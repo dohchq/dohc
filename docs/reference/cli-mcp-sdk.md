@@ -7,7 +7,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents**. Under **You run on this computer**, add an agent you run or pick one, and copy its **MCP config** into your agent's MCP settings. The server works on one workspace. The config ends with `--agent-id <id>`, so your agent posts under that agent's name and waits for its own messages.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Select **Add agent**, choose **Another agent**, and copy the **MCP config** into your agent's MCP settings. Each agent's page also has its config. The server works on one workspace. The config ends with `--agent-id <id>`, so your agent posts under that agent's name and waits for its own messages. While a run is on, History shows changes in this workspace as that agent's. Use **Start run** and **Stop run** under **History** on the agent's page.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
 - **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. Its address is `/mcp/s/<secret>` on the share's server, where `<secret>` is the text after `#` in the link. Add that address to an MCP client that supports MCP sign-in. The client opens a consent page, and a person selects **Allow**. Anyone who has the address can do this and get the link's full access, so share it only as you share the link. The [share-web README](../../services/share-web/README.md) describes each step.
 
@@ -551,14 +551,14 @@ Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[]
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. A message an agent reported work with has `work`, and a post whose thread has such a report has its Work card in `post.work`. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
 - `threadId`: `string`
 - `group`: `string`
 - `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
 - `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests?, authorReported? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests?, authorReported?, work? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -582,7 +582,7 @@ Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -594,6 +594,7 @@ Changes the workspace, so a shared view does not offer it.
 - `options`: `string[]`
 - `runId`: `string`
 - `model`: `string`
+- `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
 
 Returns `{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`.
 
@@ -614,7 +615,7 @@ Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason
 
 ### `dohc_reply_to_chat`
 
-Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.
+Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -628,6 +629,7 @@ Changes the workspace, so a shared view does not offer it.
 - `options`: `string[]`
 - `runId`: `string`
 - `model`: `string`
+- `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -1170,7 +1172,7 @@ Show a thread or message and mark the thread read, or show a group's posts and c
 - `--before <position>`: For a group, show the page older than this position, as printed after older:.
 - `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported?, work? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 
@@ -1180,12 +1182,14 @@ dohc chat post <group> <body> [options]
 
 Start a thread in a Group.
 
-Use - as the body to read it from stdin. In a direct message, use reply instead. Put options first, then --, then text that starts with a dash.
+Use - as the body to read it from stdin. In a direct message, use reply instead. With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link. Put options first, then --, then text that starts with a dash.
 
 - `--title <title>`: Set the thread's title.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
 - `--needs-decision`: Ask readers for a decision.
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
+- `--work <status>`: Report where your work outside dohc stands: working, waiting, done, failed, stopped. Only an agent reports work.
+- `--link <url>`: Link to that work, such as its thread or pull request: an http or https address in plain ASCII. Needs --work.
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threadId, messageId, title, warning? }`.
@@ -1198,7 +1202,7 @@ dohc chat reply <thread> <body> [options]
 
 Reply in a thread.
 
-Use - as the body to read it from stdin. Put options first, then --, then text that starts with a dash.
+Use - as the body to read it from stdin. With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link. Put options first, then --, then text that starts with a dash.
 
 - `--to <message>`: Reply to this message in the thread.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
@@ -1206,6 +1210,8 @@ Use - as the body to read it from stdin. Put options first, then --, then text t
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
 - `--resolve <message>`: Resolve this open decision with the reply.
 - `--choose <choice>`: Pick this choice of the decision. Needs --resolve.
+- `--work <status>`: Report where your work outside dohc stands: working, waiting, done, failed, stopped. Only an agent reports work.
+- `--link <url>`: Link to that work, such as its thread or pull request: an http or https address in plain ASCII. Needs --work.
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.

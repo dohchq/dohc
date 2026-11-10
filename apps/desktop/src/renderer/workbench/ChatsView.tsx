@@ -36,6 +36,7 @@ import {
   ComposerModeBar,
   ComposerNotice,
   AgentProblemLine,
+  ArchivedLine,
   DispatchAnnouncement,
   dispatchAnnouncement,
   type ShareReadFailure,
@@ -69,7 +70,11 @@ import type { ShellError } from "../shell/useShellError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
 import {
+  Archive,
+  ArchiveRestore,
   AtSign,
+  ChevronDown,
+  ChevronRight,
   Hash,
   House,
   MessageSquare,
@@ -115,13 +120,20 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
+import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { agentMentionId, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentMentionId, listAgents, runnableAgents, withAgent, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
+import { archivedChatsFor } from "../../settings/archivedChats";
+import { Menu } from "../ui/Menu";
+import { isContextMenuKey } from "../ui/keys";
+import { chatRowMenuItems, type ChatRowMenuTarget } from "./chatRowMenu";
+import { removeAgentWithUndo } from "../settings/agentRemoval";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -443,17 +455,44 @@ function NavRow(props: {
   trailing?: React.ReactNode;
   data?: Record<`data-${string}`, string>;
   className?: string;
+  // A right-click, the Menu key or Shift+F10 opens the row's menu.
+  onMenu?: (at: { x: number; y: number }, fromKeyboard: boolean) => void;
+  // The row whose menu is open keeps its hover fill.
+  menuOpen?: boolean;
 }) {
+  const { onMenu } = props;
+  // Set when a key opened the menu. The browser may follow the key with its
+  // own contextmenu event, which must not open the menu again at the pointer.
+  const keyedMenu = useRef(false);
   return (
     <button
       type="button"
       data-testid={props.testId}
       data-active={props.active ? "true" : "false"}
       aria-current={props.active ? "page" : undefined}
+      aria-haspopup={onMenu ? "menu" : undefined}
       onClick={props.onClick}
+      onKeyDown={onMenu ? (event) => {
+        if (!isContextMenuKey(event)) return;
+        event.preventDefault();
+        if (!keyedMenu.current) {
+          keyedMenu.current = true;
+          window.addEventListener("pointerdown", () => { keyedMenu.current = false; }, { capture: true, once: true });
+        }
+        const box = event.currentTarget.getBoundingClientRect();
+        onMenu({ x: box.left, y: box.bottom }, true);
+      } : undefined}
+      onContextMenu={onMenu ? (event) => {
+        event.preventDefault();
+        if (keyedMenu.current) {
+          keyedMenu.current = false;
+          return;
+        }
+        onMenu({ x: event.clientX, y: event.clientY }, false);
+      } : undefined}
       {...props.data}
       className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
-        props.active ? "bg-selected font-medium" : "hover:bg-hover"
+        props.active ? "bg-selected font-medium" : props.menuOpen ? "bg-hover" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
       {props.icon}
@@ -533,7 +572,9 @@ export function ChatsView(props: {
   // failure a title, an identity and an action in place of Try again.
   onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, undo?: () => void) => void;
+  // Takes back the toast and Notices row of this identity.
+  onClearError?: (identity: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
@@ -644,6 +685,8 @@ export function ChatsView(props: {
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
+  // Feed posts by personal agents name them from the roster.
+  const personalNames = usePersonalAgentNames();
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
@@ -825,9 +868,11 @@ export function ChatsView(props: {
   const sendContextKey =
     nav.level === "thread"
       ? `${workspaceId}:thread:${nav.thread.id}`
-      : nav.level === "dm"
-        ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
-        : `${workspaceId}:${nav.level}`;
+      : nav.level === "channel"
+        ? `${workspaceId}:channel:${nav.channel.id}`
+        : nav.level === "dm"
+          ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
+          : `${workspaceId}:${nav.level}`;
   const activeSendContext = useRef(sendContextKey);
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
@@ -2141,6 +2186,22 @@ export function ChatsView(props: {
     refreshChannelBadges,
     refreshDms,
   ]);
+  const latestRefresh = useRef(refreshForActivity);
+  latestRefresh.current = refreshForActivity;
+  // False once this view unmounts, so its notices' Try again reloads nothing.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  // A message that saved while a later step failed. What the window shows
+  // reloads to list it, and the notice's Try again reloads it again while the
+  // window still shows the conversation it saved in, in this workspace.
+  const reportUnshown = useCallback((words: string, failure: string, context: string) => {
+    const reload = () => { if (mounted.current && activeSendContext.current === context) latestRefresh.current(); };
+    reload();
+    props.onError(words, failure, reload);
+  }, [props.onError]);
   // Resuming after a suspension owes one catch-up pass: the activity events
   // that fired meanwhile reached only the page instance, and waiting for the
   // next event would leave this surface stale for as long as the workspace
@@ -2166,6 +2227,14 @@ export function ChatsView(props: {
     }
     return unsubscribe;
   }, [awaitingAgentChannel, props.suspendPolling, refreshChannelBadges, refreshForActivity, workspaceId]);
+  // A resume puts requests back to waiting on a busy agent, and no activity
+  // says so, so the open thread reads its dispatch again.
+  const dispatchWasPaused = useRef(computerDispatchPaused);
+  useEffect(() => {
+    const resumed = dispatchWasPaused.current && !computerDispatchPaused;
+    dispatchWasPaused.current = computerDispatchPaused;
+    if (resumed && nav.level === "thread") refreshForActivity();
+  }, [computerDispatchPaused, nav.level, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -2178,6 +2247,7 @@ export function ChatsView(props: {
     if (asked && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
+    const context = activeSendContext.current;
     startingThreadRef.current = true;
     setStartingThread(true);
     try {
@@ -2191,6 +2261,15 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
+      if ("failure" in result) {
+        if (token !== liveToken.current) return;
+        // The post saved, so it is not posted again. The Group reloads to list it.
+        props.onThreadStarted?.();
+        setNewThreadBody("");
+        setNewThreadPoll(null);
+        reportUnshown("Posted your message. dohc could not open it yet.", result.failure, context);
+        return;
+      }
       // The new message has no reactions yet; the start names the viewer.
       reactions.ingest([{
         threadId: result.thread.id,
@@ -2226,7 +2305,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, reportUnshown, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2281,7 +2360,7 @@ export function ChatsView(props: {
       latestComposerState.current = next;
     };
     // The message's poll lands with it, so it shows wherever the message does.
-    const showSent = (sent: SendChatMessageResult) => {
+    const showSent = (sent: Exclude<SendChatMessageResult, { failure: string }>) => {
       setMessages((current) =>
         current.some((message) => message.id === sent.message.id)
           ? current
@@ -2314,40 +2393,46 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      showSent(result);
-      const resolvedDecision = result.resolved;
-      if (resolvedDecision) {
-        const decisionWasOpen = reconcileResolvedChatDecision(
-          latestDecisions.current,
-          resolvedDecision,
-        ).wasOpen;
-        setDecisions(
-          (current) =>
-            reconcileResolvedChatDecision(current, resolvedDecision).decisions,
-        );
-        if (decisionWasOpen) {
-          setChannelThreads((current) =>
-            current.map((thread) =>
-              thread.id === nav.thread.id
-                ? {
-                    ...thread,
-                    openDecisionCount: Math.max(
-                      0,
-                      (thread.openDecisionCount ?? 0) - 1,
-                    ),
-                  }
-                : thread,
-            ),
+      // A message that saved without showing reloads below.
+      if (!("failure" in result)) {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        showSent(result);
+        const resolvedDecision = result.resolved;
+        if (resolvedDecision) {
+          const decisionWasOpen = reconcileResolvedChatDecision(
+            latestDecisions.current,
+            resolvedDecision,
+          ).wasOpen;
+          setDecisions(
+            (current) =>
+              reconcileResolvedChatDecision(current, resolvedDecision).decisions,
           );
+          if (decisionWasOpen) {
+            setChannelThreads((current) =>
+              current.map((thread) =>
+                thread.id === nav.thread.id
+                  ? {
+                      ...thread,
+                      openDecisionCount: Math.max(
+                        0,
+                        (thread.openDecisionCount ?? 0) - 1,
+                      ),
+                    }
+                  : thread,
+              ),
+            );
+          }
         }
       }
-      // A reply whose answer failed still leaves the mode, so retrying cannot
-      // silently post the reply twice.
+      // A message that saved leaves the composer, and a reply whose answer
+      // failed leaves the mode, so retrying cannot silently post either twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
+        if ("failure" in result) refreshForActivity();
         props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+      } else if ("failure" in result) {
+        reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -2369,6 +2454,8 @@ export function ChatsView(props: {
     poll,
     props.onAgentWaitsForTrust,
     props.onError,
+    refreshForActivity,
+    reportUnshown,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2712,13 +2799,17 @@ export function ChatsView(props: {
           : {}),
       });
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      dmRefreshSeq.current += 1;
-      setMessages((current) =>
-        current.some((message) => message.id === result.message.id)
-          ? current
-          : [...current, result.message],
-      );
+      if ("failure" in result) {
+        reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
+      } else {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        dmRefreshSeq.current += 1;
+        setMessages((current) =>
+          current.some((message) => message.id === result.message.id)
+            ? current
+            : [...current, result.message],
+        );
+      }
       if (latestComposerState.current.composer === composer) {
         latestComposerState.current = {
           ...latestComposerState.current,
@@ -2741,7 +2832,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, reportUnshown, sendContextKey, sending, workspaceId]);
 
   // A reply in one of the DM's threads.
   const sendDmReply = useCallback(async (rootId: string, body: string) => {
@@ -2757,6 +2848,11 @@ export function ChatsView(props: {
         ...(references.length > 0 ? { fileReferences: references } : {}),
       });
       if (activeSendContext.current !== context) return false;
+      if ("failure" in result) {
+        // The reply saved, so it is not sent again.
+        reportUnshown("Sent your reply. dohc could not show it yet.", result.failure, context);
+        return true;
+      }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       dmRefreshSeq.current += 1;
       setMessages((current) =>
@@ -2767,7 +2863,7 @@ export function ChatsView(props: {
       if (activeSendContext.current === context) props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
       return false;
     }
-  }, [nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, workspaceId]);
+  }, [nav, props.onAgentWaitsForTrust, props.onError, reportUnshown, sendContextKey, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
@@ -3347,20 +3443,19 @@ export function ChatsView(props: {
     });
   }, [refreshDms, refreshShares]);
 
-  const submitShare = useCallback(async (input: { email: string; viewOnly: boolean }): Promise<boolean> => {
+  const submitShare = useCallback(async (channelId: string, input: { email: string; viewOnly: boolean }): Promise<boolean> => {
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
     // dohc already cannot list. Only the granted lane, though — an outgoing
     // share never touches the received one.
     if (grantedLaneIsOverLimit(shareReadFailure)) return false;
-    if (nav.level !== "channel") return false;
     const recipientEmail = input.email.trim();
     if (recipientEmail.length === 0) return false;
     const token = liveToken.current;
     try {
       await bridge().shareChatChannel({
         workspaceId,
-        channelId: nav.channel.id,
+        channelId,
         recipientEmail,
         ...(input.viewOnly ? { access: "read-only" as const } : {}),
       });
@@ -3374,7 +3469,7 @@ export function ChatsView(props: {
       props.onError(ipcErrorMessage(error, "Could not share that group."), error);
       return false;
     }
-  }, [nav, props.onError, refreshShares, shareReadFailure, workspaceId]);
+  }, [props.onError, refreshShares, shareReadFailure, workspaceId]);
 
   const revokeShare = useCallback(
     async (shareId: string, member: string, group: string) => {
@@ -3499,6 +3594,153 @@ export function ChatsView(props: {
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
+
+  // Chats this person archived here. They leave the sidebar's lists for
+  // Archived and stay readable; nobody else's sidebar changes.
+  const archivedIds = useMemo(
+    () => new Set(archivedChatsFor(props.userSettings, workspaceId)),
+    [props.userSettings, workspaceId],
+  );
+  // An agent chat whose agent left Settings, or a personal agent's chat
+  // whose agent left your roster, stays readable in Archived. It returns
+  // when an agent with its id is added again.
+  const agentRemoved = useCallback(
+    (channel: Pick<ChatChannelRecord, "agentId">) =>
+      channel.agentId !== undefined && isPersonalAgentId(channel.agentId)
+        ? personalRosterHolds(channel.agentId) === false
+        : props.userSettings != null && !settingsAgents.some((agent) => agent.id === channel.agentId),
+    // The roster changes outside these values; its version follows it.
+    [props.userSettings, settingsAgents, personalNames],
+  );
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const setChatArchived = useCallback(
+    async (channelId: string, label: string, archived: boolean): Promise<void> => {
+      try {
+        await bridge().setChatArchived({ workspaceId, channelId, archived });
+        if (archived) {
+          props.onNotice?.(`Archived ${label}`, () => void setChatArchived(channelId, label, false));
+        }
+      } catch (error) {
+        props.onError(
+          ipcErrorMessage(error, archived ? `dohc could not archive ${label}.` : `dohc could not unarchive ${label}.`),
+          error,
+          () => void setChatArchived(channelId, label, archived),
+        );
+      }
+    },
+    [props.onError, props.onNotice, workspaceId],
+  );
+  // Marks every thread in a chat read, as opening each one would. A DM is one
+  // thread; the store stops its cursor at the last message.
+  const markChatRead = useCallback(
+    async (channelId: string, label: string, dmThreadId?: string): Promise<void> => {
+      const token = liveToken.current;
+      try {
+        if (dmThreadId !== undefined) {
+          await bridge().markChatThreadRead({ workspaceId, threadId: dmThreadId, upToSequence: Number.MAX_SAFE_INTEGER });
+        } else {
+          const lanes = await Promise.all((["posts", "chat"] as const).map((lane) =>
+            bridge().listChannelThreads({ workspaceId, channelId, lane })));
+          await Promise.all(lanes.flatMap(({ threads }) => threads)
+            .filter((thread) => thread.unreadCount > 0)
+            .map((thread) => bridge().markChatThreadRead({ workspaceId, threadId: thread.id, upToSequence: thread.messageCount })));
+        }
+        // After a workspace switch these refreshes would repaint the new workspace with this one's chats.
+        if (token !== liveToken.current) return;
+        props.onThreadRead?.();
+        props.onDmRead?.();
+        void refreshOverview({ background: true });
+        void refreshDms("person");
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, `dohc could not mark ${label} as read.`), error, () => void markChatRead(channelId, label, dmThreadId));
+      }
+    },
+    [props.onDmRead, props.onError, props.onThreadRead, refreshDms, refreshOverview, workspaceId],
+  );
+  const setAgentEnabled = useCallback(
+    async (agentId: string, enabled: boolean): Promise<void> => {
+      const settings = props.userSettings;
+      const name = settings?.agents[agentId]?.name;
+      if (!settings || name === undefined || !props.onSaveUserSettings) return;
+      try {
+        await props.onSaveUserSettings(withAgent(settings, agentId, (agent) => ({ ...agent, enabled })), settings);
+      } catch (error) {
+        props.onError(ipcErrorMessage(error, `dohc could not turn ${enabled ? "on" : "off"} ${name}.`), error);
+      }
+    },
+    [props.onError, props.onSaveUserSettings, props.userSettings],
+  );
+  // Settings removes an agent the same way, with the same Undo. Its chat
+  // stays, in Archived.
+  const removeAgent = useCallback(
+    async (agentId: string): Promise<void> => {
+      const name = props.userSettings?.agents[agentId]?.name ?? agentId;
+      // The file, with the entries dohc could not use, so Undo knows where the agent sat.
+      let file: DesktopUserSettingsResult;
+      try {
+        file = await bridge().getUserSettings();
+      } catch (error) {
+        props.onError(ipcErrorMessage(error, `dohc could not remove ${name}.`), error);
+        return;
+      }
+      const settings = file.settings;
+      const entry = settings.agents[agentId];
+      if (!entry) return;
+      await removeAgentWithUndo({
+        workspaceId,
+        settings,
+        agentProblems: file.agentProblems,
+        agent: { id: agentId, name: entry.name },
+        save: async (next) => {
+          try {
+            return await bridge().setUserSettings({ settings: next, base: settings });
+          } catch (error) {
+            props.onError(ipcErrorMessage(error, `dohc could not remove ${entry.name}.`), error);
+            return null;
+          }
+        },
+        order: async (order, failure) => {
+          try {
+            await bridge().orderAgents({ order: [...order] });
+            return true;
+          } catch (error) {
+            props.onError(ipcErrorMessage(error, failure ?? `dohc could not put ${entry.name} back in its place.`), error);
+            return false;
+          }
+        },
+        onError: props.onError,
+        onClearError: props.onClearError,
+        onNotice: props.onNotice,
+      });
+    },
+    [props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
+  );
+  // The members dialog, opened from a group's menu in the sidebar.
+  const [membersFor, setMembersFor] = useState<{ workspaceId: string; channel: ChatChannelRecord; session: number } | null>(null);
+  type RowMenu = { workspaceId: string; key: string; at: { x: number; y: number }; fromKeyboard: boolean; target: ChatRowMenuTarget; label: string; channelId: string; dmThreadId?: string; channel?: ChatChannelRecord; shareId?: string; agentId?: string };
+  const [rowMenu, setRowMenu] = useState<RowMenu | null>(null);
+  // Closed while rendering: a menu or dialog opened in one workspace must
+  // never draw, or act, in the next.
+  if (rowMenu && rowMenu.workspaceId !== workspaceId) setRowMenu(null);
+  if (membersFor && membersFor.workspaceId !== workspaceId) setMembersFor(null);
+  const rowMenuItems = rowMenu ? chatRowMenuItems(rowMenu.target, {
+    markRead: () => void markChatRead(rowMenu.channelId, rowMenu.label, rowMenu.dmThreadId),
+    setArchived: (archived) => void setChatArchived(rowMenu.channelId, rowMenu.label, archived),
+    addPeople: () => {
+      if (rowMenu.channel) setMembersFor({ workspaceId, channel: rowMenu.channel, session: sessionGeneration.current });
+    },
+    leave: () => {
+      if (rowMenu.shareId) void leaveShared(rowMenu.shareId);
+    },
+    ...(props.onSetupAgent ? { openAgentSettings: props.onSetupAgent } : {}),
+    setAgentEnabled: (enabled) => {
+      if (rowMenu.agentId) void setAgentEnabled(rowMenu.agentId, enabled);
+    },
+    removeAgent: () => {
+      if (rowMenu.agentId) void removeAgent(rowMenu.agentId);
+    },
+  }) : [];
 
   // Which lane a "both" group shows.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
@@ -3857,6 +4099,14 @@ export function ChatsView(props: {
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   const failedRun = dispatchState?.failedRun ?? null;
+  // The messages that wait for an agent to end its run, by the agent's name
+  // and colors. None do while this computer's pause holds them.
+  const waitingDispatch = computerDispatchPaused ? undefined : dispatchState?.waiting;
+  const waiting = useMemo(() => waitingDispatch ? {
+    agentName: waitingDispatch.name,
+    presentation: agentChatIdentity({ agentId: waitingDispatch.agentId, name: waitingDispatch.name }, settingsAgents).presentation,
+    messageIds: new Set(waitingDispatch.triggerMessageIds),
+  } : null, [settingsAgents, waitingDispatch]);
   const retryFailedRun = useCallback(async () => {
     if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
@@ -4098,7 +4348,7 @@ export function ChatsView(props: {
                       className="dohc-focus-row flex w-full cursor-pointer gap-3 rounded-md text-left"
                     >
                       <ChatAvatar presentation={item.message.presentation}
-                        name={item.message.authorDisplayName}
+                        name={chatAuthorLabel(item.message)}
                         kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
@@ -4293,6 +4543,12 @@ export function ChatsView(props: {
         trailing={<PresenceFaces others={presence.others} />}
       />
     );
+    const dmTop = archivedIds.has(dm.channelId) ? (
+      <>
+        {dmHeader}
+        <ArchivedLine onUnarchive={() => void setChatArchived(dm.channelId, dm.peerLabel, false)} />
+      </>
+    ) : dmHeader;
     return (
       <div
         data-testid="chats-dm-view"
@@ -4311,7 +4567,7 @@ export function ChatsView(props: {
             loading={messagesLoading}
             emptyLabel="No messages yet."
             place={dm.peerLabel}
-            header={dmHeader}
+            header={dmTop}
             belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
             composer={(inset) => dm.connected ? (
               <MentionComposer
@@ -4359,7 +4615,7 @@ export function ChatsView(props: {
           />
         ) : (
           <>
-            {dmHeader}
+            {dmTop}
             <div
               data-testid="chats-dm-waiting"
               className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
@@ -4544,6 +4800,7 @@ export function ChatsView(props: {
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
               onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
+              waiting={waiting}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4656,8 +4913,8 @@ export function ChatsView(props: {
     // Only when the agent can't answer: what's wrong, and the fix. An agent
     // you run has no launch; it answers whenever it's connected.
     const agentProblem = !agentDm || !props.agentSetup ? null
-      : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-      : channelSettingsAgent.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+      : agentRemoved(nav.channel) ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+      : channelSettingsAgent?.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
       : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
@@ -4802,6 +5059,9 @@ export function ChatsView(props: {
             </button>
           </div>
         ) : null}
+        {archivedIds.has(nav.channel.id) && !(agentDm && agentRemoved(nav.channel)) ? (
+          <ArchivedLine onUnarchive={() => void setChatArchived(nav.channel.id, channelAgent?.label ?? nav.channel.name, false)} />
+        ) : null}
         {canShare && sharePanelOpen ? (
           <ChatMembersDialog
             groupName={nav.channel.name}
@@ -4810,7 +5070,7 @@ export function ChatsView(props: {
             readFailure={shareReadFailure}
             blocked={shareGrantsBlocked}
             onAdd={(input) =>
-              sharePanelSession === sessionGeneration.current ? submitShare(input) : Promise.resolve(false)
+              sharePanelSession === sessionGeneration.current ? submitShare(nav.channel.id, input) : Promise.resolve(false)
             }
             onRemove={(grant) =>
               void revokeShare(grant.shareId, grant.recipientEmail ?? "the invited person", nav.channel.name)
@@ -4855,6 +5115,7 @@ export function ChatsView(props: {
             {...(agentDm ? {
               agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
               ...(channelAgent ? { agentPresentation: channelAgent.presentation } : {}),
+              dispatchPaused: computerDispatchPaused,
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,
@@ -5000,6 +5261,187 @@ export function ChatsView(props: {
     setNav({ level: "dm-new" });
   };
 
+  // Archived chats leave their sections for Archived at the bottom. A new
+  // message never brings one back; Archived goes bold and counts it instead.
+  const menuFor = (menu: Omit<RowMenu, "workspaceId" | "at" | "fromKeyboard">) => ({
+    menuOpen: rowMenu?.key === menu.key,
+    onMenu: (at: { x: number; y: number }, fromKeyboard: boolean) => setRowMenu({ ...menu, workspaceId, at, fromKeyboard }),
+  });
+  const groupChannels = overview.channels.filter((channel) => channel.kind === "channel");
+  const activeGroups = groupChannels.filter((channel) => !archivedIds.has(channel.id));
+  const activeDms = dms.filter((dm) => !archivedIds.has(dm.channelId));
+  const activeAgentChats = agentChats.filter((channel) => !archivedIds.has(channel.id) && !agentRemoved(channel));
+  const archivedRows: Array<{ key: string; unread: number; row: React.ReactNode }> = [
+    ...groupChannels.filter((channel) => archivedIds.has(channel.id))
+      .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: groupRow(channel, true) })),
+    ...dms.filter((dm) => archivedIds.has(dm.channelId))
+      .map((dm) => ({ key: dm.channelId, unread: dm.unreadCount, row: dmRow(dm, true) })),
+    ...agentChats.filter((channel) => archivedIds.has(channel.id) || agentRemoved(channel))
+      .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: <li key={channel.id}>{agentRow(channel, true)}</li> })),
+  ];
+  const archivedUnread = archivedRows.reduce((sum, entry) => sum + entry.unread, 0);
+
+  function groupRow(channel: ChatChannelRecord, archived: boolean) {
+    const joined = joinedFor(channel);
+    const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
+    const sharedLabel = joined
+      ? joinedChannelLabel(joined, ownerRemoved(joined.shareId))
+      : grants.length > 0
+        ? `Shared with ${grants.length}`
+        : null;
+    const unread = channel.unreadCount > 0;
+    return (
+      <li key={channel.id}>
+        <NavRow
+          testId="chats-channel"
+          data={{
+            "data-channel-id": channel.id,
+            "data-channel-slug": channel.slug,
+            "data-thread-count": String(channel.threadCount),
+            ...(archived ? { "data-archived": "true" } : {}),
+          }}
+          active={selectedChannelId === channel.id}
+          unread={unread}
+          muted={archived && !unread}
+          onClick={() => openConversation({ level: "channel", channel })}
+          icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
+          label={channel.name}
+          labelTestId="chats-channel-name"
+          {...menuFor({
+            key: channel.id,
+            label: channel.name,
+            channelId: channel.id,
+            channel,
+            ...(joined ? { shareId: joined.shareId } : {}),
+            target: {
+              kind: "group",
+              unread,
+              archived,
+              canAddPeople: channelShares !== null && joined === null && !!channel.wireId,
+              canLeave: joined !== null,
+            },
+          })}
+          trailing={
+            <>
+              {sharedLabel ? (
+                <span
+                  data-testid="chats-channel-shared"
+                  title={sharedLabel}
+                  className="grid shrink-0 place-items-center text-subtle"
+                >
+                  <Users size={12} aria-hidden />
+                  <span className="sr-only">{sharedLabel}</span>
+                </span>
+              ) : null}
+              {archived ? (
+                <UnreadPill count={channel.unreadCount} tone="quiet" testId="chats-channel-unread" />
+              ) : unread ? (
+                <span data-testid="chats-channel-unread" className="sr-only">
+                  {channel.unreadCount} unread
+                </span>
+              ) : null}
+            </>
+          }
+        />
+      </li>
+    );
+  }
+
+  function dmRow(dm: DmRecord, archived: boolean) {
+    return (
+      <li key={dm.channelId}>
+        <NavRow
+          testId="chats-dm-item"
+          data={{ "data-channel-id": dm.channelId, ...(archived ? { "data-archived": "true" } : {}) }}
+          active={selectedDmId === dm.channelId}
+          unread={dm.unreadCount > 0}
+          onClick={() => openConversation({ level: "dm", dm })}
+          icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
+          label={dm.peerLabel}
+          labelTestId="chats-dm-name"
+          muted={!dm.connected || (archived && dm.unreadCount === 0)}
+          {...menuFor({
+            key: dm.channelId,
+            label: dm.peerLabel,
+            channelId: dm.channelId,
+            ...(dm.threadId ? { dmThreadId: dm.threadId } : {}),
+            target: { kind: "person", unread: dm.unreadCount > 0 && dm.threadId !== null, archived },
+          })}
+          trailing={
+            <>
+              {dm.connected ? null : (
+                <span className="shrink-0 text-[10px] text-muted">ended</span>
+              )}
+              <UnreadPill count={dm.unreadCount} tone={archived ? "quiet" : "ink"} testId="chats-dm-unread" />
+            </>
+          }
+        />
+      </li>
+    );
+  }
+
+  function agentRow(channel: ChatChannelRecord, archived: boolean) {
+    const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
+    const { label, presentation } = agentChatIdentity(channel, settingsAgents);
+    const launch = agent?.enabled ? agent.launch : undefined;
+    const removed = agentRemoved(channel);
+    const unread = channel.unreadCount > 0;
+    // An agent you run has no launch and no state here; Settings shows whether it's listening.
+    const off = agent?.launch !== undefined && !agent.enabled;
+    return (
+      <NavRow
+        key={channel.id}
+        testId="chats-my-agent"
+        data={{
+          "data-channel-id": channel.id,
+          ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}),
+          ...(archived ? { "data-archived": "true" } : {}),
+        }}
+        active={selectedChannelId === channel.id}
+        unread={unread}
+        muted={archived && !unread}
+        onClick={() => openConversation({ level: "channel", channel })}
+        icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
+        label={label}
+        labelTestId="chats-my-agent-name"
+        {...menuFor({
+          key: channel.id,
+          label,
+          channelId: channel.id,
+          ...(channel.agentId ? { agentId: channel.agentId } : {}),
+          target: {
+            kind: "agent",
+            unread,
+            archived,
+            removed,
+            enabled: agent?.launch === undefined ? null : agent.enabled,
+            canRemove: agent !== undefined,
+          },
+        })}
+        trailing={
+          <>
+            {off && !archived ? (
+              <span
+                data-testid="chats-my-agent-state"
+                className="shrink-0 text-[10px] text-muted"
+              >
+                off
+              </span>
+            ) : null}
+            {archived ? null : (
+              <AgentPresenceHint
+                activity={agent ? agentActivity(agent.name) : null}
+                program={launch ? runnerProgram(launchCommand(launch)) : null}
+                testId="chats-my-agent-presence"
+              />
+            )}
+            <UnreadPill count={channel.unreadCount} tone={archived ? "quiet" : "ink"} testId="chats-my-agent-unread" />
+          </>
+        }
+      />
+    );
+  }
+
   return (
     <div
       ref={viewRef}
@@ -5031,54 +5473,7 @@ export function ChatsView(props: {
             </SectionActionButton>
           </div>
           <ul className="m-0 list-none p-0">
-            {overview.channels
-              .filter((channel) => channel.kind === "channel")
-              .map((channel) => {
-                const joined = joinedFor(channel);
-                const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
-                const sharedLabel = joined
-                  ? joinedChannelLabel(joined, ownerRemoved(joined.shareId))
-                  : grants.length > 0
-                    ? `Shared with ${grants.length}`
-                    : null;
-                return (
-                  <li key={channel.id}>
-                    <NavRow
-                      testId="chats-channel"
-                      data={{
-                        "data-channel-id": channel.id,
-                        "data-channel-slug": channel.slug,
-                        "data-thread-count": String(channel.threadCount),
-                      }}
-                      active={selectedChannelId === channel.id}
-                      unread={channel.unreadCount > 0}
-                      onClick={() => openConversation({ level: "channel", channel })}
-                      icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
-                      label={channel.name}
-                      labelTestId="chats-channel-name"
-                      trailing={
-                        <>
-                          {sharedLabel ? (
-                            <span
-                              data-testid="chats-channel-shared"
-                              title={sharedLabel}
-                              className="grid shrink-0 place-items-center text-subtle"
-                            >
-                              <Users size={12} aria-hidden />
-                              <span className="sr-only">{sharedLabel}</span>
-                            </span>
-                          ) : null}
-                          {channel.unreadCount > 0 ? (
-                            <span data-testid="chats-channel-unread" className="sr-only">
-                              {channel.unreadCount} unread
-                            </span>
-                          ) : null}
-                        </>
-                      }
-                    />
-                  </li>
-                );
-              })}
+            {activeGroups.map((channel) => groupRow(channel, false))}
           </ul>
           {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
             <div data-testid="chats-shared-with-you">
@@ -5125,7 +5520,7 @@ export function ChatsView(props: {
               </ul>
             </div>
           ) : null}
-          {dmAvailable || dms.length > 0 ? (
+          {dmAvailable || activeDms.length > 0 ? (
             <div data-testid="chats-dms-section">
               <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
                 <SectionLabel as="p" className="min-w-0 flex-1">
@@ -5138,29 +5533,7 @@ export function ChatsView(props: {
                 ) : null}
               </div>
               <ul className="m-0 list-none p-0">
-                {dms.map((dm) => (
-                  <li key={dm.channelId}>
-                    <NavRow
-                      testId="chats-dm-item"
-                      data={{ "data-channel-id": dm.channelId }}
-                      active={selectedDmId === dm.channelId}
-                      unread={dm.unreadCount > 0}
-                      onClick={() => openConversation({ level: "dm", dm })}
-                      icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
-                      label={dm.peerLabel}
-                      labelTestId="chats-dm-name"
-                      muted={!dm.connected}
-                      trailing={
-                        <>
-                          {dm.connected ? null : (
-                            <span className="shrink-0 text-[10px] text-muted">ended</span>
-                          )}
-                          <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
-                        </>
-                      }
-                    />
-                  </li>
-                ))}
+                {activeDms.map((dm) => dmRow(dm, false))}
               </ul>
               {dmAvailable ? (
                 <NavRow
@@ -5239,44 +5612,7 @@ export function ChatsView(props: {
               <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
                 Agents
               </SectionLabel>
-              {agentChats.map((channel) => {
-                const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
-                const { label, presentation } = agentChatIdentity(channel, settingsAgents);
-                const launch = agent?.enabled ? agent.launch : undefined;
-                // An agent you run has no launch and no state here; Settings shows whether it's listening.
-                const state = !agent ? "removed" : agent.launch && !agent.enabled ? "off" : null;
-                return (
-                  <NavRow
-                    key={channel.id}
-                    testId="chats-my-agent"
-                    data={{ "data-channel-id": channel.id, ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}) }}
-                    active={selectedChannelId === channel.id}
-                    unread={channel.unreadCount > 0}
-                    onClick={() => openConversation({ level: "channel", channel })}
-                    icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
-                    label={label}
-                    labelTestId="chats-my-agent-name"
-                    trailing={
-                      <>
-                        {state ? (
-                          <span
-                            data-testid="chats-my-agent-state"
-                            className="shrink-0 text-[10px] text-muted"
-                          >
-                            {state}
-                          </span>
-                        ) : null}
-                        <AgentPresenceHint
-                          activity={agent ? agentActivity(agent.name) : null}
-                          program={launch ? runnerProgram(launchCommand(launch)) : null}
-                          testId="chats-my-agent-presence"
-                        />
-                        <UnreadPill count={channel.unreadCount} testId="chats-my-agent-unread" />
-                      </>
-                    }
-                  />
-                );
-              })}
+              {activeAgentChats.map((channel) => agentRow(channel, false))}
               {otherAgents.length > 0 ? (
                 <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
                   {otherAgents.map((agent) => (
@@ -5335,8 +5671,72 @@ export function ChatsView(props: {
               ) : null}
             </section>
           ) : null}
+          {archivedRows.length > 0 ? (
+            <section data-testid="chats-archived-section" aria-label="Archived">
+              <button
+                type="button"
+                data-testid="chats-archived-toggle"
+                aria-expanded={archiveOpen}
+                onClick={() => setArchiveOpen((open) => !open)}
+                className="dohc-focus-row mx-1 mt-4 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 hover:bg-hover"
+              >
+                <Archive size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
+                <span className={`min-w-0 flex-1 truncate text-[13px] ${archivedUnread > 0 ? "font-medium text-ink" : "text-muted"}`}>
+                  Archived
+                </span>
+                {archivedUnread > 0 ? (
+                  <UnreadPill count={archivedUnread} tone="quiet" testId="chats-archived-unread" />
+                ) : (
+                  <span data-testid="chats-archived-count" className="shrink-0 text-[11px] tabular-nums text-subtle">
+                    {archivedRows.length}
+                  </span>
+                )}
+                {archiveOpen ? (
+                  <ChevronDown size={13} aria-hidden className="shrink-0 text-subtle" />
+                ) : (
+                  <ChevronRight size={13} aria-hidden className="shrink-0 text-subtle" />
+                )}
+              </button>
+              {archiveOpen ? (
+                <ul data-testid="chats-archived-list" className="m-0 list-none p-0">
+                  {archivedRows.map((entry) => entry.row)}
+                </ul>
+              ) : null}
+            </section>
+          ) : null}
         </nav>
       </div>
+      {rowMenu && rowMenuItems.length > 0 ? (
+        <Menu
+          label={`${rowMenu.label} options`}
+          menuTestId="chat-row-menu"
+          items={rowMenuItems}
+          at={rowMenu.at}
+          fromKeyboard={rowMenu.fromKeyboard}
+          width={200}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRowMenu(null);
+          }}
+        />
+      ) : null}
+      {membersFor && membersFor.session === sessionGeneration.current && channelShares !== null ? (
+        <ChatMembersDialog
+          groupName={membersFor.channel.name}
+          members={membersFor.channel.wireId ? grantedByWire.get(membersFor.channel.wireId) ?? [] : []}
+          knownPeople={knownPeople}
+          readFailure={shareReadFailure}
+          blocked={grantedLaneIsOverLimit(shareReadFailure)}
+          onAdd={(input) =>
+            membersFor.session === sessionGeneration.current ? submitShare(membersFor.channel.id, input) : Promise.resolve(false)
+          }
+          onRemove={(grant) =>
+            void revokeShare(grant.shareId, grant.recipientEmail ?? "the invited person", membersFor.channel.name)
+          }
+          onRetryRead={() => void refreshShares()}
+          onClose={() => setMembersFor(null)}
+        />
+      ) : null}
       {creatingGroup ? (
         <NewGroupDialog onCreate={createChannel} onClose={closeGroupDialog} />
       ) : null}

@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { addAbortListener } from "node:events";
-import { createReadStream } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -24,7 +24,7 @@ const Record = z.object({
   operationId: z.string(), staged: z.string().optional(), noUndo: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
   copies: z.array(z.object({
-    path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
+    path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(), tag: z.string(),
   })).optional(),
   engine: z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
 });
@@ -92,8 +92,9 @@ async function prune(workspace: LocalStateWorkspace): Promise<void> {
     }
   });
 }
-export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete"): Promise<void> {
-  const dir = await workspaceTrashForWrite(workspace, "save Undo information");
+export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete",
+  what = "save Undo information"): Promise<void> {
+  const dir = await workspaceTrashForWrite(workspace, what);
   const path = join(dir, recordName(record.operationId, kind));
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
@@ -104,6 +105,9 @@ export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record:
     // Atomic replacement, not a power-loss durability guarantee on Windows.
     await rename(temp, path);
   } finally { await unlink(temp).catch(() => undefined); }
+}
+export async function removeRecoveryRecord(workspace: LocalStateWorkspace, operationId: string, kind: string): Promise<void> {
+  await rm(join(await workspaceTrashForWrite(workspace, "remove Undo information"), recordName(operationId, kind)), { force: true });
 }
 /**
  * A recovery record's text, read from the workspace trash. A record decides
@@ -127,14 +131,14 @@ async function recordIn(dir: string | null | "unusable", id: string, kind: "dele
   if (dir === "unusable") return { status: "untrusted" };
   return readRecoveryFileText(join(dir, recordName(id, kind)));
 }
-async function readRecoveryFileText(path: string): Promise<RecoveryRecordRead> {
+async function readRecoveryFileText(path: string, maxAge = MAX_RECORD_AGE): Promise<RecoveryRecordRead> {
   const entry = await info(path);
-  if (!entry || Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return { status: "missing" };
+  if (!entry || Date.now() - entry.mtimeMs > maxAge) return { status: "missing" };
   const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(() => null);
   if (read?.status === "missing") return { status: "missing" };
   return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
 }
-export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move"): Promise<{ name: string; text: string }[]> {
+export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move" | "replace"): Promise<{ name: string; text: string }[]> {
   return readOwnedLocalStateFolder(root, "trash", async dir => {
     if (dir === null || dir === "unusable") return [];
     const records: { name: string; text: string }[] = [];
@@ -142,7 +146,8 @@ export async function listRecoveryRecordTexts(root: string, kind: "delete" | "mo
     for (const name of await readdir(dir)) {
       if (!recordPattern.test(name)) continue;
       try {
-        const read = await readRecoveryFileText(join(dir, name));
+        // A move dohc stopped during waits for an open, however late; prune skips it too.
+        const read = await readRecoveryFileText(join(dir, name), kind === "replace" ? Infinity : MAX_RECORD_AGE);
         if (read.status === "read") records.push({name, text: read.text});
       } catch { /* One unavailable record does not prevent other moves from resuming. */ }
     }
@@ -258,6 +263,24 @@ async function alreadyPlaced(source: string, target: string): Promise<boolean> {
   return b.isFile() && a.size === b.size && (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev || await fingerprint(source) === await fingerprint(target));
 }
 
+type PendingCopy = NonNullable<RecoveryRecord["copies"]>[number];
+// A copy under way holds a random tag just past the deleted file's end, and
+// cuts it off once all the bytes are in. Linux can give a new file the copy's
+// freed inode and creation time, so only the tag tells a half-finished copy
+// from a file someone saved there. A whole copy matches the deleted file. A
+// copy left empty, because its tag never got in, starts again.
+const COPY_TAG_BYTES = 16;
+async function copyState(file: FileHandle, entry: Stats, pending: PendingCopy, source: string): Promise<"empty" | "partial" | "complete" | undefined> {
+  if (!entry.isFile() || pending.ino === 0 || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs) return undefined;
+  if (entry.size === pending.size + COPY_TAG_BYTES) {
+    const tail = Buffer.alloc(COPY_TAG_BYTES);
+    const { bytesRead } = await file.read(tail, 0, COPY_TAG_BYTES, pending.size);
+    return bytesRead === COPY_TAG_BYTES && tail.toString("hex") === pending.tag ? "partial" : undefined;
+  }
+  if (entry.size === pending.size && await fingerprint(file, entry.size) === await fingerprint(source, entry.size)) return "complete";
+  return entry.size === 0 ? "empty" : undefined;
+}
+
 // Retrying through a verified handle cannot remove or overwrite a replacement at the path.
 async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRecord, path: string, source: string, target: string, mode: number): Promise<void> {
   const pending = record.copies?.find(copy => copy.path === path), occupant = await info(target);
@@ -272,35 +295,35 @@ async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRec
       return open(target, "r");
     })
     : await open(target, "wx", mode);
-  let complete = false;
+  let state: Awaited<ReturnType<typeof copyState>>;
   try {
     const entry = await file.stat();
     if (pending && occupant) {
-      if (!entry.isFile() || pending.ino === 0
-        || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs
-        || size !== pending.size || entry.size > size
-        || await fingerprint(file, entry.size) !== await fingerprint(source, entry.size)) {
-        throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
-      }
-      // Full bytes may have survived a crash before the receipt. Flush them before acknowledging the copy.
-      complete = entry.size === size;
+      state = size === pending.size ? await copyState(file, entry, pending, source) : undefined;
+      if (!state) throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
     }
     if (!writable) {
       await file.chmod(mode | 0o200);
       await file.close();
       file = await open(target, "r+");
       const current = await file.stat();
-      if (!current.isFile() || current.dev !== entry.dev || current.ino !== entry.ino || current.birthtimeMs !== entry.birthtimeMs
-        || current.size !== entry.size || await fingerprint(file, current.size) !== await fingerprint(source, current.size)) {
+      if (current.size !== entry.size || await copyState(file, current, pending!, source) !== state) {
         throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
       }
     }
-    if (!complete) {
-      record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
-        { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size }];
-      // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
-      await saveRecoveryRecord(workspace, record);
+    // Full bytes may have survived a crash before the receipt. Flush them before acknowledging the copy.
+    if (state !== "complete") {
+      if (state !== "partial") {
+        const tag = randomBytes(COPY_TAG_BYTES);
+        record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
+          { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size, tag: tag.toString("hex") }];
+        // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
+        await saveRecoveryRecord(workspace, record);
+        await file.write(tag, 0, COPY_TAG_BYTES, size);
+      }
+      // The tag's write leaves the file position at the start.
       await file.writeFile(createReadStream(source));
+      await file.truncate(size);
     }
     await file.chmod(mode & 0o7777);
     await file.sync();

@@ -11,6 +11,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RelayBusyError } from "./engineRelayClient";
 import {
   createRelaySyncEngine,
   type RelaySyncOperations,
@@ -947,14 +948,12 @@ describe("relaySyncEngine", () => {
   // edges-05: three failures had to pass before anyone heard, so a
   // 25-second outage never surfaced at all.
   it("reports the first failed pass with its cause and clears it on success", async () => {
-    let failuresRemaining = 2;
+    const failures: Error[] = [new RelayUnreachableError(), new RelayBusyError(), new Error("relay said no")];
     const changes = vi.fn();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock.mockImplementation(async () => {
-      if (failuresRemaining > 0) {
-        failuresRemaining -= 1;
-        throw failuresRemaining === 1 ? new RelayUnreachableError() : new Error("relay said no");
-      }
+      const failure = failures.shift();
+      if (failure) throw failure;
       return pullResult();
     });
     const sync = engine({ capture: capture(), onChange: changes });
@@ -969,13 +968,20 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(500);
     // The same failure, one attempt older, with the newest cause.
     expect(sync.snapshot().syncFailure).toEqual({
-      cause: "unknown",
-      detail: "Error: relay said no",
+      cause: "server-busy",
+      detail: "RelayBusyError: The server is busy.",
       sinceMs: 12345,
       attempts: 2,
     });
-    const changesAtFailure = changes.mock.calls.length;
     await vi.advanceTimersByTimeAsync(1000);
+    expect(sync.snapshot().syncFailure).toEqual({
+      cause: "unknown",
+      detail: "Error: relay said no",
+      sinceMs: 12345,
+      attempts: 3,
+    });
+    const changesAtFailure = changes.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2000);
     expect(sync.snapshot().syncFailure).toBeNull();
     expect(changes.mock.calls.length).toBeGreaterThan(changesAtFailure);
     errorSpy.mockRestore();

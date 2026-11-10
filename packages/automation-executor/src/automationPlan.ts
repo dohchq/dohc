@@ -64,14 +64,15 @@ type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number
 /** The claim prefix this executor drains. */
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
 const MAX_FINDS = 5;
-export const MAX_FOUND_RECORDS = 50;
+export const MAX_FOUND_RECORDS = 500;
 export const findOverflowError = (ordinal: number) =>
   `The Find in step ${ordinal + 1} matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`;
 // The field changes one run may plan. Every one is saved before and after it
 // lands, so a run stays small enough to resume and to undo.
 export const MAX_RUN_FIELD_WRITES = 200;
-// The records one code step can add or change: as many as a Find returns.
-export const MAX_CODE_RECORD_CHANGES = MAX_FOUND_RECORDS;
+// The records one code step can add or change. An added record with no fields
+// counts nothing against the field limit, so this bounds the slow add path.
+export const MAX_CODE_RECORD_CHANGES = 50;
 // The trigger record before its change, which a starts-matching condition
 // is also checked against.
 const BEFORE_BINDING = "__dohc_before";

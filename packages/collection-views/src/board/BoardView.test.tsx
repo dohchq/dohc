@@ -179,11 +179,78 @@ async function keyboardDrag(card: HTMLElement, arrows: { key: string; code: stri
 }
 
 describe("BoardView", () => {
-  it("renders a column per group with its label and count", () => {
+  it("renders a column per select option, including options no record uses", () => {
     render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" />);
     const columns = screen.getAllByRole("list");
-    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing"]);
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing", "shipped"]);
     expect(within(columns[0]!).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(columns[2]!).queryAllByRole("listitem")).toHaveLength(0);
+    const shipped = screen.getByRole("region", { name: "shipped" });
+    expect(within(shipped).getByText("0")).toBeDefined();
+  });
+
+  it("shows only the given groups when the host pages them", () => {
+    render(
+      <BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" groupFooter={() => <span>More</span>} />,
+    );
+    const columns = screen.getAllByRole("list");
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing"]);
+  });
+
+  it("colors each option column with the schema's chosen color", () => {
+    const schema = makeSchema([
+      { name: "title", type: "text" },
+      { name: "status", type: "select", options: ["todo", "doing"], colors: { doing: "teal" } },
+    ]);
+    render(<BoardView schema={schema} groups={makeGroups()} groupBy="status" />);
+    const doing = screen.getByRole("region", { name: "doing" });
+    expect(doing.querySelector("[data-option-color]")?.getAttribute("data-option-color")).toBe("teal");
+  });
+
+  it("saves a column's color from its menu", () => {
+    const onOptionColorChange = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema([
+          { name: "title", type: "text" },
+          { name: "status", type: "select", options: ["todo", "doing"], colors: { doing: "teal" } },
+        ])}
+        groups={makeGroups()}
+        groupBy="status"
+        onOptionColorChange={onOptionColorChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    expect(screen.getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
+    expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith("doing", "plum");
+    expect(screen.queryByRole("dialog", { name: "doing options" })).toBeNull();
+  });
+
+  it("closes a column's menu when focus leaves it", () => {
+    render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" onOptionColorChange={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    const menu = screen.getByRole("dialog", { name: "doing options" });
+    // A click on the menu's own padding keeps focus inside it.
+    fireEvent.blur(within(menu).getAllByRole("radio")[0]!, { relatedTarget: menu });
+    expect(screen.getByRole("dialog", { name: "doing options" })).toBe(menu);
+    fireEvent.blur(within(menu).getAllByRole("radio")[0]!, { relatedTarget: document.body });
+    expect(screen.queryByRole("dialog", { name: "doing options" })).toBeNull();
+  });
+
+  it("adds a record with the column's value", () => {
+    const onNewRecord = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={[makeGroup(null, []), ...makeGroups()]}
+        groupBy="status"
+        onNewRecord={onNewRecord}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New record in shipped" }));
+    fireEvent.click(screen.getByRole("button", { name: "New record in No status" }));
+    expect(onNewRecord.mock.calls).toEqual([["shipped"], [null]]);
   });
 
   it("shows the first visible field as the card title and the rest as cells", () => {
@@ -202,7 +269,7 @@ describe("BoardView", () => {
     expect(within(card).queryByText("todo")).toBeNull();
   });
 
-  it("labels the null group No value and marks a flagged card with a warning dot", () => {
+  it("labels the null group after the field and marks a flagged card with a warning dot", () => {
     const groups = [
       makeGroup(null, [makeRecord("rec-none", [indexedValue("title", "No status yet")])]),
       // A flagged grouped field groups under its raw value.
@@ -215,8 +282,12 @@ describe("BoardView", () => {
     ];
     render(<BoardView schema={makeSchema()} groups={groups} groupBy="status" />);
     const columns = screen.getAllByRole("list");
+    // Options keep their order; a value the options lack follows them.
     expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual([
-      "No value",
+      "No status",
+      "todo",
+      "doing",
+      "shipped",
       "shipped!!",
     ]);
     const flaggedCard = screen.getByRole("listitem", { name: "Bad status" });
@@ -252,12 +323,12 @@ describe("BoardView", () => {
     });
   });
 
-  it("emits null when a card lands on the No value column", async () => {
+  it("emits null when a card lands on the no-value column", async () => {
     const onCellChange = vi.fn();
     const groups = [
       makeGroup(null, []),
-      makeGroup("doing", [
-        makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "doing")]),
+      makeGroup("todo", [
+        makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "todo")]),
       ]),
     ];
     render(
@@ -305,11 +376,20 @@ describe("BoardView", () => {
     expect(onCellChange).not.toHaveBeenCalled();
   });
 
-  it("shows the empty state when no group has records", () => {
+  it("shows the empty state when no group of a non-select field has records", () => {
     render(
-      <BoardView schema={makeSchema()} groups={[makeGroup("todo", []), makeGroup(null, [])]} groupBy="status" />,
+      <BoardView schema={makeSchema()} groups={[makeGroup("Ada", []), makeGroup(null, [])]} groupBy="owner" />,
     );
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+  });
+
+  it("keeps a select field's empty columns so the first record has a place", () => {
+    render(<BoardView schema={makeSchema()} groups={[]} groupBy="status" onNewRecord={vi.fn()} />);
+    expect(screen.getAllByRole("list").map((column) => column.getAttribute("aria-label"))).toEqual([
+      "todo",
+      "doing",
+      "shipped",
+    ]);
   });
 
   it("emits the card's record on click, not from a keyboard drag's Enter", async () => {
@@ -354,7 +434,7 @@ describe("BoardView", () => {
     render(
       <BoardView schema={makeSchema()} groups={[makeGroup("todo", records)]} groupBy="status" />,
     );
-    const column = screen.getByRole("list");
+    const column = screen.getAllByRole("list")[0]!;
     // The stubbed 600px viewport holds a handful of cards; the rest of the
     // 60 stay unmounted.
     expect(within(column).getAllByRole("listitem").length).toBeLessThan(records.length);

@@ -334,6 +334,43 @@ describe("GraphView", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("keeps loading while the engine's store is busy, then draws the graph", async () => {
+    vi.useFakeTimers();
+    try {
+      const busy = () => new Error("Error invoking remote method 'desktop:links-edges': DaemonRefusalError [OVERLOADED]: engine-store-busy");
+      const linksEdges = vi.fn();
+      for (let refusal = 0; refusal < 5; refusal++) linksEdges.mockRejectedValueOnce(busy());
+      linksEdges.mockResolvedValue(page("a.md"));
+      const onError = vi.fn();
+      vi.stubGlobal("dohcDesktop", { linksEdges });
+      render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} onError={onError} />);
+      // It asks again after 250, 500 and 1000 ms, then every 2 s.
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(linksEdges).toHaveBeenCalledTimes(5);
+      expect(screen.getByTestId("graph-view").dataset.state).toBe("loading");
+      expect(screen.getByText("Gathering linked mentions")).toBeTruthy();
+      expect(screen.queryByTestId("graph-retry")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+      expect(linksEdges).toHaveBeenCalledTimes(6);
+      expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("1");
+      expect(onError).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("stops asking a busy engine once the Graph closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const linksEdges = vi.fn(async () => { throw new Error("Error invoking remote method 'desktop:links-edges': DaemonRefusalError [OVERLOADED]: engine-store-busy"); });
+      vi.stubGlobal("dohcDesktop", { linksEdges });
+      const view = render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      const asked = linksEdges.mock.calls.length;
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(linksEdges).toHaveBeenCalledTimes(asked);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("keeps file edges usable after chat failure and ignores a late disabled chat answer", async () => {
     const chat = deferred<{entries:ChatFileMentionRecord[]}>();
     const linksEdges=vi.fn(async()=>page("a.md"));

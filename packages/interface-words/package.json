@@ -7,7 +7,9 @@
     "./notices": "./src/notices.ts",
     "./confirmations": "./src/confirmations.ts",
     "./sharing": "./src/sharing.ts",
-    "./documents": "./src/documents.ts"
+    "./documents": "./src/documents.ts",
+    "./account": "./src/account.ts",
+    "./workspace": "./src/workspace.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

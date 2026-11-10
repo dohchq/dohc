@@ -141,7 +141,7 @@ export function LinkedChatsPanel(props: {
   // Reports a landed read so the Chats navigator can refetch its badges. The
   // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
-  onError: (message: string, cause?: unknown) => void;
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
@@ -304,6 +304,22 @@ export function LinkedChatsPanel(props: {
     [props.onError, props.onThreadRead, reactions, workspaceId],
   );
 
+  // The chat this panel shows, and none once it unmounts.
+  const shownThreadId = useRef<string | null>(null);
+  useEffect(() => {
+    shownThreadId.current = activeThread?.id ?? null;
+    return () => { shownThreadId.current = null; };
+  }, [activeThread]);
+  // A message that saved while a later step failed. The notice's Try again
+  // opens its chat again while About still shows that chat on this
+  // workspace's file.
+  const reportUnshown = useCallback((words: string, failure: string, thread: ChatThreadRecord) => {
+    const key = threadsKey;
+    props.onError(words, failure, () => {
+      if (currentThreadsKey.current === key && shownThreadId.current === thread.id) void openThread(thread);
+    });
+  }, [openThread, props.onError, threadsKey]);
+
   // A loaded response is not a React commit. Wait until the message list has
   // mounted before asking it to reveal an offscreen row.
   useEffect(() => {
@@ -370,7 +386,9 @@ export function LinkedChatsPanel(props: {
         try {
           const result = await bridge().sendChatMessage({ workspaceId, threadId: thread.id, body: trimmed });
           if (token !== liveToken.current) return;
-          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          // The comment saved, so its words stay out of the composer. Opening the chat shows it.
+          if ("failure" in result) reportUnshown("Posted your comment. dohc could not show it yet.", result.failure, thread);
+          else if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         } catch (error) {
           if (token !== liveToken.current) return;
           setComposer(trimmed);
@@ -384,7 +402,7 @@ export function LinkedChatsPanel(props: {
         setSending(false);
       }
     },
-    [filePath, openThread, props.onAgentWaitsForTrust, props.onError, sending, workspaceId],
+    [filePath, openThread, props.onAgentWaitsForTrust, props.onError, reportUnshown, sending, workspaceId],
   );
 
   // The composer that opens takes focus, as the + that opened it asked.
@@ -406,9 +424,15 @@ export function LinkedChatsPanel(props: {
         body,
       });
       if (token !== liveToken.current) return;
+      setComposer("");
+      if ("failure" in result) {
+        // The message saved, so the chat reloads to show it.
+        reportUnshown("Sent your message. dohc could not show it yet.", result.failure, thread);
+        void openThread(thread);
+        return;
+      }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       setMessages((current) => [...current, result.message]);
-      setComposer("");
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -421,7 +445,7 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props.onAgentWaitsForTrust, props.onError, sending, workspaceId]);
+  }, [activeThread, composer, openThread, props.onAgentWaitsForTrust, props.onError, reportUnshown, sending, workspaceId]);
 
   // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.

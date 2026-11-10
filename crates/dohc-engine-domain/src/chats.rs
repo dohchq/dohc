@@ -50,7 +50,7 @@ pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, re
 pub use stream::{
     AGENT_REPLY_EXCERPT_CHARS, STREAM_LIMIT_DEFAULT, StreamAgentReply, StreamAgentRequest,
     StreamAgentRequestState, StreamItem, StreamPage, StreamPosition, StreamPost, StreamReplier,
-    ThreadWithChannel,
+    ThreadWithChannel, ThreadWork,
 };
 pub use thread_projection::{linked_chat_projection_path, render_chat_thread_projection};
 
@@ -388,6 +388,41 @@ pub struct ChatReportedAgent {
     pub model: Option<String>,
 }
 
+/// Where an agent says its work stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatWorkStatus {
+    Working,
+    Waiting,
+    Done,
+    Failed,
+    Stopped,
+}
+
+impl ChatWorkStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// What an agent reports about work it does outside dohc, such as a thread in
+/// another product or a pull request: where the work stands, and a link to
+/// it. dohc can't check either, so they are only ever shown as reported. A
+/// thread's Work card shows its newest report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatWorkReport {
+    pub status: ChatWorkStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// A durable chat message row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -413,6 +448,8 @@ pub struct ChatMessage {
     pub author_agent_id: Option<String>,
     /// What the agent reported about itself. Only an agent message has one.
     pub author_reported: Option<ChatReportedAgent>,
+    /// What the agent reported about its work. Only an agent message has one.
+    pub work: Option<ChatWorkReport>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -729,6 +766,8 @@ pub struct ChannelThreadSummary {
     pub unread_count: i64,
     pub open_decision_count: i64,
     pub opening_message: Option<ChannelOpeningMessage>,
+    /// The thread's Work card. Absent when no agent reported work in it.
+    pub work: Option<ThreadWork>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -935,6 +974,8 @@ pub struct StartChannelThread {
     pub author_agent_id: Option<String>,
     /// What the agent reported about itself. Only an agent author has one.
     pub author_reported: Option<ChatReportedAgent>,
+    /// What the agent reports about its work. Only an agent author has one.
+    pub work: Option<ChatWorkReport>,
     /// Every agent the message wakes, its DM's agent included. Only a
     /// person's message wakes agents, and the ids stay on this computer.
     pub wake_agent_ids: Vec<String>,
@@ -968,6 +1009,8 @@ pub struct SendMessage {
     pub author_agent_id: Option<String>,
     /// See [`StartChannelThread::author_reported`].
     pub author_reported: Option<ChatReportedAgent>,
+    /// See [`StartChannelThread::work`].
+    pub work: Option<ChatWorkReport>,
     /// See [`StartChannelThread::wake_agent_ids`].
     pub wake_agent_ids: Vec<String>,
     pub now_ms: i64,
@@ -2134,6 +2177,55 @@ fn parse_reported_agent(json: Option<String>) -> Result<Option<ChatReportedAgent
     .transpose()
 }
 
+/// The longest link in a work report, in characters.
+pub const MAX_WORK_URL_CHARS: usize = 2048;
+
+/// Check what an agent reported about its work. Only an agent message
+/// carries it. The link is a web address: `http://` or `https://` followed by
+/// printable ASCII with no space, so no character can draw it as another
+/// address. Other characters go in percent-encoded or as punycode.
+pub fn normalize_work_report(
+    is_agent: bool,
+    work: Option<&ChatWorkReport>,
+) -> Result<Option<ChatWorkReport>, DomainError> {
+    let Some(work) = work else {
+        return Ok(None);
+    };
+    let invalid = |reason| Err(DomainError::InvalidInput { reason });
+    if !is_agent {
+        return invalid("only an agent message reports work");
+    }
+    let url_is_valid = work.url.as_deref().is_none_or(|url| {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"));
+        rest.is_some_and(|rest| !rest.is_empty())
+            && url.len() <= MAX_WORK_URL_CHARS
+            && url.bytes().all(|byte| byte.is_ascii_graphic())
+    });
+    if !url_is_valid {
+        return invalid("a work report's link is invalid");
+    }
+    Ok(Some(work.clone()))
+}
+
+pub fn work_report_json(work: Option<&ChatWorkReport>) -> Option<String> {
+    work.map(|work| serde_json::to_string(work).expect("a work report serializes"))
+}
+
+/// A stored report is checked again on read, so a row the checks did not
+/// write never reaches a reader.
+fn parse_work_report(json: Option<String>) -> Result<Option<ChatWorkReport>, DomainError> {
+    let corrupt = || DomainError::StateCorrupt {
+        reason: "chat message work report is corrupt",
+    };
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let work: ChatWorkReport = serde_json::from_str(&json).map_err(|_| corrupt())?;
+    normalize_work_report(true, Some(&work)).map_err(|_| corrupt())
+}
+
 /// An automation message must name its Collection automation and chain
 /// depth, and no other message may. The id is `collection:<collection id>#<id>`, and
 /// the depth is bounded like a record change's declared depth.
@@ -2220,7 +2312,7 @@ pub enum ReplicatedMessageAuthor {
 ///
 /// A personal agent's message comes from that agent's relay origin. It is an
 /// agent message by that agent for an account, names the agent's connection,
-/// carries no link, owner, origin, chain depth or reported agent, stays within
+/// carries no link, owner, origin, chain depth, reported agent or work report, stays within
 /// the link body cap, and uses the personal message id prefix. The relay
 /// checks that the account is the workspace's owner.
 ///
@@ -2301,7 +2393,7 @@ pub fn validate_replicated_link_author(
 type ThreadPlace = (Option<String>, Option<String>, Option<String>, bool);
 
 /// Whether a personal agent's post may land in this thread: in a Group, in
-/// the agent's own chat, or on a file. The relay doesn't post on a file yet.
+/// the agent's own chat, or on a file. The relay posts in all three.
 /// Never in a person's DM or another agent's chat. None while the thread, or
 /// the create of its chat, hasn't arrived.
 pub fn personal_agent_may_post_in(
@@ -3313,6 +3405,11 @@ impl<'a> LinkedChatStore<'a> {
             input.author_reported.as_ref(),
         )?;
         let author_reported_json = reported_agent_json(author_reported.as_ref());
+        let work = normalize_work_report(
+            input.author_kind == ChatActorKind::Agent,
+            input.work.as_ref(),
+        )?;
+        let work_json = work_report_json(work.as_ref());
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -3330,7 +3427,8 @@ impl<'a> LinkedChatStore<'a> {
             ));
         }
 
-        let payload_hash = hash_fields(&[
+        let wake_agents = wake_agent_ids.join(",");
+        let mut hashed: Vec<&[u8]> = vec![
             thread_id.as_bytes(),
             input.message_id.as_bytes(),
             input.channel_id.as_bytes(),
@@ -3355,8 +3453,14 @@ impl<'a> LinkedChatStore<'a> {
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
             author_reported_json.as_deref().unwrap_or("").as_bytes(),
-            wake_agent_ids.join(",").as_bytes(),
-        ]);
+            wake_agents.as_bytes(),
+        ];
+        // A message with no work report keeps the hash an earlier build
+        // recorded for it, so its retry still replays.
+        if let Some(work_json) = &work_json {
+            hashed.push(work_json.as_bytes());
+        }
+        let payload_hash = hash_fields(&hashed);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
         if let Some(request_id) = &input.request_id
@@ -3440,8 +3544,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported, work) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -3459,6 +3563,7 @@ impl<'a> LinkedChatStore<'a> {
                     author_actor_key,
                     author_agent_id,
                     author_reported_json,
+                    work_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -3542,6 +3647,9 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(reported) = &author_reported {
                 message_payload.insert("authorReported".to_owned(), serde_json::json!(reported));
             }
+            if let Some(work) = &work {
+                message_payload.insert("work".to_owned(), serde_json::json!(work));
+            }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
@@ -3620,6 +3728,7 @@ impl<'a> LinkedChatStore<'a> {
                 link_author: None,
                 author_agent_id: author_agent_id.clone(),
                 author_reported: author_reported.clone(),
+                work: work.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3685,6 +3794,11 @@ impl<'a> LinkedChatStore<'a> {
             input.author_reported.as_ref(),
         )?;
         let author_reported_json = reported_agent_json(author_reported.as_ref());
+        let work = normalize_work_report(
+            input.author_kind == ChatActorKind::Agent,
+            input.work.as_ref(),
+        )?;
+        let work_json = work_report_json(work.as_ref());
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -3708,7 +3822,8 @@ impl<'a> LinkedChatStore<'a> {
         let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
 
-        let payload_hash = hash_fields(&[
+        let wake_agents = wake_agent_ids.join(",");
+        let mut hashed: Vec<&[u8]> = vec![
             input.thread_id.as_bytes(),
             input.message_id.as_bytes(),
             body.as_bytes(),
@@ -3732,8 +3847,14 @@ impl<'a> LinkedChatStore<'a> {
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
             author_reported_json.as_deref().unwrap_or("").as_bytes(),
-            wake_agent_ids.join(",").as_bytes(),
-        ]);
+            wake_agents.as_bytes(),
+        ];
+        // A message with no work report keeps the hash an earlier build
+        // recorded for it, so its retry still replays.
+        if let Some(work_json) = &work_json {
+            hashed.push(work_json.as_bytes());
+        }
+        let payload_hash = hash_fields(&hashed);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
                 .store
@@ -3767,8 +3888,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported, work) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -3787,6 +3908,7 @@ impl<'a> LinkedChatStore<'a> {
                     author_actor_key,
                     author_agent_id,
                     author_reported_json,
+                    work_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -3870,6 +3992,9 @@ impl<'a> LinkedChatStore<'a> {
             }
             if let Some(reported) = &author_reported {
                 payload.insert("authorReported".to_owned(), serde_json::json!(reported));
+            }
+            if let Some(work) = &work {
+                payload.insert("work".to_owned(), serde_json::json!(work));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -3966,6 +4091,7 @@ impl<'a> LinkedChatStore<'a> {
                 link_author: None,
                 author_agent_id: author_agent_id.clone(),
                 author_reported: author_reported.clone(),
+                work: work.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -4311,7 +4437,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
+                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -4327,6 +4453,11 @@ impl<'a> LinkedChatStore<'a> {
                     .collect()
             };
             let mut reactions = active_reactions_for_messages(conn, workspace_id, &opening_ids)?;
+            let thread_ids: Vec<String> = validated
+                .iter()
+                .map(|(thread, ..)| thread.thread_id.clone())
+                .collect();
+            let mut work = stream::thread_work(conn, workspace_id, &thread_ids)?;
             let mut summaries = Vec::with_capacity(validated.len());
             for (thread, message_count, last_read_sequence, open_decision_count, opening_id) in
                 validated
@@ -4350,6 +4481,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_agent_id: message.author_agent_id,
                     });
                 summaries.push(ChannelThreadSummary {
+                    work: work.remove(&thread.thread_id),
                     thread,
                     message_count,
                     last_read_sequence,
@@ -4889,7 +5021,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -8143,7 +8275,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -8163,7 +8295,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -8382,6 +8514,10 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         Err(error) => return Ok(Err(error)),
     };
     let agent_connection_id: Option<String> = row.get(19)?;
+    let work = match parse_work_report(row.get(20)?) {
+        Ok(work) => work,
+        Err(error) => return Ok(Err(error)),
+    };
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -8417,6 +8553,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             link_author,
             author_agent_id,
             author_reported,
+            work,
             attachments: Vec::new(),
         }),
     )

@@ -1,13 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
+import { createShareDirectWriteDelivery } from "../ipc/shareDirectWriteDelivery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "../workspaces/physicalWorkspaceRemoval";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
-import { oldWindowState, windowShowsWorkspace } from "./workspaceWindowReuse";
+import { currentWindowSession, oldWindowState, windowShowsWorkspace } from "./workspaceWindowReuse";
 
 function renderer(id: number) {
   let destroyed = false;
-  return { id, isDestroyed: () => destroyed, once: () => undefined, destroy: () => { destroyed = true; } };
+  const sent: unknown[] = [];
+  return {
+    id, sent, isDestroyed: () => destroyed, once: () => undefined, on: () => undefined,
+    send: (_channel: string, event: unknown) => { sent.push(event); }, destroy: () => { destroyed = true; },
+  };
 }
 
 const shared = {
@@ -108,4 +114,29 @@ it("says whether another window shows the workspace a window was left with after
 
 it("has no old window state for a window that shows no workspace", () => {
   expect(oldWindowState(undefined, [], () => undefined, { isCurrentAttachment: () => false })).toBeNull();
+});
+
+it("offers a change that couldn't be saved to the reopened share's window, not the one left from before Forget", async () => {
+  const { workspace, authorities, sessions, view, register, forget } = await shownWorkspace(shared);
+  const reopened = renderer(2);
+  const delivery = createShareDirectWriteDelivery({
+    targets: () => [view, reopened],
+    currentSession: sender => currentWindowSession(sessions.current(sender), authorities),
+    isSharedView: () => true,
+  });
+  const listener = (rendererDocumentId: string) => ({ workspaceId: workspace.workspaceId, rendererDocumentId, subscriptionId: randomUUID() });
+  const old = listener("document-1");
+  expect(delivery.update(view, { action: "listen", listening: true, ...old })).toBe(true);
+
+  await forget();
+  await sessions.open(reopened, register(), "document-2");
+  const current = listener("document-2");
+  expect(delivery.update(reopened, { action: "listen", listening: true, ...current })).toBe(true);
+  delivery.report(workspace.workspaceId, { status: "unavailable" });
+
+  expect(view.sent).toEqual([]);
+  const answerId = (reopened.sent[0] as { answerId: string }).answerId;
+  // The old window can't take it first.
+  expect(delivery.update(view, { action: "claim", answerId, ...old })).toBe(false);
+  expect(delivery.update(reopened, { action: "claim", answerId, ...current })).toBe(true);
 });

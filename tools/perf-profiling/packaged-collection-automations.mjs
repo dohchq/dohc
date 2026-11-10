@@ -23,7 +23,7 @@ export const TRIGGER = {
 export const CASE_TIMEOUT_MS = 300_000;
 // The limits the package under test enforces. They decide which cases the harness expects the package to
 // refuse. Pass the candidate's limits to measure a package that raises them.
-export const DEFAULT_LIMITS = { findCap: 50, writeCap: 200 };
+export const DEFAULT_LIMITS = { findCap: 500, writeCap: 200 };
 // A refusal names the limit it hit; any other failure fails the case.
 export const LIMIT_REFUSAL = /matched more than \d+ records|change more than \d+ fields|more data than dohc can save/;
 
@@ -61,10 +61,11 @@ export function automationCases({ findCap, writeCap }) {
     seed: numbered(500).map(n => ({ N: n })),
     steps: [find('found', 'Case', name), set('found', { A: 1, C: '=record.N * 2' })],
     expect: records => ({ records: records.map(changed(r => ({ A: 1, C: r.N * 2 }))), added: [] }) });
-  const cap = (name, count) => ({ name, matches: count, assignments: count,
-    seed: numbered(count).map(n => ({ N: n })),
-    steps: [find('found', 'Case', name), set('found', { A: 1 })],
-    expect: records => ({ records: records.map(changed(() => ({ A: 1 }))), added: [] }) });
+  // The Find limit is above the write limit, so a cap case changes at most its first 10 records.
+  const cap = (name, count) => ({ name, matches: count, assignments: Math.min(count, 10),
+    seed: numbered(count).map(n => ({ N: n, Stage: n <= 10 ? `${name}-mark` : name })),
+    steps: [find('found', 'Case', name), find('marked', 'Stage', `${name}-mark`), set('marked', { A: 1 })],
+    expect: records => ({ records: records.map(changed(r => r.N <= 10 ? { A: 1 } : {})), added: [] }) });
   const cases = [
     baseline('baseline'),
     fiveHundred('find-500'),

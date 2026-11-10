@@ -7,6 +7,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-work";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
@@ -125,11 +126,21 @@ export const chatReportedAgentSchema = z
     message: "A reported version needs its product.",
   });
 export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
+// What an agent reports about work it does outside dohc: where the work
+// stands, and a web link to it. dohc shows both only as reported.
+export const chatWorkReportSchema = z
+  .object({
+    status: z.enum(CHAT_WORK_STATUSES),
+    url: z.string().refine(isWorkUrl, { message: "Use an http or https address in plain ASCII with no spaces. Percent-encode other characters." }).optional(),
+  })
+  .strict();
+export type CliWorkReport = z.infer<typeof chatWorkReportSchema>;
 const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
     reported: chatReportedAgentSchema.optional(),
+    work: chatWorkReportSchema.optional(),
     group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -144,6 +155,7 @@ const replyArgsSchema = z
     ...argsBase,
     runId: z.string().min(1).optional(),
     reported: chatReportedAgentSchema.optional(),
+    work: chatWorkReportSchema.optional(),
     thread: z.string().min(1),
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -831,6 +843,7 @@ const cliShowMessageSchema = z
     runId: z.string().min(1).optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
     authorReported: chatReportedAgentSchema.optional(),
+    work: chatWorkReportSchema.optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -947,6 +960,14 @@ function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group:
             bodyExcerpt: z.string(),
           }).strict().optional(),
           openDecisionCount: z.number().int().nonnegative(),
+          // The thread's Work card: its newest work report.
+          work: z.object({
+            status: z.enum(CHAT_WORK_STATUSES),
+            url: z.string().optional(),
+            messageId: z.string().min(1),
+            author: cliAuthorSchema,
+            reportedAtMs: z.number().int().nonnegative(),
+          }).strict().optional(),
         }).strict().optional(),
       }).strict()),
       // Pass as `before` to read the older page. Null at the oldest item.
@@ -1161,6 +1182,7 @@ const rawChatMessageSchema = z
     resolvedByMessageId: rawMessageIdSchema.optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
     authorReported: chatReportedAgentSchema.optional(),
+    work: chatWorkReportSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z

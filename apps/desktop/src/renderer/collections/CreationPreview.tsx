@@ -1,6 +1,6 @@
 import { Check, FileText, ListChecks, Paperclip, Search, Table2 } from "lucide-react";
 import type { DatasetColumnField } from "@dohc/security-contract/dataset";
-import { FieldTypeIcon } from "./FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 import { inputClass, selectClass } from "./FieldForm";
 
 export function CollectionKindShape({ documents }: { documents?: boolean }) {

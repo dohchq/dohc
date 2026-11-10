@@ -57,8 +57,8 @@ import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
 import { KeyboardSettings } from "../settings/KeyboardSettings";
-import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
-import { PreferredNameControl } from "../settings/PreferredNameControl";
+import { ColorControl, HueControl, SettingRow, SettingsSection, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
+import { ProfileHeader } from "../settings/ProfileHeader";
 import { SettingsNav } from "../settings/SettingsNav";
 import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
@@ -125,7 +125,7 @@ import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
-import { NewVersionHint } from "../workbench/WorkspaceVersions";
+import { NewVersionCard } from "../workbench/NewVersionDialog";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -520,6 +520,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   change: "Diff: plan.md",
   graph: "Graph",
   history: "History",
+  news: "What's new",
 };
 const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
 // The kind and object name columns share one width, wider than the longest
@@ -993,6 +994,7 @@ function ChatThreadSpecimen() {
         runRecords={{}}
         failedRun={null}
         retryBusy={false}
+        waiting={null}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -1042,6 +1044,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFa
         onRetryFailedRun={noop}
         onOpenAgentSettings={noop}
         onAskAgain={noop}
+        waiting={null}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -1508,6 +1511,35 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   );
 }
 
+// The New version dialog, from Main with a name typed, and from a version
+// with unsaved changes and a refused name.
+function NewVersionSpecimen(props: { theme: "light" | "dark"; fromVersion?: boolean }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const draft = { id: "draft-two", name: "Draft two", kind: "named" as const, createdAtMs: 0, canMergeIntoMain: false };
+  return (
+    <div className="relative h-[34rem] w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
+      <div className="flex flex-col gap-2 p-4 text-[13px] text-muted">
+        <span>Research</span>
+        <span>competitors.md</span>
+      </div>
+      <OverlayFrame panelRef={panelRef}>
+        <NewVersionCard
+          idBase={`states-new-version-${props.fromVersion ? "draft" : "main"}-${props.theme}`}
+          start={props.fromVersion ? draft : null}
+          name={props.fromVersion ? "Draft" : "Spring pricing"}
+          error={props.fromVersion ? <>Another version is called <span className="font-medium">Draft</span>. Choose another name.</> : null}
+          busy={false}
+          saveFirst={props.fromVersion === true}
+          lastChange={{ atMs: Date.now() - 4 * 60_000, personName: "Sam" }}
+          onNameChange={noop}
+          onCreate={noop}
+          onCancel={noop}
+        />
+      </OverlayFrame>
+    </div>
+  );
+}
+
 // Two options, so five controls fit on one row of the segmented part.
 const themeOptions = [
   { value: "light", label: "Light" },
@@ -1647,7 +1679,7 @@ const REFUSED_UNDO_TOAST = {
 const radioMenuItems: MenuEntry[] = [
   { id: "main", label: "Main", checked: false, onSelect: noop },
   { id: "draft", label: "Draft two", checked: true, onSelect: noop },
-  { id: "new", label: "New version", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
   MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
   {
@@ -1657,37 +1689,6 @@ const radioMenuItems: MenuEntry[] = [
     disabled: true,
     description: "Only versions made from Main can merge into Main.",
     onSelect: noop,
-  },
-];
-const fieldMenuItems: MenuEntry[] = [
-  { id: "main", label: "Main", checked: true, onSelect: noop },
-  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
-  {
-    id: "new",
-    field: {
-      label: "New version name",
-      value: "Draft three",
-      onChange: noop,
-      onSubmit: noop,
-      onCancel: noop,
-      hint: "Starts from Main",
-    },
-  },
-];
-// The versions menu before the first version, as only Main shows it: the
-// field says where the version starts, then what every version leaves alone.
-const firstVersionMenuItems: MenuEntry[] = [
-  { id: "main", label: "Main", checked: true, description: "Try changes without touching Main.", onSelect: noop },
-  {
-    id: "new",
-    field: {
-      label: "New version name",
-      value: "Draft",
-      onChange: noop,
-      onSubmit: noop,
-      onCancel: noop,
-      hint: <NewVersionHint versions={{ onMain: true, active: null }} first />,
-    },
   },
 ];
 const overflowMenuItems: MenuEntry[] = [
@@ -2339,20 +2340,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, Enter at its end, hint">
-          <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
-            <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
-          </div>
-        </Specimen>
+      <Section part="new-version" title="New version dialog">
+        <NewVersionSpecimen theme={theme} />
       </Section>
 
-      <Section part="menu-first-version" title="Menu before the first version">
-        <Specimen label="only Main: field focus, hint, what versions leave alone">
-          <div className="flex h-64 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
-            <MenuSpecimen label="Versions" items={firstVersionMenuItems} width={256} testId={`states-menu-first-version-${theme}`} />
-          </div>
-        </Specimen>
+      <Section part="new-version-from-version" title="New version dialog from a version">
+        <NewVersionSpecimen theme={theme} fromVersion />
       </Section>
 
       <Section part="menu-overflow" title="Overflow menu">
@@ -3156,12 +3149,18 @@ function Pane(props: { theme: "light" | "dark" }) {
             {/* No close button here, so no room is kept for one. */}
             <div className="min-w-0 flex-1 px-8 py-7">
               <div className="max-w-[640px]">
-                <SettingRow title="Your name">
-                  <PreferredNameControl presentation={SAMPLE_ADA} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
-                </SettingRow>
-                <SettingRow title="Editor font" modified onReset={noop}>
-                  <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
-                </SettingRow>
+                <SettingsSection>
+                  <div className="py-5">
+                    <ProfileHeader presentation={SAMPLE_ADA} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`}>
+                      <HueControl label="Your color" shape="person" value="rose" onChange={noop} />
+                    </ProfileHeader>
+                  </div>
+                </SettingsSection>
+                <SettingsSection title="Editor">
+                  <SettingRow title="Editor font" modified onReset={noop}>
+                    <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
+                  </SettingRow>
+                </SettingsSection>
               </div>
             </div>
           </div>
@@ -3182,11 +3181,13 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ThemeControl value="light" onChange={noop} />
           </div>
         </Specimen>
-        <Specimen label="changed, in its row: the dot and the reset">
+        <Specimen label="changed, in its card: the bar and Reset">
           <div className="w-[560px]">
-            <SettingRow title="Theme" modified onReset={noop}>
-              <ThemeControl value="dark" onChange={noop} />
-            </SettingRow>
+            <SettingsSection>
+              <SettingRow title="Theme" modified onReset={noop}>
+                <ThemeControl value="dark" onChange={noop} />
+              </SettingRow>
+            </SettingsSection>
           </div>
         </Specimen>
       </Section>
@@ -3208,11 +3209,13 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="at the largest: + disabled">
           <ZoomSpecimen percent={300} atMost />
         </Specimen>
-        <Specimen label="changed, in its row: the dot and the reset">
+        <Specimen label="changed, in its card: the bar and Reset">
           <div className="w-[560px]">
-            <SettingRow title="Zoom" modified onReset={noop}>
-              <ZoomSpecimen percent={110} />
-            </SettingRow>
+            <SettingsSection>
+              <SettingRow title="Zoom" modified onReset={noop}>
+                <ZoomSpecimen percent={110} />
+              </SettingRow>
+            </SettingsSection>
           </div>
         </Specimen>
       </Section>

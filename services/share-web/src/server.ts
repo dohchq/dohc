@@ -26,7 +26,12 @@ import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
 import {createAgentChatClient} from "./agentChatClient";
-import {MCP_CORS_HEADERS, MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge, mcpLinkSecret, signInPagePolicy} from "./mcpSignIn";
+import {
+  MCP_CORS_HEADERS, MCP_PATH_PREFIX, PERSONAL_MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge,
+  mcpLinkSecret, mcpPersonalWorkspace, signInPagePolicy,
+} from "./mcpSignIn";
+import {servePersonalMcp} from "./personalMcp";
+import {createPersonalAgentClient} from "./personalAgentClient";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { viewerPage } from "../viewer/src/pages";
 import { serveWorkLinkPage } from "./workLinkPage";
@@ -1066,8 +1071,10 @@ export function createShareWebApplication({
   // An MCP request's internal calls to the link handlers carry their agent
   // here, never in a header or cookie a client could send.
   const agentCallers = new WeakMap<Request, AgentCaller>();
+  // A personal agent signs in with the browser's account, on the origin its cookies belong to.
   const mcpSignIn = createMcpSignIn({relayUrl, exchangeKey: relayExchangeKey, fetchRelay, nowMs, timeoutMs: relayTimeoutMs,
-    admit: (clientIp) => exchangeAddressProbes.allow(clientIp, nowMs()) && exchangeGlobalRateLimiter.allow("global", nowMs())});
+    admit: (clientIp) => exchangeAddressProbes.allow(clientIp, nowMs()) && exchangeGlobalRateLimiter.allow("global", nowMs()),
+    ...(accountAuth && accountHandler ? {account: {publicOrigin: accountAuth.publicOrigin, handle: accountHandler}} : {})});
   if (linkLiveConfig &&(!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
@@ -1398,14 +1405,19 @@ export function createShareWebApplication({
       const page = signInPagePolicy(signIn);
       return response(signIn.body, {status: signIn.status, headers: signIn.headers, ...(page ? {page} : {})});
     }
-    if (pathname.startsWith("/mcp/s/")) {
-      const secret = mcpLinkSecret(pathname);
-      if (!secret || search || !relayExchangeKey) return refused();
-      // The address names the link; the bearer is the credential. The relay
-      // checks the token against this exact address on every call.
-      const resource = `${agentOrigin}/mcp/s/${secret}`;
+    const personal = pathname.startsWith(PERSONAL_MCP_PATH_PREFIX);
+    if (personal || pathname.startsWith(MCP_PATH_PREFIX)) {
+      const secret = personal ? null : mcpLinkSecret(pathname);
+      if ((personal ? mcpPersonalWorkspace(pathname) === null || !mcpSignIn.offersPersonal(agentOrigin) : !secret) ||
+          search || !relayExchangeKey) return refused();
+      // The address names the link, or the workspace a personal agent signed
+      // in at, in its one spelling; the bearer is the credential. The relay
+      // checks the token against this exact address, in its own family, on
+      // every call, so neither family's token works at the other's address.
+      const resourcePath = personal ? pathname : `${MCP_PATH_PREFIX}${secret}`;
+      const resource = `${agentOrigin}${resourcePath}`;
       const challenge = (invalidToken: boolean) => {
-        const result = mcpChallenge(agentOrigin, secret, invalidToken);
+        const result = mcpChallenge(agentOrigin, resourcePath, invalidToken);
         return response(result.body, {status: result.status, headers: result.headers});
       };
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
@@ -1420,7 +1432,7 @@ export function createShareWebApplication({
       if (mcpRequests >= 64) return refused();
       const digest = (value: string) => createHash("sha256").update(value).digest("base64url");
       const caller: AgentCaller = {accessToken: bearer, resource, key: `agent:${digest(bearer)}`,
-        addressKey: `agent-link:${digest(resource)}`, grantId: null, invalid: false};
+        addressKey: `${personal ? "agent-personal" : "agent-link"}:${digest(resource)}`, grantId: null, invalid: false};
       const release = mcpLimiter.acquire(caller.key, caller.addressKey);
       if (!release) return refused();
       mcpRequests++;
@@ -1428,6 +1440,16 @@ export function createShareWebApplication({
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS)]);
       let holdsLargeBody = false;
       try {
+        if (personal) {
+          const result = await servePersonalMcp(request, {signal, deadlineAtMs,
+            client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay})});
+          // The token expired or was revoked, or names another address: the client refreshes or signs in again.
+          if (!result) {
+            mcpFailedSignIns.allow(clientIp, nowMs());
+            return challenge(true);
+          }
+          return response(result.body, {status: result.status, headers: result.headers});
+        }
         const result = await serveRemoteMcp(request, {
           signal, deadlineAtMs, liveLimits: linkLiveConfig?.editor,
           ...(linkLive ? {live: linkLive.agent({accessToken: bearer, resource})} : {}),
@@ -1872,5 +1894,5 @@ export const shareWebRefusalBody = REFUSAL_BODY;
  * deadline: an agent's MCP request and a Collection write can carry megabytes.
  */
 export function streamsRequestBody(url: URL): boolean {
-  return url.pathname.startsWith(MCP_PATH_PREFIX) || url.pathname === COLLECTION_WRITES_PATH;
+  return url.pathname.startsWith(MCP_PATH_PREFIX) || url.pathname.startsWith(PERSONAL_MCP_PATH_PREFIX) || url.pathname === COLLECTION_WRITES_PATH;
 }

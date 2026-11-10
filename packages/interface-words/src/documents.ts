@@ -25,6 +25,8 @@ export const documentWords = {
     tooLarge: { label: "Read-only", explanation: "This file is too large to edit in dohc." },
     /** Phone: the server can't be reached, so pages are read-only until it answers. */
     readOnlyOffline: { label: "Read-only", explanation: "dohc could not reach the server." },
+    /** Phone: pages open read-only until the phone can save to the server. */
+    readOnlyPhone: { label: "Read-only", explanation: "dohc can't edit pages on a phone yet." },
     /** Phone: the desktop's sentence names a trash the phone doesn't have. */
     deleted: { label: "Deleted", explanation: "This file was deleted while you had it open. You can still copy what's here." },
   },
@@ -36,6 +38,10 @@ export const documentWords = {
   historyKeeps: "History keeps the original.",
   historyDoesNotTrack: "History does not track this file, so dohc can't restore the original.",
   historyUnconfirmed: "dohc could not confirm that History can restore the original.",
+  /** Phone: the server refuses a file over the editor's limit before reading any of it, so nothing shows. */
+  tooLargeToOpen: "This file is too large to open on a phone. Open it on a computer.",
+  /** Phone: the server answers a page whose workspace is being restored with no text until the restore ends. */
+  restoring: "This page is being restored.",
   /** Phone: the desktop's button opens the full file in another app; the phone points to a computer. */
   largeFile: "Showing the start of a large file. Open it on a computer to see all of it.",
   setAsideReadOnly: "This document became read-only before your edit saved. Copy your text to keep it.",

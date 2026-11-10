@@ -14,8 +14,8 @@ import {
 } from "./helpers/workspace";
 
 // Screenshot harness (@ui-audit) for the versions menu and what it opens: the
-// menu on Main, on a version, and on a version made from another version; its
-// name field with its hint, Creating…, and a refused name; a failed create as
+// menu on Main, on a version, and on a version made from another version; the
+// New version dialog with a name, Creating…, and a refused name; a failed create as
 // a notice with Try again, and a failed merge in its dialog, with Details; each
 // merge stage, with and without the protected files a merge replaced; a merge
 // whose dialog closed while it ran, answering as a toast and a Notices row; the
@@ -120,6 +120,10 @@ async function shootMenu(page: Page, name: string): Promise<void> {
   await shootParts(page, name, [page.getByTestId("version-menu-button"), page.getByTestId("version-menu")]);
 }
 
+async function shootDialog(page: Page, name: string): Promise<void> {
+  await shootParts(page, name, [page.getByTestId("version-new-dialog")]);
+}
+
 async function shootWindow(page: Page, name: string): Promise<void> {
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
@@ -213,44 +217,49 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expectActive(page, "Main");
 
-    // On Main: the menu, the field's hint, a taken name, and Creating….
+    // On Main: the menu, the New version dialog, a taken name, and Creating….
     await shootWindow(page, "window-main");
     await openMenu(page);
     await shootMenu(page, "menu-main");
     await page.getByTestId("version-new").click();
+    await expect(page.getByTestId("version-new-dialog")).toBeVisible();
+    await expect(page.getByTestId("version-new-input")).toBeFocused();
+    await shootWindow(page, "new-version-main-window");
     await page.getByTestId("version-new-input").fill("Draft");
-    await shootMenu(page, "menu-main-new-field");
+    await shootDialog(page, "new-version-main");
     await page.getByTestId("version-new-input").fill("Main");
     await page.getByTestId("version-new-input").press("Enter");
     await expect(page.getByTestId("version-menu-error")).toBeVisible({ timeout: 20_000 });
-    await shootMenu(page, "menu-name-taken");
+    await shootDialog(page, "new-version-name-taken");
     await page.getByTestId("version-new-input").fill("Draft");
     await interceptNext(desktop, "desktop:create-workspace-version", "hold");
     await page.getByTestId("version-new-input").press("Enter");
-    await expect(page.getByTestId("version-menu")).toContainText("Creating…");
-    await shootMenu(page, "menu-creating");
+    await expect(page.getByTestId("version-new-create")).toHaveText("Creating…");
+    await shootDialog(page, "new-version-creating");
     await releaseHeld(desktop);
     await expectActive(page, "Draft");
+    await expect(page.getByTestId("version-new-dialog")).toHaveCount(0);
 
     // On Draft: the trigger without a dot, the menu opened with the mouse,
-    // and the field's hint.
+    // and the dialog starting from Draft.
     await shootParts(page, "trigger-draft", [page.getByTestId("version-menu-button")]);
     await openMenu(page);
     await shootMenu(page, "menu-draft");
     await page.getByTestId("version-new").click();
     await page.getByTestId("version-new-input").fill("Ideas");
-    await shootMenu(page, "menu-draft-new-field");
+    await expect(page.getByTestId("version-new-no-merge")).toBeVisible();
+    await shootDialog(page, "new-version-draft");
 
     // A create that fails for another reason: a notice with Try again, and
-    // its row in Notices. The field keeps the name.
+    // its row in Notices. The dialog keeps the name.
     await interceptNext(desktop, "desktop:create-workspace-version", "fail");
     await page.getByTestId("version-new-input").press("Enter");
     const createFailed = errorToast(page, "Ideas");
     await expect(createFailed).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("version-new-input")).toHaveValue("Ideas");
     await shootWindow(page, "create-failure-toast");
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
+    await page.getByTestId("version-new-cancel").click();
+    await expect(page.getByTestId("version-new-dialog")).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
     await expect(page.locator("[data-notice-row]").filter({ hasText: "Ideas" })).toBeVisible();
     await shootWindow(page, "create-failure-notices");

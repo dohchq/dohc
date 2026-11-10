@@ -91,6 +91,7 @@ import {
   DEFAULT_SIDEBAR_SETTINGS,
   agentMentionCandidates,
   listAgents,
+  personalAgentMentionCandidates,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -153,6 +154,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { installWorkLinkOpener } from "./workLinkOpener";
 import { useRequestSequence } from "./useRequestSequence";
+import { knownPersonalAgents, usePersonalAgents } from "./usePersonalAgents";
+import { setPersonalAgents } from "./workbench/chosenColors";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
@@ -258,6 +261,8 @@ import {
   useWorkspaceVersions,
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
+import { WhatsNewPage } from "./workbench/WhatsNewPage";
+import { openUnseenWhatsNewOnce } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -288,6 +293,7 @@ import {
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   VERSIONS_TAB_PATH,
+  WHATS_NEW_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
   mergeSavedTabs,
@@ -688,6 +694,8 @@ export function DesktopWorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   // The part a Customize… command opened Settings for, if one did.
   const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
+  // The personal agent whose page Settings › Agents opens, if a notice named one.
+  const [settingsAgent, setSettingsAgent] = useState<{ agentId: string } | null>(null);
   // The owner's live-document list, holding the workspace it was opened for
   // rather than a bare flag. The render below only matches the current
   // workspace, so a switch cannot leave the previous workspace's list — or
@@ -727,12 +735,14 @@ export function DesktopWorkspaceShell(props: {
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => {
       setSettingsFocus(null);
+      setSettingsAgent(null);
       setSettingsSection(section);
     },
     [],
   );
   const customize = useCallback((part: CustomizePart) => {
     setSettingsFocus(part);
+    setSettingsAgent(null);
     setSettingsSection(CUSTOMIZE_TARGETS[part].section);
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
@@ -1438,12 +1448,20 @@ export function DesktopWorkspaceShell(props: {
   // Each agent that is on, and each agent you run, by name: @ and its
   // name's handle reaches it.
   const userSettings = props.userSettings;
+  // Your personal agents, as main caches them. Their names and colors paint
+  // their posts, and each one that can reach this workspace joins the @ roster.
+  const { state: personalAgents } = usePersonalAgents(workspaceId, false);
+  // A workspace switch reads the cache again; the names it showed stay until then.
+  useEffect(() => {
+    if (personalAgents.status !== "loading") setPersonalAgents(knownPersonalAgents(personalAgents));
+  }, [personalAgents]);
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
       ...agentMentionCandidates(userSettings ? listAgents(userSettings.settings) : []),
+      ...personalAgentMentionCandidates(knownPersonalAgents(personalAgents) ?? [], workspaceId),
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
-    [userSettings],
+    [personalAgents, userSettings, workspaceId],
   );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
@@ -1749,6 +1767,32 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // After the saved tabs return, What's new opens over them once per release,
+  // reusing a restored What's new tab in any group. At the tab limit, a new
+  // tab would close one of the person's tabs, so it waits for a launch with
+  // room.
+  const openUnseenWhatsNew = async () => {
+    const id = workspaceIdRef.current;
+    const canOpen = () => {
+      if (workspaceIdRef.current !== id) return false;
+      const tabs = allTabs(wbRef.current);
+      return tabs.length < MAX_OPEN_TABS || tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
+    };
+    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, true);
+    if (!(await openUnseenWhatsNewOnce(canOpen, open)) || workspaceIdRef.current !== id) return;
+    // A restored file it covers no longer holds back the restored-surface
+    // phase. A file in another group still shows and reports itself.
+    const surface = restoredActiveFileSurface.current;
+    if (
+      surface !== null &&
+      surface.groupId === activeGroup(wbRef.current).id &&
+      activeTabPath(wbRef.current) === WHATS_NEW_TAB_PATH &&
+      markCurrentSwitchPhase("restored-active-surface-ready")
+    ) {
+      restoredActiveFileSurface.current = null;
+    }
+  };
+
   // A failed read is read again once the workspace opens (useSavedTabsReread).
   const layoutReadStartedAt = useRef(0);
   const [layoutReadFailure, setLayoutReadFailure] = useState<{
@@ -1792,6 +1836,7 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
+        void openUnseenWhatsNew();
       },
       onError: (error) => {
         restoredActiveFileSurface.current = null;
@@ -1825,6 +1870,7 @@ export function DesktopWorkspaceShell(props: {
       writeWb({ ...shown });
     }
     uiStateLoaded.current = true;
+    void openUnseenWhatsNew();
   }, [writeWb]);
   useSavedTabsReread({
     workspaceId,
@@ -3282,6 +3328,12 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportExplorerError, showSuccessNotice]);
+  // The Chats sidebar's notices, held to their workspace like the Explorer's:
+  // an Undo pressed after the window moved on does nothing.
+  const chatsNavigatorNotice = useCallback((message: string, undo?: () => void) => {
+    const owner = workspaceIdRef.current;
+    showSuccessNotice(message, undo && (() => { if (workspaceIdRef.current === owner) undo(); }));
+  }, [showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
@@ -4275,7 +4327,7 @@ export function DesktopWorkspaceShell(props: {
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
-    async (collectionPath: string) => {
+    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void) => {
       const prefix = `${collectionPath}/`;
       const scopedFiles = files
         .filter((file) => file.path.startsWith(prefix))
@@ -4310,8 +4362,8 @@ export function DesktopWorkspaceShell(props: {
             if (workspaceSelection.current !== selection) return;
             const restricted = shareView && !shareViewWritableRef.current;
             const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
-            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath));
-          }
+            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created));
+          } else created?.(result);
           openFile(result.path);
         } catch (error) {
           if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();
@@ -4955,6 +5007,7 @@ export function DesktopWorkspaceShell(props: {
       "check-updates": () => void runDesktopUpdate("check"),
       "download-update": () => void runDesktopUpdate("download"),
       "install-update": () => void runDesktopUpdate("install"),
+      "whats-new": () => openVirtualTab(WHATS_NEW_TAB_PATH),
       "toggle-theme": toggleTheme,
       "zoom-in": () =>
         void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
@@ -5574,6 +5627,10 @@ export function DesktopWorkspaceShell(props: {
         case "privacy-settings":
           privacySettingsAction.run();
           return null;
+        case "agents-settings":
+          openSettings("agents");
+          if (target.agent !== undefined) setSettingsAgent({ agentId: target.agent });
+          return null;
       }
     },
     [
@@ -5876,6 +5933,10 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onNotice: chatsNavigatorNotice,
+    onClearError: clearIdentity,
+    onThreadRead: onChatsThreadRead,
+    onDmRead: onChatsDmRead,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
@@ -6834,6 +6895,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             );
+                case "whatsNew": return <WhatsNewPage appVersion={appVersion} />;
                 case "versions": return (
               // The same capability gate and lines as a compare tab.
               !captureAvailable ? (
@@ -7726,6 +7788,7 @@ export function DesktopWorkspaceShell(props: {
             }
             initialSection={settingsSection}
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
+            {...(settingsAgent ? { openAgent: settingsAgent } : {})}
             onClose={closeSettings}
             cloud={settingsCloud}
             onOpenSharing={(target) => {

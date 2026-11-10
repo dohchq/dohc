@@ -115,6 +115,7 @@ function setup(
     openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
     openChat: vi.fn((_nav: ChatsNav) => undefined),
     openChatsInvitation: vi.fn(),
+    openAgentsSettings: vi.fn(),
   };
   // The shell's resolver, down to the steps these tests watch.
   const openTarget = async (target: NoticeTarget, signal: AbortSignal): Promise<string | null> => {
@@ -130,6 +131,7 @@ function setup(
         return null;
       }
       case "chats-invitation": opens.openChatsInvitation({ shareId: target.shareId, inputs: target.inputs }); return null;
+      case "agents-settings": opens.openAgentsSettings(target.agent ?? null); return null;
       case "automation": return opens.openAutomation(target.automation, target.run ?? null, signal);
       case "automation-controls":
         return opens.openAutomationControls(target.automation, { ...(target.sharedFile === undefined ? {} : { sharedFile: target.sharedFile }), signal });
@@ -170,6 +172,35 @@ describe("opening a sent notice", () => {
     const {result} = setup(notices, [workspace("notes"), workspace("other")]);
     expect(result.current.sentNotices.map(row => row.notice.workspaceId)).toEqual(["other", "removed"]);
   });
+  it("opens the page of a personal agent that signed in through another workspace's link", async () => {
+    const grok = `p-${"g".repeat(26)}`;
+    const signedIn = notice({
+      kind: "personal-agent-signed-in", workspaceId: "other", recipientShareId: null,
+      senderKind: "agent", senderLabel: "Grok Bot", title: "Grok Bot signed in as your agent",
+      target: { settings: "agents", agent: grok },
+    });
+    const { result, sentNotices, openAgentsSettings, onSwitchWorkspace, onOpenShare } = setup([signedIn], [workspace("notes"), workspace("other")]);
+    expect(result.current.sentNotices).toEqual([{ notice: signedIn, folder: null, openable: true, retryable: false }]);
+    await expect(result.current.onOpenSentNotice(signedIn, live())).resolves.toBeNull();
+    expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "n1" }]);
+    // Settings › Agents finds the agent's page by its id, which a rename keeps, or shows the list.
+    expect(openAgentsSettings).toHaveBeenCalledTimes(1);
+    expect(openAgentsSettings).toHaveBeenCalledWith(grok);
+    expect(onSwitchWorkspace).not.toHaveBeenCalled();
+    expect(onOpenShare).not.toHaveBeenCalled();
+  });
+
+  it("opens the list in Settings › Agents when the notice names no agent", async () => {
+    const unnamed = notice({
+      kind: "personal-agent-signed-in", workspaceId: "other", recipientShareId: null,
+      senderKind: "agent", senderLabel: "Grok Bot", title: "Grok Bot signed in as your agent",
+      target: { settings: "agents" },
+    });
+    const { result, openAgentsSettings } = setup([unnamed], [workspace("notes"), workspace("other")]);
+    await expect(result.current.onOpenSentNotice(unnamed, live())).resolves.toBeNull();
+    expect(openAgentsSettings).toHaveBeenCalledWith(null);
+  });
+
   it("marks it read and opens its file in this workspace's shared-with-me, naming its folder", async () => {
     const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
     const { result, sentNotices, openFile, onSwitchWorkspace } = setup([notice()], [here]);
@@ -746,7 +777,7 @@ describe("Try again on a failed agent run", () => {
     ({ ...IDLE, failedRun: { runId, triggerMessageId: `ask-${runId}`, words: "Nova didn't reply. dohc quit during its run.", retryable } });
   beforeEach(() => {
     states = {};
-    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => states[threadId] ?? IDLE);
+    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => (threadId === null ? IDLE : states[threadId] ?? IDLE));
     retryStoppedRun.mockResolvedValue({ queued: true });
   });
 

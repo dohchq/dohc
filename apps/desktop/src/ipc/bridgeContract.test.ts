@@ -3,7 +3,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure, ShareMountStatusRow } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
-import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { ImportWorkspaceFilesResult, NoticeTargetShape } from "./bridgeContract";
 import { OwnerLiveDocumentsResult } from "./bridgeContract";
 
 it("bounds recovery replies with room for the capped restore queues", () => {
@@ -99,6 +99,7 @@ import {
   ResumeThreadDispatchPayload,
   SendChatMessagePayload,
   StartChannelThreadPayload,
+  StartChannelThreadResult,
   SendChatMessageResult,
   SetChatReactionPayload,
   ShowWorkbenchMenuPayload,
@@ -1870,7 +1871,7 @@ describe("collection IPC contracts", () => {
         description: null,
         fields: [
           { name: "title", type: "text" },
-          { name: "status", type: "select", options: ["open", "done"] },
+          { name: "status", type: "select", options: ["open", "done"], colors: { done: "teal" } },
           { name: "blocks", type: "relation", collection: "projects", many: true },
           { name: "Mark paid", type: "button" },
         ],
@@ -1888,6 +1889,12 @@ describe("collection IPC contracts", () => {
       recordCount: 3,
     });
     expect(details.schema.fields).toHaveLength(4);
+    expect(details.schema.fields[1]).toEqual({
+      name: "status",
+      type: "select",
+      options: ["open", "done"],
+      colors: { done: "teal" },
+    });
     expect(details.schema.views[0]?.kind).toBe("board");
   });
 
@@ -3602,7 +3609,7 @@ describe("engine history and linked Chats IPC contract", () => {
         createdAtMs: 100,
       },
     });
-    expect(result.message.authorKind).toBe("human");
+    expect(result).toMatchObject({ message: { authorKind: "human" } });
     // The agent author kind is a first-class wire value (rendered as
     // "the agent name" in the UI).
     expect(
@@ -3615,8 +3622,21 @@ describe("engine history and linked Chats IPC contract", () => {
           body: "Agent reply",
           createdAtMs: 101,
         },
-      }).message.authorKind,
-    ).toBe("agent");
+      }),
+    ).toMatchObject({ message: { authorKind: "agent" } });
+  });
+
+  it("carries only a saved message's ids and what failed after the save", () => {
+    const saved = { message: { id: "message-1", threadId: "thread-1", body: "First message", authorDisplayName: "You" },
+      failure: "Error: Chats stopped because this window changed workspaces.", waitsForTrust: true,
+      decision: { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1 } };
+    expect(SendChatMessageResult.parse({ ...saved, resolveFailure: "Error: Your server session changed. Try again." })).toEqual({
+      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+      resolveFailure: "Error: Your server session changed. Try again.",
+    });
+    expect(StartChannelThreadResult.parse({ ...saved, viewerAuthorId: "owner" })).toEqual({
+      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+    });
   });
 });
 
@@ -4546,5 +4566,13 @@ describe("ImportWorkspaceFilesResult", () => {
       skipped: 1,
       skippedSources: [{ path, reason: "link" }],
     }).success).toBe(true);
+  });
+});
+
+describe("NoticeTargetShape", () => {
+  it("keeps the personal agent a sign-in notice opens, and only with Settings › Agents", () => {
+    const agent = `p-${"g".repeat(26)}`;
+    expect(NoticeTargetShape.parse({ settings: "agents", agent })).toEqual({ settings: "agents", agent });
+    expect(NoticeTargetShape.safeParse({ agent }).success).toBe(false);
   });
 });

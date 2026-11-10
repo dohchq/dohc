@@ -3,6 +3,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
+  ActorPresentation,
   ChannelThreadRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
@@ -32,14 +33,16 @@ import {
   TOOLBAR_BUTTON,
   chatAuthorLabel,
   continuesRun,
+  usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
-import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
+import { FailedRunLine, failedRunEnd, WaitingLine } from "./ChatThreadPanel";
 import { AS_REPORTED, reportedProduct } from "./reportedAgent";
 import { CopyMessageLink } from "./messageLinks";
+import { WorkStatus } from "./WorkCard";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -488,6 +491,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onRetryFailedRun?: () => void;
   onOpenAgentSettings?: () => void;
   onAskAgain?: (agentId: string, mention: boolean) => void;
+  // The messages that wait for an agent to end its run, by its name and colors.
+  waiting: { agentName: string; presentation: ActorPresentation; messageIds: ReadonlySet<string> } | null;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -513,6 +518,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 }) {
   // Long messages parse in the chat's worker; start it before they need it.
   useEffect(retainChatParser, []);
+  // Personal agents' names come from the roster, so a rename repaints the thread.
+  usePersonalAgentNames();
   const {
     nav,
     channelLabel,
@@ -526,6 +533,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     onRetryFailedRun,
     onOpenAgentSettings,
     onAskAgain,
+    waiting,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -582,6 +590,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       </FailedRunLine>
     );
   };
+  const waitingLine = (messageId: string, className: string) => waiting && waiting.messageIds.has(messageId)
+    ? <WaitingLine testIdPrefix="chats" agentName={waiting.agentName} presentation={waiting.presentation} className={className} />
+    : null;
 
   // A comment: a row that holds the avatar, the name and body, and a hover
   // toolbar, then any replies as a nested list. Comments from one author
@@ -665,7 +676,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ) : (
               <AgentColorAvatar>
                 <ChatAvatar presentation={comment.presentation}
-                  name={comment.authorDisplayName}
+                  name={chatAuthorLabel(comment)}
                   kind={comment.authorKind} linkAgent={comment.linkAgent === true}
                   size="comment"
                 />
@@ -725,6 +736,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   onOpenPath={props.onOpenPath}
                 />
               ))}
+            </div>
+          ) : null}
+          {comment.work ? (
+            <div className="mt-2">
+              <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
             </div>
           ) : null}
           {commentDecision ? (
@@ -803,6 +819,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         ) : null}
         {failedLine(comment.id, "mt-1 px-2", true)}
+        {waitingLine(comment.id, "mt-1 px-2")}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
@@ -841,7 +858,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </p>
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
-            name={openingMessage.authorDisplayName}
+            name={chatAuthorLabel(openingMessage)}
             kind={openingMessage.authorKind} linkAgent={openingMessage.linkAgent === true}
             size="row"
           />
@@ -910,8 +927,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ))}
             </div>
           ) : null}
-          {openingDecision || runRecords[openingMessage.id] ? (
+          {openingMessage.work || openingDecision || runRecords[openingMessage.id] ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">
+              {openingMessage.work ? <WorkStatus testIdPrefix="chats-message" work={openingMessage.work} /> : null}
               {openingDecision ? (
                 <DecisionStatus
                   decision={openingDecision}
@@ -933,6 +951,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </div>
           ) : null}
           {failedLine(openingMessage.id, "mt-2", false)}
+          {waitingLine(openingMessage.id, "mt-2")}
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}

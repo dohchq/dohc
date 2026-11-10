@@ -111,7 +111,11 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   };
 }
 
-async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub } = {}) {
+async function relay(options: {
+  accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub;
+  /** False for a server whose copies aren't running. */
+  copies?: boolean;
+} = {}) {
   const storage = await testStorage();
   for (const [workspaceId, ownerUserId] of [["trip", "ana"], ["notes", "ana"], ["budget", "ben"]] as const) {
     storage.claimWorkspace({ workspaceId, ownerUserId, createdAtMs: 1 });
@@ -121,7 +125,8 @@ async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSe
   const run = await serverCopies(storage, engine);
   const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
-    accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession, serverCopies: () => run.copies,
+    accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession,
+    serverCopies: () => options.copies === false ? undefined : run.copies,
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
     discussionActivity: activity,
   });
@@ -298,6 +303,23 @@ describe("an account's reads through the server's copy", () => {
     expect(syncs).toEqual([]);
   });
 
+  it("answers every workspace's read alike with server_busy while the server has no copies, and keeps the feed", async () => {
+    const { h, storage } = await relay({ copies: false });
+    const bytes = async (workspaceId: string, operation = "documentRead") => {
+      const response = await h(op(workspaceId, operation, { path: "docs/plan.md" }));
+      return { status: response.status, body: await response.text() };
+    };
+    const owned = await bytes("trip");
+    expect(owned.status).toBe(503);
+    expect(JSON.parse(owned.body)).toEqual({ ok: false, code: "server_busy", error: "Your server can't open workspaces for the phone right now. Try again later." });
+    for (const workspaceId of ["notes", "budget", "nowhere"]) expect(await bytes(workspaceId), workspaceId).toEqual(owned);
+    expect(await bytes("trip", "nope"), "an unknown operation").toEqual(owned);
+    const feed = await h(new Request("http://relay.test/sync/trip/ops/changes?since=0.0.0&hold=0", { headers: signedIn("ana") }));
+    expect(feed.status).toBe(200);
+    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+    expect(await bytes("trip"), "hidden from the phone").toEqual(owned);
+  });
+
   it("answers only POST", async () => {
     const { h } = await relay();
     expect((await h(new Request("http://relay.test/sync/trip/ops/groups", { headers: signedIn("ana") }))).status).toBe(405);
@@ -413,6 +435,16 @@ describe("failures through the server's copy", () => {
     expect(await response.text()).not.toContain("/srv/");
   });
 
+  it("answers a chat read the engine failed as a failure, not as a missing chat", async () => {
+    const { engine, h } = await relay();
+    const { planning, thread } = await seedTrip(engine);
+    engine.failing.set("chats.messages.list", engineFailure());
+    const read = await answer(await h(op("trip", "chat", { threadId: thread.id })));
+    expect(read).toEqual({ ok: false, reason: `failed to read chat: ${thread.id}` });
+    engine.failing.set("chats.channels.list", engineFailure());
+    expect(await answer(await h(op("trip", "chat", { group: planning.channelId })))).not.toHaveProperty("refusal");
+  });
+
   it("words a rejected document read without the engine's detail, and keeps an operation's own refusal", async () => {
     const { engine, h } = await relay();
     await seedTrip(engine);
@@ -431,7 +463,7 @@ describe("secret files through the server's copy", () => {
   it("reads a secret file's page exactly as a missing one, without asking the engine", async () => {
     const { engine, h } = await relay();
     await seedTrip(engine);
-    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.` });
+    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.`, refusal: "missing" });
     expect(await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
     const reads = engine.files.requests.length;
     for (const [path, normalized] of [
@@ -443,6 +475,18 @@ describe("secret files through the server's copy", () => {
     expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
   });
 
+  it("answers a secret file's page with the same bytes as a missing one's, its path aside", async () => {
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    const bytes = async (path: string) => {
+      const response = await h(op("trip", "documentRead", { path }));
+      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(path, "<path>") };
+    };
+    const missing = await bytes("docs/missing.md");
+    expect(missing.body).toContain('"refusal":"missing"');
+    for (const path of [".env", "docs/.env.local", "a/.env/b.md"]) expect(await bytes(path), path).toEqual(missing);
+  });
+
   it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
     const { engine, h } = await relay();
     const { onSecret } = await seedTrip(engine);
@@ -452,9 +496,9 @@ describe("secret files through the server's copy", () => {
       .toEqual({ ok: true, path: "docs/missing.md", fileObjectId: null, threads: [] });
     // The thread's file is nowhere in the copy, as a secret file never is.
     expect(await answer(await h(op("trip", "chat", { threadId: onSecret.id }))))
-      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}` });
+      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}`, refusal: "missing" });
     expect(await answer(await h(op("trip", "chat", { threadId: "thread-nowhere" }))))
-      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere" });
+      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere", refusal: "missing" });
     for (const target of [onSecret.id, cliThreadId(onSecret.id)]) {
       expect(await json(await h(op("trip", "show", { target, peek: true })))).toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${target}` });
     }
@@ -467,6 +511,19 @@ describe("secret files through the server's copy", () => {
     expect(shown.messages).toMatchObject([{ attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }] }]);
     const stream = await answer(await h(op("trip", "chat", { group: "planning" })));
     expect(JSON.stringify(stream)).not.toContain("object-env");
+  });
+
+  it("answers a thread on a secret file with the same bytes as a missing one's, its ID aside, and a missing group as missing", async () => {
+    const { engine, h } = await relay();
+    const { onSecret } = await seedTrip(engine);
+    const bytes = async (threadId: string) => {
+      const response = await h(op("trip", "chat", { threadId }));
+      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(threadId, "<id>") };
+    };
+    const missing = await bytes("thread-nowhere");
+    expect(missing.body).toContain('"refusal":"missing"');
+    expect(await bytes(onSecret.id)).toEqual(missing);
+    expect(await answer(await h(op("trip", "chat", { group: "channel-nowhere" })))).toMatchObject({ ok: false, refusal: "missing" });
   });
 
   it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
@@ -501,7 +558,7 @@ describe("secret files through the server's copy", () => {
       .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
     for (const hidden of [dotenv, renamed]) {
       expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
-        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}` });
+        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
       expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
         .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
     }
@@ -563,7 +620,8 @@ describe("pages the relay hosts live", () => {
     expect(f.storage.advanceStopRestoreFence({ workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" }, 110).phase).toBe("fenced");
     const response = await read();
     expect(response.status).toBe(409);
-    expect(await json(response)).toMatchObject({ ok: false, code: "restore-in-progress" });
+    // This route's own words, not the code's default, which is live editing's.
+    expect(await json(response)).toEqual({ ok: false, code: "restore-in-progress", error: "This page is being restored. Try again once it finishes." });
   });
 
   it("reads the active version's settled file when it isn't main, or the page as missing when the copy doesn't hold it", async () => {
@@ -578,7 +636,7 @@ describe("pages the relay hosts live", () => {
 
     const absent = await livePage(() => undefined);
     absent.edit();
-    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md." });
+    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md.", refusal: "missing" });
   });
 });
 

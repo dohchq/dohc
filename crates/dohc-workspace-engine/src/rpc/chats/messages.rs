@@ -64,6 +64,8 @@ struct ChatMessageSendParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    work: Option<dohc_engine_domain::ChatWorkReport>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     wake_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
@@ -270,6 +272,8 @@ pub(super) struct MessageWire<'a> {
     author_agent_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<&'a dohc_engine_domain::ChatWorkReport>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -298,6 +302,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             automation: message.automation.as_ref().map(AutomationWire::from),
             author_agent_id: message.author_agent_id.as_deref(),
             author_reported: message.author_reported.as_ref(),
+            work: message.work.as_ref(),
         }
     }
 }
@@ -619,6 +624,7 @@ impl EngineService {
                     automation: params.automation.map(ChatMessageAutomation::from),
                     author_agent_id: params.author_agent_id,
                     author_reported: params.author_reported,
+                    work: params.work,
                     wake_agent_ids: params.wake_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
@@ -904,6 +910,7 @@ mod tests {
             link_author: None,
             author_agent_id: None,
             author_reported: None,
+            work: None,
             attachments: Vec::new(),
         }
     }

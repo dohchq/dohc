@@ -1,6 +1,6 @@
 import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -8,15 +8,11 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
 import { EMPTY_ART } from "./EmptyArt";
-import { NewVersionHint, type VersionNameField, type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
+import { type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
 interface ConflictCount { count: number; more: boolean }
-
-// Conflict counts read the open conflicts a page at a time. Past this many pages
-// a count shows as a lower bound.
-const CONFLICT_PAGES_MAX = 5;
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
 // `quiet` changes the row where it stands, with no new toast. `onDismiss` runs
@@ -291,125 +287,37 @@ export function VersionsPage(props: {
     if (versionIds === null) return;
     const token = conflictReads.next();
     notice.started("conflicts");
-    void (async () => {
-      const found = new Map<string, ConflictCount>();
-      let after: string | null = null;
-      try {
-        for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
-          const result: ListWorkspaceVersionConflictsResult = await withDeadline(bridge().listWorkspaceVersionConflicts({
-            workspaceId,
-            ...(after === null ? {} : { afterConflictId: after }),
-          }), "listWorkspaceVersionConflicts");
-          if (!conflictReads.isCurrent(token)) return;
-          for (const conflict of result.conflicts) {
-            if (conflict.origin !== "merge") continue;
-            const entry = found.get(conflict.sourceVersionId) ?? { count: 0, more: false };
-            found.set(conflict.sourceVersionId, { ...entry, count: entry.count + 1 });
-          }
-          after = result.nextAfterConflictId;
-          if (after === null) break;
-        }
-      } catch (error) {
+    void withDeadline(bridge().countWorkspaceVersionConflicts({ workspaceId }), "countWorkspaceVersionConflicts").then(
+      (result) => {
+        if (!conflictReads.isCurrent(token)) return;
+        notice.worked("conflicts");
+        // When the count stopped before the list did, every count is a lower bound.
+        setConflictCounts(new Map(result.versions.map(({ versionId, count }) => [versionId, { count, more: result.more }])));
+      },
+      (error: unknown) => {
         if (conflictReads.isCurrent(token)) notice.failed("conflicts", error);
-        return;
-      }
-      notice.worked("conflicts");
-      // The pages ran out before the list did, so every count is a lower bound.
-      if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
-      setConflictCounts(found);
-    })();
+      },
+    );
   }, [workspaceId, versionIds, props.versionKey, conflictsRetry]);
 
-  const [newName, setNewName] = useState<string | null>(null);
-  const [nameError, setNameError] = useState<ReactNode>(null);
-  const newButton = useRef<HTMLButtonElement>(null);
-  const restoreButton = useRef(false);
-  const hintId = useId();
-  useEffect(() => {
-    if (newName !== null || !restoreButton.current) return;
-    restoreButton.current = false;
-    newButton.current?.focus();
-  }, [newName]);
-  const closeField = () => {
-    restoreButton.current = true;
-    setNewName(null);
-    setNameError(null);
-  };
-  const field = useMemo<VersionNameField>(() => ({
-    refuse: setNameError,
-    created: closeField,
-    reopen: (name) => {
-      setNewName(name);
-      setNameError(null);
-    },
-  }), []);
-  const creating = versions.busy === "create";
   const locked = versions.busy !== null || props.disabled === true;
 
   const ready = snapshot !== null && lastChanges !== null;
   const onlyMain = ready && ordered.length <= 1;
 
-  // New version, or the name field in its place. One shows at a time: in the
-  // header once a version exists, and in the empty state while only Main does.
-  const newVersion = newName === null ? (
+  // New version opens the dialog. It shows in the header once a version
+  // exists, and in the empty state while only Main does.
+  const newVersion = (
     <SecondaryButton
-      ref={newButton}
       data-testid="versions-page-new"
       disabled={locked}
       size={onlyMain ? "compact" : "default"}
       className={onlyMain ? "inline-flex items-center gap-1.5" : undefined}
-      onClick={() => {
-        setNameError(null);
-        setNewName("");
-      }}
+      onClick={versions.openCreate}
     >
       {onlyMain ? <Plus size={12} aria-hidden /> : null}
-      New version
+      New version…
     </SecondaryButton>
-  ) : (
-    <div className="w-64 min-w-0 text-left">
-      <input
-        autoFocus
-        aria-label="New version name"
-        aria-invalid={nameError !== null || undefined}
-        aria-describedby={hintId}
-        data-testid="versions-page-new-input"
-        value={newName}
-        maxLength={80}
-        readOnly={creating}
-        onChange={(event) => {
-          setNewName(event.target.value);
-          setNameError(null);
-        }}
-        onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing) return;
-          // A switch from the menu locks the page too.
-          if (event.key === "Enter" && !locked) {
-            event.preventDefault();
-            setNameError(null);
-            versions.create(newName, field);
-          } else if (event.key === "Escape" && !creating) {
-            event.preventDefault();
-            event.stopPropagation();
-            closeField();
-          }
-        }}
-        onBlur={() => {
-          // Leaving a field with a name in it keeps the name.
-          if (newName.trim() === "" && !creating) closeField();
-        }}
-        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-      />
-      {nameError !== null ? (
-        <p id={hintId} data-testid="versions-page-new-error" role="alert" className="m-0 mt-1 text-[12px] leading-4 text-danger">
-          {nameError}
-        </p>
-      ) : (
-        <p id={hintId} className="m-0 mt-1 text-[12px] leading-4 text-subtle">
-          {creating ? "Creating…" : <NewVersionHint versions={versions} first={onlyMain} />}
-        </p>
-      )}
-    </div>
   );
 
   let body: ReactNode;
@@ -458,7 +366,7 @@ export function VersionsPage(props: {
   return (
     <div data-testid="versions-page" className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable]">
       {/* The document column, so the page lines up with the editor's text. */}
-      <div className="mx-auto flex w-full max-w-[832px] flex-1 flex-col px-14 pb-6">
+      <div className="mx-auto flex w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] flex-1 flex-col px-[var(--dohc-editor-gutter)] pb-6">
         <header className="flex shrink-0 items-start justify-between gap-4 pb-4 pt-10">
           <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
           {ready && !onlyMain ? newVersion : null}

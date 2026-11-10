@@ -15,12 +15,10 @@ export interface CredentialFenceChange {
   changedAtMs: number;
 }
 
-/** What consent needs, read in one statement so all of it comes from one snapshot. */
+/** What consent needs, read in one statement so the epoch and the session check come from one snapshot. */
 export interface ConsentCredentials {
-  /** The account's email-and-password hash; null when it has no password. */
-  passwordHash: string | null;
   epoch: number;
-  /** The session exists, is the account's, is unexpired, and began at or after the last fence change. */
+  /** The session exists, is the account's, is unexpired, and began at or after the last fence change, both by this database's clock. */
   sessionCurrent: boolean;
 }
 
@@ -37,7 +35,6 @@ export interface CredentialFence {
   readEpoch(userId: string): Promise<number>;
   /** Null when the account doesn't exist. */
   readConsentCredentials(userId: string, sessionId: string): Promise<ConsentCredentials | null>;
-  verifyPassword(passwordHash: string, password: string): Promise<boolean>;
   /** Every fence changed at or after the position, oldest first. */
   changedSince(positionMs: number): Promise<CredentialFenceChange[]>;
   listen(listener: CredentialFenceListener): { close(): Promise<void> };
@@ -61,14 +58,8 @@ function parseChange(payload: string): CredentialFenceChange | null {
   }
 }
 
-/**
- * The fence over Better Auth's Postgres. `verifyPassword` is Better Auth's
- * own check (`(await auth.$context).password.verify`), so consent accepts
- * exactly the passwords sign-in accepts.
- */
-export function createPostgresCredentialFence(pool: Pool, options: {
-  verifyPassword(input: { hash: string; password: string }): Promise<boolean>;
-}): CredentialFence {
+/** The fence over Better Auth's Postgres. */
+export function createPostgresCredentialFence(pool: Pool): CredentialFence {
   return {
     async readEpoch(userId) {
       const result = await pool.query<{ epoch: string }>("select epoch from dohc_credential_fences where user_id = $1", [userId]);
@@ -76,12 +67,10 @@ export function createPostgresCredentialFence(pool: Pool, options: {
     },
 
     async readConsentCredentials(userId, sessionId) {
-      const result = await pool.query<{ password_hash: string | null; epoch: string; session_current: boolean }>(
-        `select a."password" as password_hash,
-           coalesce(f.epoch, 0) as epoch,
-           (s.id is not null and s."expiresAt" > now() and (f.changed_at is null or s."createdAt" >= f.changed_at)) as session_current
+      const result = await pool.query<{ epoch: string; session_current: boolean }>(
+        `select coalesce(f.epoch, 0) as epoch,
+           (s.id is not null and s."expiresAt" > now() and (f.changed_at is null or s.dohc_created_at >= f.changed_at)) as session_current
          from "user" u
-         left join "account" a on a."userId" = u.id and a."providerId" = 'credential'
          left join dohc_credential_fences f on f.user_id = u.id
          left join "session" s on s.id = $2 and s."userId" = u.id
          where u.id = $1`,
@@ -89,15 +78,7 @@ export function createPostgresCredentialFence(pool: Pool, options: {
       );
       const row = result.rows[0];
       if (!row) return null;
-      return { passwordHash: row.password_hash, epoch: epochOf(row.epoch), sessionCurrent: row.session_current === true };
-    },
-
-    async verifyPassword(passwordHash, password) {
-      try {
-        return await options.verifyPassword({ hash: passwordHash, password });
-      } catch {
-        return false;
-      }
+      return { epoch: epochOf(row.epoch), sessionCurrent: row.session_current === true };
     },
 
     async changedSince(positionMs) {

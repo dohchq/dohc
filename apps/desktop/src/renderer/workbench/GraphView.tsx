@@ -12,7 +12,7 @@ import {
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import { graphWalk, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
 import { bridge } from "../bridge";
-import { isChatMentionPageChanged } from "../../ipc/errorWords";
+import { isChatMentionPageChanged, refusalCode } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { EmptyState, IconButton, RetryRow } from "../ui/controls";
 import { GraphCanvas, type CanvasNode } from "./GraphCanvas";
@@ -431,8 +431,13 @@ export function GraphView(props: {
       resumePaint = resolve;
       frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
     });
+    const wait = (ms: number) => new Promise<void>(resolve => {
+      resumePaint = resolve;
+      timer = setTimeout(resolve, ms);
+    });
     let hasDrawnGraph = state.workspaceId === props.workspaceId && (state.graph?.nodes.length ?? 0) > 0;
     let restarted = false;
+    let busy = 0;
     const walk = async () => {
       let accumulator = graphWalk();
       let cursor: string | undefined;
@@ -449,8 +454,17 @@ export function GraphView(props: {
               cursor = undefined;
               continue;
             }
+            // The engine refuses while its store is busy, as it can be for
+            // minutes while links drain after a launch. That clears by itself,
+            // so the Graph keeps loading and asks again.
+            if (refusalCode(error) === "OVERLOADED") {
+              await wait(Math.min(250 * 2 ** busy++, 2000));
+              if (!current()) return;
+              continue;
+            }
             throw error;
           }
+          busy = 0;
           if (!current()) return;
           accumulator.append(page);
           cursor = page.nextCursor ?? undefined;

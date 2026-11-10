@@ -1,17 +1,16 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Check, CircleAlert, Ear, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronRight, CircleAlert, Ear, FilePenLine, History, Link, Pause, Play, Plug, Plus, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
-import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
-import { isAgentIdTaken, withErrorWords } from "../../ipc/errorWords";
+import type { ActorPresentation, McpConfigResult, PersonalAgentChange, PersonalAgentsAccount } from "../../ipc/bridgeContract";
+import { withErrorWords } from "../../ipc/errorWords";
 import {
+  agentNameKey,
   agentNameTaken,
   automationAgent,
   DEFAULT_AGENT_ID,
-  listAgents,
   newAgentDefaults,
   newAgentId,
-  newAgentName,
   withAgent,
   type Agent,
   type AgentProblem,
@@ -22,51 +21,30 @@ import {
 import type { AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { relativeTime } from "../relativeTime";
 import { RestrictedAgentsBand } from "../RestrictedMode";
 import type { ErrorDetailField } from "../shell/copyDetails";
-import { CopyButton } from "../ui/CopyButton";
-import { SecondaryButton } from "../ui/controls";
+import { IconButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
-import { Menu, MENU_SEPARATOR } from "../ui/Menu";
 import { useAgentsListening } from "../useAgentsListening";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
+import { usePersonalAgents, type PersonalAgentsState } from "../usePersonalAgents";
 import { useRequestSequence } from "../useRequestSequence";
 import { ownPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar, useAgentInk } from "../workbench/ChatAvatar";
-import { AgentDetails } from "./AgentDetails";
-import { SwitchControl } from "./SettingRow";
-import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
-
-export type AgentListRow =
-  | { kind: "agent"; agent: Agent }
-  | { kind: "broken"; problem: AgentProblem };
-
-/** Your agents and the entries dohc could not use, in the order the file lists them. */
-export function agentListRows(settings: Pick<DesktopUserSettings, "agents">, problems: readonly AgentProblem[] = []): AgentListRow[] {
-  const agents = listAgents(settings);
-  const rows: AgentListRow[] = [];
-  let next = 0;
-  for (const problem of [...problems].sort((left, right) => left.position - right.position)) {
-    while (rows.length < problem.position && next < agents.length) rows.push({ kind: "agent", agent: agents[next++]! });
-    rows.push({ kind: "broken", problem });
-  }
-  return [...rows, ...agents.slice(next).map((agent) => ({ kind: "agent" as const, agent }))];
-}
-
-const rowId = (row: AgentListRow) => (row.kind === "agent" ? row.agent.id : row.problem.id);
-
-/**
- * `order` with `id` back where it was: after the entry it followed, or in
- * front of the one after it when that entry is gone, or first. It never goes
- * ahead of `keep`, an agent chosen since that should go on waking automations.
- */
-function placeBack(order: readonly string[], id: string, before: string | undefined, after: string | undefined, keep?: string): string[] {
-  const rest = order.filter((entry) => entry !== id);
-  let at = before !== undefined && rest.includes(before) ? rest.indexOf(before) + 1
-    : after !== undefined && rest.includes(after) ? rest.indexOf(after) : 0;
-  if (keep !== undefined && rest.includes(keep)) at = Math.max(at, rest.indexOf(keep) + 1);
-  return [...rest.slice(0, at), id, ...rest.slice(at)];
-}
+import { AddAgentSheet, type AgentLinkChoice, type NewAgent, type ToolTileState } from "./AddAgentSheet";
+import { AgentPage, checkStatus, type AgentRunControl, type CheckState } from "./AgentPage";
+import {
+  agentLink,
+  changePersonalAgent,
+  NAME_TAKEN,
+  PersonalAgentPage,
+  personalEntries,
+  personalNameProblem,
+  syncsTo,
+  type PersonalEntry,
+} from "./PersonalAgentPage";
+import { agentListRows, checkIdentity, placeBack, removeAgentWithUndo, rowId, type AgentListRow } from "./agentRemoval";
 
 /** A problem sentence, with each key in backticks set in monospace. */
 export function ProblemText(props: { text: string }) {
@@ -82,10 +60,6 @@ export function runnerEngineNote(sharedView: boolean, sessionRecorderOn: boolean
   return sessionRecorderOn === false
     ? "The workspace engine starts when dohc starts. Restart dohc to check an agent."
     : null;
-}
-
-function checkIdentity(workspaceId: string, agentId: string): string {
-  return `agent-check:${workspaceId}:${agentId}`;
 }
 
 const PAUSED_CHECK_REASON = "Agents are paused. Resume them, then try again.";
@@ -124,45 +98,49 @@ function presentationFor(hue: AgentHue | undefined): ActorPresentation {
   return { group: "", hue: hue === undefined || hue === "olive" ? null : hue, self: false };
 }
 
-type CheckState = { status: "replied"; seconds: number } | { status: "failed" };
 
 const ROW = "border-b border-line last:border-b-0";
-const ROW_LINE = "flex items-center gap-3 py-4";
-const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
-const TILE_LINE = "mt-0.5 text-[12px]";
-const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
-// Holds the place of a control the row does not have, so every row's controls line up.
-const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
+const ROW_LINE = "flex items-center gap-3 px-4 py-3";
+const STATE = "m-0 mt-0.5 flex items-center gap-1 text-[12px]";
+
+// Why an agent in the settings file can't take this name, or null when it
+// can. `takenElsewhere` names your personal agents, which answer to the same @.
+function localNameProblem(agents: DesktopUserSettings["agents"], agentId: string, takenElsewhere: (name: string) => boolean) {
+  return (value: string): string | null => {
+    try {
+      const name = preferredNameFromInput(value);
+      if (!name) return "Enter an agent name.";
+      return agentNameTaken(agents, agentId, name) || takenElsewhere(name) ? NAME_TAKEN : null;
+    } catch (cause) {
+      return ipcErrorMessage(cause, "This name can't be used.");
+    }
+  };
+}
 
 function AgentNameField(props: {
-  agent: Agent;
-  agents: DesktopUserSettings["agents"];
+  agentId: string;
+  name: string;
+  maxLength?: number;
+  // Why the field can't save this name, or null when it can.
+  problem: (value: string) => string | null;
   onSave: (name: string) => Promise<boolean>;
   onDone: () => void;
 }) {
-  const [draft, setDraft] = useState(props.agent.name);
+  const { problem } = props;
+  const [draft, setDraft] = useState(props.name);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const input = useRef<HTMLInputElement | null>(null);
   // Escape leaves the name as it was, so the blur that follows saves nothing.
   const cancelled = useRef(false);
   useEffect(() => input.current?.select(), []);
-  const problem = (value: string): string | null => {
-    try {
-      const name = preferredNameFromInput(value);
-      if (!name) return "Enter an agent name.";
-      return agentNameTaken(props.agents, props.agent.id, name) ? "Another agent has this name." : null;
-    } catch (cause) {
-      return ipcErrorMessage(cause, "This name can't be used.");
-    }
-  };
   const save = async () => {
     if (cancelled.current) return;
     const found = problem(draft);
     setError(found);
     if (found) return;
     const name = draft.trim();
-    if (name === props.agent.name) return props.onDone();
+    if (name === props.name) return props.onDone();
     setSaving(true);
     // A save that fails says why in Notices and keeps the field open.
     const saved = await props.onSave(name);
@@ -172,14 +150,14 @@ function AgentNameField(props: {
   return <>
     <input
       ref={input}
-      aria-label={`Name of ${props.agent.name}`}
+      aria-label={`Name of ${props.name}`}
       aria-invalid={error ? true : undefined}
-      aria-describedby={error ? `agent-name-error-${props.agent.id}` : undefined}
+      aria-describedby={error ? `agent-name-error-${props.agentId}` : undefined}
       data-testid="agent-name-input"
-      data-unsaved={draft.trim() !== props.agent.name ? true : undefined}
+      data-unsaved={draft.trim() !== props.name ? true : undefined}
       data-edit-in-place
       value={draft}
-      maxLength={MAX_PREFERRED_NAME_LENGTH}
+      maxLength={props.maxLength}
       disabled={saving}
       autoComplete="off"
       spellCheck={false}
@@ -187,7 +165,7 @@ function AgentNameField(props: {
         const value = event.currentTarget.value;
         setDraft(value);
         // Says at once when the name is taken, and clears once it is not.
-        setError(problem(value) === "Another agent has this name." ? "Another agent has this name." : null);
+        setError(problem(value) === NAME_TAKEN ? NAME_TAKEN : null);
       }}
       onBlur={() => void save()}
       onKeyDown={(event) => {
@@ -200,10 +178,10 @@ function AgentNameField(props: {
           props.onDone();
         }
       }}
-      className={`h-8 w-56 max-w-full rounded-md border bg-bg px-2.5 text-[13px] font-medium text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
+      className={`h-8 w-56 max-w-full rounded-md border bg-bg px-2.5 text-[14px] font-semibold text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
     />
     {error ? (
-      <p id={`agent-name-error-${props.agent.id}`} role="alert" className={`${STATE} mt-1.5 text-danger`}>
+      <p id={`agent-name-error-${props.agentId}`} role="alert" className={`${STATE} mt-1.5 text-danger`}>
         <CircleAlert size={12} aria-hidden />{error}
       </p>
     ) : null}
@@ -220,145 +198,202 @@ function AutomationChip(props: { hue: AgentHue | undefined }) {
   );
 }
 
+// One agent in the list: who it is and where it stands. It opens the agent's page.
 function AgentRow(props: {
   agent: Agent;
-  agents: DesktopUserSettings["agents"];
-  workspaceId: string;
-  // For an agent you run: its MCP config, or null when this workspace has none.
-  mcpConfig: string | null;
-  // An agent you run holds a wait for messages on this computer.
   listening: boolean;
   paused: boolean;
   checking: boolean;
   check: CheckState | undefined;
-  canCheck: boolean;
-  checkNote: string | null;
-  tools: AgentToolsResult | null;
-  editing: boolean;
-  onEditingChange: (editing: boolean) => void;
+  marking: boolean;
   forAutomations: boolean;
-  // Absent on the agent automations already wake, and on one dohc cannot start.
-  onUseForAutomations?: () => void;
-  onRemove: () => void;
-  onCheck: () => void;
-  onRename: (name: string) => Promise<boolean>;
-  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
+  // One of your personal agents has this agent's name, so @ can't tell them apart.
+  nameClash: boolean;
+  onOpen: () => void;
 }) {
-  const { agent, editing, onEditingChange: setEditing } = props;
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const nameId = useId();
+  const { agent } = props;
   const launched = agent.launch !== undefined;
-  // Only a switch turns an agent off, so only a row with one dims.
+  // Only a switch turns an agent off, so only an agent with one dims.
   const off = launched && !agent.enabled;
   // Under the name: what starts the agent, then where it stands. A check
-  // reports even when the agent is off; otherwise an agent that is off says
-  // only its tool, and its switch shows it off.
+  // reports even when the agent is off.
   const launch = agent.launch;
   const toolId = launch && "tool" in launch ? launch.tool : null;
   const tool = !launch ? null : toolId ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name : "Your command";
   const status = !launched ? (props.listening ? (
     <span className="inline-flex items-center gap-1 text-success"><Ear size={12} aria-hidden />Listening</span>
+  ) : props.marking ? (
+    <span className="inline-flex items-center gap-1 text-success"><History size={12} aria-hidden />Marking changes</span>
   ) : (
     <span className="inline-flex items-center gap-1 text-muted"><Plug size={12} aria-hidden />Through MCP</span>
-  )) : props.checking ? (
-    <span className="inline-flex items-center gap-1 text-muted"><LoaderCircle size={12} aria-hidden className="animate-spin" />Checking</span>
-  ) : props.paused && !off ? (
-    <span className="inline-flex items-center gap-1 text-muted"><Pause size={12} aria-hidden />Paused</span>
-  ) : props.check?.status === "replied" ? (
-    <span className="inline-flex items-center gap-1 text-success"><Check size={12} aria-hidden />{`Replied in ${props.check.seconds} s`}</span>
-  ) : props.check?.status === "failed" ? (
-    <span className="inline-flex items-center gap-1 text-danger"><CircleAlert size={12} aria-hidden />Didn't reply.</span>
-  ) : off ? null : (
-    <span className="text-muted">Not checked</span>
-  );
-  const state = (
-    <p data-testid="agent-state" className={STATE}>
-      {tool ? <span className="text-muted">{tool}</span> : null}
-      {tool && status ? <span aria-hidden className="text-subtle">·</span> : null}
-      {status}
-    </p>
-  );
+  )) : props.checking || props.check ? checkStatus(props)
+    : off ? <span className="text-muted">Off</span>
+    : props.paused ? <span className="inline-flex items-center gap-1 text-muted"><Pause size={12} aria-hidden />Paused</span>
+    : <span className="text-muted">On</span>;
   return (
-    <div data-testid="agent-row" data-agent-id={agent.id} className={ROW}>
-      <div className={ROW_LINE}>
-        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" className={off ? "opacity-50" : undefined} />
-        <div className="min-w-0 flex-1">
-          {editing ? (
-            <AgentNameField agent={agent} agents={props.agents} onSave={props.onRename} onDone={() => setEditing(false)} />
-          ) : (
-            <div className="flex min-w-0 items-center gap-1.5">
-              <button
-                type="button"
-                title="Rename"
-                aria-label={`Rename ${agent.name}`}
-                onClick={() => setEditing(true)}
-                className={`min-w-0 truncate rounded text-left text-[13px] font-medium ${off ? "text-muted" : "text-ink"}`}
-              >
-                <span id={nameId}>{agent.name}</span>
-              </button>
-              {props.forAutomations ? <AutomationChip hue={agent.hue} /> : null}
-            </div>
-          )}
-          {editing ? null : state}
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          {launched ? (
-            <SecondaryButton
-              data-testid="agent-check"
-              disabled={!props.canCheck}
-              title={props.checkNote ?? undefined}
-              onClick={props.onCheck}
-              className={BUTTON_ICON}
-            >
-              {props.check?.status === "failed" && !props.checking ? "Try again" : "Check"}
-            </SecondaryButton>
-          ) : null}
-          {launched ? (
-            <SwitchControl label={agent.name} labelledBy={nameId}
-              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
-              description={agent.enabled ? "Turn off" : "Turn on"} checked={agent.enabled}
-              onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
-          ) : (
-            <CopyButton
-              key={props.workspaceId}
-              label="Copy MCP config"
-              size="button"
-              testId="mcp-config-copy"
-              disabled={props.mcpConfig === null}
-              getText={() => props.mcpConfig}
-            />
-          )}
-          <Menu
-            label={`${agent.name} actions`}
-            testId="agent-menu"
-            open={menuOpen}
-            onOpenChange={setMenuOpen}
-            width={200}
-            items={[
-              ...(props.onUseForAutomations
-                ? [{ id: "automations", label: "Use for automations", icon: <Workflow size={14} aria-hidden />, onSelect: props.onUseForAutomations }]
-                : []),
-              { id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: () => setEditing(true) },
-              { id: "details", label: detailsOpen ? "Hide details" : "Details", icon: <ListCollapse size={14} aria-hidden />, onSelect: () => setDetailsOpen((open) => !open) },
-              MENU_SEPARATOR,
-              { id: "remove", label: "Remove", icon: <Trash2 size={14} aria-hidden />, danger: true, onSelect: props.onRemove },
-            ]}
-          />
-        </div>
-      </div>
-      {detailsOpen ? (
-        <AgentDetails agent={agent} tools={props.tools} onChange={props.onChange} onClose={() => setDetailsOpen(false)} />
-      ) : null}
+    <button
+      type="button"
+      data-testid="agent-row"
+      data-agent-id={agent.id}
+      aria-label={agent.name}
+      onClick={props.onOpen}
+      className={`${ROW} ${ROW_LINE} w-full text-left transition-colors first:rounded-t-lg last:rounded-b-lg hover:bg-hover`}
+    >
+      <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="row" className={off ? "opacity-50" : undefined} />
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className={`min-w-0 truncate text-[13px] font-medium ${off ? "text-muted" : "text-ink"}`}>{agent.name}</span>
+          {props.forAutomations ? <AutomationChip hue={agent.hue} /> : null}
+        </span>
+        {props.nameClash ? (
+          <span data-testid="agent-problem" className={`${STATE} text-warning`}>
+            <TriangleAlert size={12} aria-hidden className="shrink-0" />{NAME_TAKEN}
+          </span>
+        ) : (
+          <span data-testid="agent-state" className={STATE}>
+            {tool ? <span className="text-muted">{tool}</span> : null}
+            {tool ? <span aria-hidden className="text-subtle">·</span> : null}
+            {status}
+          </span>
+        )}
+      </span>
+      <ChevronRight size={16} aria-hidden className="shrink-0 text-subtle" />
+    </button>
+  );
+}
+
+// One of your personal agents: it signed in through an agent link, and the
+// server's host takes the place of a tool. A signed-out agent dims.
+function PersonalAgentRow(props: { entry: PersonalEntry; onOpen: () => void }) {
+  const { agent, account } = props.entry;
+  const signedOut = agent.status === "signed_out";
+  const dim = signedOut ? "opacity-50" : undefined;
+  return (
+    <button
+      type="button"
+      data-testid="agent-row"
+      data-agent-id={agent.agentId}
+      data-personal=""
+      aria-label={agent.name}
+      onClick={props.onOpen}
+      className={`${ROW} ${ROW_LINE} w-full text-left transition-colors first:rounded-t-lg last:rounded-b-lg hover:bg-hover`}
+    >
+      <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="row" className={dim} />
+      <span className={`min-w-0 flex-1 ${dim ?? ""}`}>
+        <span className="block min-w-0 truncate text-[13px] font-medium text-ink">{agent.name}</span>
+        <span data-testid="agent-state" className={`${STATE} min-w-0 text-muted`}>
+          <span className="inline-flex shrink-0 items-center gap-1"><Link size={12} aria-hidden />Through agent link</span>
+          <span aria-hidden className="text-subtle">·</span>
+          <span className="min-w-0 truncate">{account.host}</span>
+          <span aria-hidden className="text-subtle">·</span>
+          <span className="shrink-0">
+            {signedOut ? "Signed out" : agent.lastActionAtMs === null ? "Signed in" : `Active ${relativeTime(agent.lastActionAtMs)}`}
+          </span>
+        </span>
+      </span>
+      <ChevronRight size={16} aria-hidden className="shrink-0 text-subtle" />
+    </button>
+  );
+}
+
+// A report with an identity replaces the row of that identity in Notices.
+type ReportError = (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+
+// An account whose agents dohc could not list: the toast once, a Try again in
+// the list while no roster is cached, and a later good read takes both back.
+// The shell takes the toast's row back as its Try again starts, so a read
+// that fails again reports again, in the same words too. A push from main
+// reports only new words. `reported` holds the words Notices has for each
+// account, and the list keeps it while one of its pages is open, so coming
+// back to the list doesn't report the same failure again.
+function AccountReadFailure(props: { account: PersonalAgentsAccount; reported: Map<string, string>; onReload: () => Promise<PersonalAgentsState>; onError?: ReportError; onClearError?: (identity: string) => void }) {
+  const { accountKey, failure } = props.account;
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const clear = useRef(props.onClearError);
+  clear.current = props.onClearError;
+  const reload = useRef(props.onReload);
+  reload.current = props.onReload;
+  // A failure reports once, whether a push or a Try again brings it first.
+  const { reported } = props;
+  useEffect(() => {
+    const identity = `personal-agents:${accountKey}`;
+    function tell(words: string) {
+      reported.set(accountKey, words);
+      report.current?.(words, undefined, retry, undefined, identity);
+    }
+    async function retry(): Promise<void> {
+      reported.delete(accountKey);
+      const after = await reload.current();
+      const words = after.status === "ready" ? after.accounts.find((entry) => entry.accountKey === accountKey)?.failure ?? null : null;
+      if (words !== null && words !== reported.get(accountKey)) tell(words);
+    }
+    if (failure === null) {
+      reported.delete(accountKey);
+      clear.current?.(identity);
+    } else if (failure !== reported.get(accountKey)) tell(failure);
+  }, [accountKey, failure, reported]);
+  if (props.account.roster !== null || failure === null) return null;
+  return (
+    <div className="mt-2">
+      <RetryRow testId="personal-agents-retry" onRetry={props.onReload}>
+        dohc could not list your agents on {props.account.host}.
+      </RetryRow>
     </div>
   );
 }
 
-type ToolTileState =
-  | { status: "ready"; executable: string }
-  | { status: "sign-in" | "update" | "not-found" };
+const PERSONAL_READ_FAILED = "dohc could not read your personal agents.";
 
-// What an Add tile says about a tool: Ready, Sign in first, Update first or
+// The read of your personal agents failed before any account answered. A
+// Try again on its toast that fails again reports again. `reported` says
+// whether Notices holds this failure, and the list keeps it as
+// AccountReadFailure's is kept.
+function PersonalReadFailure(props: { state: PersonalAgentsState; reported: { current: boolean }; onReload: () => Promise<PersonalAgentsState>; onError?: ReportError }) {
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const reload = useRef(props.onReload);
+  reload.current = props.onReload;
+  const failed = props.state.status === "failed";
+  // It reports once, whether the state or a Try again brings it first.
+  const { reported } = props;
+  useEffect(() => {
+    function tell() {
+      reported.current = true;
+      report.current?.(PERSONAL_READ_FAILED, undefined, retry);
+    }
+    async function retry(): Promise<void> {
+      reported.current = false;
+      if ((await reload.current()).status === "failed" && !reported.current) tell();
+    }
+    if (!failed) reported.current = false;
+    else if (!reported.current) tell();
+  }, [failed, reported]);
+  if (!failed) return null;
+  return (
+    <div className="mt-2">
+      <RetryRow testId="personal-agents-retry" onRetry={props.onReload}>{PERSONAL_READ_FAILED}</RetryRow>
+    </div>
+  );
+}
+
+// Agent link on Add agent: the account this workspace syncs to, else the
+// first account, with its link once the workspace syncs there.
+function agentLinkChoice(state: PersonalAgentsState, workspaceId: string, workspaceName: string): AgentLinkChoice {
+  if (state.status === "loading") return { status: "loading" };
+  if (state.status === "failed") return { status: "failed" };
+  const account = state.accounts.find((entry) => syncsTo(entry.roster, workspaceId)) ?? state.accounts[0];
+  if (!account) return { status: "no-server" };
+  if (account.roster === null) return account.failure === null ? { status: "loading" } : { status: "failed" };
+  return {
+    status: "ready",
+    host: account.host,
+    workspaceName,
+    link: syncsTo(account.roster, workspaceId) ? agentLink(account, workspaceId) : null,
+  };
+}
+
+// What Add agent says about a tool: Ready, Sign in first, Update first or
 // Not found. Null while dohc looks, or when it could not look.
 function toolTileState(tool: "claude" | "codex", tools: AgentToolsResult | null): ToolTileState | null {
   if (!tools) return null;
@@ -368,37 +403,12 @@ function toolTileState(tool: "claude" | "codex", tools: AgentToolsResult | null)
   return found.auth === "signed-out" ? { status: "sign-in" } : { status: "ready", executable: found.executable };
 }
 
-const TILE_STATE: Record<ToolTileState["status"], { text: string; tone: ReadinessTone }> = {
-  ready: { text: "Ready", tone: "ready" },
-  "sign-in": { text: "Sign in first", tone: "blocked" },
-  update: { text: "Update first", tone: "blocked" },
-  "not-found": { text: "Not found", tone: "unknown" },
-};
-
-function AddTile(props: { title: string; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
-  return (
-    <button
-      type="button"
-      disabled={props.disabled}
-      title={props.hint}
-      onClick={props.onAdd}
-      className="flex h-[52px] min-w-0 items-center gap-3 rounded-lg border border-line bg-bg px-3 text-left transition-colors hover:bg-hover disabled:cursor-default disabled:hover:bg-bg"
-    >
-      <span className="min-w-0">
-        <span className="block truncate text-[13px] font-medium text-ink">{props.title}</span>
-        {props.state}
-      </span>
-      <Plus size={16} aria-hidden className="ml-auto shrink-0 text-muted" />
-    </button>
-  );
-}
-
 function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () => void }) {
   const { problem } = props;
   const name = problem.name ?? problem.id;
   return (
     <div data-testid="agent-row-broken" data-agent-id={problem.id} className={`${ROW} ${ROW_LINE}`}>
-      <ChatAvatar name={name} kind="agent" presentation={presentationFor(problem.hue)} size="comment" />
+      <ChatAvatar name={name} kind="agent" presentation={presentationFor(problem.hue)} size="row" />
       <div className="min-w-0 flex-1">
         <p className="m-0 truncate text-[13px] font-medium text-ink">{name}</p>
         <p data-testid="agent-problem" className={`${STATE} text-warning`}>
@@ -406,30 +416,30 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
           <span className="min-w-0"><ProblemText text={problem.problem} /></span>
         </p>
       </div>
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        <SecondaryButton onClick={props.onOpenSettingsFile} className={BUTTON_ICON}>
-          <FilePenLine size={14} aria-hidden />Open settings file
-        </SecondaryButton>
-        <SwitchControl label={name} checked={false} disabled onChange={() => undefined} />
-        {menuSpace}
-      </div>
+      <SecondaryButton onClick={props.onOpenSettingsFile} className="inline-flex shrink-0 items-center gap-1.5">
+        <FilePenLine size={14} aria-hidden />Open settings file
+      </SecondaryButton>
     </div>
   );
 }
 
 /**
- * Settings › Agents: the agents dohc starts, then the agents you run, each in
- * the order the file lists them with its state and its controls, and the
- * entries dohc could not use in their place among the first. Pause all holds
- * every agent dohc starts on this computer until Resume or quit.
+ * Settings › Agents: every agent in the order the file lists them, with the
+ * entries dohc could not use in their place. A row opens that agent's page.
+ * Add agent opens one sheet for any agent. Pause holds every agent dohc
+ * starts on this computer until Resume or quit.
  */
 export function AgentList(props: {
   workspaceId: string;
+  // What the open workspace goes by, for its agent link.
+  workspaceName: string;
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
   config: McpConfigResult | null;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
+  // The run that marks this workspace's changes as one agent's, absent where there is none to start.
+  run?: AgentRunControl;
   // Answers with the settings main saved, or null when a failed save said why in Notices.
   onSave: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult | null>;
   // Moves these entries to the front of the file; answers whether it saved.
@@ -443,28 +453,56 @@ export function AgentList(props: {
   // Takes back the toast and Notices row of this identity.
   onClearError?: (identity: string) => void;
   onNotice?: (message: string, undo?: () => void) => void;
+  // The personal agent whose page opens once the roster answers, by id, such
+  // as the one a sign-in notice names. The list shows when the roster no
+  // longer holds it. Each request is a new object, so the same agent can be
+  // asked for again.
+  openAgent?: { agentId: string };
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent replies are paused.", cause), cause));
   const listening = useAgentsListening();
+  // Opening Settings › Agents reads the relay again.
+  const personal = usePersonalAgents(workspaceId, true);
+  // What the read failures below have told this workspace's Notices. It
+  // outlives the list while a page is open.
+  const reportedAccounts = useMemo(() => new Map<string, string>(), [workspaceId]);
+  const reportedRead = useMemo(() => ({ current: false }), [workspaceId]);
+  // While a page is open the failures aren't shown, so forget each one that
+  // ended: a later failure in the same words is a new one.
+  useEffect(() => {
+    if (personal.state.status !== "ready") return;
+    reportedRead.current = false;
+    const failures = new Map(personal.state.accounts.map((account) => [account.accountKey, account.failure]));
+    for (const key of [...reportedAccounts.keys()]) if ((failures.get(key) ?? null) === null) reportedAccounts.delete(key);
+  }, [personal.state, reportedAccounts, reportedRead]);
+  const entries = personal.state.status === "ready" ? personalEntries(personal.state.accounts) : [];
+  // A personal agent answers to the same @ as an agent here, so neither takes the other's name.
+  const personalKeys = new Set(entries.map((entry) => agentNameKey(entry.agent.name)));
+  const takenByPersonal = (name: string) => personalKeys.has(agentNameKey(name));
+  // "No agents yet." waits until every account's agents are known.
+  const personalKnown = personal.state.status === "ready" && personal.state.accounts.every((account) => account.roster !== null);
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
   const requests = useRequestSequence([workspaceId]);
+  // The agent whose page shows, or null for the list.
+  const [opened, setOpened] = useState<string | null>(null);
   useEffect(() => {
     setChecking(null);
     setChecks({});
   }, [workspaceId]);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const [adding, setAdding] = useState(false);
-  // The tools installed on this computer, for the Add tiles and each agent's details.
+  // The tools installed on this computer, for Add agent and each agent's page.
   const [detection, setDetection] = useState<AgentToolsResult | "failed" | null>(null);
   const tools = detection === "failed" ? null : detection;
   const toolRequests = useRequestSequence([workspaceId]);
   const reportError = useRef(onError);
   reportError.current = onError;
-  // Try again on a failed look's toast looks again and refills the tiles.
+  // Try again on a failed look's toast looks again.
   const detectTools = useCallback(async (): Promise<void> => {
     const token = toolRequests.next();
     setDetection(null);
@@ -482,10 +520,6 @@ export function AgentList(props: {
   }, [detectTools]);
 
   const rows = agentListRows(settings, props.agentProblems);
-  // An agent with a launch, or an entry dohc could not use, is one dohc starts.
-  const youRun = (row: AgentListRow) => row.kind === "agent" && row.agent.launch === undefined;
-  const startedRows = rows.filter((row) => !youRun(row));
-  const yourRows = rows.filter(youRun);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
   // The chip shows only when there is more than one agent to choose from.
   const automation = automationAgent(settings);
@@ -493,12 +527,74 @@ export function AgentList(props: {
   const fileOrder = rows.map(rowId);
   const restricted = props.trust?.trusted === false;
   const asking = props.trust?.asking ?? false;
-  // Set while main's dialog answers the card's Trust workspace. When it
-  // answers, focus that was on the band goes to the first thing trust turned
-  // on, or to the Agents heading when it turned on nothing. It goes back to
-  // Trust workspace when the person stayed in Restricted Mode.
+  const page = opened === null ? null : rows.find((row): row is Extract<AgentListRow, { kind: "agent" }> => row.kind === "agent" && row.agent.id === opened)?.agent ?? null;
+  const personalPage = opened === null || page !== null ? null : entries.find((entry) => entry.agent.agentId === opened) ?? null;
+
+  // Opening a page focuses its back button; going back focuses the agent's row.
   const card = useRef<HTMLDivElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const back = useRef<HTMLButtonElement>(null);
+  const focusAfter = useRef<{ row: string } | "page" | "heading" | null>(null);
+  useEffect(() => {
+    const target = focusAfter.current;
+    if (target === null) return;
+    if (target === "page" || target === "heading") {
+      focusAfter.current = null;
+      (target === "page" ? back.current : heading.current)?.focus();
+      return;
+    }
+    const element = card.current?.querySelector<HTMLElement>(`[data-testid="agent-row"][data-agent-id="${CSS.escape(target.row)}"]`);
+    // A row for an agent just added waits for the settings that list it.
+    if (!element && !Object.hasOwn(settings.agents, target.row)) return;
+    focusAfter.current = null;
+    (element ?? heading.current)?.focus();
+  });
+  const openPage = (id: string) => {
+    focusAfter.current = "page";
+    setOpened(id);
+  };
+  const closePage = () => {
+    if (opened !== null) focusAfter.current = { row: opened };
+    setRenaming(null);
+    setOpened(null);
+  };
+  // A page whose agent left the file or the roster, such as after Remove, goes back to the list.
+  useEffect(() => {
+    if (opened !== null && page === null && personalPage === null) {
+      focusAfter.current = "heading";
+      setOpened(null);
+    }
+  }, [opened, page, personalPage]);
+  // The page asked for opens once the roster says whether it still holds
+  // that agent, so it waits until every account has its agents or a failure.
+  // When the roster doesn't hold it, the list shows, as after Remove.
+  const [wanted, setWanted] = useState<string | null>(null);
+  useEffect(() => {
+    if (props.openAgent) setWanted(props.openAgent.agentId);
+  }, [props.openAgent]);
+  useEffect(() => {
+    if (wanted === null || personal.state.status === "loading") return;
+    if (personal.state.status === "ready" && personal.state.accounts.some((account) => account.roster === null && account.failure === null)) return;
+    setWanted(null);
+    const held = personal.state.status === "ready"
+      && personalEntries(personal.state.accounts).some((entry) => entry.agent.agentId === wanted);
+    if (held) {
+      focusAfter.current = "page";
+      setRenaming((current) => (current === wanted ? current : null));
+      setOpened(wanted);
+      return;
+    }
+    setRenaming(null);
+    setOpened((current) => {
+      if (current !== null) focusAfter.current = "heading";
+      return null;
+    });
+  }, [personal.state, wanted]);
+
+  // Set while main's dialog answers the band's Trust workspace. When it
+  // answers, focus that was on the band goes to the page's Send test, or the
+  // list's first agent, or the Agents heading when there is neither. It goes
+  // back to Trust workspace when the person stayed in Restricted Mode.
   const trustPressed = useRef(false);
   useEffect(() => {
     if (!trustPressed.current || asking) return;
@@ -508,10 +604,10 @@ export function AgentList(props: {
     if (active !== null && active !== document.body && !band?.contains(active)) return;
     (restricted
       ? card.current?.querySelector<HTMLElement>(`[data-testid="restricted-agents-state"] button`)
-      : card.current?.querySelector<HTMLElement>(`[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`) ?? heading.current)?.focus();
+      : card.current?.querySelector<HTMLElement>(`[data-testid="agent-check"]:not(:disabled), [data-testid="agent-row"]`) ?? heading.current)?.focus();
   }, [asking, restricted]);
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn, restricted);
-  // Why Check can't start now. Try again on a toast can come at such a time.
+  // Why a check can't start now. Try again on a toast can come at such a time.
   const checkBlocked = useRef<string | null>(null);
   checkBlocked.current = checkNote
     ?? (paused ? PAUSED_CHECK_REASON : null)
@@ -563,17 +659,32 @@ export function AgentList(props: {
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
 
-  // A new agent takes the first free id, name and color. One dohc starts is
-  // on and checked at once; one you run has nothing to check. An agent you run
-  // never takes the default id, which Chats would set up as one dohc starts.
-  const add = async (fields: Pick<AgentSettings, "name" | "enabled"> & Partial<Pick<AgentSettings, "launch">>, idBase: string) => {
-    const taken = [...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)];
-    const id = newAgentId(fields.launch ? taken : [...taken, DEFAULT_AGENT_ID], idBase);
-    const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
+  // The ids an added agent can't take. An agent you run never takes the
+  // default id, which Chats would set up as one dohc starts.
+  const taken = [...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)];
+  const idFor = (launched: boolean, base: string) => newAgentId(launched ? taken : [...taken, DEFAULT_AGENT_ID], base);
+  const newHue = newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue).hue;
+
+  // A new agent dohc starts is checked at once when it is on; one you run has nothing to check.
+  const add = async (fields: NewAgent) => {
+    const id = idFor(fields.launch !== undefined, fields.idBase);
+    const agent: AgentSettings = {
+      ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue),
+      name: fields.name,
+      hue: fields.hue,
+      enabled: fields.enabled,
+      ...(fields.launch ? { launch: fields.launch } : {}),
+    };
+    // The agent is saved for every workspace; its check belongs to this one.
+    const token = requests.current();
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
-    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
+    if (!saved) return;
+    setSheetOpen(false);
+    if (!requests.isCurrent(token)) return;
+    focusAfter.current = { row: id };
+    if (agent.launch && agent.enabled && !paused && checkNote === null) void check({ id, ...agent });
   };
 
   const neighbours = (id: string) => {
@@ -605,56 +716,31 @@ export function AgentList(props: {
     })());
   };
 
-  // Undo puts the agent back under the name and settings it had, where it
-  // was (`placeBack`). Every other entry keeps its place in the file as it is
-  // then. An agent in the file with its id by then stays.
   const remove = async (agent: Agent) => {
-    const [before, after] = neighbours(agent.id);
-    const { [agent.id]: entry, ...agents } = settings.agents;
-    if (!entry) return;
-    const saved = await onSave({ ...settings, agents });
-    if (!saved) return;
-    // The file can hold the agent again by the time main saves.
-    if (Object.hasOwn(saved.settings.agents, agent.id) || saved.agentProblems?.some((problem) => problem.id === agent.id)) {
-      onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
-      return;
-    }
-    const left = agentListRows(saved.settings, saved.agentProblems).map(rowId);
+    const removed = await removeAgentWithUndo({
+      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave, order: onOrder, onError, onClearError, onNotice,
+    });
+    if (!removed) return;
     setRenaming((current) => (current === agent.id ? null : current));
-    // Its failed check goes with it, and Undo doesn't bring that back.
-    onClearError?.(checkIdentity(workspaceId, agent.id));
-    onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
-      let file: DesktopUserSettingsResult;
-      try {
-        file = await bridge().getUserSettings();
-      } catch (cause) {
-        onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
-        return;
-      }
-      const current = file.settings;
-      const problem = file.agentProblems?.find((entry) => entry.id === agent.id);
-      const holder = current.agents[agent.id]?.name ?? (problem ? problem.name ?? problem.id : null);
-      const keep = (name: string) => onError?.(`Undo didn't replace the new ${name}, so the one you removed stays removed.`);
-      if (holder !== null) {
-        keep(holder);
-        return;
-      }
-      // If the agents are in the order this Remove left them, it goes back
-      // exactly where it was. Otherwise it doesn't go ahead of the agent that
-      // wakes automations now.
-      const now = agentListRows(current, file.agentProblems).map(rowId);
-      const unchanged = now.length === left.length && now.every((id, at) => id === left[at]);
-      const order = placeBack(now, agent.id, before, after, unchanged ? undefined : automationAgent(current)?.id);
-      // Saved from the file just read, so main refuses it if the agent came back since.
-      try {
-        await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agent.id]: entry } }, base: current });
-      } catch (cause) {
-        if (isAgentIdTaken(cause)) keep(agent.name);
-        else onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
-        return;
-      }
-      await onOrder(order, `dohc brought back ${agent.name} but could not put it back in its place.`);
-    })());
+    // Its page goes with it, and focus goes to the Agents heading.
+    setOpened((current) => {
+      if (current !== agent.id) return current;
+      focusAfter.current = "heading";
+      return null;
+    });
+  };
+
+  const changePersonal = async (entry: PersonalEntry, next: PersonalAgentChange, failure: string): Promise<boolean> => {
+    const result = await changePersonalAgent(entry.account, entry.agent, next, failure);
+    if (!result.ok) onError?.(result.error, undefined, async () => { await changePersonal(entry, next, failure); });
+    return result.ok;
+  };
+  // Remove hides a signed-out agent. Undo brings it back signed out.
+  const removePersonal = async (entry: PersonalEntry) => {
+    const { agent } = entry;
+    if (!(await changePersonal(entry, { kind: "remove" }, `dohc could not remove ${agent.name}.`))) return;
+    setRenaming((current) => (current === agent.agentId ? null : current));
+    onNotice?.(`Removed ${agent.name}.`, () => void changePersonal(entry, { kind: "restore" }, `dohc could not bring back ${agent.name}.`));
   };
 
   const setPaused = (next: boolean) => {
@@ -665,124 +751,193 @@ export function AgentList(props: {
   };
 
   const mcpConfig = (agentId: string) => (config && !("unavailable" in config) ? configSnippet(config, agentId) : null);
-  const agentRow = (row: AgentListRow) => row.kind === "broken" ? (
-    <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
-  ) : (
-    <AgentRow
-      key={row.agent.id}
-      agent={row.agent}
-      agents={settings.agents}
-      workspaceId={workspaceId}
-      mcpConfig={mcpConfig(row.agent.id)}
-      listening={listening.has(row.agent.id)}
-      paused={paused}
-      checking={checking === row.agent.id}
-      check={checks[row.agent.id]}
-      // One check at a time: main runs one runner per workspace.
-      canCheck={!paused && checking === null && checkNote === null}
-      checkNote={checkNote}
-      tools={tools}
-      editing={renaming === row.agent.id}
-      onEditingChange={(editing) => setRenaming(editing ? row.agent.id : null)}
-      forAutomations={choosing && automation?.id === row.agent.id}
-      {...(row.agent.launch && automation?.id !== row.agent.id
-        ? { onUseForAutomations: () => void wakeForAutomations(row.agent) }
-        : {})}
-      onRemove={() => void remove(row.agent)}
-      onCheck={() => void check(row.agent)}
-      onRename={async (name) => (await onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))) !== null}
-      onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
-    />
-  );
+  const mcpUnavailable = config && "unavailable" in config ? config.message : null;
+  const activeRun = props.run?.activeRun ?? null;
+  const restrictedBand = restricted && props.trust ? (
+    <div className="mb-4 overflow-hidden rounded-lg border border-line">
+      <RestrictedAgentsBand asking={asking} onTrust={() => {
+        trustPressed.current = true;
+        props.trust?.onTrust();
+      }} />
+    </div>
+  ) : null;
+
+  if (page) {
+    const agent = page;
+    return (
+      <section data-testid="agent-list" aria-labelledby="agents-title">
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="sr-only">Agents</h3>
+        <div ref={card}>
+          {restrictedBand}
+          <AgentPage
+            agent={agent}
+            agents={settings.agents}
+            workspaceId={workspaceId}
+            tools={tools}
+            mcpConfig={mcpConfig(agent.id)}
+            mcpUnavailable={mcpUnavailable}
+            listening={listening.has(agent.id)}
+            paused={paused}
+            checking={checking === agent.id}
+            check={checks[agent.id]}
+            // One check at a time: main runs one runner per workspace.
+            canCheck={!paused && checking === null && checkNote === null}
+            checkReason={checkNote ?? (paused ? PAUSED_CHECK_REASON : null)}
+            // The band already says why in Restricted Mode.
+            checkNote={restricted ? null : checkNote ?? (paused ? PAUSED_CHECK_REASON : null)}
+            agentName={(id) => settings.agents[id]?.name ?? "another agent"}
+            run={props.run}
+            nameField={renaming === agent.id ? (
+              <AgentNameField agentId={agent.id} name={agent.name} maxLength={MAX_PREFERRED_NAME_LENGTH}
+                problem={localNameProblem(settings.agents, agent.id, takenByPersonal)}
+                onSave={async (name) => (await onSave(withAgent(settings, agent.id, (current) => ({ ...current, name })))) !== null}
+                onDone={() => setRenaming((current) => (current === agent.id ? null : current))} />
+            ) : null}
+            automationChip={choosing && automation?.id === agent.id ? <AutomationChip hue={agent.hue} /> : null}
+            {...(agent.launch && automation?.id !== agent.id
+              ? { onUseForAutomations: () => void wakeForAutomations(agent) }
+              : {})}
+            onRename={() => setRenaming(agent.id)}
+            onRemove={() => void remove(agent)}
+            onCheck={() => void check(agent)}
+            onChange={(change) => void onSave(withAgent(settings, agent.id, change))}
+            onBack={closePage}
+            backRef={back}
+          />
+        </div>
+      </section>
+    );
+  }
+
+  if (personalPage) {
+    const { agent } = personalPage;
+    // Its name can't be one an agent here or another personal agent has.
+    const takenByOthers = (name: string) => agentNameTaken(settings.agents, "", name)
+      || entries.some((entry) => entry.agent.agentId !== agent.agentId && agentNameKey(entry.agent.name) === agentNameKey(name));
+    return (
+      <section data-testid="agent-list" aria-labelledby="agents-title">
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="sr-only">Agents</h3>
+        <div ref={card}>
+          {/* Each agent gets a page of its own. A notice that opens another agent closes this one's sheets and menu, and their answers stay off the new page. */}
+          <PersonalAgentPage
+            key={`${personalPage.account.accountKey}:${agent.agentId}`}
+            entry={personalPage}
+            workspaceId={workspaceId}
+            nameField={renaming === agent.agentId ? (
+              <AgentNameField agentId={agent.agentId} name={agent.name}
+                problem={(value) => personalNameProblem(value, takenByOthers)}
+                onSave={(name) => changePersonal(personalPage, { kind: "name", name }, `dohc could not rename ${agent.name}.`)}
+                onDone={() => setRenaming((current) => (current === agent.agentId ? null : current))} />
+            ) : null}
+            onRename={() => setRenaming(agent.agentId)}
+            onRemove={() => void removePersonal(personalPage)}
+            onChange={(next, failure) => changePersonal(personalPage, next, failure)}
+            onError={(message) => onError?.(message)}
+            onBack={closePage}
+            backRef={back}
+          />
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section data-testid="agent-list" aria-labelledby="agents-title">
       {/* The title sits where every Settings page title sits. */}
-      <div className="-mt-1 mb-5 flex min-h-8 items-center">
-        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 text-base font-semibold text-ink">Agents</h3>
+      <div className="-mt-1 mb-5 flex min-h-8 items-center gap-2">
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
+        {anyLaunch ? (
+          <IconButton
+            data-testid="agents-pause"
+            aria-label={paused ? "Resume agents" : "Pause all agents"}
+            aria-pressed={paused}
+            title={paused ? "Resume agents" : "Pause all agents"}
+            onClick={() => setPaused(!paused)}
+            className="size-8"
+          >
+            {paused ? <Play size={15} aria-hidden /> : <Pause size={15} aria-hidden />}
+          </IconButton>
+        ) : null}
+        <SecondaryButton
+          data-testid="agent-add"
+          disabled={adding}
+          onClick={() => setSheetOpen(true)}
+          className="inline-flex shrink-0 items-center gap-1.5"
+        >
+          <Plus size={14} aria-hidden />Add agent
+        </SecondaryButton>
       </div>
-      <section data-testid="agents-started" aria-labelledby="agents-started-title">
-        <div className="mb-2 flex min-h-8 items-center gap-2">
-          <h4 id="agents-started-title" className="m-0 mr-auto text-sm font-semibold text-ink">Started by dohc</h4>
-          {anyLaunch ? (
-            <SecondaryButton
-              data-testid="agents-pause"
-              onClick={() => setPaused(!paused)}
-              className={BUTTON_ICON}
-            >
-              {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}
-              {paused ? "Resume" : "Pause all"}
-            </SecondaryButton>
-          ) : null}
-        </div>
+      <div ref={card}>
+        {restrictedBand}
         {paused && anyLaunch ? (
           <p data-testid="agents-paused" className="m-0 mb-3 flex items-center gap-1.5 text-[12px] text-muted">
             <Pause size={13} aria-hidden />Paused until you resume or quit dohc.
           </p>
         ) : null}
-        <div ref={card} className="rounded-lg border border-line bg-panel px-4">
-          {restricted && props.trust ? (
-            <div className="-mx-4 overflow-hidden rounded-t-lg">
-              <RestrictedAgentsBand asking={asking} onTrust={() => {
-                trustPressed.current = true;
-                props.trust?.onTrust();
-              }} />
-            </div>
-          ) : null}
-          {startedRows.map(agentRow)}
-          <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
-            {(["claude", "codex"] as const).map((tool) => {
-              const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
-              const found = toolTileState(tool, tools);
-              return (
-                <AddTile
-                  key={tool}
-                  title={`Add ${name}`}
-                  disabled={found?.status !== "ready" || adding || checking !== null}
-                  hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
-                  state={found ? (
-                    <ToolReadiness tone={TILE_STATE[found.status].tone} className={TILE_LINE}>{TILE_STATE[found.status].text}</ToolReadiness>
-                  ) : detection === "failed" ? (
-                    <span className={`${TILE_LINE} block text-muted`}>Couldn't check</span>
-                  ) : (
-                    <span className={`${TILE_LINE} flex text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
-                  )}
-                  onAdd={() => {
-                    if (found?.status === "ready") {
-                      void add({ name: newAgentName(settings.agents, name), launch: { tool, executable: found.executable }, enabled: true }, tool);
-                    }
-                  }}
-                />
-              );
-            })}
+        {rows.length === 0 && entries.length === 0 ? (personalKnown ? (
+          <p data-testid="agents-empty" className="m-0 rounded-lg border border-dashed border-line px-4 py-6 text-center text-[13px] text-muted">
+            No agents yet.
+          </p>
+        ) : null) : (
+          <div data-testid="agents" className="rounded-lg border border-line bg-panel">
+            {rows.map((row) => row.kind === "broken" ? (
+              <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
+            ) : (
+              <AgentRow
+                key={row.agent.id}
+                agent={row.agent}
+                listening={listening.has(row.agent.id)}
+                paused={paused}
+                checking={checking === row.agent.id}
+                check={checks[row.agent.id]}
+                marking={activeRun?.agentId === row.agent.id}
+                forAutomations={choosing && automation?.id === row.agent.id}
+                nameClash={takenByPersonal(row.agent.name)}
+                onOpen={() => openPage(row.agent.id)}
+              />
+            ))}
+            {entries.map((entry) => (
+              <PersonalAgentRow key={entry.agent.agentId} entry={entry} onOpen={() => openPage(entry.agent.agentId)} />
+            ))}
           </div>
-        </div>
-        <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
-          <Monitor size={14} aria-hidden />Runs on this computer. Turn an agent on for one computer per workspace.
-        </p>
+        )}
+        <PersonalReadFailure state={personal.state} reported={reportedRead} onReload={personal.reload} onError={onError} />
+        {personal.state.status === "ready" ? personal.state.accounts.map((account) => (
+          <AccountReadFailure key={account.accountKey} account={account} reported={reportedAccounts} onReload={personal.reload} onError={onError} onClearError={onClearError} />
+        )) : null}
         {checkNote && !restricted ? (
           <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
         ) : null}
-      </section>
-      <section data-testid="agents-yours" aria-labelledby="agents-yours-title" className="mt-8">
-        <div className="mb-2 flex min-h-8 items-center">
-          <h4 id="agents-yours-title" className="m-0 text-sm font-semibold text-ink">You run on this computer</h4>
-        </div>
-        {config && "unavailable" in config ? (
-          <p data-testid="mcp-unavailable" className="m-0 mb-3 text-[12px] text-danger">{config.message}</p>
-        ) : null}
-        <div className="rounded-lg border border-line bg-panel px-4">
-          {yourRows.map(agentRow)}
-          <div data-testid="agent-add-yours" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
-            <AddTile
-              title="Add an agent you run"
-              disabled={adding}
-              state={<span className={`${TILE_LINE} flex items-center gap-1 text-muted`}><Plug size={12} aria-hidden />Through MCP</span>}
-              onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
-            />
+        {/* A run for an agent this list doesn't show still needs a way to stop it. */}
+        {activeRun && !rows.some((entry) => entry.kind === "agent" && entry.agent.id === activeRun.agentId) ? (
+          <div data-testid="agent-run-unlisted" className="mt-3 flex items-center gap-3 text-[12px] text-muted">
+            <span className="min-w-0">A run is marking this workspace's changes as another agent's.</span>
+            <SecondaryButton data-testid="mcp-enable-toggle" size="row" disabled={props.run?.busy}
+              onClick={() => props.run?.onToggle(activeRun.agentId)} className="ml-auto shrink-0">
+              Stop run
+            </SecondaryButton>
           </div>
-        </div>
-      </section>
+        ) : null}
+      </div>
+      {sheetOpen ? (
+        <AddAgentSheet
+          agents={settings.agents}
+          toolState={(tool) => toolTileState(tool, tools)}
+          detectionFailed={detection === "failed"}
+          hue={newHue}
+          mcpConfig={mcpConfig}
+          mcpUnavailable={mcpUnavailable}
+          mcpAgentId={idFor(false, "agent")}
+          agentLink={agentLinkChoice(personal.state, workspaceId, props.workspaceName)}
+          takenElsewhere={takenByPersonal}
+          adding={adding}
+          onAdd={(agent) => void add(agent)}
+          onCancel={() => {
+            focusAfter.current = null;
+            setSheetOpen(false);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

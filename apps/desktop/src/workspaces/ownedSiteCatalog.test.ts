@@ -19,7 +19,7 @@ afterEach(async () => {
 
 function catalogWith(listing: WorkspacePathListing) {
   const reads = createOwnedWorkspaceReadPort({
-    hasShareState: false, searchSources: [], repairProjection: async () => undefined,
+    hasShareState: false, searchSources: [], repairProjection: async () => new Set<string>(),
     listFiles: vi.fn(async scope => ({ ...listing, files: listing.files.filter(file => matchesFileListingScope(file.path, scope)) })),
     lookupFiles: vi.fn(async paths => ({ ...listing, files: listing.files.filter(file => paths.includes(file.path)) })),
   });

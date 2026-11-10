@@ -98,7 +98,9 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   const records = vi.fn<LiveAgentDispatchStoreHandle["store"]["runRecordsForThread"]>(async () => { events.push("records"); return {}; });
   const runnable = vi.fn((_id: string) => { events.push("runnable"); });
   const idle = vi.fn((_id: string) => { events.push("idle"); });
-  const start = vi.fn(async (value: RegistryEntry) => { events.push("start-with-activity"); return integration.startAgentRun(value.workspaceId); });
+  const start = vi.fn(async (value: RegistryEntry, agentId: string) => { events.push("start-with-activity"); return integration.startAgentRun(value.workspaceId, agentId); });
+  // Settings lists one agent you run, `terminal`, and one dohc starts, `default`.
+  const agentYouRun = vi.fn(async (agentId: string) => { events.push("agent-you-run"); return agentId === "terminal" ? { id: agentId } : null; });
   const writable = vi.fn((_value: RegistryEntry) => { events.push("writable"); });
   const activity = vi.fn(async (_value: RegistryEntry) => { events.push("activity"); });
   const dispatch = {
@@ -120,7 +122,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
     assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
-    startAgentRunWithWorkspaceActivity: start,
+    startAgentRunWithWorkspaceActivity: start, agentYouRun,
     agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
     senderWorkspaceAuthority: {
@@ -134,7 +136,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   const groupSizes = [handlers.size];
   registrations.registerAgentRuns();
   groupSizes.push(handlers.size);
-  const invoke = (channel: string, payload: unknown = { workspaceId: workspace.workspaceId }, value = sender) => Promise.resolve().then(() => {
+  const invoke = (channel: string, payload: unknown = { workspaceId: workspace.workspaceId, ...(channel === CHANNELS.startAgentRun ? { agentId: "terminal" } : {}) }, value = sender) => Promise.resolve().then(() => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`unregistered: ${channel}`);
     return handler({ sender: value }, payload);
@@ -142,7 +144,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   return {
     workspace, registry, physical, sender, authority, renderers, events, integration,
     ended, setAgentRun, requireWorkspace, requireCapture,
-    ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
+    ensureOpen, records, runnable, idle, start, agentYouRun, writable, activity, dispatch, shareAccess, config,
     detection, handlers, groupSizes, invoke,
     durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs", agentRunsFileName("install-local")), "utf8")),
     switchWorkspace: async () => {
@@ -188,13 +190,14 @@ describe("agent run IPC registrations", () => {
     const input = { workspaceId: "workspace-a",
       ...(channel === CHANNELS.endAgentRun || channel === retryStoppedRun.channel ? { runId: "run-1" } : {}),
       ...(channel === CHANNELS.runnerSelfTest ? { agentId: "default" } : {}),
+      ...(channel === CHANNELS.startAgentRun ? { agentId: "terminal" } : {}),
       ...(channel === CHANNELS.chatRunRecordsForThread || channel === CHANNELS.chatDispatchStateForThread || channel === CHANNELS.resumeThreadDispatch
         || channel === retryStoppedRun.channel
         ? { threadId: "thread-1" } : {}) };
     if (channel === CHANNELS.endAgentRun) await h.invoke(CHANNELS.startAgentRun);
     await h.invoke(channel, input);
     const services = [h.requireWorkspace, h.requireCapture, h.ensureOpen, h.records,
-      h.runnable, h.idle, h.start, end, status, h.shareAccess, h.config,
+      h.runnable, h.idle, h.start, h.agentYouRun, end, status, h.shareAccess, h.config,
       h.writable, h.activity, ...Object.values(h.dispatch)];
     services.forEach(service => service.mockClear());
     await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow(
@@ -369,10 +372,32 @@ describe("agent run IPC registrations", () => {
     expect((await h.integration.getAgentRunStatus("workspace-a")).activeRun).toBeNull();
   });
 
+  it("records the agent the run is for, so its writes carry that agent's id", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.startAgentRun)).resolves.toMatchObject({ id: "run-1", agentId: "terminal" });
+    expect(h.setAgentRun).toHaveBeenLastCalledWith(expect.objectContaining({ agentId: "terminal", agentRunId: "run-1", depth: 0 }));
+  });
+
+  it.each(["default", "gone"])("refuses a run for %s, which names no agent you run, before recording one", async (agentId) => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.startAgentRun, { workspaceId: "workspace-a", agentId }))
+      .rejects.toThrow("this agent isn't one you run");
+    expect(h.start).not.toHaveBeenCalled();
+    expect(h.setAgentRun).not.toHaveBeenCalled();
+    expect((await h.integration.getAgentRunStatus("workspace-a")).activeRun).toBeNull();
+  });
+
+  it("refuses a start that names no agent", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.startAgentRun, { workspaceId: "workspace-a" })).rejects.toThrow();
+    expect(h.agentYouRun).not.toHaveBeenCalled();
+    expect(h.start).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, "failed"] as const)("starts a durable plain run and ends it with outcome %s", async (status) => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.startAgentRun)).resolves.toMatchObject({ id: "run-1", status: "running" });
-    expect(h.events).toEqual(["runnable", "idle", "start-with-activity"]);
+    expect(h.events).toEqual(["runnable", "idle", "agent-you-run", "start-with-activity"]);
     await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toMatchObject({ activeRun: { id: "run-1" } });
     await h.invoke(CHANNELS.endAgentRun, { workspaceId: "workspace-a", runId: "run-1", ...(status ? { status } : {}) });
     expect(h.ended).toHaveBeenCalledTimes(1);
@@ -430,7 +455,7 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: true });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
-    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1");
+    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1", []);
     h.events.length = 0;
     h.writable.mockImplementationOnce(() => { throw new Error("read-only"); });
     await expect(h.invoke(CHANNELS.resumeThreadDispatch, threadPayload)).rejects.toThrow("read-only");

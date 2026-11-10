@@ -89,12 +89,13 @@ export type Agent = AgentSettings & { id: string };
 
 // Names with one handle name the same agent in a chat. A name with no handle
 // names no agent, so it only has to differ from the other names.
-const nameKey = (name: string) => normalizeHandle(agentHandle(name) || name);
+/** What tells one agent's name from another's in a chat: its handle, or the name when it has none. */
+export const agentNameKey = (name: string) => normalizeHandle(agentHandle(name) || name);
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
   return Object.values(agents).flatMap(({ name, nameBeforeMigration }) =>
-    [...new Set([name, nameBeforeMigration ?? name].map(nameKey))]);
+    [...new Set([name, nameBeforeMigration ?? name].map(agentNameKey))]);
 }
 export const AgentsSettings = z.record(AgentId, AgentSettings)
   .refine((agents) => new Set(agentNameKeys(agents)).size === agentNameKeys(agents).length, {
@@ -154,6 +155,20 @@ export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name
     const handle = agentHandle(agent.name);
     return (agent.enabled || !agent.launch) && handle
       ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+      : [];
+  });
+}
+
+// The @ roster's entries for your personal agents that are signed in and can
+// reach this workspace. Each one reads its own mentions through the server.
+export function personalAgentMentionCandidates(
+  agents: readonly { agentId: string; name: string; status: "active" | "signed_out"; reach: readonly { workspaceId: string }[] }[],
+  workspaceId: string,
+): MentionCandidate[] {
+  return agents.flatMap((agent) => {
+    const handle = agentHandle(agent.name);
+    return agent.status === "active" && handle && agent.reach.some((entry) => entry.workspaceId === workspaceId)
+      ? [{ id: agentMentionId(agent.agentId), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
       : [];
   });
 }
@@ -239,17 +254,18 @@ export function newAgentId(taken: readonly string[], base: string): string {
 }
 
 /** A new agent's name that no agent has: `base`, `base 2`, `base 3` and on. */
-export function newAgentName(agents: AgentsSettings, base: string): string {
+// `takenElsewhere` names the agents outside the file, such as your personal agents.
+export function newAgentName(agents: AgentsSettings, base: string, takenElsewhere: (name: string) => boolean = () => false): string {
   for (let count = 1; ; count += 1) {
     const name = count === 1 ? base : `${base} ${count}`;
-    if (!agentNameTaken(agents, "", name)) return name;
+    if (!agentNameTaken(agents, "", name) && !takenElsewhere(name)) return name;
   }
 }
 
 /** Whether another of your agents has this name, or one a chat cannot tell apart from it. */
 export function agentNameTaken(agents: AgentsSettings, id: string, name: string): boolean {
   const others = Object.fromEntries(Object.entries(agents).filter(([other]) => other !== id));
-  return agentNameKeys(others).includes(nameKey(name));
+  return agentNameKeys(others).includes(agentNameKey(name));
 }
 
 const hasKey = (entry: Record<string, unknown>, key: string) => Object.hasOwn(entry, key);
@@ -314,6 +330,9 @@ export type AgentProblem = z.infer<typeof AgentProblem>;
 export const MAX_PINNED_APPS = 20;
 const MAX_PINNED_WORKSPACES = 200;
 const PinnedAppsWorkspaceId = z.string().max(200).regex(/^[a-z0-9][a-z0-9-]*$/);
+// Archived chats follow the same rule: hiding a chat from your sidebar is
+// your choice on this computer, and the chat's members still see it.
+export const MAX_ARCHIVED_CHATS = 500;
 
 export const SidebarSettings = z.object({
   // dohc's own views in the order the sidebar shows them. A view the list
@@ -326,6 +345,13 @@ export const SidebarSettings = z.object({
     .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
       message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
     }),
+  // Each workspace's archived chats, by the chat's id in that workspace.
+  archivedChats: z
+    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+    .refine((archived) => Object.keys(archived).length <= MAX_PINNED_WORKSPACES, {
+      message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+    })
+    .default({}),
 }).strict();
 export type SidebarSettings = z.infer<typeof SidebarSettings>;
 
@@ -333,6 +359,7 @@ export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
   order: [],
   hidden: [],
   pinnedApps: {},
+  archivedChats: {},
 };
 
 // Reports this computer sends to dohc's developers. A release build that

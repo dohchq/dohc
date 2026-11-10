@@ -17,6 +17,8 @@ export function SettingRow(props: {
   aside?: ReactNode;
   // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
+  // After the title on its line, such as the app's version.
+  detail?: ReactNode;
   // A row of a long list that only shows a value, such as a shortcut's keys.
   // Its title needs less room than a description, so the value stays beside it
   // in a narrower pane.
@@ -30,18 +32,11 @@ export function SettingRow(props: {
   // don't fit beside that wrap under the text.
   // mr-4 and the row's gap-x-2 keep 24 px between the text and what follows it.
   const first = props.compact ? "mr-4 min-w-0 flex-[1_1_8rem]" : "mr-4 min-w-0 flex-[1_1_15rem]";
-  // Reset and the place a row keeps for it share one footprint.
-  const resetPlace = `size-6 shrink-0 ${props.top ? "mt-1" : ""}`;
   const text = (
     <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
-      {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
-      <div className="relative flex items-center">
-        {props.modified ? (
-          <span title="Modified" className="absolute right-full top-1/2 mr-1 size-1.5 -translate-y-1/2 rounded-full bg-accent">
-            <span className="sr-only">Modified</span>
-          </span>
-        ) : null}
+      <div className="flex items-center gap-2">
         <span className="text-[13px] font-medium text-ink">{props.title}</span>
+        {props.detail}
       </div>
       {props.description ? (
         <p className="m-0 mt-1 text-[12px] text-muted">{props.description}</p>
@@ -55,10 +50,22 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-2 gap-y-2 border-b border-line last:border-b-0 ${
+      className={`relative flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-2 gap-y-2 border-b border-line last:border-b-0 ${
         props.compact ? "py-2" : "py-4"
       } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
+      {/* A changed row is marked by a bar on the card's left edge, outside
+          the text, so marking it moves nothing in the row. */}
+      {props.modified ? (
+        <span
+          title="Modified"
+          className={`absolute w-0.5 rounded-full bg-accent ${props.compact ? "inset-y-2" : "inset-y-3"} ${
+            props.highlighted ? "-left-3" : "-left-5"
+          }`}
+        >
+          <span className="sr-only">Modified</span>
+        </span>
+      ) : null}
       {props.lead ? (
         <div className={`flex items-center gap-3 ${first}`}>
           {props.lead}
@@ -71,17 +78,8 @@ export function SettingRow(props: {
           they never move or wrap when it appears. The place is its own item:
           when the controls wrap under the text, it stays at the end of the
           text's line and the controls start at the text's left edge. */}
-      {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
-      {props.onReset && props.modified ? (
-        <button
-          type="button"
-          aria-label="Reset"
-          title="Reset"
-          onClick={props.onReset}
-          className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
-        >
-          <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
-        </button>
+      {props.onReset ? (
+        <ResetButton onReset={props.modified ? props.onReset : undefined} className={props.top ? "mt-1" : ""} />
       ) : null}
       <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {props.children}
@@ -90,12 +88,38 @@ export function SettingRow(props: {
   );
 }
 
+/**
+ * Reset, labeled. Without `onReset` it keeps its place, drawn invisible, so
+ * the controls beside it never move when it appears.
+ */
+export function ResetButton(props: { onReset?: () => void; className?: string }) {
+  const place = `flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] ${props.className ?? ""}`;
+  const face = (
+    <>
+      <RotateCcw size={12} strokeWidth={2} aria-hidden />
+      Reset
+    </>
+  );
+  if (!props.onReset) {
+    return (
+      <span aria-hidden className={`invisible ${place}`}>
+        {face}
+      </span>
+    );
+  }
+  return (
+    <button type="button" onClick={props.onReset} className={`text-muted transition-colors hover:bg-hover hover:text-ink ${place}`}>
+      {face}
+    </button>
+  );
+}
+
 /** A named group of settings: its heading over a card of rows. A page with one group leaves out the heading. */
 export function SettingsSection(props: { title?: string; children: ReactNode }) {
   return (
     <section aria-label={props.title} className="mt-8 first:mt-0">
-      {props.title ? <h4 className="m-0 mb-2 text-sm font-semibold text-ink">{props.title}</h4> : null}
-      <div className="rounded-lg border border-line bg-panel px-4">{props.children}</div>
+      {props.title ? <h4 className="m-0 mb-2.5 text-sm font-semibold text-ink">{props.title}</h4> : null}
+      <div className="rounded-lg border border-line bg-panel px-5">{props.children}</div>
     </section>
   );
 }

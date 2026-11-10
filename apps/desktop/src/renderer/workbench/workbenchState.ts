@@ -129,6 +129,7 @@ export const GRAPH_TAB_PATH = "tab://graph";
 export const HISTORY_TAB_PATH = "tab://history";
 // Every version in the workspace, one tab per workspace.
 export const VERSIONS_TAB_PATH = "tab://versions";
+export const WHATS_NEW_TAB_PATH = "tab://whats-new";
 // Home and each conversation have their own workspace-scoped tab identity.
 export const CHATS_TAB_PATH = "tab://chats";
 const APP_TAB_PREFIX = "tab://app/";
@@ -192,6 +193,7 @@ export type ParsedTab = { path: string } & (
   | { kind: "graph" }
   | { kind: "history" }
   | { kind: "versions" }
+  | { kind: "whatsNew" }
   | { kind: "chat"; target: ChatTabTarget }
   | { kind: "site"; siteRoot: string | null }
   | { kind: "momentDiff"; momentId: string | null }
@@ -218,6 +220,7 @@ export function parseTab(path: string | null): ParsedTab | null {
   if (path === GRAPH_TAB_PATH) return { kind: "graph", path };
   if (path === HISTORY_TAB_PATH) return { kind: "history", path };
   if (path === VERSIONS_TAB_PATH) return { kind: "versions", path };
+  if (path === WHATS_NEW_TAB_PATH) return { kind: "whatsNew", path };
   if (path === CHATS_TAB_PATH) return { kind: "chat", path, target: { kind: "home" } };
   if (path === CHATS_TAB_PATH + "/new") return { kind: "chat", path, target: { kind: "new" } };
   if (path.startsWith(CHATS_TAB_PATH + "/")) {
@@ -257,6 +260,7 @@ export function tabPath(tab: ParsedTab): string {
     case "graph": return GRAPH_TAB_PATH;
     case "history": return HISTORY_TAB_PATH;
     case "versions": return VERSIONS_TAB_PATH;
+    case "whatsNew": return WHATS_NEW_TAB_PATH;
     case "file": case "removed": case "newPage": return tab.path;
   }
 }
@@ -322,6 +326,14 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     explorerTitle: () => "Versions",
     // The Layers glyph, as the versions menu draws it.
     glyph: () => "compare",
+  },
+  whatsNew: {
+    virtual: true,
+    singleton: false,
+    title: () => "What's new",
+    tooltip: () => "What's new in dohc",
+    explorerTitle: () => "What's new",
+    glyph: () => "news",
   },
   chat: {
     virtual: true,

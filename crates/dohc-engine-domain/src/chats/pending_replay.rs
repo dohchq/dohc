@@ -4,9 +4,10 @@ use super::{
     ReplicatedMessageAuthor, ThreadMessageResolution, bump_chat_conversation_revision,
     index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
-    normalize_reported_agent, parse_mention_handles, personal_agent_may_post_in,
-    reported_agent_json, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_replicated_link_author,
+    normalize_reported_agent, normalize_work_report, parse_mention_handles,
+    personal_agent_may_post_in, reported_agent_json, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message, validate_replicated_link_author,
+    work_report_json,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -74,6 +75,10 @@ struct PendingMessageAppend {
     /// field parked it unchecked, so replay checks it.
     #[serde(default)]
     author_reported: Option<serde_json::Value>,
+    /// What an agent reported about its work, checked on replay for the same
+    /// reason.
+    #[serde(default)]
+    work: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -515,6 +520,11 @@ fn replay_pending_chat_operation(
                     "pending chat message reported agent is invalid",
                 ));
             };
+            let Some(work) = pending_work_report(&payload) else {
+                return Ok(PendingReplayOutcome::Refused(
+                    "pending chat message work report is invalid",
+                ));
+            };
             let thread_exists: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM chat_threads \
@@ -539,6 +549,7 @@ fn replay_pending_chat_operation(
                 operation,
                 payload,
                 author_reported,
+                work,
                 automation_claims,
             )
         }
@@ -560,6 +571,16 @@ fn pending_reported_agent(
     normalize_reported_agent(payload.author_kind == "agent", reported.as_ref()).ok()
 }
 
+/// The parked message's work report, checked as sync apply checks it. `None`
+/// means it is invalid; `Some(None)` means the message reported no work.
+fn pending_work_report(payload: &PendingMessageAppend) -> Option<Option<super::ChatWorkReport>> {
+    let work = match &payload.work {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
+    };
+    normalize_work_report(payload.author_kind == "agent", work.as_ref()).ok()
+}
+
 /// Stores a parked message whose thread exists. A stored message adds its
 /// Group automation claims to `automation_claims`.
 fn apply_pending_message(
@@ -568,6 +589,7 @@ fn apply_pending_message(
     operation: &PendingChatOperation,
     payload: PendingMessageAppend,
     author_reported: Option<super::ChatReportedAgent>,
+    work: Option<super::ChatWorkReport>,
     automation_claims: &mut Vec<AutomationClaim>,
 ) -> Result<PendingReplayOutcome, DomainError> {
     // An older build parked names that this build refuses.
@@ -621,7 +643,8 @@ fn apply_pending_message(
         owner_name.is_some()
             || payload.origin.is_some()
             || payload.chain_depth.is_some()
-            || author_reported.is_some(),
+            || author_reported.is_some()
+            || work.is_some(),
         &body,
     );
     let (link_connection, personal_connection) = match relay_author {
@@ -693,8 +716,8 @@ fn apply_pending_message(
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
               author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
               link_grant_id,link_principal_id,author_agent_id,author_reported,agent_connection_id, \
-              personal_agent_connection_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+              personal_agent_connection_id,work) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -714,6 +737,7 @@ fn apply_pending_message(
                 reported_agent_json(author_reported.as_ref()),
                 link_connection,
                 personal_connection,
+                work_report_json(work.as_ref()),
             ],
         )
         .map_err(DomainError::sql_persist)?;

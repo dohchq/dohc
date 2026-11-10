@@ -1,36 +1,63 @@
+import { accountWords } from "@dohc/interface-words/account";
+import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useSignIn } from "../account/AccountProvider";
+import { sampleBuild } from "../sampleBuild";
 import { useTheme } from "../theme";
 import { waitingToSend } from "../demo";
-import { sampleMe, type SampleWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./sample";
 import { useWorkspaceMenu } from "./workspaceMenu";
 
-// Slack's Home header: the workspace on the left (tap for its menu); your mark on the right.
-export function ChatsHeader({ workspace, scrolled }: { workspace: SampleWorkspace; scrolled: boolean }) {
+// The sample's "you", in a sample build only (src/sampleBuild.ts).
+const sampleMe = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? (require("./sample") as typeof import("./sample")).sampleMe : null;
+
+// Slack's Home header: the workspace on the left (tap for its menu, or the switcher once signed in); your mark on the
+// right, which opens Settings once signed in. Without a workspace on the phone, only your mark shows.
+export function ChatsHeader({ workspace, scrolled }: { workspace: PhoneWorkspace | null; scrolled: boolean }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const openMenu = useWorkspaceMenu(workspace, waitingToSend);
   return (
     // A hairline appears once the list scrolls under the header, as in Mail and Messages.
     <View style={[styles.bar, { paddingTop: insets.top + 6, backgroundColor: theme.bg, borderBottomColor: scrolled ? theme.line : "transparent" }]}>
-      <Pressable style={styles.workspace} onPress={() => void openMenu()} accessibilityRole="button" accessibilityLabel={`${workspace.name}. Workspace menu`}>
-        <View style={[styles.mark, { backgroundColor: workspace.color }]}>
-          <Text style={styles.markText}>{workspace.initial}</Text>
-        </View>
-        <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>{workspace.name}</Text>
-        <SymbolView name="chevron.down" size={13} weight="semibold" tintColor={theme.muted} style={styles.chevron} fallback={null} />
-      </Pressable>
+      {workspace ? (
+        <Pressable style={styles.workspace} onPress={() => sampleBuild ? void openMenu() : router.push("/workspaces")} accessibilityRole="button"
+          accessibilityLabel={sampleBuild ? `${workspace.name}. Workspace menu` : `Workspace: ${workspace.name}. Switch workspace`}>
+          <View style={[styles.mark, { backgroundColor: workspace.color }]}>
+            <Text style={styles.markText}>{workspace.initial}</Text>
+          </View>
+          <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>{workspace.name}</Text>
+          <SymbolView name="chevron.down" size={13} weight="semibold" tintColor={theme.muted} style={styles.chevron} fallback={null} />
+        </Pressable>
+      ) : <View />}
       <View style={styles.actions}>
         {/* New message joins here when compose exists; a button that does nothing tells the person nothing. */}
-        {/* A plain mark until Settings exists: nothing to press, so it isn't a button. */}
-        <View accessible accessibilityRole="image" accessibilityLabel="You" style={styles.action}>
-          <View style={[styles.me, { backgroundColor: sampleMe.hue }]}>
-            <Text style={styles.meText}>{sampleMe.initials}</Text>
+        {sampleMe ? (
+          // The sample has no Settings: nothing to press, so it isn't a button.
+          <View accessible accessibilityRole="image" accessibilityLabel="You" style={styles.action}>
+            <View style={[styles.me, { backgroundColor: sampleMe.hue }]}>
+              <Text style={styles.meText}>{sampleMe.initials}</Text>
+            </View>
           </View>
-        </View>
+        ) : <SettingsButton />}
       </View>
     </View>
+  );
+}
+
+function SettingsButton() {
+  const theme = useTheme();
+  const router = useRouter();
+  const { email } = useSignIn();
+  return (
+    <Pressable style={styles.action} onPress={() => router.push("/settings")} accessibilityRole="button" accessibilityLabel={accountWords.settings}>
+      <View style={[styles.me, { backgroundColor: theme.accent }]}>
+        <Text style={[styles.meText, { color: theme.bg }]}>{[...email][0]?.toUpperCase()}</Text>
+      </View>
+    </Pressable>
   );
 }
 

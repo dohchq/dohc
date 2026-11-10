@@ -12,7 +12,7 @@ const bridgeMock = {
   listWorkspaceVersions: vi.fn(),
   listVersionLastChanges: vi.fn(),
   countWorkspaceVersionChanges: vi.fn(),
-  listWorkspaceVersionConflicts: vi.fn(),
+  countWorkspaceVersionConflicts: vi.fn(),
   switchWorkspaceVersion: vi.fn(),
   createWorkspaceVersion: vi.fn(),
 };
@@ -38,7 +38,7 @@ beforeEach(() => {
   });
   bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) =>
     ({ count: versionId === "draft" ? 3 : versionId === "nested" ? 1 : 0 }));
-  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts: [], nextAfterConflictId: null });
+  bridgeMock.countWorkspaceVersionConflicts.mockResolvedValue({ versions: [], more: false });
   bridgeMock.switchWorkspaceVersion.mockResolvedValue({ activeVersionId: "main", changedFileCount: 1 });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
@@ -216,23 +216,19 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", versionId: "main" }));
   });
 
-  it("creates nothing on Enter while a switch runs, and the switch still finishes", async () => {
+  it("turns off New version while a switch runs, and turns it back on when the switch finishes", async () => {
     const switching = deferred<{ activeVersionId: string; changedFileCount: number }>();
     bridgeMock.switchWorkspaceVersion.mockReturnValue(switching.promise);
     const user = userEvent.setup();
     render(<Page />);
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.keyboard("Idea");
     await user.click(within(row("main")).getByTestId("versions-page-switch"));
     await waitFor(() => expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledOnce());
-    await user.click(screen.getByTestId("versions-page-new-input"));
-    await user.keyboard("{Enter}");
-    expect(bridgeMock.createWorkspaceVersion).not.toHaveBeenCalled();
+    expect(screen.getByTestId<HTMLButtonElement>("versions-page-new").disabled).toBe(true);
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, NESTED, FRESH], activeVersionId: "main" });
     switching.resolve({ activeVersionId: "main", changedFileCount: 1 });
     await waitFor(() => expect(row("main").getAttribute("aria-current")).toBe("true"));
-    await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-switch").getAttribute("aria-disabled")).toBeNull());
+    await waitFor(() => expect(screen.getByTestId<HTMLButtonElement>("versions-page-new").disabled).toBe(false));
   });
 
   it("counts again only the version you're in when its history grows", async () => {
@@ -397,19 +393,15 @@ describe("VersionsPage", () => {
   });
 
   it("counts the files each merge left to decide, and opens the review", async () => {
-    const conflict = (conflictId: string, sourceVersionId: string, origin: "merge" | "sync" = "merge") => ({
-      conflictId, path: `${conflictId}.md`, sourceVersionId, targetVersionId: "main", origin, contentKind: "text",
-      currentText: "a", incomingText: "b", baseText: null,
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce({
+      versions: [{ versionId: "draft", count: 2 }, { versionId: "fresh", count: 1 }], more: false,
     });
-    bridgeMock.listWorkspaceVersionConflicts
-      .mockResolvedValueOnce({ conflicts: [conflict("c1", "draft"), conflict("c2", "draft")], nextAfterConflictId: "c2" })
-      .mockResolvedValueOnce({ conflicts: [conflict("c3", "fresh"), conflict("c4", "draft", "sync")], nextAfterConflictId: null });
     const onReviewConflicts = vi.fn();
     const user = userEvent.setup();
     render(<Page onReviewConflicts={onReviewConflicts} />);
     await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("2 to decide"));
     expect(within(row("fresh")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide");
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1", afterConflictId: "c2" });
+    expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1" });
     // The count leads the details line, before where the version came from.
     expect(within(row("draft")).getByTestId("versions-page-details").firstElementChild)
       .toBe(within(row("draft")).getByTestId("versions-page-conflicts"));
@@ -425,24 +417,17 @@ describe("VersionsPage", () => {
   });
 
   it("says when there are more files to decide than it read", async () => {
-    const conflict = (conflictId: string) => ({
-      conflictId, path: `${conflictId}.md`, sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
-      contentKind: "text", currentText: "a", incomingText: "b", baseText: null,
-    });
-    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(async ({ afterConflictId }: { afterConflictId?: string }) => {
-      const page = Number(afterConflictId?.slice(1) ?? "0") + 1;
-      return { conflicts: [conflict(`c${page}`)], nextAfterConflictId: `c${page}` };
-    });
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce({ versions: [{ versionId: "draft", count: 5 }], more: true });
     render(<Page />);
     await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("5+ to decide"));
   });
 
   it("offers Merge into Main again once nothing is left to decide", async () => {
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null });
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce(DRAFT_CONFLICT);
     const { rerender } = render(<Page />);
     await waitFor(() => expect(within(row("draft")).queryByTestId("versions-page-decide")).not.toBeNull());
     expect(within(row("draft")).queryByTestId("versions-page-merge")).toBeNull();
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce({ versions: [], more: false });
     rerender(<Page versionKey={1} />);
     await waitFor(() => expect(within(row("draft")).queryByTestId("versions-page-decide")).toBeNull());
     expect(within(row("draft")).getByTestId("versions-page-merge").textContent).toBe("Merge into Main");
@@ -450,23 +435,19 @@ describe("VersionsPage", () => {
   });
 
   it("files a failed read of the files to decide with a Try again that reads them again", async () => {
-    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValueOnce(new Error("conflicts failed"));
+    bridgeMock.countWorkspaceVersionConflicts.mockRejectedValueOnce(new Error("conflicts failed"));
     const onError = vi.fn();
     render(<Page onError={onError} />);
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(
       "dohc could not read which merges have files to decide.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-reads:/), false, expect.any(Function));
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({
-      conflicts: [{ conflictId: "c1", path: "c1.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
-        contentKind: "text", currentText: "a", incomingText: "b", baseText: null }],
-      nextAfterConflictId: null,
-    });
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce({ versions: [{ versionId: "draft", count: 1 }], more: false });
     act(filedRetry(onError));
     await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide"));
   });
 
   it("takes back the files to decide's row once a later read works", async () => {
-    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValueOnce(new Error("conflicts failed"));
+    bridgeMock.countWorkspaceVersionConflicts.mockRejectedValueOnce(new Error("conflicts failed"));
     const onError = vi.fn();
     const onSettled = vi.fn();
     const { rerender } = render(<Page onError={onError} onSettled={onSettled} />);
@@ -476,12 +457,11 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError)));
   });
 
-  const DRAFT_CONFLICT = { conflictId: "c1", path: "c1.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
-    contentKind: "text", currentText: "a", incomingText: "b", baseText: null };
+  const DRAFT_CONFLICT = { versions: [{ versionId: "draft", count: 1 }], more: false };
 
   it("gives up on the files to decide after 30 seconds with no answer, and drops the answer that comes later", async () => {
-    const late = deferred<{ conflicts: unknown[]; nextAfterConflictId: string | null }>();
-    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(late.promise);
+    const late = deferred<typeof DRAFT_CONFLICT>();
+    bridgeMock.countWorkspaceVersionConflicts.mockReturnValueOnce(late.promise);
     const onError = vi.fn();
     const onSettled = vi.fn();
     // Only the page's timers are fake. Testing Library's async helpers need
@@ -492,7 +472,7 @@ describe("VersionsPage", () => {
     // The page lists the versions, then reads. No time passes.
     await act(async () => {});
     await act(() => vi.advanceTimersByTimeAsync(0));
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledOnce();
+    expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenCalledOnce();
     await act(() => vi.advanceTimersByTimeAsync(29_999));
     expect(onError).not.toHaveBeenCalled();
     await act(() => vi.advanceTimersByTimeAsync(1));
@@ -500,10 +480,10 @@ describe("VersionsPage", () => {
     expect(onError).toHaveBeenCalledExactlyOnceWith(sentence, expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-reads:/), false, expect.any(Function));
     expect(withErrorWords(sentence, onError.mock.calls[0]![1])).toBe(`${sentence} dohc did not answer in time. Try again.`);
     // The answer that comes after the deadline shows nothing, and the row stays.
-    await act(async () => late.resolve({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null }));
+    await act(async () => late.resolve(DRAFT_CONFLICT));
     expect(within(row("draft")).queryByTestId("versions-page-conflicts")).toBeNull();
     expect(onSettled).not.toHaveBeenCalled();
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null });
+    bridgeMock.countWorkspaceVersionConflicts.mockResolvedValueOnce(DRAFT_CONFLICT);
     act(filedRetry(onError));
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide");
@@ -614,15 +594,15 @@ describe("VersionsPage", () => {
   });
 
   it("drops an answer about the workspace the page showed before", async () => {
-    const stale = deferred<{ conflicts: unknown[]; nextAfterConflictId: string | null }>();
-    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(stale.promise);
+    const stale = deferred<typeof DRAFT_CONFLICT>();
+    bridgeMock.countWorkspaceVersionConflicts.mockReturnValueOnce(stale.promise);
     const onError = vi.fn();
     const { rerender } = render(<Page workspaceId="ws-1" onError={onError} />);
-    await waitFor(() => expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
     rerender(<Page workspaceId="ws-2" onError={onError} />);
-    await waitFor(() => expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }));
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }));
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
-    await act(async () => stale.resolve({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null }));
+    await act(async () => stale.resolve(DRAFT_CONFLICT));
     expect(within(row("draft")).queryByTestId("versions-page-conflicts")).toBeNull();
     expect(onError).not.toHaveBeenCalled();
   });
@@ -666,7 +646,7 @@ describe("VersionsPage", () => {
   it("files one row and one toast in the combined words when the engine is down as the page opens, and its Try again reads each read again", async () => {
     const cause = "EngineDaemonUnavailableError: Rust engine daemon exited.";
     bridgeMock.listVersionLastChanges.mockRejectedValueOnce(new Error(cause));
-    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValueOnce(new Error(cause));
+    bridgeMock.countWorkspaceVersionConflicts.mockRejectedValueOnce(new Error(cause));
     bridgeMock.countWorkspaceVersionChanges.mockRejectedValue(new Error(cause));
     const onError = vi.fn<OnError>();
     const onSettled = vi.fn();
@@ -682,7 +662,7 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(details("draft")).toBe("Made from Main · 2 files differ from Main · Changed 1h ago by Ice"));
     await waitFor(() => expect(details("fresh")).toContain("2 files differ from Main"));
     expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(2);
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
     // Its Try again already took the row back, and every read works now.
     expect(onError).toHaveBeenCalledOnce();
     expect(onSettled).not.toHaveBeenCalled();
@@ -699,8 +679,8 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     // Everything reads again. The last changes fail again at once, and the
     // files to decide and the first count wait.
-    const conflicts = deferred<{ conflicts: never[]; nextAfterConflictId: null }>();
-    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(conflicts.promise);
+    const conflicts = deferred<{ versions: never[]; more: false }>();
+    bridgeMock.countWorkspaceVersionConflicts.mockReturnValueOnce(conflicts.promise);
     const count = deferred<{ count: number }>();
     bridgeMock.countWorkspaceVersionChanges.mockReturnValueOnce(count.promise);
     rerender(page(1));
@@ -719,15 +699,15 @@ describe("VersionsPage", () => {
     expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenLastCalledWith({ workspaceId: "ws-1", versionId: "nested" });
     await waitFor(() => expect(details("nested")).toContain("1 file differs from Main"));
     expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(3);
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(3);
+    expect(bridgeMock.countWorkspaceVersionConflicts).toHaveBeenCalledTimes(3);
     expect(onError).toHaveBeenCalledOnce();
     expect(onSettled).not.toHaveBeenCalled();
   });
 
   it("waits for the reads that started together, so both failing file one toast in the combined words", async () => {
-    const conflicts = deferred<{ conflicts: never[]; nextAfterConflictId: null }>();
+    const conflicts = deferred<{ versions: never[]; more: false }>();
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
-    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(conflicts.promise);
+    bridgeMock.countWorkspaceVersionConflicts.mockReturnValueOnce(conflicts.promise);
     const onError = vi.fn<OnError>();
     render(<Page onError={onError} />);
     // The last changes failed, and the counts after them are done.
@@ -776,14 +756,14 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(shownRows()).toEqual([{ message: historyFailed("dohc could not read when each version last changed."), toast: true }]));
     act(() => shell!.dismissShellError(shell!.shellErrors[0]!.id));
     expect(shownRows()).toEqual([]);
-    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValue(new Error("conflicts failed"));
+    bridgeMock.countWorkspaceVersionConflicts.mockRejectedValue(new Error("conflicts failed"));
     rerender(<ShellPage versionKey={1} />);
     await waitFor(() => expect(shownRows()).toEqual([{ message: historyFailed(READS_FAILED), toast: true }]));
   });
 
   it("files a new row and toast when another read fails after the person dismissed the combined row", async () => {
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
-    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValue(new Error("conflicts failed"));
+    bridgeMock.countWorkspaceVersionConflicts.mockRejectedValue(new Error("conflicts failed"));
     const { rerender } = render(<ShellPage />);
     await waitFor(() => expect(shownRows()).toEqual([{ message: historyFailed(READS_FAILED), toast: true }]));
     act(() => shell!.dismissShellError(shell!.shellErrors[0]!.id));
@@ -856,41 +836,35 @@ describe("VersionsPage", () => {
     expect(right.onSettled).not.toHaveBeenCalled();
   });
 
-  it("shows the versions picture and New version when only Main exists, and names what stays the same in its field", async () => {
+  it("shows the versions picture and New version when only Main exists, and its dialog names what stays the same", async () => {
     const user = userEvent.setup();
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     render(<Page />);
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
     expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
-    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version");
+    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version…");
     // One New version, the empty state's. The header's shows once a version exists.
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     await user.click(within(empty).getByTestId("versions-page-new"));
-    expect(within(empty).getByTestId("version-new-same").textContent)
+    expect(screen.getByTestId("version-new-same").textContent)
       .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
   });
 
-  it("opens the name field in the header, and Escape or leaving it empty puts the button back", async () => {
+  it("opens the New version dialog from the header, starting from the version you're in, and Escape gives focus back", async () => {
     const user = userEvent.setup();
     render(<Page />);
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
     await user.click(screen.getByTestId("versions-page-new"));
-    const input = screen.getByTestId("versions-page-new-input");
-    expect(document.activeElement).toBe(input);
-    // You're in Draft, so the new version starts there.
-    expect(screen.getByText(/so it can't merge into Main/).textContent).toBe("Starts from Draft, so it can't merge into Main.");
+    expect(document.activeElement).toBe(screen.getByTestId("version-new-input"));
+    // You're in Draft, so the new version starts there, with Draft's last change.
+    expect(screen.getByTestId("version-new-start").textContent).toBe("DraftChanged 1h ago by Ice");
+    expect(screen.getByTestId("version-new-no-merge").textContent).toBe("It can't merge into Main, because it starts from Draft.");
     await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("versions-page-new"));
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.tab();
-    expect(screen.queryByTestId("versions-page-new-input")).toBeNull();
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.keyboard("Idea");
-    await user.tab();
-    expect((screen.getByTestId("versions-page-new-input") as HTMLInputElement).value).toBe("Idea");
   });
 
-  it("creates the version on Enter, and keeps a refused name in the field with why", async () => {
+  it("creates the version on Enter, and keeps a refused name in the dialog with why", async () => {
     bridgeMock.createWorkspaceVersion.mockRejectedValueOnce(new Error(
       "Error invoking remote method 'desktop:create-workspace-version': VersionedTextStoreError [version-name-conflict]: version-name-conflict",
     ));
@@ -899,12 +873,12 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
     await user.click(screen.getByTestId("versions-page-new"));
     await user.keyboard("Draft{Enter}");
-    const error = await waitFor(() => screen.getByTestId("versions-page-new-error"));
+    const error = await waitFor(() => screen.getByTestId("version-menu-error"));
     expect(error.textContent).toBe("Another version is called Draft. Choose another name.");
     bridgeMock.createWorkspaceVersion.mockResolvedValueOnce({ versions: [MAIN, DRAFT, NESTED, FRESH, { ...FRESH, id: "idea", name: "Idea" }], activeVersionId: "idea" });
-    await user.clear(screen.getByTestId("versions-page-new-input"));
+    await user.clear(screen.getByTestId("version-new-input"));
     await user.keyboard("Idea{Enter}");
-    await waitFor(() => expect(screen.queryByTestId("versions-page-new-input")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("version-new-dialog")).toBeNull());
     expect(bridgeMock.createWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", name: "Idea" });
     expect(document.activeElement).toBe(screen.getByTestId("versions-page-new"));
   });

@@ -1,4 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
+import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -18,24 +22,34 @@ import {
 // the running desktop over the CLI transport, which is the sole writer.
 import { replyToChat } from "../../../packages/mcp/src/tools";
 
-// PR 0N-1 agent loop E2E: a dohc-tracked agent run's file edits appear in
-// History as "the agent name" (signed out => "Agent"), edits after
-// the run ends go back to actor-neutral, and an MCP chat reply lands in the
-// file rail attributed to the agent.
+// Agent loop E2E: an agent run's file edits appear in History under the
+// agent's name, edits after the run ends go back to actor-neutral, and an MCP
+// chat reply lands in the file rail attributed to the agent.
+
+// An agent you run through MCP, so a run can be started for it.
+async function seedMcpAgent(homeDir: string): Promise<string> {
+  const settings: DesktopUserSettings = {
+    ...DEFAULT_USER_SETTINGS,
+    agents: { rover: { name: "Rover", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 5 } },
+  };
+  await writeFile(join(homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
+  return "rover";
+}
 
 async function startAgentRun(
   page: import("@playwright/test").Page,
   workspaceId: string,
+  agentId: string,
 ): Promise<string> {
-  return page.evaluate(async ({ id }) => {
+  return page.evaluate(async ({ id, agent }) => {
     const api = (window as unknown as {
       dohcDesktop: {
-        startAgentRun(payload: { workspaceId: string }): Promise<{ id: string }>;
+        startAgentRun(payload: { workspaceId: string; agentId: string }): Promise<{ id: string }>;
       };
     }).dohcDesktop;
-    const run = await api.startAgentRun({ workspaceId: id });
+    const run = await api.startAgentRun({ workspaceId: id, agentId: agent });
     return run.id;
-  }, { id: workspaceId });
+  }, { id: workspaceId, agent: agentId });
 }
 
 async function endAgentRun(
@@ -53,18 +67,18 @@ async function endAgentRun(
   }, { id: workspaceId, run: runId });
 }
 
-test("a dohc-tracked run's edits show as \"Agent\" in History; later edits are neutral", async () => {
+test("a run's edits show under its agent's name in History; later edits are neutral", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
+    const agentId = await seedMcpAgent(temp.homeDir);
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Start a dohc-tracked agent run through the same integration the agent
-    // panel uses (AgentIntegration -> workspaceActivity.setAgentRun).
-    const runId = await startAgentRun(page, workspace.workspaceId);
+    // Start the run as Settings' Start run does.
+    const runId = await startAgentRun(page, workspace.workspaceId, agentId);
 
     await writeWorkspaceFiles(temp, [
       { path: "notes/plan.md", contents: "agent draft\n" },
@@ -77,15 +91,15 @@ test("a dohc-tracked run's edits show as \"Agent\" in History; later edits are n
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
     await expect(agentRow.first()).toBeVisible();
-    // Signed out, run active: History attributes the edit to "Agent".
+    // Run active: History attributes the edit to the run's agent.
     await expect(
       agentRow.first().getByTestId("engine-moment-source"),
-    ).toHaveText("Agent");
+    ).toHaveText("Rover");
 
     // The diff page carries the same attribution.
     await agentRow.first().click();
     await expect(page.getByTestId("engine-moment-diff-page")).toBeVisible();
-    await expect(page.getByTestId("engine-diff-source")).toHaveText("Agent");
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Rover");
 
     // End the run: later edits are the local user's, actor-neutral.
     await endAgentRun(page, workspace.workspaceId, runId);
@@ -195,7 +209,8 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
     );
     await expect(agentAuthor).toHaveText("Agent");
     await page.getByTestId("linked-chat-agent-badge").focus();
-    await expect(page.getByRole("tooltip")).toContainText("Owned by You");
+    // A reply made outside a run dohc started comes from a connected agent.
+    await expect(page.getByRole("tooltip")).toContainText("Connected agent");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -36,6 +36,7 @@ import {
   parseCliResult,
   reportedAgentPartSchema,
   type CliReportedAgent,
+  type CliWorkReport,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliStreamPosition,
@@ -2104,6 +2105,8 @@ interface ChatWriteInput {
   options?: string[];
   // Links the message to a local agent run for provenance.
   runId?: string;
+  // What the agent reports about work it does outside dohc.
+  work?: CliWorkReport;
 }
 
 // What an agent reports about itself. The product and version come from its
@@ -2144,6 +2147,7 @@ function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput, reported: CliRep
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
     ...(input.options !== undefined ? { options: input.options } : {}),
+    ...(input.work !== undefined ? { work: input.work } : {}),
     body: input.body,
   };
 }

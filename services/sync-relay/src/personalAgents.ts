@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { isAgentHue } from "@dohc/workspace-contracts/agent-hues";
 import {
   CREDENTIAL_FENCE_RETRY_MS,
@@ -30,9 +30,6 @@ export type PersonalAgentRoute =
   | { route: "personal-agents" }
   | { route: "personal-agent"; agentId: string; action: PersonalAgentAction };
 
-/** A password check that failed, per account, as sign-in limits them. */
-export const PERSONAL_PASSWORD_ATTEMPTS = 10;
-export const PERSONAL_PASSWORD_WINDOW_MS = 60_000;
 /**
  * How far before the stored position catch-up reads again. A fence's time is
  * when its trigger ran, not when it committed, so a change can commit after
@@ -72,9 +69,8 @@ export interface PersonalRunningEntry {
 export interface PersonalAgents {
   /** The account's fence epoch, read by primary key. 503 while Postgres can't answer. */
   readFence(userId: string): Promise<number>;
-  /** Present only when this relay can check passwords and fences, so personal sign-in can start. */
+  /** Present only when this relay can read fences and sessions, so personal sign-in can start. */
   readonly fence: CredentialFence | undefined;
-  readonly passwordLimiter: TokenBucketLimiter;
   /** Adds running work. 503 until the fence listener is up and caught up. Returns its release. */
   register(entry: PersonalRunningEntry): () => void;
   /** After signing in again: ends the agent's running work and wakes these logs. */
@@ -144,8 +140,10 @@ function toAgent(agent: PersonalAgentRow) {
     name: agent.name,
     hue: agent.hue,
     reportedProduct: agent.reportedProduct,
+    reportedVersion: agent.reportedVersion,
     status: agent.status,
     createdAtMs: agent.createdAtMs,
+    signedInAtMs: agent.signedInAtMs,
     lastActionAtMs: agent.lastActionAtMs,
     reach: agent.reach.map(entry => ({ workspaceId: entry.workspaceId, level: entry.level })),
   };
@@ -163,8 +161,6 @@ export function createPersonalAgents(input: {
 }): PersonalAgents {
   const { storage, fence, activity } = input;
   const running = new Set<PersonalRunningEntry>();
-  const passwordLimiter = new TokenBucketLimiter(
-    PERSONAL_PASSWORD_ATTEMPTS, PERSONAL_PASSWORD_ATTEMPTS * 1_000 / PERSONAL_PASSWORD_WINDOW_MS, 100_000);
   // Running work starts only while the listener is up and has caught up, so
   // no fence change can pass unseen while it runs.
   let ready = false;
@@ -248,7 +244,6 @@ export function createPersonalAgents(input: {
 
   return {
     fence,
-    passwordLimiter,
 
     async readFence(userId) {
       if (!fence) throw unavailable();

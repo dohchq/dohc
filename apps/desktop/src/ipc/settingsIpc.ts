@@ -14,6 +14,7 @@ import {
   type ZoomStep,
 } from "../settings/userSettings";
 import { withAppPinned } from "../settings/pinnedApps";
+import { withChatArchived } from "../settings/archivedChats";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
   ensureUserSettingsFile, orderUserSettingsAgents, readCachedUserSettingsFile, reloadUserSettingsFile,
@@ -206,6 +207,15 @@ export function createSettingsIpc<
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) =>
           withAppPinned(current, input, knownWorkspaceIds())));
+    },
+
+    // Like a pin: one chat at a time, applied to the file as it is now.
+    setChatArchived: async (input, { operation }) => {
+      return saveUserSettings(() =>
+        updateUserSettingsFile(stateDir(), (current) => {
+          operation.assertCurrent();
+          return withChatArchived(current, input, knownWorkspaceIds());
+        }));
     },
 
     orderAgents: async (input) => {

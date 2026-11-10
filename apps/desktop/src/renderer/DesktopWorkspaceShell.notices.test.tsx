@@ -4820,11 +4820,24 @@ describe("connection dialog retries", () => {
 });
 
 describe("unavailable MCP launcher settings", () => {
+  // The run and Copy MCP config sit on the page of an agent you run.
+  const agentYouRun = { name: "Terminal", hue: "rose" as const, changesFiles: true, enabled: false, timeoutMinutes: 30 };
+  const openAgentPage = async (user: ReturnType<typeof userEvent.setup>, agentId: string) => {
+    await user.click(await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(`[data-testid="agent-row"][data-agent-id="${agentId}"]`);
+      if (!row) throw new Error(`No row for ${agentId}.`);
+      return row;
+    }));
+  };
   it("retries a stopped run's history from Notices after Settings closes", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const run = { id: "run-old", startedAt: 1, agentId: "agent-1", onBehalfOf: "ice", status: "running" as const };
     let activeRun: typeof run | null = run;
     bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
+    bridge.getUserSettings = vi.fn(async () => ({
+      settings: { ...DEFAULT_USER_SETTINGS, agents: { "agent-1": agentYouRun } },
+      source: "default" as const,
+    }));
     bridge.endAgentRun.mockImplementationOnce(async () => {
       activeRun = null;
       throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
@@ -4833,6 +4846,7 @@ describe("unavailable MCP launcher settings", () => {
     renderShell(bridge);
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await openAgentPage(user, "agent-1");
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await screen.findByTestId("workspace-shell-error");
@@ -4879,9 +4893,8 @@ describe("unavailable MCP launcher settings", () => {
         message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       }),
     );
-    // Copy MCP config sits on each agent you run.
     bridge.getUserSettings = vi.fn(async () => ({
-      settings: { ...DEFAULT_USER_SETTINGS, agents: { terminal: { name: "Terminal", hue: "rose" as const, changesFiles: true, enabled: false, timeoutMinutes: 30 } } },
+      settings: { ...DEFAULT_USER_SETTINGS, agents: { terminal: agentYouRun } },
       source: "default" as const,
     }));
     const user = userEvent.setup();
@@ -4893,6 +4906,7 @@ describe("unavailable MCP launcher settings", () => {
         "Settings: Open Agents (MCP)",
       ),
     );
+    await openAgentPage(user, "terminal");
 
     expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
       "dohc could not prepare its MCP launcher. Restart dohc to try again.",

@@ -20,6 +20,7 @@ import {
   type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
+import { accountIsFenced } from "./accountDeletion";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
@@ -54,14 +55,17 @@ function dependentGrantIdsMatch(
 export function createShare(storage: StorageContext, input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): void {
+  }): boolean {
     if (input.grant.shareId !== input.share.shareId) {
       throw new Error("share and grant ids do not match");
     }
     if (input.grant.principalKind === "link") {
       throw new Error("a link grant requires an existing share and a credential");
     }
-    storage.tx(() => {
+    return storage.tx(() => {
+      // A deleted account gets no new access, so no later Undo can restore it.
+      const recipient = input.grant.principalUserId;
+      if (recipient !== null && accountIsFenced(storage, recipient)) return false;
       insertShare(storage, input.share);
       insertShareGrant(storage, input.grant);
       // A named grant tells its person the share arrived. The waiting row
@@ -70,6 +74,7 @@ export function createShare(storage: StorageContext, input: {
       storage.db.prepare(
         "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
       ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
+      return true;
     });
   }
 
@@ -694,6 +699,9 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
     const normalized = email.trim().toLowerCase();
     if (!normalized) return 0;
     return storage.tx(() => {
+      // A request that passed the fence before deletion began must not claim
+      // an invite sent to the address afterward.
+      if (accountIsFenced(storage, userId)) return 0;
       const result = storage.db
         .prepare(
           `UPDATE sync_relay_share_grants

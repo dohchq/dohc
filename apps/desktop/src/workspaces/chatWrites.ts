@@ -1,6 +1,7 @@
 import { signalChatWrite } from "./chatWriteSignals";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatMessage, ChatReportedAgent, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
@@ -74,6 +75,8 @@ interface ChatMessageInput {
   body: string;
   needsDecision?: boolean;
   options?: string[];
+  // What an agent reports about its work. The engine refuses one from a person.
+  work?: ChatWorkReport;
   // Runs between admission and the final check, so a slow file lookup cannot
   // carry a stale grant or session into the write.
   resolveAttachments(): Promise<ChatAttachments>;
@@ -82,6 +85,10 @@ interface ChatMessageInput {
   idempotencyKey?: string;
   // Ends the write before its row when a run stops, pauses, or times out.
   signal?: AbortSignal;
+  // Hears of the message once the store holds it, before the work that
+  // follows the write, so a caller whose later step fails knows it saved.
+  // An answer's `failure` says why its question stays open.
+  onSaved?(saved: { message: ChatMessage; failure?: unknown }): void;
 }
 
 export function createChatWrites(dependencies: {
@@ -311,6 +318,7 @@ export function createChatWrites(dependencies: {
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
+      ...(input.work ? { work: input.work } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
     } };
   }
@@ -391,6 +399,7 @@ export function createChatWrites(dependencies: {
       if (!sent) throw error;
       message = sent;
     }
+    input.onSaved?.({ message });
     afterWrite(place.workspaceId, target, true, input.writer);
     return message;
   }
@@ -420,10 +429,14 @@ export function createChatWrites(dependencies: {
     } catch (error) {
       const sent = await replayedMessage(place, input, target);
       if (!sent) throw error;
+      // The post saved, so the caller hears so before the lookup of its thread, which can fail.
+      input.onSaved?.({ message: sent });
       const thread = (await place.store.listChannelThreads({ workspaceId: place.workspaceId, channelId: input.channelId, ...(input.lane ? { lane: input.lane } : {}) })).find(entry => entry.thread.id === sent.threadId)?.thread;
       if (!thread) throw error;
-      started = { thread, message: sent };
+      afterWrite(place.workspaceId, target, true, input.writer);
+      return { thread, message: sent };
     }
+    input.onSaved?.({ message: started.message });
     afterWrite(place.workspaceId, target, true, input.writer);
     return started;
   }
@@ -494,18 +507,15 @@ export function createChatWrites(dependencies: {
     const prepared = await prepareMessage(place, target, input);
     const answered = await betweenDispatchScans(place.workspaceId, async () => {
       const message = await commitReply(place, prepared, input);
-      try {
-        const decision = await commit(place, prepared.admission, () => place.store.resolveChatDecision({
-          workspaceId: place.workspaceId,
-          threadId: input.threadId,
-          messageId: input.resolves.messageId,
-          resolvedByMessageId: message.id,
-          ...(input.resolves.chosenOption !== undefined ? { chosenOption: input.resolves.chosenOption } : {}),
-        }));
-        return { message, decision };
-      } catch (failure) {
-        return { message, failure };
-      }
+      const outcome = await commit(place, prepared.admission, () => place.store.resolveChatDecision({
+        workspaceId: place.workspaceId,
+        threadId: input.threadId,
+        messageId: input.resolves.messageId,
+        resolvedByMessageId: message.id,
+        ...(input.resolves.chosenOption !== undefined ? { chosenOption: input.resolves.chosenOption } : {}),
+      })).then((decision) => ({ message, decision }), (failure: unknown) => ({ message, failure }));
+      input.onSaved?.(outcome);
+      return outcome;
     });
     afterWrite(place.workspaceId, target, true, input.writer);
     return answered;

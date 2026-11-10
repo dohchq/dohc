@@ -241,6 +241,8 @@ export const CHANNELS = {
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
   agentsListening: "desktop:agents-listening",
+  // Main's cached personal agents changed.
+  personalAgents: "desktop:personal-agents",
   chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",

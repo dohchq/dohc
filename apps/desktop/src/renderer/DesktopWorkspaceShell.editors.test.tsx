@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import type { ReadWorkspaceTextPayload, RefreshSharedViewResult, SyncDmsResult, WriteWorkspaceTextPayload, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { PersonalAgentsEvent, ReadWorkspaceTextPayload, RefreshSharedViewResult, SyncDmsResult, WriteWorkspaceTextPayload, WorkspaceUiState } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { pendingHeadingTargetForOpen, type Workspace } from "./DesktopWorkspaceShell";
@@ -3623,6 +3623,69 @@ describe("ui-state merge-on-load", () => {
     await user.type(await screen.findByTestId("chats-new-thread-composer"), "@");
     const options = await screen.findAllByTestId("chats-new-thread-mention-option");
     expect(options.some((option) => option.dataset.candidateId === "agent:default")).toBe(enabled);
+  });
+
+  // A rename on another computer reaches this one through the next notice
+  // pull, and main pushes the new roster. The @ picker uses it at once,
+  // without Settings opening, and sending asks the server nothing.
+  it("offers a personal agent under the name its latest roster gives", async () => {
+    const user = userEvent.setup();
+    const agentId = `p-${"c".repeat(26)}`;
+    const roster = (name: string, revision: number): PersonalAgentsEvent => ({
+      accounts: [{
+        accountKey: "relay.test:user-1",
+        host: "relay.test",
+        agentLinkOrigin: "https://relay.test",
+        roster: {
+          revision,
+          agents: [{
+            agentId, name, hue: "teal", reportedProduct: null, reportedVersion: null, status: "active",
+            createdAtMs: 1, signedInAtMs: 1, lastActionAtMs: null,
+            reach: [{ workspaceId: WORKSPACE.workspaceId, level: "comment" }],
+          }],
+          workspaces: [{ workspaceId: WORKSPACE.workspaceId, name: "Personal" }],
+        },
+        failure: null,
+      }],
+    });
+    const bridge = Object.assign(chatsPageBridge(CHATS_PAGE_STATE), {
+      listChatChannelShares: vi.fn(async () => ({
+        joined: [], sessionKey: null,
+        relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+      })),
+      startChannelThread: vi.fn(() => new Promise<never>(() => {})),
+    });
+    bridge.readPersonalAgents.mockResolvedValue(roster("Grok Bot", 3));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<DesktopWorkspaceShell
+      workspace={WORKSPACE}
+      workspaces={[WORKSPACE]}
+      {...shellBootstrapProps(bridge)}
+      userSettings={{ source: "stored", settings: DEFAULT_USER_SETTINGS }}
+      onSwitchWorkspace={() => {}}
+    />);
+    await screen.findByTestId("chats-personal-feed");
+    await waitFor(() => expect(bridge.readPersonalAgents).toHaveBeenCalledWith({ refresh: false }));
+    act(() => bridge.emitPersonalAgents(roster("Iris", 4)));
+    const reads = bridge.readPersonalAgents.mock.calls.length;
+
+    await user.click(screen.getByTestId("activity-chats"));
+    await user.click(await screen.findByTestId("chats-channel"));
+    const composer = await screen.findByTestId("chats-new-thread-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@Ir");
+    const option = (await screen.findAllByTestId("chats-new-thread-mention-option"))
+      .find((candidate) => candidate.dataset.candidateId === `agent:${agentId}`);
+    expect(option?.textContent).toContain("Iris");
+    expect(option?.textContent).not.toContain("Grok Bot");
+    await user.click(option!);
+    expect(composer.value).toContain("@Iris");
+    expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
+
+    await user.type(composer, "plan the trip{Enter}");
+    await waitFor(() => expect(bridge.startChannelThread).toHaveBeenCalledTimes(1));
+    expect(bridge.readPersonalAgents).toHaveBeenCalledTimes(reads);
+    expect(bridge.changePersonalAgent).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("agent-list")).toBeNull();
   });
 
   it("keeps Home open when a DM link cannot resolve and offers a retry", async () => {

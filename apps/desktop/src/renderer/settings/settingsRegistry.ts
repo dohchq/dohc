@@ -37,7 +37,7 @@ export const SETTINGS_SECTIONS = [
     label: "General",
     scope: "User",
     group: "you",
-    keywords: ["workspace", "path", "version", "name", "identity"],
+    keywords: ["workspace", "path", "version", "update", "name", "identity", "profile", "color"],
     Icon: Settings,
   },
   {

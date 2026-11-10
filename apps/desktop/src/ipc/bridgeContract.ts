@@ -31,6 +31,8 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
+import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-work";
 import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
@@ -63,6 +65,7 @@ import {
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
+  OPTION_COLORS,
 } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath, MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
 import type {
@@ -690,6 +693,7 @@ const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
   type: z.enum(["select", "multi-select"]),
   options: z.array(z.string().max(500)).max(MAX_SCHEMA_COLLECTION_ITEMS),
+  colors: z.record(z.string().max(500), z.enum(OPTION_COLORS)).optional(),
 });
 const RelationFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
@@ -1478,7 +1482,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
     .object({
-      cause: z.enum(["server-unreachable", "claim-refused", "unknown"]),
+      // A busy server is fixed by a later pass, so it shows as a ring first.
+      cause: z.enum(["server-unreachable", "server-busy", "claim-refused", "unknown"]),
       detail: z.string(),
       // When this failure began, and how many passes have failed since.
       sinceMs: z.number(),
@@ -2099,6 +2104,21 @@ export const ChatReportedAgentRecord = z.object({
 });
 export type ChatReportedAgentRecord = z.infer<typeof ChatReportedAgentRecord>;
 
+// What an agent reported about work it does outside dohc: where the work
+// stands, and a web link to it. dohc shows both only as reported.
+const ChatWorkReportRecord = z.object({
+  status: z.enum(CHAT_WORK_STATUSES),
+  url: z.string().refine(isWorkUrl).optional(),
+});
+// A thread's Work card: its newest work report, and the agent that wrote it.
+export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
+  messageId: OPAQUE_ID,
+  authorDisplayName: z.string().min(1).max(200),
+  authorOwnerDisplayName: z.string().min(1).max(200).optional(),
+  reportedAtMs: z.number(),
+});
+export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
@@ -2110,6 +2130,7 @@ export const ChatMessageRecord = z.object({
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   authorReported: ChatReportedAgentRecord.optional(),
+  work: ChatWorkReportRecord.optional(),
   // The agent in Settings that wrote it, which only main records.
   authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
@@ -2297,20 +2318,35 @@ export const ChatDecisionRecord = z.object({
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
-export const SendChatMessageResult = z.object({
-  message: ChatMessageRecord,
-  // The message asks an agent, and Restricted Mode holds it until the person
-  // trusts the workspace.
-  waitsForTrust: z.literal(true).optional(),
-  // The question or poll the message asked, read back after the write.
-  // Absent when it asked none, or when that read failed.
-  decision: ChatDecisionRecord.optional(),
-  // The question or poll the message answered. One another message resolved
-  // first comes back as that message left it.
-  resolved: ChatDecisionRecord.optional(),
-  // Why the answer failed. The message landed and the question stays open.
-  resolveFailure: z.string().optional(),
+// A message that saved, when a step after the save failed or the window's
+// workspace changed. It names only the message this window wrote, so the
+// window does not send it again and reloads the thread itself. It carries
+// nothing main read after the save.
+export const SavedChatMessage = z.object({
+  message: z.object({ id: OPAQUE_ID, threadId: OPAQUE_ID }),
+  // What failed after the save.
+  failure: z.string(),
 });
+export type SavedChatMessage = z.infer<typeof SavedChatMessage>;
+
+export const SendChatMessageResult = z.union([
+  z.object({
+    message: ChatMessageRecord,
+    // The message asks an agent, and Restricted Mode holds it until the person
+    // trusts the workspace.
+    waitsForTrust: z.literal(true).optional(),
+    // The question or poll the message asked, read back after the write.
+    // Absent when it asked none, or when that read failed.
+    decision: ChatDecisionRecord.optional(),
+    // The question or poll the message answered. One another message resolved
+    // first comes back as that message left it.
+    resolved: ChatDecisionRecord.optional(),
+    // Why the answer failed. The message landed and the question stays open.
+    resolveFailure: z.string().optional(),
+  }),
+  // As above, an answer whose question stays open also names why.
+  SavedChatMessage.extend({ resolveFailure: z.string().optional() }),
+]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 export const ListChatThreadDecisionsPayload = z.object({
@@ -2447,6 +2483,8 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   // Main always supplies the engine-derived count. Optionality keeps older
   // renderer fixtures and pre-phase-4 bridge consumers source-compatible.
   openDecisionCount: z.number().int().min(0).optional(),
+  // The thread's Work card. Absent when no agent reported work in it.
+  work: ChatThreadWorkRecord.optional(),
   // Feed-only opening-message data. Optional + nullable keeps older bridge
   // fixtures compatible while allowing an empty/corrupt legacy thread to be
   // represented without fabricating a message.
@@ -2628,16 +2666,20 @@ export const StartChannelThreadPayload = z.object({
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
 
-export const StartChannelThreadResult = z.object({
-  thread: ChannelThreadRecord,
-  message: ChatMessageRecord,
-  // Main derives this from the author identity used for the opening message.
-  viewerAuthorId: OPAQUE_ID,
-  // As on SendChatMessageResult: the opening message's question or poll.
-  decision: ChatDecisionRecord.optional(),
-  // As on SendChatMessageResult.
-  waitsForTrust: z.literal(true).optional(),
-});
+export const StartChannelThreadResult = z.union([
+  z.object({
+    thread: ChannelThreadRecord,
+    message: ChatMessageRecord,
+    // Main derives this from the author identity used for the opening message.
+    viewerAuthorId: OPAQUE_ID,
+    // As on SendChatMessageResult: the opening message's question or poll.
+    decision: ChatDecisionRecord.optional(),
+    // As on SendChatMessageResult.
+    waitsForTrust: z.literal(true).optional(),
+  }),
+  // The opening message saved. Its threadId names the new thread.
+  SavedChatMessage,
+]);
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 
 export const MarkChatThreadReadPayload = z.object({
@@ -3165,6 +3207,16 @@ export type ListWorkspaceVersionConflictsResult = z.infer<
   typeof ListWorkspaceVersionConflictsResult
 >;
 
+// Open conflicts a merge left, per version they came from, without their
+// text. The count reads a bounded number of pages; `more` says the list ran on.
+export const CountWorkspaceVersionConflictsResult = z.object({
+  versions: z.array(z.object({ versionId: OPAQUE_ID, count: z.number().int().positive() })),
+  more: z.boolean(),
+});
+export type CountWorkspaceVersionConflictsResult = z.infer<
+  typeof CountWorkspaceVersionConflictsResult
+>;
+
 export const ResolveWorkspaceVersionConflictPayload = z.object({
   workspaceId: WORKSPACE_ID,
   conflictId: OPAQUE_ID,
@@ -3300,6 +3352,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.conflicts.list",
     channel: "desktop:list-workspace-version-conflicts",
     payload: ListWorkspaceVersionConflictsPayload, result: ListWorkspaceVersionConflictsResult, ...versionGuard,
+  },
+  countWorkspaceVersionConflicts: {
+    capabilityId: "version.conflicts.list",
+    channel: "desktop:count-workspace-version-conflicts",
+    payload: WorkspaceIdPayload, result: CountWorkspaceVersionConflictsResult, ...versionGuard,
   },
   resolveWorkspaceVersionConflict: {
     capabilityId: "version.conflict.resolve",
@@ -5935,6 +5992,14 @@ export const AgentRunPayload = z.object({
 });
 export type AgentRunPayload = z.infer<typeof AgentRunPayload>;
 
+// A run a person starts in Settings for one agent they run. Main refuses an
+// id that names no agent they run, and the run's writes carry this id.
+export const StartAgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  agentId: AgentId,
+}).strict();
+export type StartAgentRunPayload = z.infer<typeof StartAgentRunPayload>;
+
 export const EndAgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
   runId: OPAQUE_ID,
@@ -5996,9 +6061,14 @@ export type ResumeThreadDispatchPayload = z.infer<
   typeof ResumeThreadDispatchPayload
 >;
 
+// The most earlier posts of an agent's chat one dispatch read covers.
+export const CHAT_DISPATCH_POST_THREADS_MAX = 1_000;
 export const ChatDispatchStateForThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  threadId: OPAQUE_ID,
+  // The conversation. An agent's chat with only earlier posts has none.
+  threadId: OPAQUE_ID.nullable(),
+  // An agent's chat's earlier posts, where a reply can wait for the agent too.
+  postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
 }).strict();
 export type ChatDispatchStateForThreadPayload = z.infer<
   typeof ChatDispatchStateForThreadPayload
@@ -6058,6 +6128,14 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
+  // The messages here and in the earlier posts asked for that wait for the
+  // agent at work, here or in another chat, to end its run, so a line under
+  // each says it will reply.
+  waiting: z.object({
+    agentId: AgentId,
+    name: z.string().min(1).max(1_000),
+    triggerMessageIds: z.array(OPAQUE_ID).min(1),
+  }).strict().optional(),
   // The conversation's run that didn't reply, while it is the one to show.
   failedRun: ChatDispatchFailedRun.optional(),
 }).strict();
@@ -6109,6 +6187,14 @@ export const SetAppPinnedPayload = z.object({
   pinned: z.boolean(),
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
+// Archives or unarchives one chat in this person's sidebar for one workspace.
+export const SetChatArchivedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  channelId: OPAQUE_ID,
+  archived: z.boolean(),
+}).strict();
+export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
 
 // Ids of entries in the settings file, broken ones included, so Undo can put
 // back an order with an entry dohc could not use.
@@ -6889,6 +6975,8 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
   recovery: z.literal("automation-controls").optional(),
+  settings: z.literal("agents").optional(),
+  agent: NOTICE_TARGET_FIELD,
 }).refine(isNoticeTarget);
 export const AutomationControlsTargetShape = z.object({
   recovery: z.literal("automation-controls"),
@@ -7102,6 +7190,85 @@ export const agentsListeningOperations = {
     scope: "device",
     channel: "desktop:read-agents-listening",
     payload: z.strictObject({}), result: AgentsListeningEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
+// The personal agents of the server account this computer is signed in to,
+// as main caches them from the relay. A removed agent is left out.
+export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
+export const PERSONAL_AGENT_REACH_LIMIT = 20;
+export const PersonalAgentLevel = z.enum(["view", "comment"]);
+export type PersonalAgentLevel = z.infer<typeof PersonalAgentLevel>;
+const RelayWorkspaceId = z.string().min(1).max(256);
+export const PersonalAgentReach = z.strictObject({ workspaceId: RelayWorkspaceId, level: PersonalAgentLevel });
+export type PersonalAgentReach = z.infer<typeof PersonalAgentReach>;
+export const PersonalAgent = z.strictObject({
+  agentId: z.string().regex(PERSONAL_AGENT_ID),
+  name: z.string().min(1).max(256),
+  hue: z.enum(AGENT_HUES),
+  // What the agent's program says it is, and its version. dohc can't check either.
+  reportedProduct: z.string().min(1).max(256).nullable(),
+  reportedVersion: z.string().min(1).max(256).nullable(),
+  status: z.enum(["active", "signed_out"]),
+  createdAtMs: z.number().int().nonnegative(),
+  // When it last signed in, or null when the relay has no record of it.
+  signedInAtMs: z.number().int().nonnegative().nullable(),
+  lastActionAtMs: z.number().int().nonnegative().nullable(),
+  reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT),
+});
+export type PersonalAgent = z.infer<typeof PersonalAgent>;
+export const PersonalAgentRoster = z.strictObject({
+  revision: z.number().int().nonnegative(),
+  agents: z.array(PersonalAgent),
+  // The workspaces the account owns on the server, which a reach can name.
+  workspaces: z.array(z.strictObject({ workspaceId: RelayWorkspaceId, name: z.string().min(1).max(1_024).nullable() })),
+});
+export type PersonalAgentRoster = z.infer<typeof PersonalAgentRoster>;
+export const PersonalAgentsAccount = z.strictObject({
+  accountKey: z.string().min(1),
+  host: z.string().min(1),
+  // Where a personal agent link starts: `${agentLinkOrigin}/mcp/agent/w/<workspaceId>`.
+  agentLinkOrigin: z.string().url(),
+  // Null until the first read answers.
+  roster: PersonalAgentRoster.nullable(),
+  // Why the last read failed. The roster above stays as it was.
+  failure: z.string().min(1).nullable(),
+});
+export type PersonalAgentsAccount = z.infer<typeof PersonalAgentsAccount>;
+export const PersonalAgentsEvent = z.strictObject({ accounts: z.array(PersonalAgentsAccount) });
+export type PersonalAgentsEvent = z.infer<typeof PersonalAgentsEvent>;
+export const PersonalAgentChange = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("name"), name: z.string().min(1).max(256) }),
+  z.strictObject({ kind: z.literal("hue"), hue: z.enum(AGENT_HUES) }),
+  z.strictObject({ kind: z.literal("reach"), reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT) }),
+  z.strictObject({ kind: z.literal("sign-out") }),
+  z.strictObject({ kind: z.literal("remove") }),
+  z.strictObject({ kind: z.literal("restore") }),
+]);
+export type PersonalAgentChange = z.infer<typeof PersonalAgentChange>;
+export const PersonalAgentChangeResult = z.discriminatedUnion("ok", [
+  z.strictObject({ ok: z.literal(true), personalAgents: PersonalAgentsEvent }),
+  z.strictObject({ ok: z.literal(false), error: z.string().min(1) }),
+]);
+export type PersonalAgentChangeResult = z.infer<typeof PersonalAgentChangeResult>;
+export const personalAgentsOperations = {
+  // `refresh` asks the relay first, as Settings › Agents does when it opens.
+  readPersonalAgents: {
+    capabilityId: "agent.personal.read",
+    scope: "device",
+    channel: "desktop:read-personal-agents",
+    payload: z.strictObject({ refresh: z.boolean() }), result: PersonalAgentsEvent, guard: "trusted-sender",
+  },
+  changePersonalAgent: {
+    capabilityId: "agent.personal.change",
+    scope: "device",
+    channel: "desktop:change-personal-agent",
+    payload: z.strictObject({
+      accountKey: z.string().min(1),
+      agentId: z.string().regex(PERSONAL_AGENT_ID),
+      change: PersonalAgentChange,
+    }),
+    result: PersonalAgentChangeResult, guard: "trusted-sender",
   },
 } as const satisfies OperationTable;
 
@@ -7674,6 +7841,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentsListeningOperations>,
+    OperationBridge<typeof personalAgentsOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7845,7 +8013,7 @@ export interface DohcDesktopBridge
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
-  startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
+  startAgentRun(payload: StartAgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
@@ -7913,6 +8081,8 @@ export interface DohcDesktopBridge
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
   // An agent you run started or stopped waiting for messages on this computer.
   onAgentsListening(listener: (event: AgentsListeningEvent) => void): () => void;
+  // Main's cached personal agents changed: a read, a change, or another account.
+  onPersonalAgents(listener: (event: PersonalAgentsEvent) => void): () => void;
   // An agent request changed state in a group this window shows: re-read
   // that group's page.
   onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;

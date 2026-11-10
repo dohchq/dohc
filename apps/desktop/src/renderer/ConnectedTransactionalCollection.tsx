@@ -5,7 +5,7 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
+import type { DatasetCopyStatus, DatasetMigrationPreparation, DatasetSchemaChange } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
@@ -98,6 +98,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const [viewingPending, setViewingPending] = useState(false);
   // True, or the type of the new field the dialog opens on.
   const [editingFields, setEditingFields] = useState<boolean | "date">(false);
+  // A failed field change that Try again prepares once the page read the Collection again.
+  const [fieldRetry, setFieldRetry] = useState<{ change: DatasetSchemaChange } | null>(null);
   const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -114,12 +116,13 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
   useEffect(() => { pageOpen.current = true; return () => { pageOpen.current = false; }; }, []);
-  const refresh = useCallback(async () => {
+  // Says whether this read showed the Collection, failed, or gave way to a newer read.
+  const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
     const sequence = ++request.current;
     setLoading(true);
     try {
       const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: describedId.current, action: "describe", ...(owner ? { includeArchived: true } : {}) });
-      if (sequence !== request.current) return;
+      if (sequence !== request.current) return "superseded";
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
       onSettled?.(openIdentity);
@@ -128,8 +131,9 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
+      return "read";
     } catch (error) {
-      if (sequence !== request.current) return;
+      if (sequence !== request.current) return "superseded";
       setRecordsVersion(value => value + 1);
       const refused = readCollectionsRefusal(error), away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
@@ -137,9 +141,19 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
       if (refused || away) setDataset(null);
       else onError("Could not open this Collection.", error, () => { void refresh(); }, openIdentity);
+      return "failed";
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetPath, onError, onSettled, openIdentity, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
+  // The Collection may have changed somewhere else, as through the CLI, which tells this page nothing.
+  const retryFieldChange = useCallback(async (change: DatasetSchemaChange) => {
+    // A newer read, as after a change to the rules, replaces this one, so read again until one shows the Collection.
+    let read;
+    do read = await refresh(); while (read === "superseded" && pageOpen.current);
+    if (read !== "read" || !pageOpen.current) return;
+    setFieldRetry({ change });
+    setEditingFields(open => open || true);
+  }, [refresh]);
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
     const result = await bridge().dataset({ ...input, action: "migrationPreviewPage" });
@@ -396,8 +410,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       onChooseButton={table ? chooseButton : undefined}
       onButtonAdded={table ? chooseButton : undefined}
       onLoadPreview={loadMigrationPreview}
-      onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
+      retry={fieldRetry} onRetry={change => { void retryFieldChange(change); }}
+      onClose={() => { setEditingFields(false); setFieldRetry(null); }} onReviewSource={() => { setEditingFields(false); setFieldRetry(null); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
+        setFieldRetry(null);
         signal.throwIfAborted();
         const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
         signal.throwIfAborted();

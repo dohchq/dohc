@@ -153,6 +153,10 @@ export const bridgeMock = {
   chatRunRecordsForThread: vi.fn(),
   sendChatMessage: vi.fn(),
   markChatThreadRead: vi.fn(),
+  setChatArchived: vi.fn(),
+  getUserSettings: vi.fn(),
+  setUserSettings: vi.fn(),
+  orderAgents: vi.fn(),
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
   syncDms: vi.fn(),
@@ -474,7 +478,7 @@ export function navigatorView(readRevision: number, extra: ExtraProps = {}) {
 }
 
 export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsViewProps["onError"]>(), extra: ExtraProps = {}) {
-  render(
+  const { unmount } = render(
     <ChatsView
       workspaceId="workspace-a"
       workspaces={[
@@ -486,7 +490,7 @@ export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsVi
       {...extra}
     />,
   );
-  return { onOpenFileChat, onError };
+  return { onOpenFileChat, onError, unmount };
 }
 
 export const mentionRoster = [

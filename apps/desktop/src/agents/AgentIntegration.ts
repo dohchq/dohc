@@ -5,7 +5,6 @@ import { randomUUID } from "node:crypto";
 import { DOHC_AGENT_RUNS_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import { UNNAMED_AGENT_ID } from "@dohc/workspace-contracts/engine";
 import type { ActiveAgentRun } from "./activeAgentRun";
 
 // Local agent runs. An agent run is a LOCAL concept: a small record in this
@@ -52,7 +51,6 @@ interface AgentIntegrationAuthority {
 export interface AgentIntegrationOptions {
   acquire(workspaceId: string): AgentIntegrationAuthority;
   workspaceIds(): string[];
-  agentId?: string;
   // The person this computer's agent runs work for, read when a run starts.
   localPersonId(): string;
   // This installation's stable id. It names the file that holds its runs.
@@ -173,7 +171,6 @@ async function writeRuns(rootPath: string, installId: string, runs: AgentRunReco
 export function createAgentIntegration(options: AgentIntegrationOptions) {
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
-  const agentId = options.agentId ?? UNNAMED_AGENT_ID;
   const incarnation = options.incarnation ?? randomUUID();
   const ownRuns = (root: string) => readRuns(root, options.installId());
   const saveOwnRuns = (root: string, runs: AgentRunRecord[]) => writeRuns(root, options.installId(), runs);
@@ -213,9 +210,9 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     });
   }
 
-  // Records the run. The active-run slot is set so the watcher attributes the
-  // run's writes to the agent until endAgentRun clears it.
-  async function startAgentRun(workspaceId: string): Promise<AgentRunRecord> {
+  // Records the run for one agent. The active-run slot is set so the watcher
+  // attributes the run's writes to that agent until endAgentRun clears it.
+  async function startAgentRun(workspaceId: string, agentId: string): Promise<AgentRunRecord> {
     const authority = options.acquire(workspaceId);
     const root = authority.rootPath;
     const state = authority.state;

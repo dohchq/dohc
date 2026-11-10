@@ -2,18 +2,21 @@ import { noticesWords } from "@dohc/interface-words/notices";
 import { usePathname } from "expo-router";
 import { NativeTabs } from "expo-router/native-tabs";
 import { File, Paths } from "expo-file-system";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { useWorkspaces, WorkspacesProvider } from "../../src/chats/Workspaces";
 import { demoMode } from "../../src/demo";
 import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
-import { ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
+import { sampleBuild } from "../../src/sampleBuild";
+import { FeedNotice } from "../../src/workspace/FeedNotice";
+import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
 import { useTheme } from "../../src/theme";
 
-const sampleToast: ToastMessage = {
+// Design review's toast. The sample test is written out, so a build without sample data drops it (src/sampleBuild.ts).
+const sampleToast: ToastMessage | null = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? {
   tone: "failure", sender: "automation", title: "Automation “Budget sync” failed", body: "The exchange-rate source didn’t answer.",
   action: { label: noticesWords.tryAgain },
-};
+} : null;
 
 // The platform's own tab bar: Liquid Glass on iOS 26, Material on Android.
 // Toasts sit above every tab except Notices, where each one already has its row.
@@ -33,8 +36,9 @@ function Tabs() {
   const unreadCount = (current?.sections ?? []).flatMap(section => section.rows).reduce((sum, row) => sum + (row.count ?? 0), 0);
   const pathname = usePathname();
   const [toast, setToast] = useState<ToastMessage | null>(demoMode === "toast" || demoMode === "toast-copied" ? sampleToast : null);
+  const hideToast = useCallback((id: string) => setToast(shown => shown?.id === id ? null : shown), []);
   return (
-    <ShowToast value={setToast}>
+    <ShowToast value={setToast}><HideToast value={hideToast}>
       <View style={{ flex: 1 }}>
         <NativeTabs tintColor={theme.accent}>
           <NativeTabs.Trigger name="(chats)">
@@ -57,7 +61,8 @@ function Tabs() {
           </NativeTabs.Trigger>
         </NativeTabs>
         {toast && pathname !== "/notices" ? <Toast message={toast} onClose={() => setToast(null)} /> : null}
+        {sampleBuild ? null : <FeedNotice />}
       </View>
-    </ShowToast>
+    </HideToast></ShowToast>
   );
 }

@@ -1,3 +1,4 @@
+import { DohcMark } from "@dohc/brand";
 import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
@@ -40,21 +41,21 @@ import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { applyLookSettings, currentLookRevision } from "../theme";
 import { reportInstallationFailure } from "../shell/installationNotices";
+import { workspaceName } from "../Titlebar";
 import { palette } from "../tokens";
 import { useColorScheme } from "../useColorScheme";
-import { ChatAvatar } from "../workbench/ChatAvatar";
-import { ownPresentation } from "../workbench/actorPresentation";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
 import { ShellErrorReporter } from "../shell/useShellError";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
-import { PreferredNameControl } from "./PreferredNameControl";
+import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
   ColorControl,
   HueControl,
+  ResetButton,
   SettingRow,
   SettingsSection,
   StepperControl,
@@ -157,6 +158,9 @@ export function SettingsDialog(props: {
   // The part a Customize… command opened Settings for: its row is marked and
   // takes focus.
   focus?: CustomizeTarget;
+  // The personal agent whose page Settings › Agents opens, by id, such as
+  // the one a sign-in notice names. Each request is a new object.
+  openAgent?: { agentId: string };
   onClose: () => void;
   /** The shell's server connection for this workspace, for Sync and sharing. */
   cloud?: CloudSettings;
@@ -707,23 +711,6 @@ export function SettingsDialog(props: {
                 />
               </SettingRow>
             </SettingsSection>
-            <SettingsSection title="You">
-              <SettingRow
-                title="Your color"
-                modified={userSettings.appearance.yourColor !== null}
-                onReset={() => void saveAppearance({ yourColor: null })}
-                testId="settings-row-your-color"
-                {...customizeRow("settings-row-your-color")}
-              >
-                <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
-                <HueControl
-                  label="Your color"
-                  shape="person"
-                  value={userSettings.appearance.yourColor}
-                  onChange={(yourColor) => void saveAppearance({ yourColor })}
-                />
-              </SettingRow>
-            </SettingsSection>
             <SettingsSection title="Editor">
               <SettingRow
                 title="Editor font"
@@ -790,6 +777,8 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
+              workspaceName={props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+              {...(props.openAgent ? { openAgent: props.openAgent } : {})}
               settings={userSettings}
               agentProblems={userResult?.agentProblems}
               onSave={saveUserSettings}
@@ -1092,22 +1081,15 @@ export function SettingsDialog(props: {
       default:
         return (
           <div data-testid={settingsSectionPin("general")}>
-            <SettingsSection title="Profile">
-              <SettingRow
-                title="Your name"
-                modified={isModified(
-                  userSettings.profile.preferredName,
-                  DEFAULT_USER_SETTINGS.profile.preferredName,
-                )}
-                onReset={() =>
-                  void saveUserSettings({
-                    ...userSettings,
-                    profile: { ...userSettings.profile, preferredName: undefined },
-                  })
-                }
-                testId="settings-row-preferred-name"
+            <SettingsSection>
+              <div
+                data-testid="settings-row-preferred-name"
+                {...(props.focus?.row === "settings-row-preferred-name"
+                  ? { "data-highlighted": true, role: "group", "aria-label": "Profile", tabIndex: -1 }
+                  : {})}
+                className={`py-5 ${props.focus?.row === "settings-row-preferred-name" ? "-mx-2 my-2 rounded-md bg-selected px-2 py-3" : ""}`}
               >
-                <PreferredNameControl
+                <ProfileHeader
                   value={userSettings.profile.preferredName}
                   onChange={async (preferredName) => {
                     await saveUserSettings({
@@ -1116,14 +1098,44 @@ export function SettingsDialog(props: {
                     });
                   }}
                   testIdPrefix="general-preferred-name"
-                />
-              </SettingRow>
+                >
+                  <div data-testid="settings-row-your-color" className="flex items-center gap-2">
+                    {/* Reset gives the choice back to dohc. */}
+                    <ResetButton
+                      onReset={userSettings.appearance.yourColor === null ? undefined : () => void saveAppearance({ yourColor: null })}
+                    />
+                    <HueControl
+                      label="Your color"
+                      shape="person"
+                      value={userSettings.appearance.yourColor}
+                      onChange={(yourColor) => void saveAppearance({ yourColor })}
+                    />
+                  </div>
+                </ProfileHeader>
+              </div>
             </SettingsSection>
             <SettingsSection title="App">
               <SettingRow
-                title="Updates"
+                title="dohc"
+                lead={
+                  <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-lg border border-line bg-bg text-ink">
+                    <DohcMark size={18} />
+                  </span>
+                }
+                // No channel: a nightly's version names it, and "latest"
+                // beside a failure reads as up to date.
+                detail={updateState?.currentVersion ? (
+                  <span data-testid="desktop-updates-version" className="font-mono text-[12px] tabular-nums text-subtle">
+                    <span className="sr-only">Version </span>
+                    {updateState.currentVersion}
+                  </span>
+                ) : null}
                 description={
-                  <span data-testid="desktop-updates-status" data-state={updateState?.status ?? "unknown"}>
+                  <span
+                    data-testid="desktop-updates-status"
+                    data-state={updateState?.status ?? "unknown"}
+                    className={updateState?.failure ? "text-danger" : undefined}
+                  >
                     {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
                   </span>
                 }
@@ -1137,13 +1149,6 @@ export function SettingsDialog(props: {
                 ) : undefined}
                 testId="settings-row-desktop-updates"
               >
-                {/* No channel: a nightly's version names it, and "latest"
-                    beside a failure reads as up to date. */}
-                {updateState?.currentVersion ? (
-                  <span data-testid="desktop-updates-version" className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
-                    Version {updateState.currentVersion}
-                  </span>
-                ) : null}
                 {/* One button for every step. It fills once the next step is
                     the person's: Update, then Restart to update. */}
                 {update.step ? (

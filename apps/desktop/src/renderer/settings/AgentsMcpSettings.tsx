@@ -9,10 +9,13 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { AgentList } from "./AgentList";
-import { SettingRow } from "./SettingRow";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
+  // What the open workspace goes by, for its agent link.
+  workspaceName: string;
+  // The personal agent whose page opens, by id, such as one a notice names.
+  openAgent?: { agentId: string };
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
   onClearError?: (identity: string) => void;
   settings: DesktopUserSettings;
@@ -87,9 +90,8 @@ export function AgentsMcpSettings(props: {
     };
   }, [loadSettings, workspaceId]);
 
-  const runActive = Boolean(status?.activeRun);
-
-  const toggle = useCallback(async () => {
+  // Starts a run for this agent, or stops the run that is on, whichever agent it is for.
+  const toggle = useCallback(async (agentId: string) => {
     const version = requestVersionRef.next();
     const renderedRunId = status?.activeRun?.id ?? null;
     const starting = renderedRunId === null;
@@ -115,7 +117,7 @@ export function AgentsMcpSettings(props: {
           if (renderedRunId !== null) {
             await bridge().endAgentRun({ workspaceId, runId: renderedRunId });
           } else {
-            await bridge().startAgentRun({ workspaceId });
+            await bridge().startAgentRun({ workspaceId, agentId });
           }
           changed = true;
         }
@@ -155,6 +157,8 @@ export function AgentsMcpSettings(props: {
     <div className="flex flex-col">
       <AgentList
         workspaceId={workspaceId}
+        workspaceName={props.workspaceName}
+        {...(props.openAgent ? { openAgent: props.openAgent } : {})}
         settings={props.settings}
         agentProblems={props.agentProblems}
         config={config}
@@ -167,39 +171,17 @@ export function AgentsMcpSettings(props: {
         {...(props.onClearError ? { onClearError: props.onClearError } : {})}
         {...(props.trust ? { trust: props.trust } : {})}
         {...(props.onNotice ? { onNotice: props.onNotice } : {})}
+        run={{
+          activeRun: status?.activeRun ? { id: status.activeRun.id, agentId: status.activeRun.agentId } : null,
+          busy,
+          onToggle: (agentId) => void toggle(agentId),
+        }}
       />
-
-      <SettingRow
-        title="Agent run"
-        description="While a run is active, history marks changes in this workspace as your agent's."
-        testId="settings-row-mcp-server"
-      >
-        <span
-          data-testid="mcp-status"
-          data-state={runActive ? "running" : "stopped"}
-          className="text-[11px] text-muted"
-        >
-          {runActive ? "Running" : "Stopped"}
-        </span>
-        <button
-          type="button"
-          data-testid="mcp-enable-toggle"
-          disabled={busy}
-          onClick={() => void toggle()}
-          className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
-            runActive
-              ? "border border-line bg-transparent text-muted hover:bg-hover hover:text-ink"
-              : "bg-accent text-bg hover:opacity-90"
-          } disabled:opacity-50`}
-        >
-          {runActive ? "Stop run" : "Start run"}
-        </button>
-      </SettingRow>
 
       {retry ? (
         <div
           data-testid="mcp-load-error"
-          className="flex justify-end border-b border-line py-3 text-[11px]"
+          className="mt-3 flex justify-end text-[11px]"
         >
           <button
             type="button"

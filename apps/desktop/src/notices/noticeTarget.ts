@@ -29,7 +29,10 @@ export type NoticeTarget =
   | { to: "sync-settings" }
   // Sign-in when signed out, else the server's settings.
   | { to: "server-connection" }
-  | { to: "privacy-settings" };
+  | { to: "privacy-settings" }
+  // Settings › Agents, with the account's personal agents. `agent` is the id
+  // of the personal agent whose page opens, when the notice names one.
+  | { to: "agents-settings"; agent?: string };
 
 export const CHAT_NOT_FOUND_NOTE = "dohc could not find this chat.";
 export const FILE_NOT_FOUND_NOTE = "dohc could not find this file.";

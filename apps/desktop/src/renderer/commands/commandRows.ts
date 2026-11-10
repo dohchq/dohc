@@ -64,6 +64,7 @@ export const COMMAND_ROWS = {
   "check-updates": { label: "Check for updates", availability: "always" },
   "download-update": { label: "Update dohc", availability: "updateAvailable" },
   "install-update": { label: "Restart to update", availability: "updateReady" },
+  "whats-new": { label: "What's new", availability: "always" },
   "toggle-theme": { label: "Toggle light/dark theme", availability: "always" },
   "zoom-in": { label: "Zoom in", availability: "always" },
   "zoom-out": { label: "Zoom out", availability: "always" },

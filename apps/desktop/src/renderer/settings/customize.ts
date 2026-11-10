@@ -12,7 +12,7 @@ export interface CustomizeTarget {
 
 export const CUSTOMIZE_TARGETS: Record<CustomizePart, CustomizeTarget> = {
   sidebar: { section: "appearance", row: "settings-row-sidebar" },
-  chats: { section: "appearance", row: "settings-row-your-color" },
+  chats: { section: "general", row: "settings-row-preferred-name" },
   editor: { section: "appearance", row: "settings-row-editor-font" },
 };
 

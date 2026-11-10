@@ -89,6 +89,24 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
   });
 
+  // #3294: a busy server needs nothing from the person, so it is a ring with
+  // its words kept for the name, and a failed save still shows over it.
+  it("shows a busy server as a ring, not a failure", () => {
+    const busy = syncState("sync-failed", {
+      cause: "server-busy", detail: "RelayBusyError: The server is busy.", sinceMs: 1, attempts: 3,
+    });
+    const { rerender } = renderStatus({ syncStatus: busy });
+    const status = screen.getByRole("status", { name: "Server busy. dohc keeps trying to sync." });
+    expect(status.getAttribute("data-state")).toBe("sync-failed");
+    expect(status.getAttribute("title")).toBe("Server busy. dohc keeps trying to sync.");
+    expect(status.textContent).toBe("Server busy");
+    expect(dotOf()).toBe("working");
+    expect(worded()).toBe(false);
+    rerender(<WorkspaceSyncStatus syncStatus={busy} failedSaves={1} />);
+    expect(status.textContent).toBe("Couldn't save 1 file");
+    expect(dotOf()).toBe("attention");
+  });
+
   it("keeps the pinned testid/data-state and shows no count when clean", () => {
     renderStatus({
       syncStatus: {
