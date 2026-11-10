@@ -86,6 +86,8 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     const chatRows = rows.filter(row => channels.includes(row.channel));
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    // Marking a question answered is its own capability, not a reply.
+    expect(CAPABILITIES["chat.decision.resolve"].ipc.operations).toEqual(["resolveChatDecision"]);
     // A send holds its own workspace operation, so a failure after the save still answers.
     // Marking a saved reply's question answered holds the same operation.
     const sends = ["desktop:send-chat-message", "desktop:start-channel-thread", "desktop:resolve-chat-decision"];
