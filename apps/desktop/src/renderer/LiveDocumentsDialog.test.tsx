@@ -11,6 +11,7 @@ import {
   type LiveDocumentPage,
   type LiveDocumentRow,
   type LiveDocumentStopResult,
+  type LiveDocumentStopRunning,
   type LiveRefusalPage,
   type LiveRefusalRow,
   type LiveStopWaitingNotice,
@@ -1490,6 +1491,35 @@ describe("LiveDocumentsDialog", () => {
   });
 });
 
+
+it.each(["open", "closed"] as const)("answers a Stop from earlier openings once, with the list %s", async ending => {
+  const h = harness(), user = userEvent.setup(), stopping = deferred<LiveDocumentStopResult>();
+  const onStopPending = vi.fn();
+  const stopRunning: { current: LiveDocumentStopRunning | null } = { current: null };
+  h.load.mockResolvedValue(page([row("a.md")]));
+  h.stop.mockReturnValueOnce(stopping.promise);
+  const opening = () => render(<LiveDocumentsDialog workspaceId="ws" {...h} onStopPending={onStopPending} stopRunning={stopRunning} />);
+  const first = opening();
+  await user.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+  first.unmount();
+  const second = opening();
+  await within(await screen.findByTestId("live-document-row-a.md")).findByText("Stopping live editing…");
+  second.unmount();
+  if (ending === "open") {
+    opening();
+    await within(await screen.findByTestId("live-document-row-a.md")).findByText("Stopping live editing…");
+  }
+  await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+  if (ending === "open") {
+    const live = screen.getByTestId("live-document-row-a.md");
+    await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(onStopPending).not.toHaveBeenCalled();
+  } else {
+    expect(onStopPending).toHaveBeenCalledExactlyOnceWith("ws", "a.md", "object:a.md", expect.objectContaining({code: "edits-pending"}));
+  }
+  expect(stopRunning.current).toBeNull();
+  expect(h.stop).toHaveBeenCalledTimes(1);
+});
 
 it("focuses the withheld conflict cause once after Stop refuses, without retry or Resume", async () => {
   const h = harness();

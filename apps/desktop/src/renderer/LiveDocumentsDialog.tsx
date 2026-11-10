@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
@@ -29,6 +29,16 @@ export type LiveDocumentRow = {
 
 /** What a Stop did with edits the server refused. */
 export type LiveDocumentStopResult = { keptEdits: "none" | "recovered" | "kept" };
+/** A Stop the dialog asked for, until it answers. The shell keeps it, so a
+ * reopened dialog shows it and its answer; `shownIn` is the opening that does. */
+export type LiveDocumentStopRunning = {
+  workspaceId: string;
+  path: string;
+  objectId: string;
+  again?: LiveDocumentStopAgain;
+  answer: Promise<LiveDocumentStopResult>;
+  shownIn: object;
+};
 /** The kept edits a Try again runs the Stop for: their document, and why the Stop waits. */
 export type LiveDocumentStopAgain = { objectId: string; recovery: "not-written" | "stopping" };
 
@@ -63,6 +73,8 @@ export type LiveDocumentsDialogProps = {
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** A Stop refused after its dialog closed; the shell owns its retry and notice. */
   onStopPending?: (workspaceId: string, path: string, objectId: string, refusal: LiveStopRefusal) => void;
+  /** The Stop still running from this or an earlier opening, kept by the shell. */
+  stopRunning?: RefObject<LiveDocumentStopRunning | null>;
   /** The row a notice opened this dialog for. */
   reveal?: string;
   /** Writes the kept edits a row shows next to its file, settling when the save ends. The shell reports the result. */
@@ -311,6 +323,7 @@ export function LiveDocumentsDialog({
   onError,
   onStopped,
   onStopPending,
+  stopRunning,
   reveal,
   saveRecoveryCopy,
   readKeptEdits,
@@ -373,7 +386,21 @@ export function LiveDocumentsDialog({
     refusalRetry?.();
   }
 
-  function perform(work: Work): void {
+  // Kept by the shell until it answers, so a reopened dialog can show it.
+  function holdStop(work: Extract<Work, { kind: "stop" }>, startedIn: Scope): LiveDocumentStopRunning {
+    const answer = work.again ? stop(workspaceId, work.path, work.objectId, work.again) : stop(workspaceId, work.path, work.objectId);
+    const held: LiveDocumentStopRunning = { workspaceId, path: work.path, objectId: work.objectId,
+      ...(work.again ? { again: work.again } : {}), answer, shownIn: startedIn };
+    if (stopRunning) {
+      stopRunning.current = held;
+      const done = () => { if (stopRunning.current === held) stopRunning.current = null; };
+      void answer.then(done, done);
+    }
+    return held;
+  }
+
+  /** With `earlier`, the work waits for a Stop an earlier opening asked for. */
+  function perform(work: Work, earlier?: LiveDocumentStopRunning): void {
     // Synchronous, so a second click in the same tick cannot start a second
     // request before React re-renders the disabled buttons.
     if (running.current || !scope.current.live) return;
@@ -388,10 +415,24 @@ export function LiveDocumentsDialog({
 
     void (async () => {
       let mutated = false;
+      // Only the latest opening that shows a Stop shows or reports its answer.
+      let held: LiveDocumentStopRunning | null = null;
+      const shows = () => held === null || held.shownIn === startedIn;
+      let listRows = state.kind === "ready" ? state.rows : undefined;
+      let listed = true;
       try {
         if (work.kind === "stop") {
-          const { keptEdits } = await (work.again ? stop(workspaceId, work.path, work.objectId, work.again) : stop(workspaceId, work.path, work.objectId));
-          if (!isCurrent()) return;
+          held = earlier ?? holdStop(work, startedIn);
+          held.shownIn = startedIn;
+          if (earlier) {
+            // The rows show the Stop until its answer.
+            const shown = await load(workspaceId).catch(() => null);
+            listRows = shown?.documents;
+            listed = shown !== null;
+            if (isCurrent()) setState(shown ? { kind: "ready", rows: mergeRows([], shown.documents), nextCursor: shown.nextCursor } : { kind: "unknown" });
+          }
+          const { keptEdits } = await held.answer;
+          if (!shows() || !isCurrent()) return;
           mutated = true;
           setPendingStops(previous => {
             const next = new Map(previous);
@@ -422,9 +463,11 @@ export function LiveDocumentsDialog({
         }));
       } catch (error) {
         const refusal = work.kind === "stop" ? readLiveStopRefusal(error) : null;
+        if (!shows()) return;
         if (work.kind === "stop" && refusal) {
-          if (!isCurrent()) {
-            const row = state.kind === "ready" ? state.rows.find(row => !row.saveOnly && row.objectId === work.objectId) : undefined;
+          // Without its row, this opening cannot show the answer either.
+          if (!isCurrent() || !listed) {
+            const row = listRows?.find(row => !row.saveOnly && row.objectId === work.objectId);
             onStopPending?.(workspaceId, work.path, work.objectId,
               liveStopRefusalForRow(refusal, row));
             return;
@@ -549,7 +592,10 @@ export function LiveDocumentsDialog({
     refusalRunning.current = false;
     refusalPendingRetry.current = null;
     refusalCursor.current = undefined;
-    perform({ kind: "reload" });
+    const earlier = stopRunning?.current;
+    if (earlier?.workspaceId === workspaceId) {
+      perform({ kind: "stop", path: earlier.path, objectId: earlier.objectId, ...(earlier.again ? { again: earlier.again } : {}) }, earlier);
+    } else perform({ kind: "reload" });
     // One page of refusals on open; every later page is asked for by hand.
     performRefusals({ kind: "page" });
     return () => { scope.current.live = false; };
