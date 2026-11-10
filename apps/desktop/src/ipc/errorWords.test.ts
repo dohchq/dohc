@@ -325,14 +325,6 @@ describe("error words", () => {
     );
   });
 
-  it("says dohc left a file whose permissions it could not read, after the caller's sentence", () => {
-    const engine = acrossIpc(refusal("INTERNAL", "permissions-not-kept"), "desktop:write-workspace-file");
-    expect(readError(engine)).toMatchObject({ mapped: true, cause: "DaemonRefusalError [INTERNAL]: permissions-not-kept" });
-    expect(withErrorWords("Could not update notes.md on disk.", engine)).toBe(
-      "Could not update notes.md on disk. dohc could not read this file's permissions, so it left the file as it was. In the file's Properties › Security › Advanced, give your account Read permissions, then try again.",
-    );
-  });
-
   const LINK = "Put what it links to in its place, then try again.";
   const OTHER_OWNER = "Make it yours again, then try again.";
   const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";

@@ -391,6 +391,20 @@ describe("useSyncFailureNotice", () => {
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
   });
 
+  it("names a file whose permissions dohc could not read, with Try again", async () => {
+    const detail = "Error: Could not update notes/trip.txt on disk: permissions-not-kept";
+    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+    await waitFor(() => expect(view.toasts()).toHaveLength(1));
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]).toMatchObject({
+      kind: "cloud-sync",
+      title: "dohc could not sync this workspace",
+      message: "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.",
+      details: [["Detail", detail]],
+    });
+    expect(view.rows()[0]!.retry).toBeTypeOf("function");
+  });
+
   it("keeps the generic words for a failed pass that names no file", () => {
     expect(
       syncFailureNotice({ cause: "unknown", detail: "DaemonRefusalError: workspace operation failed", sinceMs: 1, attempts: 1 }),

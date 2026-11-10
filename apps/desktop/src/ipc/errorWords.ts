@@ -154,8 +154,6 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "file-locked": "Another program has this file open. Close it there, then try again.",
     "ydoc-session-busy": "This file is open for editing. Close its tabs, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
-    // Windows only: the file's own access could not be read, so dohc left it.
-    "permissions-not-kept": "dohc could not read this file's permissions, so it left the file as it was. In the file's Properties › Security › Advanced, give your account Read permissions, then try again.",
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
