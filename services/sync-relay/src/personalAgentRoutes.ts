@@ -451,13 +451,14 @@ export function createPersonalAgentToolRoutes(input: {
 
   // The current path of the file a thread is on, or null when the file is
   // gone. Undefined when it is on a file no share can serve, a secret file
-  // included. A path binding names its file even when the relay holds no
-  // object there, as for a secret file.
+  // included, or when its create binds no one file. A path binding names its
+  // file even when the relay holds no object there, as for a secret file.
   const filePathOf = (workspaceId: string, threadId: string): string | null | undefined => {
     const binding = storage.findThreadCreateFileBinding(workspaceId, threadId);
-    if (binding?.kind === "path" && visibleSharePath(MAIN_FILES, binding.path) === null) return undefined;
-    const path = binding?.kind === "object" ? storage.objectCurrentPath(workspaceId, binding.objectId) ?? null
-      : binding?.kind === "path" && storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : null;
+    if (!binding) return undefined;
+    if (binding.kind === "path" && visibleSharePath(MAIN_FILES, binding.path) === null) return undefined;
+    const path = binding.kind === "object" ? storage.objectCurrentPath(workspaceId, binding.objectId) ?? null
+      : storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : null;
     return path === null ? null : visibleSharePath(MAIN_FILES, path) ?? undefined;
   };
 

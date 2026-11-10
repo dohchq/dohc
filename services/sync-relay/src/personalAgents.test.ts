@@ -1413,7 +1413,12 @@ describe("a personal agent's wait", () => {
       fileThread("thread-by-path", { linkedPath: "config/.env" }),
       // A secret file has no object on the relay, so only its path names it.
       fileThread("thread-secret-only", { linkedPath: "keys/.env.production" }),
-      ...["kept", "env", "upper", "encoded", "moved", "by-path", "secret-only"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
+      // A create that binds a file twice, or a channel and a file path, binds
+      // nothing the agent can read.
+      fileThread("thread-twice", { linkedObjectId: "object-env", linkedPath: "config/.env" }),
+      chatChannelCreate("wire-team"),
+      chatThreadCreate("thread-channel-path", "wire-team", { linkedPath: "keys/.env.production", linkedAtMs: 2 }),
+      ...["kept", "env", "upper", "encoded", "moved", "by-path", "secret-only", "twice", "channel-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
     ]);
 
     const answer = await waitOnce(f, agent);
@@ -1715,8 +1720,10 @@ describe("a personal agent's reads", () => {
       chatChannelCreate("wire-team"),
       chatThreadCreate("thread-team", "wire-team"),
       chatThreadCreate("thread-both", "wire-team", { linkedObjectId: "object-env", linkedAtMs: 2 }),
+      chatThreadCreate("thread-both-path", "wire-team", { linkedPath: "keys/.env.production", linkedAtMs: 2 }),
       ownerSays("in-channel", "thread-team", "in the channel"),
       ownerSays("on-file", "thread-both", "about the file"),
+      ownerSays("on-path", "thread-both-path", "about the file"),
       ownerSays("in-channel-again", "thread-team", "in the channel again"),
     ]);
 

@@ -135,10 +135,10 @@ export function findThreadCreateChannelWireId(
       const record = asRecord(payload);
       if (!record || record.threadId !== threadId) continue;
       // The earliest matching op is authoritative, whatever it says: a string
-      // channelWireId with no linked-file owner is the binding; anything else
-      // (a file-linked/both-owned thread or a pre-wire-id slug binding) is "no
-      // shareable binding" — fail closed.
-      return record.linkedObjectId === undefined &&
+      // channelWireId with no linked-file owner, by object or by path, is the
+      // binding; anything else (a file-linked/both-owned thread or a
+      // pre-wire-id slug binding) is "no shareable binding" — fail closed.
+      return record.linkedObjectId === undefined && record.linkedPath === undefined &&
         typeof record.channelWireId === "string" &&
         record.channelWireId.length > 0
         ? record.channelWireId
