@@ -575,6 +575,10 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(run({...manual, confinement: {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
   }
+  const failedJavascript = run(jobs("true", "true", "failure", "success", "success"));
+  assert.equal(failedJavascript.status, 1);
+  assert.match(failedJavascript.stdout, /PASS \(rust completed group\)/,
+    "a failed JavaScript gate must not omit the Rust group's completed timing verdict");
   for (const [gate, finalJob, budget] of [["js", "typecheck + tests", 300], ["rust", "engine gate", 600]]) {
     const manual = jobs(undefined, undefined, gate === "js" ? "success" : "skipped", gate === "rust" ? "success" : "skipped", "success");
     const at = seconds => completed.map(row => row.name === finalJob ? {...row, completed_at: new Date(started + seconds * 1000).toISOString()} : row);

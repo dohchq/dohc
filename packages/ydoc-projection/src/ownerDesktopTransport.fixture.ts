@@ -554,6 +554,8 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
     // Every owned resource gets its close, in order, even after an earlier close fails.
     const cleanupErrors: unknown[] = [];
     const attempt = async (close: () => unknown) => {try {await close();} catch (error) {cleanupErrors.push(error);}};
+    // The quarantined owner tail remains pending; retire sessions through app shutdown.
+    await attempt(() => capture.beginShutdown());
     await attempt(() => releaseTailAdmission?.());
     await attempt(() => closeNamedPeer?.());
     await attempt(() => captures.mockRestore());

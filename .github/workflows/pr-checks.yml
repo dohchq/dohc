@@ -713,7 +713,7 @@ jobs:
           import { verifyCompletedCloud } from './scripts/verification/cloud-aggregate.mjs';
           const jobs = JSON.parse(process.env.JOBS);
           assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
-          for (const [gate, job] of [['js', 'javascript'], ['rust', 'rust']]) {
+          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust']].map(async ([gate, job]) => {
             if (process.env.EVENT_NAME === 'pull_request') {
               assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
             }
@@ -722,7 +722,9 @@ jobs:
               : jobs.changes.outputs[gate] === 'true';
             assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
             if (selected) await verifyCompletedCloud(gate);
-          }
+          }));
           const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
           assert.equal(jobs.confinement.result, confined ? 'success' : 'skipped', 'confinement job did not complete as selected');
+          const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
+          if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');
           NODE
