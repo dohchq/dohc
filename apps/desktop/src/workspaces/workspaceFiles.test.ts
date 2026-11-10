@@ -1629,6 +1629,22 @@ describe("screenPickedPaths", () => {
     });
     expect(existsSync(join(target, "copy.json"))).toBe(false);
   });
+
+  // Outside Windows a backslash is part of a name, so this folder holds no `.dohc` folder.
+  it.skipIf(process.platform === "win32")("keeps a file whose folder name has .dohc between backslashes, picked or dropped", async () => {
+    const folder = join(root, "archive\\.dohc\\old");
+    await mkdir(folder);
+    await writeFile(join(folder, "plain.md"), "plain");
+    const target = join(root, "target");
+    await mkdir(target);
+
+    const picked = await screenPickedPaths([join(folder, "plain.md")]);
+    expect(picked.usable).toEqual([join(folder, "plain.md")]);
+    const outcome = await importDroppedPaths(target, [join(folder, "plain.md")], []);
+
+    expect(outcome).toEqual({ imported: ["plain.md"], skipped: 0 });
+    expect(await readFile(join(target, "plain.md"), "utf8")).toBe("plain");
+  });
 });
 
 describe("importDroppedPaths", () => {
