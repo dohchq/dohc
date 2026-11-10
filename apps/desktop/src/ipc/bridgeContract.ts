@@ -1482,7 +1482,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
     .object({
-      cause: z.enum(["server-unreachable", "claim-refused", "unknown"]),
+      // A busy server is fixed by a later pass, so it shows as a ring first.
+      cause: z.enum(["server-unreachable", "server-busy", "claim-refused", "unknown"]),
       detail: z.string(),
       // When this failure began, and how many passes have failed since.
       sinceMs: z.number(),
