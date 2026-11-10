@@ -160,6 +160,9 @@ function fixture() {
         writer: PERSON, threadId: "thread", body: "Monday", resolveAttachments: attachments,
         resolves: { messageId: "question", chosenOption: "Monday" },
       }),
+      answerWith: () => writes.answerWith(place, {
+        writer: PERSON, threadId: "thread", messageId: "question", resolvedByMessageId: "message", chosenOption: "Monday",
+      }),
     },
   };
 }
@@ -475,7 +478,7 @@ describe("chat writes", () => {
   });
 
   for (const grant of ["read-only", "ended"] as const) {
-    it.each(["send", "start", "react", "answer"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
+    it.each(["send", "start", "react", "answer", "answerWith"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
       await expect(test.writeEach[kind]()).rejects.toThrow("You can only read this.");
@@ -484,7 +487,7 @@ describe("chat writes", () => {
     });
   }
 
-  it.each(["send", "start", "react", "answer", "file"] as const)("refuses %s in a received share before any store read", async (kind) => {
+  it.each(["send", "start", "react", "answer", "answerWith", "file"] as const)("refuses %s in a received share before any store read", async (kind) => {
     const test = fixture();
     test.row.shareView = {
       shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
@@ -501,7 +504,7 @@ describe("chat writes", () => {
     expectNothingWritten(test);
   });
 
-  it.each(["send", "start", "react", "answer"] as const)("requires the joined account to %s in a joined channel", async (kind) => {
+  it.each(["send", "start", "react", "answer", "answerWith"] as const)("requires the joined account to %s in a joined channel", async (kind) => {
     const test = fixture();
     test.row.sharedChannels = [joined];
     test.setCredentials(null);
@@ -698,6 +701,107 @@ describe("chat writes", () => {
     });
     expect(answered).toEqual({ message: expect.objectContaining({ id: "message" }), failure: refusal });
     expect(onSaved).toHaveBeenCalledExactlyOnceWith(answered);
+  });
+
+  // Try again after an answer whose reply saved while its question stayed open.
+  describe("answering with a reply that saved", () => {
+    // The reply as the store holds it, written through the module so it
+    // carries the key the writer's session gives it.
+    async function savedReply(test: ReturnType<typeof fixture>, writer: PersonWriter = PERSON) {
+      const reply = await test.writes.sendMessage(test.place, { writer, threadId: "thread", body: "Monday", resolveAttachments: async () => [] });
+      vi.clearAllMocks();
+      test.events.length = 0;
+      return reply;
+    }
+
+    it("marks the question answered with the writer's own reply and posts nothing", async () => {
+      const test = fixture();
+      const reply = await savedReply(test);
+      test.store.getMessage.mockResolvedValue(reply);
+      const decision = await test.writeEach.answerWith();
+      expect(test.store.getMessage).toHaveBeenCalledWith({ workspaceId: "workspace", messageId: "message" });
+      expect(test.store.resolveChatDecision).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "workspace", threadId: "thread", messageId: "question",
+        resolvedByMessageId: "message", chosenOption: "Monday",
+      });
+      expect(decision).toMatchObject({ messageId: "question", state: "resolved", resolvedByMessageId: "message" });
+      expect(test.store.sendMessage).not.toHaveBeenCalled();
+      expect(test.store.startChannelThread).not.toHaveBeenCalled();
+      // The answer syncs. No new message means nothing to dispatch.
+      expect(test.effects.queueCloudSync).toHaveBeenCalledWith("workspace");
+      expect(test.effects.scanChatDispatch).not.toHaveBeenCalled();
+    });
+
+    it("answers with a reply written signed out while still signed out", async () => {
+      const test = fixture();
+      test.setCredentials(null);
+      const reply = await savedReply(test);
+      test.store.getMessage.mockResolvedValue(reply);
+      await expect(test.writeEach.answerWith()).resolves.toMatchObject({ state: "resolved" });
+    });
+
+    const notTheWritersReply: [string, (reply: ChatMessage) => ChatMessage][] = [
+      ["a reply in another thread", (reply) => ({ ...reply, threadId: "other-thread" })],
+      ["a reply another device wrote, which keeps no key here", ({ authorActorKey: _key, ...reply }) => reply],
+      ["a reply under another relay author", (reply) => ({ ...reply, authorUserId: "user-2" })],
+      ["the question itself", (reply) => ({ ...reply, id: "question" })],
+    ];
+    it.each(notTheWritersReply)("refuses %s", async (_case, change) => {
+      const test = fixture();
+      const reply = change(await savedReply(test));
+      test.store.getMessage.mockResolvedValue(reply);
+      await expect(test.writes.answerWith(test.place, {
+        writer: PERSON, threadId: "thread", messageId: "question", resolvedByMessageId: reply.id,
+      })).rejects.toThrow("Only your own reply in this thread can answer its question.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses the writer's agent's reply, which has the agent's key", async () => {
+      const test = fixture();
+      const reply = await savedReply(test, AGENT);
+      test.store.getMessage.mockResolvedValue(reply);
+      await expect(test.writeEach.answerWith()).rejects.toThrow("Only your own reply in this thread can answer its question.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses a reply written under the session this one replaced", async () => {
+      const test = fixture();
+      const reply = await savedReply(test);
+      test.setCredentials(signedIn("user-2"));
+      test.store.getMessage.mockResolvedValue(reply);
+      await expect(test.writeEach.answerWith()).rejects.toThrow("Only your own reply in this thread can answer its question.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses a reply the store cannot find", async () => {
+      const test = fixture();
+      await expect(test.writeEach.answerWith()).rejects.toThrow("missing message");
+      expectNothingWritten(test);
+    });
+
+    it("refuses when the session changes while it reads the reply", async () => {
+      const test = fixture();
+      const reply = await savedReply(test);
+      test.store.getMessage.mockImplementationOnce(async () => {
+        test.setCredentials(signedIn("user-1"));
+        return reply;
+      });
+      await expect(test.writeEach.answerWith()).rejects.toThrow("Your server session changed. Try again.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses a question another reply already answered, which keeps that answer", async () => {
+      const test = fixture();
+      const reply = await savedReply(test);
+      test.store.getMessage.mockResolvedValue(reply);
+      test.store.resolveChatDecision.mockResolvedValueOnce({
+        workspaceId: "workspace", threadId: "thread", messageId: "question",
+        state: "resolved", resolvedByMessageId: "earlier", atMs: 1,
+      });
+      await expect(test.writeEach.answerWith()).rejects.toThrow("Another reply already answered this question.");
+      expect(test.store.sendMessage).not.toHaveBeenCalled();
+      expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
+    });
   });
 
   it("toggles a signed-out reaction under the install's local id without a relay author", async () => {

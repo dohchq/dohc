@@ -2345,6 +2345,25 @@ export const SendChatMessageResult = z.union([
 ]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
+// Marks a question or poll answered with a reply that already saved, after
+// the answer failed. It posts nothing. The reply must be this window's own,
+// in the question's thread.
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: OPAQUE_ID,
+  // The question or poll.
+  messageId: OPAQUE_ID,
+  // The reply that answers it.
+  resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
+}).strict();
+export type ResolveChatDecisionPayload = z.infer<typeof ResolveChatDecisionPayload>;
+
+export const ResolveChatDecisionResult = z.object({
+  resolved: ChatDecisionRecord,
+}).strict();
+export type ResolveChatDecisionResult = z.infer<typeof ResolveChatDecisionResult>;
+
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: OPAQUE_ID,

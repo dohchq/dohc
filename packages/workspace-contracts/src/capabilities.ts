@@ -204,7 +204,7 @@ export const CAPABILITIES = {
   "chat.inbox.read": capability("List unread threads. For an agent, also list its unread requests: mentions of it, its DMs, and replies in threads it posted in.", {ipc: ["listPersonalChatFeed"], mcp: {owner: ["dohc_wait_for_messages"]}}),
   "chat.show": capability("Show a thread or message and mark the thread read.", {ipcReason: "CLI-only action with no IPC channel."}),
   "chat.post": capability("Start a thread in a Group.", {ipc: ["startChannelThread"], mcp: {owner: ["dohc_start_group_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
-  "chat.reply": capability("Reply in a thread.", {ipc: ["sendChatMessage"], mcp: {owner: ["dohc_reply_to_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
+  "chat.reply": capability("Reply in a thread.", {ipc: ["sendChatMessage", "resolveChatDecision"], mcp: {owner: ["dohc_reply_to_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "chat.react": capability("Add your reaction to a message, or remove it if it is already there.", {ipcReason: "No IPC channel carries this capability."}),
   "chat.search": capability("Search message text and thread titles.", {ipcReason: "CLI-only action with no IPC channel."}),
   "chat.export": capability("Save threads as Markdown files, one file per thread.", {ipcReason: "CLI-only action with no IPC channel."}),

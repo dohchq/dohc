@@ -75,11 +75,11 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(16);
   });
-  it("records all 23 chat operations with their sender-workspace admission", () => {
+  it("records all 24 chat operations with their sender-workspace admission", () => {
     const channels = [
       "list-file-chats", "chat-file-mentions-page", "chat-links", "list-chat-bookmarks", "save-chat-bookmark",
       "archive-chat-bookmark", "create-file-chat", "list-chat-messages", "get-chat-thread-revision",
-      "send-chat-message", "list-chat-thread-decisions", "list-chat-thread-attachments",
+      "send-chat-message", "resolve-chat-decision", "list-chat-thread-decisions", "list-chat-thread-attachments",
       "list-chat-channels", "list-chat-follows", "set-chat-follow", "list-personal-chat-feed",
       "mark-personal-chat-feed-seen", "create-chat-channel", "list-channel-threads", "start-channel-thread",
       "mark-chat-thread-read", "list-chat-reactions", "set-chat-reaction",
@@ -87,7 +87,8 @@ describe("main inventories", () => {
     const chatRows = rows.filter(row => channels.includes(row.channel));
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
     // A send holds its own workspace operation, so a failure after the save still answers.
-    const sends = ["desktop:send-chat-message", "desktop:start-channel-thread"];
+    // Marking a saved reply's question answered holds the same operation.
+    const sends = ["desktop:send-chat-message", "desktop:start-channel-thread", "desktop:resolve-chat-decision"];
     for (const row of chatRows) {
       if (sends.includes(row.channel)) {
         expect(row, row.channel).toMatchObject({
