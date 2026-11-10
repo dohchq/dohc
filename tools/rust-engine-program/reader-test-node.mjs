@@ -7,7 +7,7 @@
 //   DOHC_READER_TEST_NODE="$(node tools/rust-engine-program/reader-test-node.mjs)" \
 //     cargo nextest run -p dohc-engine-reader
 //
-// The Rust gate stages it before its macOS and Linux test steps.
+// The Rust gate stages it on macOS and Linux targets with a desktop pin.
 //
 // The Node lives in this user's private scratch parent under its own hash,
 // whatever folder holds the checkout. A stager writes it into a private
@@ -23,6 +23,10 @@ import { testScratchParent } from "./scratch-leak-report.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+
+export function stagesReaderNode(platform = process.platform, arch = process.arch) {
+  return ["darwin", "linux"].includes(platform) && Boolean(PINNED_NODE[`${platform}-${arch}`]);
+}
 
 function pinnedHash() {
   const pin = process.platform !== "win32" && PINNED_NODE[`${process.platform}-${process.arch}`];

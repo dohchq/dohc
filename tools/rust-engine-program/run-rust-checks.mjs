@@ -58,7 +58,7 @@ import {
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
-import { readerTestNode } from "./reader-test-node.mjs";
+import { readerTestNode, stagesReaderNode } from "./reader-test-node.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -143,9 +143,8 @@ writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 const storeImage = join(scratchRunRoot, "empty.db");
 if (!policyOnly) process.env.DOHC_TEST_EMPTY_STORE_IMAGE = storeImage;
 // The Markdown reader refuses a Node under a linked or shared-writable
-// directory. POSIX tests use a private copy of the app compiler's pinned Node.
-const stagesReaderNode = ["darwin", "linux"].includes(platform());
-if (stagesReaderNode) process.env.DOHC_READER_TEST_NODE = readerTestNode();
+// directory. Desktop-pinned POSIX targets use a private copy of the compiler's Node.
+if (stagesReaderNode()) process.env.DOHC_READER_TEST_NODE = readerTestNode();
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
@@ -198,7 +197,7 @@ const required = [
   // below keeps them.
   {
     name: "test --workspace",
-    cmd: `${stagesReaderNode ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
+    cmd: `${stagesReaderNode() ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
   },
   // The reader regressions are ignored above because they need a real
   // reader. This builds one and runs exactly them, over the same build.

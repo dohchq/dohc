@@ -49,8 +49,8 @@ export function aggregateRust(records) {
 function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
   return ["what changed", "confinement", ...(scope === "js"
-    ? ["typecheck + tests", "JS shared preparation", ...Array.from({ length: JS_SHARDS }, (_, index) => `JS worker ${index}`)]
-    : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS }, (_, index) => `Rust tests ${index}`)])];
+    ? ["typecheck + tests", "JS shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`)]
+    : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`)])];
 }
 
 export function completedGateTiming(scope, jobs, commit) {
@@ -90,7 +90,7 @@ async function jobs() {
   }
 }
 
-// Allocate reporting before workers finish so it does not enter a second queue.
+// The reporting job runs partition zero before waiting for the other workers.
 export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, now = Date.now } = {}) {
   const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
   const expected = gateJobNames(scope).filter(name => name !== finalJob);

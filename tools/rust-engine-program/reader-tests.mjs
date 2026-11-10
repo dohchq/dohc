@@ -13,9 +13,10 @@
 // build.
 //
 // The bundle is built into this user's private scratch parent and removed
-// afterwards. POSIX readers run a private pinned Node, as the reader's own tests do.
+// afterwards. Desktop-pinned POSIX targets use a private Node, as the reader's own tests do.
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { stagesReaderNode } from "./reader-test-node.mjs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -67,7 +68,7 @@ export function readerTestMismatches(names, list) {
 
 async function readerNode() {
   if (process.env.DOHC_READER_TEST_NODE) return process.env.DOHC_READER_TEST_NODE;
-  if (process.platform === "win32") return process.execPath;
+  if (!stagesReaderNode()) return process.execPath;
   const { stageReaderTestNode } = await import("./reader-test-node.mjs");
   return stageReaderTestNode();
 }

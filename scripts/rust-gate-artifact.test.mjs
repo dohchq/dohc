@@ -36,7 +36,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
-import { readerTestNode } from "../tools/rust-engine-program/reader-test-node.mjs";
+import { readerTestNode, stagesReaderNode } from "../tools/rust-engine-program/reader-test-node.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceHeadLog = () => execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
@@ -335,13 +335,13 @@ test("the caps and the scratch root reach every cargo child", () => {
   }
 });
 
-test("POSIX reader tests run the staged pinned Node", () => {
+test("reader tests use a staged Node on targets with a desktop pin", () => {
   const stub = stubToolchain();
   try {
     runGate(stub);
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
-    const posix = ["darwin", "linux"].includes(platform());
+    const posix = stagesReaderNode();
     const nextestRun = commands.indexOf("nextest run --locked --workspace --no-fail-fast");
     assert.ok(nextestRun > 0);
     assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", posix);

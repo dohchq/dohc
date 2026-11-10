@@ -77,7 +77,7 @@ export interface MoveDevice {
   /** One pull outside the relay engine, as setup does. */
   pull(): Promise<{ fetched: number }>;
   /** Moves by hand, as Explorer does. Resolves with the elapsed milliseconds. */
-  move(fromPath: string, toPath: string, options: { guarded: boolean }): Promise<number>;
+  move(fromPath: string, toPath: string): Promise<number>;
   /** Waits for the last guarded move's catch-up to end, then returns the pulls it ran. */
   guardPulls(): Promise<GuardPulls>;
   /** Relay engine pulls that no guard's catch-up ran. */
@@ -284,9 +284,9 @@ export async function openLiveMoveFixture(input: {
         rootPath, capture, relay, runNative,
         targetedPasses: () => targeted,
         pull: () => relay.pull(apply => capture.runRelaySync(apply)),
-        async move(fromPath, toPath, { guarded }) {
+        async move(fromPath, toPath) {
           const record: MoveRecord = { catchUps: [], endedInWait: false };
-          if (guarded) lastGuarded = record;
+          lastGuarded = record;
           const beforeMove = async (storedSpelling: () => Promise<string>) => {
             moving = record;
             try { await guard.beforeMove(workspaceId, storedSpelling); } finally {
@@ -297,7 +297,7 @@ export async function openLiveMoveFixture(input: {
           const started = performance.now();
           await moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { capture, requestId: randomUUID(),
             trashItem: async () => { throw new Error("This test trashes nothing."); }, markDeleted: () => undefined,
-            ...(guarded ? { beforeMove } : {}) });
+            beforeMove });
           return performance.now() - started;
         },
         async guardPulls() {

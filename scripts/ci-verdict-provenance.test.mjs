@@ -390,10 +390,11 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   }
   assert.equal(jobs.javascript.needs, "changes");
   assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive"]);
+  assert.deepEqual(jobs["rust-policy"].needs, ["changes", "javascript-prepare"]);
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
     const steps = jobs[name].steps;
     const wait = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs wait ${scope}`);
-    const download = steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+    const download = steps.findIndex(step => step.with?.pattern);
     const aggregate = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope}`);
     assert.ok(wait >= 0 && wait < download && download < aggregate);
     assert.equal(steps[aggregate].if, "always()", "failed waits must retain failure evidence");
@@ -492,13 +493,21 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const {jobs} = load(workflow);
-  for (const [name, count] of [["javascript-workers", JS_SHARDS], ["rust-tests", RUST_SHARDS]]) {
+  for (const [name, count, finalJob, scope, command] of [
+    ["javascript-workers", JS_SHARDS, "javascript", "js-worker", "node scripts/verification/cloud.mjs worker 0"],
+    ["rust-tests", RUST_SHARDS, "rust", "rust-tests", "node scripts/verification/cloud-rust.mjs tests 0"],
+  ]) {
     const job = jobs[name];
-    assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count}, (_, index) => index)}, name);
+    assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count - 1}, (_, index) => index + 1)}, name);
     assert.equal(job.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
     assert.match(job.name, /\$\{\{ matrix\.shard \}\}/);
     const upload = job.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
     assert.match(upload.with.name, /\$\{\{ matrix\.shard \}\}/, "shards must not overwrite each other's evidence");
+    const reporting = jobs[finalJob].steps;
+    const run = reporting.findIndex(step => step.run === command);
+    const ownReceipt = reporting.findIndex(step => step.with?.name === `verification-${scope}-0-\${{ github.run_attempt }}`);
+    const wait = reporting.findIndex(step => step.run?.startsWith("node scripts/verification/cloud-aggregate.mjs wait "));
+    assert.ok(run >= 0 && ownReceipt > run && wait > ownReceipt, "partition zero must execute and publish its receipt before reporting waits");
   }
 });
 
@@ -511,9 +520,9 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
   assert.equal(filter.with.base, "${{ github.event.pull_request.base.sha }}");
   for (const name of ["javascript", "rust"]) {
-    const download = jobs[name].steps.find(step => step.uses?.startsWith("actions/download-artifact@"));
+    const download = jobs[name].steps.find(step => step.with?.pattern);
     assert.equal(download.with.pattern, `verification-${name === "javascript" ? "js" : "rust"}-*-\${{ github.run_attempt }}`);
-    const upload = jobs[name].steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
+    const upload = jobs[name].steps.find(step => step.with?.path?.endsWith("-result.json"));
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
@@ -535,8 +544,8 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
   const jobNames = ["what changed", "confinement", "typecheck + tests", "engine gate", "JS shared preparation", "Rust build once", "Rust policy checks",
-    ...Array.from({length: JS_SHARDS}, (_, index) => `JS worker ${index}`),
-    ...Array.from({length: RUST_SHARDS}, (_, index) => `Rust tests ${index}`)];
+    ...Array.from({length: JS_SHARDS - 1}, (_, index) => `JS worker ${index + 1}`),
+    ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
     started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => spawnSync(process.execPath, ["--input-type=module", "-e",

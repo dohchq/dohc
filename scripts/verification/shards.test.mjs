@@ -12,18 +12,18 @@ import { runVitestGroup } from "./vitest-group.mjs";
 
 test("early reporting waits for every successful job and preserves the complete group deadline", async () => {
   const started_at = "2026-11-10T00:00:00Z", start = Date.parse(started_at);
-  const names = ["what changed", "confinement", "JS shared preparation", ...Array.from({ length: JS_SHARDS }, (_, i) => `JS worker ${i}`)];
+  const names = ["what changed", "confinement", "JS shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
   const complete = names.map(name => ({ name, started_at, status: "completed", conclusion: "success" }));
   let reads = 0, pauses = 0;
   await waitForGate("js", { now: () => start + 1000, pause: async () => { pauses++; }, readJobs: async () => {
     reads++;
     return reads === 1 ? complete.slice(0, -1) : reads === 2
-      ? complete.map(row => row.name === "JS worker 0" ? { ...row, status: "in_progress", conclusion: null } : row) : complete;
+      ? complete.map(row => row.name === "JS worker 1" ? { ...row, status: "in_progress", conclusion: null } : row) : complete;
   } });
   assert.equal(pauses, 2);
   for (const conclusion of ["failure", "cancelled", "skipped"]) {
     await assert.rejects(waitForGate("js", { now: () => start + 1000,
-      readJobs: async () => complete.map(row => row.name === "JS worker 0" ? { ...row, conclusion } : row) }), /did not finish successfully/);
+      readJobs: async () => complete.map(row => row.name === "JS worker 1" ? { ...row, conclusion } : row) }), /did not finish successfully/);
   }
   await assert.rejects(waitForGate("js", { now: () => start + 291_000, readJobs: async () => complete }), /no time left/);
   await assert.rejects(waitForGate("js", { now: () => start, readJobs: async () => [...complete, complete[1]] }), /Duplicate/);
