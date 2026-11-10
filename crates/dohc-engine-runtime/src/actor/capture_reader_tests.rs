@@ -981,15 +981,16 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
                 Arc::from([input(source)]),
                 scratch.path(),
                 &mut None,
-            );
-            assert!(skipped.await.is_empty());
+            )
+            .await;
+            assert!(skipped.is_empty());
             assert_eq!(
                 reader.dispatch_count(),
                 1,
                 "the next capture waited on the hung reader again"
             );
             *hung_until(&actor) = Some(std::time::Instant::now());
-            let mut short = Some(std::time::Instant::now() + std::time::Duration::from_millis(50));
+            let mut short = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
             let _ = prepare(
                 &actor,
                 Arc::from([input(source)]),
