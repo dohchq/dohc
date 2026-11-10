@@ -1,8 +1,10 @@
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { canRewriteMoveLinks, listMoveRecoveries, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
+import { canRewriteMoveLinks, listMoveRecoveries, listStoppedMoves, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
+// A function-time cycle: moves schedule link rewrites, and an open settles stopped moves first.
+import { putBackStoppedMoves } from "./workspaceFileMoves";
 
 export type LinkRewriteContext = {
   workspaceId: string;
@@ -88,6 +90,10 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
 
 export async function resumeWorkspaceLinkRewrites(workspace: LocalStateWorkspace, context: LinkRewriteContext): Promise<void> {
   const root = workspace.rootPath;
+  // The pass reads again under the lock, where no move is under way.
+  if ((await listStoppedMoves(root)).length) {
+    await withExclusiveWorkspaceOperation(root, markChanged => putBackStoppedMoves(workspace, markChanged), {markOnSuccess: false});
+  }
   for (const id of await listMoveRecoveries(root)) {
     if (context.signal?.aborted) return;
     await withExclusiveWorkspaceOperation(root, async () => {

@@ -2227,6 +2227,14 @@ export function ChatsView(props: {
     }
     return unsubscribe;
   }, [awaitingAgentChannel, props.suspendPolling, refreshChannelBadges, refreshForActivity, workspaceId]);
+  // A resume puts requests back to waiting on a busy agent, and no activity
+  // says so, so the open thread reads its dispatch again.
+  const dispatchWasPaused = useRef(computerDispatchPaused);
+  useEffect(() => {
+    const resumed = dispatchWasPaused.current && !computerDispatchPaused;
+    dispatchWasPaused.current = computerDispatchPaused;
+    if (resumed && nav.level === "thread") refreshForActivity();
+  }, [computerDispatchPaused, nav.level, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -4091,6 +4099,14 @@ export function ChatsView(props: {
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   const failedRun = dispatchState?.failedRun ?? null;
+  // The messages that wait for an agent to end its run, by the agent's name
+  // and colors. None do while this computer's pause holds them.
+  const waitingDispatch = computerDispatchPaused ? undefined : dispatchState?.waiting;
+  const waiting = useMemo(() => waitingDispatch ? {
+    agentName: waitingDispatch.name,
+    presentation: agentChatIdentity({ agentId: waitingDispatch.agentId, name: waitingDispatch.name }, settingsAgents).presentation,
+    messageIds: new Set(waitingDispatch.triggerMessageIds),
+  } : null, [settingsAgents, waitingDispatch]);
   const retryFailedRun = useCallback(async () => {
     if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
@@ -4784,6 +4800,7 @@ export function ChatsView(props: {
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
               onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
+              waiting={waiting}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -5098,6 +5115,7 @@ export function ChatsView(props: {
             {...(agentDm ? {
               agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
               ...(channelAgent ? { agentPresentation: channelAgent.presentation } : {}),
+              dispatchPaused: computerDispatchPaused,
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,

@@ -15,7 +15,8 @@ export interface OwnedWorkspaceReadPortInput {
   lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
-  repairProjection(target: ShareViewFilesTarget): Promise<void>;
+  // Resolves with the share-relative paths held back from the folder.
+  repairProjection(target: ShareViewFilesTarget): Promise<ReadonlySet<string>>;
   onSearchSourceFailure?: (
     source: OwnedWorkspaceSearchSource,
     error: unknown,
@@ -78,15 +79,22 @@ export function createOwnedWorkspaceReadPort(
 ): OwnedWorkspaceReadPort {
   async function prepareLookup(): Promise<OwnedWorkspaceLookup> {
     const failedPrefixes: string[] = [];
+    // Exact paths: on a disk that ignores case, a held spelling shares its
+    // file with another spelling, which stays readable.
+    const held = new Set<string>();
     for (const source of input.searchSources) {
-      try { await input.repairProjection(source.target); }
-      catch (error) {
+      try {
+        for (const path of await input.repairProjection(source.target)) {
+          held.add(source.prefix === undefined ? path : `${source.prefix}/${path}`);
+        }
+      } catch (error) {
         if (source.prefix === undefined) throw error;
         failedPrefixes.push(source.prefix);
         input.onSearchSourceFailure?.(source, error);
       }
     }
-    const allowed = (path: string) => !failedPrefixes.some(prefix => isAtOrBelowPrefix(path, prefix));
+    const allowed = (path: string) =>
+      !held.has(path) && !failedPrefixes.some(prefix => isAtOrBelowPrefix(path, prefix));
     const visible = (listed: WorkspacePathListing): WorkspacePathListing => ({
       files: listed.files.filter(file => allowed(file.path)),
       folders: (listed.folders ?? []).filter(allowed),

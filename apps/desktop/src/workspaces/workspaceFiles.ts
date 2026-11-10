@@ -1739,6 +1739,8 @@ export async function deletePath(
 export async function moveIntoWorkspaceTrash(
   workspace: LocalStateWorkspace,
   target: string,
+  // A caller that records the entry before it exists names its prefix.
+  prefix = `${Date.now()}-${randomUUID()}-`,
 ): Promise<string> {
   // The trash is checked after it is made and immediately before the rename,
   // to keep the swap window minimal; a colluding local process racing a
@@ -1760,7 +1762,6 @@ export async function moveIntoWorkspaceTrash(
   // the legacy MAX_PATH limit -- each reached only because the platform
   // refused the one above it. A name that fits is never shortened, and the
   // trash keeps no record of the original, so a dropped character is gone.
-  const prefix = `${Date.now()}-${randomUUID()}-`;
   const plan = trashEntryPlan(basename(target), prefix, {
     unit: nameUnitFor(process.platform),
     maxEntryChars: entryCharBudget(trashDir, process.platform),

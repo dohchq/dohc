@@ -210,6 +210,62 @@ describe("createOwnedProjectionRepairer", () => {
     collisionPaths: [],
     pullInFlight: false,
   };
+  const heldStatus: ShareViewProjectionStatus = {
+    state: "pending",
+    pendingPathCount: 0,
+    pendingPaths: [],
+    collisionPathCount: 2,
+    collisionPaths: ["Notes.md", "mine.md"],
+    pullInFlight: false,
+  };
+  const holds: ShareViewReconcileOutcome = {
+    ...validRepair,
+    unjournalablePaths: [
+      { path: "Notes.md", reason: "spelling-collision", owner: "notes.md" },
+      { path: "mine.md", reason: "local-collision" },
+    ],
+  };
+
+  it("returns the files held back from a view that is otherwise current", async () => {
+    const harness = owner({ statuses: [heldStatus, heldStatus], repair: holds });
+    await expect(ensureCurrent(harness.files, "dohc-owned-projection-held"))
+      .resolves.toEqual(new Set(["Notes.md", "mine.md"]));
+  });
+
+  it.each([
+    { name: "a file held behind a local one", resolved: "mine.md", requested: "mine.md", refusal: "mine.md already has a file from this machine." },
+    { name: "a held file asked for from its folder", resolved: "./mine.md", requested: "./mine.md", refusal: "mine.md already has a file from this machine." },
+    { name: "a held spelling the disk resolves to its owner", resolved: "notes.md", requested: "shared-with-me/alex/Notes.md", refusal: "This machine treats Notes.md and notes.md as the same name." },
+    ...process.platform === "win32"
+      ? [{ name: "another case of a file held behind a local one", resolved: "MINE.md", requested: "MINE.md", refusal: "mine.md already has a file from this machine." }]
+      : [],
+  ])("refuses to open $name", async ({ name, resolved, requested, refusal }) => {
+    const harness = owner({ statuses: [heldStatus, heldStatus], repair: holds });
+    await expect(createOwnedProjectionRepairer(harness.files)({
+      rootPath: join(tmpdir(), `dohc-owned-projection-open-${name.replaceAll(" ", "-")}`),
+      target,
+      path: { resolved, requested },
+    })).rejects.toThrow(refusal);
+  });
+
+  it("opens the spelling that owns a held spelling's file", async () => {
+    const harness = owner({ statuses: [heldStatus, heldStatus], repair: holds });
+    await expect(createOwnedProjectionRepairer(harness.files)({
+      rootPath: join(tmpdir(), "dohc-owned-projection-open-owner"),
+      target,
+      path: { resolved: "notes.md", requested: "shared-with-me/alex/notes.md" },
+    })).resolves.toEqual(new Set(["Notes.md", "mine.md"]));
+  });
+
+  it.each([
+    { name: "a recorded collision that is not held", after: { ...heldStatus, collisionPathCount: 3 } },
+    { name: "a path still waiting for repair", after: { ...heldStatus, pendingPathCount: 1, pendingPaths: ["a.md"] } },
+    { name: "an unfinished pull", after: { ...heldStatus, pullInFlight: true } },
+  ])("refuses held files beside $name", async ({ name, after }) => {
+    const harness = owner({ statuses: [heldStatus, after], repair: holds });
+    await expect(ensureCurrent(harness.files, `dohc-owned-projection-${name.replaceAll(" ", "-")}`))
+      .rejects.toThrow(/still being restored/i);
+  });
 
   it.each<{
     name: string;
@@ -219,7 +275,9 @@ describe("createOwnedProjectionRepairer", () => {
     refusal?: RegExp;
   }>([
     { name: "lets a write queued behind a no-op repair land", repair: validRepair, writeLands: true },
+    { name: "lets a write queued behind a repair that only found held files land", repair: holds, after: heldStatus, writeLands: true },
     { name: "refuses a write queued behind a repair that restored a path", repair: { ...validRepair, repairedPaths: 1 } },
+    { name: "refuses a write queued behind a repair that held files and restored a path", repair: { ...holds, repairedPaths: 1 }, after: heldStatus },
     {
       name: "refuses a write queued behind a repair that found a damaged record",
       repair: damagedRecord,

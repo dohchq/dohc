@@ -203,6 +203,7 @@ enum Command {
 pub struct WorkspaceActor {
     markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
+    reader_hung_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     identity: EngineDbIdentity,
     store: Arc<StoreLocation>,
     generation: u64,
@@ -477,6 +478,7 @@ impl WorkspaceActor {
                 let mut actor = WorkspaceActor {
                     markdown_recovery,
                     reader_configured: Arc::default(),
+                    reader_hung_until: Arc::default(),
                     identity,
                     store,
                     generation,
@@ -526,6 +528,7 @@ impl WorkspaceActor {
         ActorHandle {
             markdown_recovery: self.markdown_recovery.clone(),
             reader_configured: Arc::clone(&self.reader_configured),
+            reader_hung_until: Arc::clone(&self.reader_hung_until),
             identity: self.identity.clone(),
             store: Arc::clone(&self.store),
             tx: self.tx.clone(),
@@ -663,6 +666,8 @@ pub type CheckpointCycle = Arc<dyn Fn() -> CheckpointWait + Send + Sync>;
 pub struct ActorHandle {
     markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
+    /// Until when capture skips a reader that missed its deadline.
+    reader_hung_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     #[cfg(unix)]
     retained_root: retained::Root,
     identity: EngineDbIdentity,
@@ -1684,6 +1689,7 @@ pub(crate) mod test_support {
         let mut actor = WorkspaceActor {
             markdown_recovery: Arc::default(),
             reader_configured: Arc::default(),
+            reader_hung_until: Arc::default(),
             identity,
             store: StoreLocation::new(db.to_path_buf()),
             generation: 1,

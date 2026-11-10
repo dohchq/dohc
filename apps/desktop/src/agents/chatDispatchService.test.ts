@@ -1732,7 +1732,7 @@ describe("chatDispatchService", () => {
       paused: false,
     });
 
-    await fixture.chat.sendMessage({
+    const followUp = await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
@@ -1742,11 +1742,19 @@ describe("chatDispatchService", () => {
       body: "@Nova Arrived after spawn.",
     });
     // The request is written with the message, so the thread's next read,
-    // which a new message prompts, shows it.
+    // which a new message prompts, shows it waiting for Nova's run to end.
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String),
       pendingCount: 1,
+      waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
+    });
+    // An agent's chat with only earlier posts reads them with no conversation.
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, null, [trigger.threadId])).toEqual({
+      liveRunId: null, liveTriggerMessageId: null,
+      pendingCount: 0,
+      paused: false,
+      waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
     });
 
     const firstClaim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
@@ -4138,6 +4146,9 @@ describe("chatDispatchService", () => {
     });
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(1);
+    // The stopped run still holds the workspace, so the request waits for Nova.
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, followUp.threadId)).waiting)
+      .toEqual({ agentId: "default", name: "Nova", triggerMessageIds: [followUp.messageId] });
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
     expect(fixture.killCalls).toEqual([
@@ -4148,6 +4159,8 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(followUp.threadId);
+    // Nova started on it, so it no longer waits.
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, followUp.threadId)).waiting).toBeUndefined();
   });
 
   it("does not let a queued stop for an exited run stop its successor", async () => {
