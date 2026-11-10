@@ -11,7 +11,7 @@ import { readDatasetResponse } from "../ipc/readDatasetResponse";
 
 it("manages the authoritative relay Collection through the desktop owner adapter", async () => {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "desktop-remote-dataset-"));
-  const host = await f.storage.createDatasetHost({ directory, limits, onShutdownError(error) { throw error; } });
+  const host = await f.storage.createDatasetHost({ publicEditRelease: undefined, directory, limits, onShutdownError(error) { throw error; } });
   const controller = new AbortController();
   try {
     const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

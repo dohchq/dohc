@@ -14,7 +14,7 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}
 
 it("persists real owner reads across restart, catches up, and refuses offline writes and revoked access", async () => {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(),"desktop-owner-copy-"));
-  const host = await f.storage.createDatasetHost({directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
+  const host = await f.storage.createDatasetHost({publicEditRelease:undefined,directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
   const actor = {kind:"named" as const,workspaceId:"w",userId:"owner"}, scope = {workspaceId:"w",datasetId:id(1)};
   const definition: DatasetDefinition = {formatVersion:1,datasetId:id(1),name:"Entries",schemaPath:"schema.sql",operationsPath:"actions.js",
     tables:[{tableId:id(2),name:"Entries",sqlName:"entries",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true},{fieldId:id(4),name:"Name",sqlColumn:"name",type:"text",required:true,unique:false}]}],
@@ -70,7 +70,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
 
 it.each(["delete", "status", "closing"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
   const f=fixture(), directory=await mkdtemp(join(tmpdir(),"desktop-deleted-copy-"));
-  const host=await f.storage.createDatasetHost({directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
+  const host=await f.storage.createDatasetHost({publicEditRelease:undefined,directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
   const actor={kind:"named" as const,workspaceId:"w",userId:"owner"}, scope={workspaceId:"w",datasetId:id(1)};
   const definition:DatasetDefinition={formatVersion:1,datasetId:id(1),name:"Entries",schemaPath:"schema.sql",operationsPath:"actions.js",tables:[{tableId:id(2),name:"Entries",sqlName:"entries",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true}]}],operations:[
     {operationId:id(5),name:"seed",label:"Seed",kind:"create",tableId:id(2),access:"owner",readOnly:false,fieldIds:[id(3)]},

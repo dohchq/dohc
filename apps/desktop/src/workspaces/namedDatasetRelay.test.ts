@@ -18,7 +18,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 it("keeps two named recipients' projected pages isolated over real HTTP, through restart/offline and known revocation", async () => {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "named-pages-relay-"));
-  const host = await f.storage.createDatasetHost({ directory: join(directory, "host"), limits, onShutdownError(error) { throw error; } });
+  const host = await f.storage.createDatasetHost({ publicEditRelease: undefined, directory: join(directory, "host"), limits, onShutdownError(error) { throw error; } });
   const actor = { kind: "named" as const, workspaceId: "w", userId: "owner" };
   const schemaSql = `CREATE TABLE registrations(id TEXT PRIMARY KEY NOT NULL,person TEXT NOT NULL,name TEXT NOT NULL,secret TEXT NOT NULL);
     INSERT INTO registrations VALUES('a','alice','Alice visible','ALICE PRIVATE'),('b','bob','Bob visible','BOB PRIVATE');`;
