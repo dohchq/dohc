@@ -2994,8 +2994,8 @@ pub(super) fn ensure_no_pending_undo_placement(
 /// missing until replay lands it. Retiring that head would discard the file
 /// instead of waiting for it. The write is a version switch's, or the one that
 /// records the head's latest moment, as for a document settle. Another
-/// version's pending write with the same bytes does not count: replay skips it
-/// while that version is inactive.
+/// version's pending write with the same bytes does not count, since replay
+/// completes it without writing while that version is inactive.
 fn ensure_no_pending_head_placement(
     conn: &Connection,
     workspace: &str,
