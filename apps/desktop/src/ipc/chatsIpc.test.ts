@@ -459,7 +459,7 @@ describe("registered chat writes", () => {
     expect(test.scanChatDispatch).toHaveBeenCalledWith("workspace");
   });
 
-  it("says when Restricted Mode holds the agent a sent message asks, and never fails the send over it", async () => {
+  it("says when Restricted Mode holds the agent a sent message asks, and answers a failed trust read with the saved message", async () => {
     const test = fixture();
     const send = { workspaceId: "workspace", threadId: "thread", body: "@Nova plan the day" };
     expect(shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send))).waitsForTrust).toBeUndefined();
@@ -467,11 +467,11 @@ describe("registered chat writes", () => {
     const held = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)));
     expect(held.waitsForTrust).toBe(true);
     expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", held.message.id);
+    // The message saved, so a trust read that fails names it and why, and
+    // the window does not send it again.
     test.agentWaitsForTrust.mockRejectedValueOnce(new Error("trust file unreadable"));
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const unknown = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)));
-    warn.mockRestore();
-    expect(unknown.waitsForTrust).toBeUndefined();
+    await expect(test.invoke(chatOperations.sendChatMessage.channel, send))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: "Error: trust file unreadable" });
     test.agentWaitsForTrust.mockResolvedValueOnce(true);
     const started = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
       workspaceId: "workspace", channelId: "channel", body: "Plan the day",
@@ -515,16 +515,38 @@ describe("registered chat writes", () => {
     engine.storeMethods[method].mockRejectedValueOnce(new Error("The workspace engine stopped."));
     await expect(engine.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow("The workspace engine stopped.");
   });
+  // The work after the store write, such as bookmarks and sync, runs inside
+  // chatWrites. The message saved before it.
+  it.each(sends)("answers $name with its ids when the work after the write fails", async ({ channel, payload, method }) => {
+    const test = fixture();
+    test.projectChatBookmarks.mockImplementationOnce(() => { throw new Error("The bookmark projection stopped."); });
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...payload }))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: "Error: The bookmark projection stopped." });
+    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
   it("keeps why an answer failed when the reply saved and a later step failed too", async () => {
     const test = fixture();
     test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
-    test.warmCredentialCache.mockImplementationOnce(async () => { test.endSession(); });
+    test.warmCredentialCache.mockRejectedValueOnce(new Error("The credential store is busy."));
     await expect(test.invoke(chatOperations.sendChatMessage.channel, {
       workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" },
     })).resolves.toEqual({
-      message: { id: "message", threadId: "thread" }, failure: `Error: ${CHATS_STOPPED}`,
+      message: { id: "message", threadId: "thread" }, failure: "Error: The credential store is busy.",
       resolveFailure: "Error: Pick one of the poll's choices.",
     });
+  });
+  // Whatever a later step says, a window whose workspace changed hears only
+  // the ids of the message it wrote and the operation's own refusal.
+  it.each(sends)("answers $name to a window that changed workspaces with its ids and the refusal alone", async ({ channel, payload }) => {
+    const test = fixture();
+    test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
+    test.agentWaitsForTrust.mockImplementationOnce(async () => {
+      test.endSession();
+      throw new Error("The other workspace's trust file is unreadable.");
+    });
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...payload }))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: `Error: ${CHATS_STOPPED}` });
   });
 
   it("names the reaction's author as the viewer, locally when signed out", async () => {
@@ -809,12 +831,19 @@ describe("poll IPC writes", () => {
     expect(result).not.toHaveProperty("decision");
     expect(test.storeMethods.listThreadDecisions).not.toHaveBeenCalled();
   });
-  it.each(doors)("still answers a written poll when its decision cannot be read back on $name", async ({ channel, target }) => {
+  // The poll saved, so a read back that fails names it and why.
+  it.each(doors)("answers a written poll whose decision cannot be read back with its ids and why on $name", async ({ channel, target, method }) => {
     const test = fixture();
     test.storeMethods.listThreadDecisions.mockRejectedValueOnce(new Error("engine busy"));
-    const result = await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] }) as { message: unknown; decision?: unknown };
-    expect(result.message).toBeDefined();
-    expect(result).not.toHaveProperty("decision");
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] }))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: "Error: engine busy" });
+    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+  });
+  it.each(doors)("answers a message whose trust read fails with its ids and why on $name", async ({ channel, target }) => {
+    const test = fixture();
+    test.agentWaitsForTrust.mockRejectedValueOnce(new Error("trust file unreadable"));
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "@Nova plan the day" }))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: "Error: trust file unreadable" });
   });
   it.each(doors)("refuses a poll in a share view on $name before persistence", async ({ channel, target, name }) => {
     const test = fixture("view");

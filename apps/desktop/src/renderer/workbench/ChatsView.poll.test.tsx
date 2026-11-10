@@ -243,3 +243,162 @@ describe("ChatsView polls", () => {
     expect(screen.queryByTestId("chats-poll")).toBeNull();
   });
 });
+
+// A send whose store write held while a later step failed answers with the
+// saved message's ids and why. What it said shows once a reload lists it.
+describe("ChatsView sends that saved before a later step failed", () => {
+  const failure = "Error: The bookmark projection stopped.";
+  const bodies = () => screen.queryAllByTestId("chats-message-body").map((node) => node.textContent);
+  const groupReads = () => bridgeMock.listChannelThreads.mock.calls.filter(([input]) => input.lane === undefined).length;
+  const threadReads = (threadId: string) =>
+    bridgeMock.listChatMessages.mock.calls.filter(([input]) => input.threadId === threadId).length;
+
+  it("clears a saved comment's draft, reloads its thread to show it, and says why once", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "message-2", threadId: "thread-1" }, failure });
+    const { onError } = renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-message-body");
+    const reload = deferred<{ messages: ReturnType<typeof message>[] }>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(reload.promise);
+    await user.type(screen.getByTestId("chats-composer"), "Lunch?");
+    fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
+
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith("Sent your message. dohc could not show it yet.", failure, expect.any(Function));
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(bodies()).toEqual(["Should we ship on Friday?"]);
+    await act(async () => reload.resolve({ messages: [message(), message({ id: "message-2", body: "Lunch?" })] }));
+    await waitFor(() => expect(bodies()).toEqual(["Should we ship on Friday?", "Lunch?"]));
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it("gives a comment that saved a Try again that reloads its thread, only while the window shows it", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "message-2", threadId: "thread-1" }, failure });
+    const { onError } = renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.type(screen.getByTestId("chats-composer"), "Lunch?");
+    fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const again = onError.mock.lastCall?.[2] as () => void;
+
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ id: "message-2", body: "Lunch?" })] });
+    const before = threadReads("thread-1");
+    act(() => again());
+    expect(threadReads("thread-1")).toBe(before + 1);
+    await waitFor(() => expect(bodies()).toContain("Lunch?"));
+
+    // Back in the Group, Try again reads nothing.
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-channel-view");
+    const left = threadReads("thread-1");
+    act(() => again());
+    expect(threadReads("thread-1")).toBe(left);
+  });
+
+  it("clears a saved post and its poll and reloads the Group to list it, without opening it", async () => {
+    const user = userEvent.setup();
+    const onThreadStarted = vi.fn();
+    const onNavCommand = vi.fn();
+    bridgeMock.startChannelThread.mockResolvedValue({ message: { id: "message-1", threadId: "thread-1" }, failure });
+    const { onError } = renderView(vi.fn(), vi.fn(), { onThreadStarted, onNavCommand });
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.type(await screen.findByTestId("chats-new-thread-composer"), "Lunch?");
+    fillPoll("chats-new-thread", ["Soup", "Salad"]);
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ title: "Lunch?" })] });
+    const before = groupReads();
+    onNavCommand.mockClear();
+    fireEvent.click(screen.getByTestId("chats-new-thread-send"));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith("Posted your message. dohc could not open it yet.", failure, expect.any(Function));
+    expect(onThreadStarted).toHaveBeenCalledOnce();
+    expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(screen.queryByTestId("chats-new-thread-poll")).toBeNull();
+    expect(groupReads()).toBe(before + 1);
+    expect((await screen.findByTestId("chats-thread")).dataset.threadId).toBe("thread-1");
+    expect(screen.getByTestId("chats-channel-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-thread-view")).toBeNull();
+    expect(onNavCommand).not.toHaveBeenCalled();
+  });
+
+  // Leaving and reopening the Group keeps the same send context, so only the
+  // navigation token tells this answer is stale.
+  it("leaves the reopened Group alone when a post saved after the person left it", async () => {
+    const user = userEvent.setup();
+    const onThreadStarted = vi.fn();
+    const held = deferred<{ message: { id: string; threadId: string }; failure: string }>();
+    bridgeMock.startChannelThread.mockReturnValueOnce(held.promise);
+    const { onError } = renderView(vi.fn(), vi.fn(), { onThreadStarted });
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.type(await screen.findByTestId("chats-new-thread-composer"), "Lunch?");
+    fireEvent.click(screen.getByTestId("chats-new-thread-send"));
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-empty");
+    const before = groupReads();
+
+    await act(async () => held.resolve({ message: { id: "message-1", threadId: "thread-1" }, failure }));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onThreadStarted).not.toHaveBeenCalled();
+    expect(groupReads()).toBe(before);
+    expect(screen.getByTestId("chats-channel-view")).toBeTruthy();
+  });
+
+  it("leaves another thread's draft alone when a comment saved after the person left its thread", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread(), thread({ id: "thread-2", title: "Another chat" })],
+    });
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
+      messages: [message({ id: `${threadId}-opening`, threadId })],
+    }));
+    const held = deferred<{ message: { id: string; threadId: string }; failure: string }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(held.promise);
+    const { onError } = renderView();
+    const openThread = async (id: string) => {
+      const card = (await screen.findAllByTestId("chats-thread")).find((node) => node.dataset.threadId === id)!;
+      await user.click(card);
+      await screen.findByTestId("chats-thread-view");
+    };
+    await user.click(await screen.findByTestId("chats-channel"));
+    await openThread("thread-1");
+    await user.type(screen.getByTestId("chats-composer"), "Lunch?");
+    fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await openThread("thread-2");
+    fireEvent.change(screen.getByTestId("chats-composer"), { target: { value: "Other words" } });
+    const before = [threadReads("thread-1"), threadReads("thread-2")];
+
+    await act(async () => held.resolve({ message: { id: "message-2", threadId: "thread-1" }, failure }));
+    expect(onError).not.toHaveBeenCalled();
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("Other words");
+    expect([threadReads("thread-1"), threadReads("thread-2")]).toEqual(before);
+  });
+
+  it.each(["post", "comment"] as const)("keeps a %s's draft when its send saved nothing", async (kind) => {
+    const user = userEvent.setup();
+    const refusal = new Error("Engine busy");
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.startChannelThread.mockRejectedValue(refusal);
+    bridgeMock.sendChatMessage.mockRejectedValue(refusal);
+    const { onError } = renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    if (kind === "comment") await user.click(await screen.findByTestId("chats-thread"));
+    const composerId = kind === "post" ? "chats-new-thread-composer" : "chats-composer";
+    await user.type(await screen.findByTestId(composerId), "Lunch?");
+    fireEvent.keyDown(screen.getByTestId(composerId), { key: "Enter" });
+
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(expect.any(String), refusal);
+    expect((screen.getByTestId(composerId) as HTMLTextAreaElement).value).toBe("Lunch?");
+  });
+});

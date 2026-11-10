@@ -161,10 +161,8 @@ async function askedDecision(
   message: ChatMessage,
 ): Promise<{ decision?: ChatDecisionRecord }> {
   if (!asked.needsDecision && (asked.options?.length ?? 0) === 0) return {};
-  const decision = await store.listThreadDecisions(workspaceId, message.threadId).then(
-    (decisions) => decisions.find((entry) => entry.messageId === message.id),
-    () => undefined,
-  );
+  const decision = (await store.listThreadDecisions(workspaceId, message.threadId))
+    .find((entry) => entry.messageId === message.id);
   return decision ? { decision: chatDecisionForIpc(decision) } : {};
 }
 
@@ -412,38 +410,46 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   };
 
-  // The message is saved whatever this answers, so a failed answer is none.
   async function waitsForTrust(workspaceId: string, messageId: string): Promise<{ waitsForTrust?: true }> {
-    try {
-      return await agentWaitsForTrust(workspaceId, messageId) ? { waitsForTrust: true } : {};
-    } catch (error) {
-      console.warn("[desktop] could not read whether a message waits for workspace trust", error);
-      return {};
-    }
+    return await agentWaitsForTrust(workspaceId, messageId) ? { waitsForTrust: true } : {};
   }
 
   // A send holds the sending window's workspace operation itself. Once
-  // `saved` names its message, a later failure, the operation's last check
-  // included, answers with that message's ids and the failure instead of
-  // rejecting, so the window does not send it again. The ids name the message
-  // this window wrote. Nothing read after the save goes with them, so a window
-  // whose workspace changed gets none of the message's presentation.
+  // `onSaved` hears the store holds its message, a later failure answers with
+  // that message's ids and the failure instead of rejecting, so the window
+  // does not send it again. The ids name the message this window wrote.
+  // Nothing read after the save goes with them.
+  // The operation's own last check fails only once the window's workspace
+  // changed or closed. Its refusal is then the whole answer beside the ids,
+  // whatever an earlier step said.
   type Saved = { message: { id: string; threadId: string }; resolveFailure?: string };
   async function sendOnce<Result>(
     event: Event, workspaceId: string,
-    send: (operation: Operation, saved: (sent: Saved) => void) => Promise<Result>,
+    send: (operation: Operation, onSaved: (saved: { message: ChatMessage; failure?: unknown }) => void) => Promise<Result>,
   ): Promise<Result | (Saved & { failure: string })> {
     const landed: { current?: Saved } = {};
+    const onSaved = ({ message, ...answer }: { message: ChatMessage; failure?: unknown }) => {
+      landed.current = {
+        message: { id: message.id, threadId: message.threadId },
+        ...("failure" in answer ? { resolveFailure: String(ipcWireError(answer.failure)) } : {}),
+      };
+    };
     try {
-      return await withRendererWorkspaceOperation(event.sender, workspaceId, CHATS_STOPPED,
-        (operation) => send(operation, (sent) => { landed.current = sent; }));
-    } catch (failure) {
-      if (!landed.current) throw failure;
-      return { ...landed.current, failure: String(ipcWireError(failure)) };
+      return await withRendererWorkspaceOperation(event.sender, workspaceId, CHATS_STOPPED, async (operation) => {
+        try {
+          return await send(operation, onSaved);
+        } catch (failure) {
+          if (!landed.current) throw failure;
+          return { ...landed.current, failure: String(ipcWireError(failure)) };
+        }
+      });
+    } catch (refusal) {
+      if (!landed.current) throw refusal;
+      return { message: landed.current.message, failure: String(ipcWireError(refusal)) };
     }
   }
 
-  const sendChatMessage: ChatHandler<"sendChatMessage"> = (input, { event }) => sendOnce(event, input.workspaceId, async (operation, saved) => {
+  const sendChatMessage: ChatHandler<"sendChatMessage"> = (input, { event }) => sendOnce(event, input.workspaceId, async (operation, onSaved) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
@@ -460,19 +466,18 @@ export function registerChatsIpcHandlers<
           (path) => chatFileObjectId(scope, path),
           input.fileReferences,
         ),
+      onSaved,
     };
     const sent = input.resolves
       ? await chatWrites.answer(chatWritePlace(scope), { ...reply, resolves: input.resolves })
       : { message: await chatWrites.sendMessage(chatWritePlace(scope), reply) };
     const { message } = sent;
-    const unanswered = "failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {};
-    saved({ message: { id: message.id, threadId: message.threadId }, ...unanswered });
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
       ...("decision" in sent ? { resolved: chatDecisionForIpc(sent.decision) } : {}),
-      ...unanswered,
+      ...("failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {}),
       ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   });
@@ -901,7 +906,7 @@ export function registerChatsIpcHandlers<
       viewerAuthorId,
     });
   };
-  const startChannelThread: ChatHandler<"startChannelThread"> = (input, { event }) => sendOnce(event, input.workspaceId, async (operation, saved) => {
+  const startChannelThread: ChatHandler<"startChannelThread"> = (input, { event }) => sendOnce(event, input.workspaceId, async (operation, onSaved) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -920,8 +925,8 @@ export function registerChatsIpcHandlers<
       ...(input.options !== undefined ? { options: input.options } : {}),
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
+      onSaved,
     });
-    saved({ message: { id: started.message.id, threadId: started.message.threadId } });
     const presentation = await presentationRequest(workspace, linkedChatStoreFor(workspace), operation.assertCurrent);
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({

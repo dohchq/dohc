@@ -655,6 +655,38 @@ describe("chat writes", () => {
     expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
   });
 
+  // A caller whose later step fails still knows the message saved.
+  it.each(["send", "start", "answer"] as const)("tells the caller a %s saved before the work after the write, which can fail", async (kind) => {
+    const test = fixture();
+    test.effects.projectChatBookmarks.mockImplementation(() => {
+      test.events.push("after");
+      throw new Error("The bookmark projection stopped.");
+    });
+    const onSaved = vi.fn((saved: { message: ChatMessage; failure?: unknown }) => { test.events.push(`saved:${saved.message.id}`); });
+    const input = { writer: PERSON, body: "Hi", resolveAttachments: test.attachments, onSaved };
+    const write = kind === "send" ? test.writes.sendMessage(test.place, { ...input, threadId: "thread" })
+      : kind === "start" ? test.writes.startThread(test.place, { ...input, channelId: "channel" })
+      : test.writes.answer(test.place, { ...input, threadId: "thread", resolves: { messageId: "question", chosenOption: "Monday" } });
+    await expect(write).rejects.toThrow("The bookmark projection stopped.");
+    expect(onSaved).toHaveBeenCalledOnce();
+    expect(onSaved.mock.calls[0]?.[0]).not.toHaveProperty("failure");
+    const after = test.events.slice(test.events.indexOf("write"));
+    expect(after).toEqual(kind === "answer" ? ["write", "resolve", "saved:message", "release", "after"] : ["write", "saved:message", "after"]);
+  });
+
+  it("tells the caller an answer saved with why its question stays open", async () => {
+    const test = fixture();
+    const refusal = new Error("Pick one of the poll's choices.");
+    test.store.resolveChatDecision.mockRejectedValueOnce(refusal);
+    const onSaved = vi.fn();
+    const answered = await test.writes.answer(test.place, {
+      writer: PERSON, threadId: "thread", body: "Monday", resolveAttachments: test.attachments, onSaved,
+      resolves: { messageId: "question", chosenOption: "Monday" },
+    });
+    expect(answered).toEqual({ message: expect.objectContaining({ id: "message" }), failure: refusal });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith(answered);
+  });
+
   it("toggles a signed-out reaction under the install's local id without a relay author", async () => {
     const test = fixture();
     test.setCredentials(null);

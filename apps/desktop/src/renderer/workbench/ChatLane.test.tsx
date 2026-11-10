@@ -313,9 +313,33 @@ describe("ChatLane", () => {
     });
     send("Reply");
     await screen.findByText("Reply");
-    expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your message. dohc could not show it yet.", saved.failure);
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your message. dohc could not show it yet.", saved.failure, expect.any(Function));
     expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("");
     expect(onAgentWaitsForTrust).not.toHaveBeenCalled();
+  });
+
+  it("gives a message that saved a Try again that reloads its conversation, only while the lane shows it", async () => {
+    const view = render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: { id: "reply", threadId: "thread-1" }, failure: "Error: The bookmark projection stopped." });
+    const before = bridgeMock.listChatMessages.mock.calls.length;
+    send("Reply");
+    // The send's own reload has read the conversation before the message shows.
+    await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(before));
+    expect(onError).toHaveBeenCalledOnce();
+    const again = onError.mock.lastCall?.[2] as () => void;
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "reply", body: "Reply" })] });
+    await act(async () => again());
+    await screen.findByText("Reply");
+
+    // Once the lane shows another workspace, Try again reads nothing.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Other workspace" })] });
+    view.rerender(lane("channel-1", "workspace-b"));
+    await screen.findByText("Other workspace");
+    const reads = bridgeMock.listChatMessages.mock.calls.length;
+    await act(async () => again());
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(reads);
+    expect(bridgeMock.listChannelThreads).not.toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "workspace-a" }));
   });
 
   it.each(["message", "post"] as const)("says a %s that saved nothing failed to send and keeps the draft", async (kind) => {
@@ -475,7 +499,7 @@ describe("ChatLane", () => {
       render(lane());
     }
 
-    it("says a choice that saved was sent, with no Try again, and shows it answered on reload", async () => {
+    it("says a choice that saved was sent and shows it answered on reload", async () => {
       choose(async () => {
         bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
           { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" }] });
@@ -483,7 +507,7 @@ describe("ChatLane", () => {
       });
       fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
       await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
-      expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your choice. dohc could not show it yet.", failure);
+      expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your choice. dohc could not show it yet.", failure, expect.any(Function));
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
     });
 

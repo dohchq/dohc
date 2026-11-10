@@ -1294,7 +1294,26 @@ describe("LinkedChatsPanel comment on the file", () => {
     await writeComment("Tighten the intro");
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe("");
-    expect(onError).toHaveBeenCalledExactlyOnceWith("Posted your comment. dohc could not show it yet.", failure);
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Posted your comment. dohc could not show it yet.", failure, expect.any(Function));
+  });
+
+  it("gives a comment that posted a Try again that opens its chat again, only while About shows the file", async () => {
+    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1", threadId: "thread-new" }, failure: "Error: The bookmark projection stopped." });
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [] });
+    const onError = vi.fn();
+    const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />);
+    await writeComment("Tighten the intro");
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const again = onError.mock.lastCall?.[2] as () => void;
+    const reads = () => bridgeMock.listChatMessages.mock.calls.filter(([input]) => input.threadId === "thread-new").length;
+    await waitFor(() => expect(reads()).toBe(1));
+    await act(async () => again());
+    await waitFor(() => expect(reads()).toBe(2));
+
+    view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/other.md" onError={onError} />);
+    await act(async () => again());
+    expect(reads()).toBe(2);
   });
 
   it("closes the composer on Escape without writing anything", async () => {
