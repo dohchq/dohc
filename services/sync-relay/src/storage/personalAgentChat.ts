@@ -190,7 +190,7 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
   const body = linkChatBody(input.body);
   const { target } = input;
   const replyTo = "threadId" in target ? target.threadId : null;
-  const named = replyTo ?? ("channelWireId" in target ? target.channelWireId : target.filePath);
+  const named = "threadId" in target ? target.threadId : "channelWireId" in target ? target.channelWireId : target.filePath;
   if (body === null || !validLinkDiscussionIdempotencyKey(input.idempotencyKey) || !named || !named.isWellFormed()) {
     return { ok: false, reason: "invalid-input" };
   }

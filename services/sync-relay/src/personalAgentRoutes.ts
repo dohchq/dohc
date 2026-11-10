@@ -217,10 +217,11 @@ export function createPersonalAgentToolRoutes(input: {
       const fresh = await linkAuthority.freshPersonal(authority);
       if (!storage.readPersonalReach(credential(fresh), workspaceId, nowMs())) throw notFound();
     };
-    const listed = await runAccountOperation({ storage, copies }, {
+    const { result } = await runAccountOperation({ storage, copies }, {
       owner: authority.ownerUserId, workspaceId, operation: "groups", args: {}, authorize,
       visitor: { reason: "account", caller: `agent:${authority.connectionId}`, signal, phone: false },
-    }) as CliResultByVerb["groups"];
+    });
+    const listed = result as CliResultByVerb["groups"];
     return jsonResponse({
       ok: true,
       workspaceId,
