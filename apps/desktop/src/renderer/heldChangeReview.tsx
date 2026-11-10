@@ -79,10 +79,12 @@ export function HeldChangeCard(props: { path: string; read: HeldChangeRead; onRe
         {unavailable === "fileUnreadable" ? (
           <ReadFailed testId="held-change-file-unreadable" onRetry={props.onRetry}>dohc could not read this file to compare it.</ReadFailed>
         ) : null}
-        {unavailable === "waitingForSync" || unavailable === "unsupported" ? (
-          <p data-testid="held-change-unavailable" className="m-0 text-[13px] text-muted">
-            {unavailable === "waitingForSync" ? "dohc can't preview this change while edits wait to sync." : "dohc can't preview this change."}
-          </p>
+        {/* Sync can finish while the review is open, so this one retries. */}
+        {unavailable === "waitingForSync" ? (
+          <ReadFailed testId="held-change-waiting" onRetry={props.onRetry}>dohc could not preview this change while edits wait to sync.</ReadFailed>
+        ) : null}
+        {unavailable === "unsupported" ? (
+          <p data-testid="held-change-unavailable" className="m-0 text-[13px] text-muted">dohc can't preview this change.</p>
         ) : null}
         {props.read.kind === "ready" && change === null ? (
           <p data-testid="held-change-gone" className="m-0 text-[13px] text-muted">dohc no longer holds a change to this note.</p>

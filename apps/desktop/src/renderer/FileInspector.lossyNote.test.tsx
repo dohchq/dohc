@@ -239,17 +239,34 @@ describe("a lossy note", () => {
     expect(bridge.readHeldChange).toHaveBeenCalledTimes(3);
   });
 
-  it("says why it can't preview a change whose saved text it can't reproduce", async () => {
+  it("previews a change after its edits finish syncing, through Try again", async () => {
     const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
-    bridge.readHeldChange.mockResolvedValue({ change: { path: "a.md", unavailable: "waitingForSync" } });
+    bridge.readHeldChange
+      .mockResolvedValueOnce({ change: { path: "a.md", unavailable: "waitingForSync" } })
+      .mockResolvedValueOnce({ change: { path: "a.md", unavailable: "waitingForSync" } })
+      .mockResolvedValue({ change: { path: "a.md", tooLarge: true } });
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-show-change"));
-    const unavailable = await screen.findByTestId("held-change-unavailable");
-    expect(unavailable.textContent).toBe("dohc can't preview this change while edits wait to sync.");
+    const waiting = await screen.findByTestId("held-change-waiting");
+    expect(waiting.textContent).toContain("dohc could not preview this change while edits wait to sync.");
     expect(screen.queryByTestId("held-change-diff")).toBeNull();
     expect(screen.queryByTestId("held-change-counts")).toBeNull();
+    await user.click(within(waiting).getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("held-change-too-large");
+    expect(screen.queryByTestId("held-change-waiting")).toBeNull();
+  });
+
+  it("says it can't preview a change whose saved text it can't reproduce", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange.mockResolvedValue({ change: { path: "a.md", unavailable: "unsupported" } });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    expect((await screen.findByTestId("held-change-unavailable")).textContent).toBe("dohc can't preview this change.");
+    expect(screen.queryByTestId("held-change-diff")).toBeNull();
   });
 
   it("offers Show change only while dohc holds a change", async () => {
