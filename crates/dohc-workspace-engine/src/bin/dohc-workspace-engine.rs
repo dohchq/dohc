@@ -5250,20 +5250,37 @@ mod tests {
 
         /// While held, the daemon's writes wait with their waker filed.
         #[derive(Clone, Default)]
-        struct OutputGate(Arc<Mutex<(bool, Option<std::task::Waker>)>>);
+        struct OutputGate(Arc<GateState>);
+
+        #[derive(Default)]
+        struct GateState {
+            /// Whether writes wait, and the waker of the write waiting.
+            held: Mutex<(bool, Option<std::task::Waker>)>,
+            parked: Notify,
+        }
 
         impl OutputGate {
             fn hold(&self) {
-                lock(&self.0).0 = true;
+                lock(&self.0.held).0 = true;
             }
             fn release(&self) {
                 let waker = {
-                    let mut gate = lock(&self.0);
+                    let mut gate = lock(&self.0.held);
                     gate.0 = false;
                     gate.1.take()
                 };
                 if let Some(waker) = waker {
                     waker.wake();
+                }
+            }
+            /// Waits until a write is waiting at the held gate.
+            async fn parked(&self) {
+                loop {
+                    let parked = self.0.parked.notified();
+                    if lock(&self.0.held).1.is_some() {
+                        return;
+                    }
+                    parked.await;
                 }
             }
         }
@@ -5280,9 +5297,10 @@ mod tests {
                 bytes: &[u8],
             ) -> Poll<io::Result<usize>> {
                 {
-                    let mut gate = lock(&self.gate.0);
+                    let mut gate = lock(&self.gate.0.held);
                     if gate.0 {
                         gate.1 = Some(cx.waker().clone());
+                        self.gate.0.parked.notify_one();
                         return Poll::Pending;
                     }
                 }
@@ -5302,8 +5320,8 @@ mod tests {
             }
         }
 
-        /// The engine, reporting each request's id once the engine has it: a
-        /// plain request when its call starts, an upload once it is answered.
+        /// The engine, reporting each request's id once the engine answers it.
+        /// The supervisor runs every request through `call_with_input`.
         struct ReportingService {
             engine: Arc<EngineService>,
             seen: tokio::sync::mpsc::UnboundedSender<u64>,
@@ -5316,7 +5334,6 @@ mod tests {
                 ctx: RequestContext,
                 request: WireRequest,
             ) -> Result<ServiceResponse, WireError> {
-                let _ = self.seen.send(request.id);
                 ProtocolEngineService::call(&*self.engine, ctx, request).await
             }
             async fn call_with_input(
@@ -5483,7 +5500,7 @@ mod tests {
                     .unwrap();
             }
 
-            /// Waits until the engine has request `id`, as `ReportingService` reports it.
+            /// Waits until the engine answers request `id`, as `ReportingService` reports it.
             async fn seen(&mut self, id: u64) {
                 while self.seen.recv().await.unwrap() != id {}
             }
@@ -5537,7 +5554,10 @@ mod tests {
             let workspace = daemon.workspace.clone();
             daemon.gate.hold();
             daemon.check(2, workspace.clone()).await;
-            daemon.seen(2).await;
+            // Nothing else is owed output, so the write at the gate is the answer.
+            // The engine answering is not enough: the answer could still be on
+            // its way to the writer, and the next one could overtake it.
+            daemon.gate.parked().await;
             daemon.send(&Envelope::Cancel(Cancel { id: 2 })).await;
             // The daemon reads in order, so it has the cancel once it has the next request.
             daemon
