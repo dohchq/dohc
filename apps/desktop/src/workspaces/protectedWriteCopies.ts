@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import { PROTECTED_COPY_FINAL_ERROR } from "../ipc/errorWords";
-import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
+import { localStateFolder, localStateOpened, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
 
 // Text of a protected file that a sync was about to replace and History did
 // not hold. It stays on this computer: `.dohc` is never captured, synced,
@@ -105,7 +105,16 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
   }
   return {
     list(onReadError: (error: unknown) => void = () => undefined): Promise<ProtectedCopyRow[]> {
-      return enqueue(async () => (await load(onReadError)).map(copy => [copy.path, copy.id, copy.createdAtMs]));
+      // Right after launch the sync client's first request reopens the
+      // engine's binding, so a list refused meanwhile waits once for that open.
+      return enqueue(async () => {
+        const copies = await load(onReadError).catch(async (error: unknown) => {
+          if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+          await localStateOpened(workspace);
+          return load(onReadError);
+        });
+        return copies.map((copy): ProtectedCopyRow => [copy.path, copy.id, copy.createdAtMs]);
+      });
     },
     // False when a copy of this path and version already holds this text.
     keep(path: string, text: string, versionId: string): Promise<boolean> {
