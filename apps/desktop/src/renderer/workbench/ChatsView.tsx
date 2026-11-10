@@ -2198,6 +2198,35 @@ export function ChatsView(props: {
     reload();
     props.onError(words, failure, reload);
   }, [props.onError]);
+  // A question marked answered. Its Group lists one fewer open question when
+  // this thread showed it open.
+  const showResolved = useCallback((threadId: string, resolved: ChatDecisionRecord) => {
+    const wasOpen = reconcileResolvedChatDecision(latestDecisions.current, resolved).wasOpen;
+    setDecisions((current) => reconcileResolvedChatDecision(current, resolved).decisions);
+    if (!wasOpen) return;
+    setChannelThreads((current) => current.map((thread) =>
+      thread.id === threadId
+        ? { ...thread, openDecisionCount: Math.max(0, (thread.openDecisionCount ?? 0) - 1) }
+        : thread));
+  }, []);
+  // An answer whose reply saved while its question stayed open. Try again
+  // marks the question answered with that reply while the window still shows
+  // that conversation, in this workspace, and never posts the reply again.
+  // A failed try offers Try again again.
+  const reportStillOpen = useCallback((words: string, failure: unknown, context: string, answer: {
+    threadId: string; messageId: string; resolvedByMessageId: string; chosenOption?: string;
+  }) => {
+    const shown = () => mounted.current && activeSendContext.current === context;
+    const report = (cause: unknown) => props.onError(words, cause, () => {
+      if (!shown()) return;
+      void bridge().resolveChatDecision({ workspaceId, ...answer }).then(({ resolved }) => {
+        if (!shown()) return;
+        showResolved(answer.threadId, resolved);
+        latestRefresh.current();
+      }, (error: unknown) => { if (shown()) report(error); });
+    });
+    report(failure);
+  }, [props.onError, showResolved, workspaceId]);
   // Resuming after a suspension owes one catch-up pass: the activity events
   // that fired meanwhile reached only the page instance, and waiting for the
   // next event would leave this surface stale for as long as the workspace
@@ -2385,40 +2414,20 @@ export function ChatsView(props: {
       if (!("failure" in result)) {
         if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         showSent(result);
-        const resolvedDecision = result.resolved;
-        if (resolvedDecision) {
-          const decisionWasOpen = reconcileResolvedChatDecision(
-            latestDecisions.current,
-            resolvedDecision,
-          ).wasOpen;
-          setDecisions(
-            (current) =>
-              reconcileResolvedChatDecision(current, resolvedDecision).decisions,
-          );
-          if (decisionWasOpen) {
-            setChannelThreads((current) =>
-              current.map((thread) =>
-                thread.id === nav.thread.id
-                  ? {
-                      ...thread,
-                      openDecisionCount: Math.max(
-                        0,
-                        (thread.openDecisionCount ?? 0) - 1,
-                      ),
-                    }
-                  : thread,
-              ),
-            );
-          }
-        }
+        if (result.resolved) showResolved(nav.thread.id, result.resolved);
       }
       // A message that saved leaves the composer, and a reply whose answer
       // failed leaves the mode, so retrying cannot silently post either twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
-      if (result.resolveFailure) {
+      if (resolvingMessageId !== null && result.resolveFailure) {
         if ("failure" in result) refreshForActivity();
-        props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+        reportStillOpen("Sent your reply. dohc could not mark the question answered.", result.resolveFailure, sendContextKey, {
+          threadId: nav.thread.id,
+          messageId: resolvingMessageId,
+          resolvedByMessageId: result.message.id,
+          ...(chosenOption ? { chosenOption } : {}),
+        });
       } else if ("failure" in result) {
         reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
       }
@@ -2443,12 +2452,14 @@ export function ChatsView(props: {
     props.onAgentWaitsForTrust,
     props.onError,
     refreshForActivity,
+    reportStillOpen,
     reportUnshown,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
     sendContextKey,
     sending,
+    showResolved,
     workspaceId,
   ]);
 

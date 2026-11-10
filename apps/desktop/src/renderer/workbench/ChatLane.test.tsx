@@ -474,19 +474,62 @@ describe("ChatLane", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Monday" }).getAttribute("aria-pressed")).toBe("true"));
   });
 
-  it("says a choice that posted left its question open, with no Try again", async () => {
+  it("marks the poll answered from Try again on a choice that posted while it stayed open, and never sends again", async () => {
+    const words = "Sent your choice. dohc could not mark the question answered.";
+    const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    const resolved = { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "answer", body: "Monday" }),
+      resolveFailure: "Error: Your server session changed. Try again.",
+    });
+    const refusal = new Error("Your server session changed. Try again.");
+    bridgeMock.resolveChatDecision.mockRejectedValueOnce(refusal).mockImplementationOnce(async () => {
+      // The engine holds the answer now, so the reload after it reads it too.
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
+      return { resolved };
+    });
+    const notices = () => onError.mock.calls.filter(([said]) => said === words);
+    render(lane());
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(notices()).toHaveLength(1));
+    expect(notices()[0]?.[1]).toBe("Error: Your server session changed. Try again.");
+    expect(notices()[0]?.[2], "Try again on the choice's toast").toEqual(expect.any(Function));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+
+    // A try that fails says so again, with Try again again.
+    await act(async () => { notices()[0]?.[2]?.(); });
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[1]?.[1]).toBe(refusal);
+    expect(notices()[1]?.[2], "Try again after a failed try").toEqual(expect.any(Function));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+
+    await act(async () => { notices()[1]?.[2]?.(); });
+    await screen.findByTestId("chats-lane-decision-resolved");
+    const answer = { workspaceId: "workspace-a", threadId: "thread-1", messageId: "message-1", resolvedByMessageId: "answer", chosenOption: "Monday" };
+    expect(bridgeMock.resolveChatDecision.mock.calls).toEqual([[answer], [answer]]);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    expect(notices()).toHaveLength(2);
+  });
+
+  it("does nothing from Try again once the lane shows another conversation", async () => {
+    const words = "Sent your choice. dohc could not mark the question answered.";
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", body: "Monday" }),
       resolveFailure: "Error: Your server session changed. Try again.",
     });
-    render(lane());
+    const view = render(lane());
     fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "Sent your choice. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
-    expect(onError.mock.lastCall?.[2]).toBeUndefined();
-    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(words, expect.anything(), expect.any(Function)));
+    const retry = onError.mock.calls.find(([said]) => said === words)?.[2] as () => void;
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-2", channelId: "channel-2" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", threadId: "thread-2", body: "Second channel" })] });
+    view.rerender(lane("channel-2"));
+    await screen.findByText("Second channel");
+    await act(async () => { retry(); });
+    expect(bridgeMock.resolveChatDecision).not.toHaveBeenCalled();
   });
 
   // A choice that saved answers with its ids, so only a refusal says it failed.
@@ -975,24 +1018,48 @@ describe("ChatLane", () => {
     await act(async () => reload.resolve({ decisions: [resolved] }));
   });
 
-  it("says a reply that posted left its question open, with no Try again", async () => {
+  it("marks the question answered from Try again on a reply that posted while it stayed open, and never sends again", async () => {
+    const words = "Sent your reply. dohc could not mark the question answered.";
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
       message({ id: "question", body: "What should I call the file?", authorKind: "agent", authorDisplayName: "Nova" }),
     ] });
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    const decision = { threadId: "thread-1", messageId: "question", state: "open", atMs: 1 };
+    const resolved = { ...decision, state: "resolved", resolvedByMessageId: "answer" };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", body: "notes.md", parentMessageId: "question" }),
       resolveFailure: "Error: Your server session changed. Try again.",
     });
+    const refusal = new Error("Your server session changed. Try again.");
+    bridgeMock.resolveChatDecision.mockRejectedValueOnce(refusal).mockImplementationOnce(async () => {
+      // The engine holds the answer now, so the reload after it reads it too.
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
+      return { resolved };
+    });
+    const notices = () => onError.mock.calls.filter(([said]) => said === words);
     render(lane("agent-dm", "workspace-a", "agent"));
     fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
     const reply = await screen.findByTestId("chats-lane-thread-composer");
     fireEvent.change(reply, { target: { value: "notes.md" } });
     fireEvent.keyDown(reply, { key: "Enter" });
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "Sent your reply. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
-    expect(onError.mock.lastCall?.[2]).toBeUndefined();
+    await waitFor(() => expect(notices()).toHaveLength(1));
+    expect(notices()[0]?.[1]).toBe("Error: Your server session changed. Try again.");
+    expect(notices()[0]?.[2], "Try again on the reply's toast").toEqual(expect.any(Function));
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+
+    // A try that fails says so again, with Try again again.
+    await act(async () => { notices()[0]?.[2]?.(); });
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[1]?.[1]).toBe(refusal);
+    expect(notices()[1]?.[2], "Try again after a failed try").toEqual(expect.any(Function));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+
+    await act(async () => { notices()[1]?.[2]?.(); });
+    await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
+    const answer = { workspaceId: "workspace-a", threadId: "thread-1", messageId: "question", resolvedByMessageId: "answer" };
+    expect(bridgeMock.resolveChatDecision.mock.calls).toEqual([[answer], [answer]]);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    expect(notices()).toHaveLength(2);
   });
 
   it("puts the cursor in the reply box once a reply still sending ends, when Answer is pressed meanwhile", async () => {

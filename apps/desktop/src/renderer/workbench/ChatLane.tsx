@@ -251,6 +251,24 @@ export function ChatLane(props: {
     onError(words, failure, () => { if (current === token.current) void load(true); });
   }, [load, onError]);
 
+  // An answer whose reply saved while its question stayed open. Try again
+  // marks the question answered with that reply, while this lane still shows
+  // it, and never posts the reply again. A failed try offers Try again again.
+  const reportStillOpen = useCallback((words: string, failure: unknown, answer: {
+    threadId: string; messageId: string; resolvedByMessageId: string; chosenOption?: string;
+  }) => {
+    const current = token.current;
+    const report = (cause: unknown) => onError(words, cause, () => {
+      if (current !== token.current) return;
+      void bridge().resolveChatDecision({ workspaceId, ...answer }).then(({ resolved }) => {
+        if (current !== token.current) return;
+        setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+        void load(true);
+      }, (error: unknown) => { if (current === token.current) report(error); });
+    });
+    report(failure);
+  }, [load, onError, workspaceId]);
+
   useEffect(() => {
     setThreadId(null);
     setPostThreadIds([]);
@@ -403,15 +421,18 @@ export function ChatLane(props: {
         const resolved = result.resolved;
         if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
       }
-      if (result.resolveFailure) onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
-      else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
+      if (answers && result.resolveFailure) {
+        reportStillOpen("Sent your reply. dohc could not mark the question answered.", result.resolveFailure, {
+          threadId: target, messageId: answers, resolvedByMessageId: result.message.id,
+        });
+      } else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
       void load(true);
       return true;
     } catch (error) {
       if (current === token.current) onError(ipcErrorMessage(error, "Could not send that reply."), error);
       return false;
     }
-  }, [load, messages, onError, props.locked, props.onAgentWaitsForTrust, reportUnshown, threadId, workspaceId]);
+  }, [load, messages, onError, props.locked, props.onAgentWaitsForTrust, reportStillOpen, reportUnshown, threadId, workspaceId]);
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     // The answer goes where the poll is: its thread, or its earlier post.
@@ -426,7 +447,6 @@ export function ChatLane(props: {
       ...(parentMessageId ? { parentMessageId } : {}),
       resolves: { messageId: decision.messageId, chosenOption: option },
     };
-    const stayedOpen = (failure: unknown) => onError("Sent your choice. dohc could not mark the question answered.", failure);
     setSending(true);
     try {
       const result = await bridge().sendChatMessage(input);
@@ -439,8 +459,11 @@ export function ChatLane(props: {
         const resolved = result.resolved;
         if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
       }
-      if (result.resolveFailure) stayedOpen(result.resolveFailure);
-      else if ("failure" in result) reportUnshown("Sent your choice. dohc could not show it yet.", result.failure);
+      if (result.resolveFailure) {
+        reportStillOpen("Sent your choice. dohc could not mark the question answered.", result.resolveFailure, {
+          threadId: target, messageId: decision.messageId, resolvedByMessageId: result.message.id, chosenOption: option,
+        });
+      } else if ("failure" in result) reportUnshown("Sent your choice. dohc could not show it yet.", result.failure);
     } catch (error) {
       // A choice that saved answers, so a refused one saved nothing.
       if (current === token.current) onError(ipcErrorMessage(error, "Could not send that choice."), error);
@@ -450,7 +473,7 @@ export function ChatLane(props: {
         void load(true);
       }
     }
-  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages, reportUnshown]);
+  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages, reportStillOpen, reportUnshown]);
 
   // Applying or undoing a change answers in the change's own place, as the person who clicked.
   // Apply answers the message's question, attaching the change a review applied instead. Undo attaches the change file again.

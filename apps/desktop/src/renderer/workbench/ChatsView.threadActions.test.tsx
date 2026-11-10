@@ -181,10 +181,12 @@ describe("ChatsView decisions", () => {
     expect(barWords("chats-replying-mode")).toBe("Replying to Sam");
   });
 
-  it("says a reply that posted left its question open, with no Try again", async () => {
+  it("marks the question answered from Try again on a reply that posted while it stayed open, and never sends again", async () => {
     const user = userEvent.setup();
+    const words = "Sent your reply. dohc could not mark the question answered.";
     const opening = message();
     const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    const resolved = { ...openDecision, state: "resolved" as const, resolvedByMessageId: "resolution-message", atMs: NOW + 1 };
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
@@ -192,17 +194,38 @@ describe("ChatsView decisions", () => {
       message: message({ id: "resolution-message", parentMessageId: opening.id, body: "Resolved ✓" }),
       resolveFailure: "Error: Your server session changed. Try again.",
     });
+    const refusal = new Error("Your server session changed. Try again.");
+    bridgeMock.resolveChatDecision.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ resolved });
     const { onError } = renderView();
+    const notices = () => onError.mock.calls.filter(([said]) => said === words);
 
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     await user.click(await screen.findByTestId("chats-message-decision-resolve"));
     await user.click(screen.getByTestId("chats-send"));
 
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "Sent your reply. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
-    expect(onError.mock.lastCall?.[2]).toBeUndefined();
+    await waitFor(() => expect(notices()).toHaveLength(1));
+    expect(notices()[0]?.[1]).toBe("Error: Your server session changed. Try again.");
+    expect(notices()[0]?.[2], "Try again on the reply's toast").toEqual(expect.any(Function));
     expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
+
+    // A try that fails says so again, with Try again again.
+    await act(async () => { notices()[0]?.[2]?.(); });
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[1]?.[1]).toBe(refusal);
+    expect(notices()[1]?.[2], "Try again after a failed try").toEqual(expect.any(Function));
+    expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
+
+    // The engine holds the answer once a try succeeds, so the reload after it reads it too.
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
+    await act(async () => { notices()[1]?.[2]?.(); });
+    expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(bridgeMock.resolveChatDecision.mock.calls).toEqual([
+      [{ workspaceId: "workspace-a", threadId: "thread-1", messageId: opening.id, resolvedByMessageId: "resolution-message" }],
+      [{ workspaceId: "workspace-a", threadId: "thread-1", messageId: opening.id, resolvedByMessageId: "resolution-message" }],
+    ]);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(notices()).toHaveLength(2);
   });
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
