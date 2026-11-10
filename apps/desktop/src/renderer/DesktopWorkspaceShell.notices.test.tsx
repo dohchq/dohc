@@ -2042,6 +2042,35 @@ describe("notices sent to you", () => {
     );
   }
 
+  // A note with parts dohc can't show, so its band appears.
+  const LOSSY_NOTE = ["# Readme", "", "<details>", "<summary>More</summary>", "", "Hidden.", "</details>", ""].join("\n");
+
+  it("keeps a held change's band after its Notice is dismissed, because the band reads the engine's hold", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.listHeldChanges.mockImplementation(async () => ({ paths: ["b.md"] }));
+    // No Notice row names the hold: it was dismissed, and the hold remains.
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    expect(bridge.listHeldChanges).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+  });
+
+  it("clears a note's held band when the engine no longer holds its change", async () => {
+    let listener: () => void = () => {};
+    const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
+      onNoticesChanged: vi.fn((next: () => void) => { listener = next; return () => {}; }),
+    });
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.listHeldChanges.mockImplementation(async () => ({ paths: ["b.md"] }));
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    bridge.listHeldChanges.mockImplementation(async () => ({ paths: [] }));
+    act(() => listener());
+    await waitFor(() => expect(screen.getByTestId("lossy-note-notice").textContent).not.toContain("dohc held a change"));
+  });
+
   it("keeps a held Notice dismissed after the Notice list updates", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));

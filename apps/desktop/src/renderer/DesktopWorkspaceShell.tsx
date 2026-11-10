@@ -156,6 +156,7 @@ import { installWorkLinkOpener } from "./workLinkOpener";
 import { useRequestSequence } from "./useRequestSequence";
 import { knownPersonalAgents, usePersonalAgents } from "./usePersonalAgents";
 import { setPersonalAgents } from "./workbench/chosenColors";
+import { useHeldChanges } from "./shell/useHeldChanges";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
@@ -6190,10 +6191,9 @@ export function DesktopWorkspaceShell(props: {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
   }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
-  // The notes whose change dohc holds, for their band.
-  const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
-    notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
-  [props.sentNotices?.notices, workspaceId]);
+  // The notes whose change dohc holds, for their band. The engine's holds
+  // answer, so dismissing a Notice leaves the band.
+  const heldNotes = useHeldChanges(workspaceId, workspaceIsReady && !shareView, reportShellError);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,

@@ -562,6 +562,10 @@ function makeBaseBridge(
     // on that read pass for the wrong reason.
     linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
+    // The band reads which notes hold a change from the engine's holds.
+    onNoticesChanged: vi.fn((_listener: () => void) => () => undefined),
+    listHeldChanges: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listHeldChanges"]>(async () => ({ paths: [] })),
+    readHeldChange: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["readHeldChange"]>(async () => ({ change: null })),
     chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     // About for a conversation reads the files it mentions.
     chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(async ({ channelWireId }) => ({
