@@ -4,7 +4,7 @@ import { Stack, useIsFocused } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
 import { Check } from "lucide-react-native";
 import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, ScrollView, StyleSheet, Text, View } from "react-native";
 import { File, Paths } from "expo-file-system";
 import { BarBand, nativeBarBand } from "../../../modules/bar-band";
 import { demoMode, demoScroll } from "../../../src/demo";
@@ -13,9 +13,26 @@ import { NoticeRow } from "../../../src/notices/NoticeRow";
 import { useNotices } from "../../../src/notices/NoticesState";
 import type { PhoneNotice } from "../../../src/notices/sample";
 import { useSyncBandHost, type BandRecord } from "../../../src/notices/useSyncBandHost";
+import { NotYet } from "../../../src/NotYet";
+import { sampleBuild } from "../../../src/sampleBuild";
 import { useTheme } from "../../../src/theme";
 
 export default function Notices() {
+  return sampleBuild ? <SampleNotices /> : <ServerNotices />;
+}
+
+// A signed-in build reads no notices from the server yet, so the tab says so instead of showing any.
+function ServerNotices() {
+  const theme = useTheme();
+  return (
+    <ScrollView contentInsetAdjustmentBehavior="automatic" alwaysBounceVertical={false} style={{ backgroundColor: theme.bg }} contentContainerStyle={{ flexGrow: 1 }}>
+      <Stack.Screen options={{ title: noticesWords.heading }} />
+      <NotYet symbol="bell" title={noticesWords.heading} />
+    </ScrollView>
+  );
+}
+
+function SampleNotices() {
   const theme = useTheme();
   const list = useRef<LegendListRef>(null);
   const { notices, unread, dismiss, markAllRead } = useNotices();

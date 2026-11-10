@@ -30,6 +30,9 @@ const palette = {
   },
 } as const;
 
+/** Fills for a workspace's mark, under its white initial: the light identity hues, which hold it in both themes. */
+export const workspaceMarkFills: readonly string[] = Object.values(palette.light.hues);
+
 export type Theme = (typeof palette)["light"] | (typeof palette)["dark"];
 export type IdentityHue = keyof Theme["hues"];
 

@@ -1,11 +1,12 @@
+import { accountWords } from "@dohc/interface-words/account";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo } from "react";
 import { Platform, Settings, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
+import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
 import { demoMode } from "../src/demo";
-import { NotConnected } from "../src/NotConnected";
 import { sampleBuild } from "../src/sampleBuild";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
@@ -36,8 +37,7 @@ export default function RootLayout() {
     if (page) router.push({ pathname: "/page", params: { path: page, t0: String(Date.now()) } });
   }, [router]);
 
-  if (!sampleBuild) return <NotConnected />;
-  return (
+  const app = (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={navigationTheme}>
         <KeyboardProvider>
@@ -49,12 +49,19 @@ export default function RootLayout() {
             {/* An agent's card: a sheet that fits its lines and closes by swiping down or tapping outside it. */}
             <Stack.Screen name="agent-card" options={{ presentation: "formSheet", sheetAllowedDetents: "fitToContents",
               sheetGrabberVisible: true, headerShown: false, contentStyle: { backgroundColor: "transparent" } }} />
+            {/* A signed-in build's Settings, from your mark in the Chats header, and its workspace switcher. */}
+            <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
+            <Stack.Screen name="workspaces" options={{ presentation: "formSheet", sheetAllowedDetents: "fitToContents",
+              sheetGrabberVisible: true, headerShown: false, contentStyle: { backgroundColor: "transparent" } }} />
           </Stack>
           {/* Design review only: page-fonts-missing opens a page whose font files are gone, so no warm web view may have
               loaded them first. */}
-          {demoMode === "page-fonts-missing" ? null : <WarmEditor />}
+          {/* A signed-in build opens no pages yet, so it warms no editor. */}
+          {!sampleBuild || demoMode === "page-fonts-missing" ? null : <WarmEditor />}
         </KeyboardProvider>
       </ThemeProvider>
     </GestureHandlerRootView>
   );
+  // Any build without sample data signs in to a server first.
+  return sampleBuild ? app : <AccountProvider><AccountGate>{app}</AccountGate></AccountProvider>;
 }

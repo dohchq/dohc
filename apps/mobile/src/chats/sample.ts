@@ -27,11 +27,13 @@ export interface ChatSection {
   readonly rows: readonly ChatRowData[];
 }
 
-export interface SampleWorkspace {
+/** A workspace as the phone lists it, from the sample or the server. */
+export interface PhoneWorkspace {
   readonly id: string;
   readonly name: string;
   readonly initial: string;
   readonly color: string;
+  /** Its chats. The server's workspaces have none until the phone reads chats from the server. */
   readonly sections: readonly ChatSection[];
 }
 export const sampleMe = { initials: "IV", hue: "#3f7f86" };
@@ -75,7 +77,7 @@ const fundraiserSections: readonly ChatSection[] = [
 ];
 
 // The workspaces on this phone, in the order the switcher lists them.
-export const sampleWorkspaces: readonly SampleWorkspace[] = [
+export const sampleWorkspaces: readonly PhoneWorkspace[] = [
   { id: "lisbon", name: "Lisbon trip", initial: "L", color: "#38684e", sections: lisbonSections },
   { id: "fundraiser", name: "Fundraiser", initial: "F", color: "#8a5a2e", sections: fundraiserSections },
 ];

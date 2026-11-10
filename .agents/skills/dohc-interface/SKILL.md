@@ -541,6 +541,9 @@ The phone app (`apps/mobile`) uses this skill's words and behavior. Shared words
 11. **A page that fails to load** (its view, or the editor files it needs) shows "dohc could not open this file." with Try again. If the editor files could not be written for lack of space, a second line says "Not enough storage on this phone. Free up space, then choose Try again." The could-not-open strip is only for text shown read-only because editing could not start. A page that's gone offers no Try again.
 12. **End share names the file.** The phone's alert asks "End the share of <file>?", where the desktop asks "End this share?" beside its row. With changes waiting, it asks "End the share of <file> and decline <N> changes <who> sent?".
 13. **A failed End share's toast** has a 2-line title, not 4. It cuts the file's name and each person's in the middle to fit. Its Notices row and Copy keep the whole text.
+14. **Sign out**, where the desktop says Disconnect. The desktop's Disconnect stops sync and keeps the files on the computer. The phone keeps no work of its own, so it only signs out.
+15. **Settings** opens from your mark at the right of the Chats header, as in Slack. It holds the account and its server, Show on phone for each workspace, the account's sessions with End session, and its agents with Sign out, Remove and Restore. The desktop has no session or agent list yet.
+16. **Connect and Settings show their errors in place**, as a line with Try again, and file no toast or Notices row. Both sit outside the tabs, where toasts show, and the phone keeps no Notices of its own yet.
 
 Browser alerts gain the message text after phone push lands (Ice, Nov 9).
 

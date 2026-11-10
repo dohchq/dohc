@@ -27,9 +27,14 @@ Android has been run since the host was added.
 ## Controls that act
 
 The app shows its sample data only in a sample build: a development build, or one made with
-`EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`). Any other build shows one screen
-saying it can't connect to a server yet, so an installable build never presents sample data as someone's work. A
-sample build may keep a control the server will drive later. `src/notices/rowAccessibility.test.ts` holds that each
+`EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`). Any other build signs in to a
+server first (`src/account/Connect.tsx`), then shows the account's workspaces, Settings, and a "Not built yet" state
+on every tab that reads nothing from the server yet, so an installable build never presents sample data as someone's
+work. A sample build may keep a control the server will drive later.
+
+The server client (`src/server`) gives each sign-in a generation, which changes at sign-out, at a 401 and when
+another sign-in starts. A change aborts that sign-in's requests. Check `SignIn.isCurrent()` before applying anything
+a request answered, and use `requestGenerations()` for results that replace each other. `src/notices/rowAccessibility.test.ts` holds that each
 action a Notices row offers has a handler.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to

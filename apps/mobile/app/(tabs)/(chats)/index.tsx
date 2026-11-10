@@ -13,6 +13,8 @@ import { NotYet } from "../../../src/NotYet";
 import { syncProblem } from "../../../src/demo";
 import { SyncBand } from "../../../src/notices/SyncBand";
 import { FirstScreenProbe, firstScreenProbeOn } from "../../../src/firstScreenProbe";
+import { sampleBuild } from "../../../src/sampleBuild";
+import { ServerChats } from "../../../src/chats/ServerChats";
 import { useTheme } from "../../../src/theme";
 
 type Item =
@@ -20,6 +22,10 @@ type Item =
   | { type: "row"; key: string; row: ChatRowData };
 
 export default function Chats() {
+  return sampleBuild ? <SampleChats /> : <ServerChats />;
+}
+
+function SampleChats() {
   const theme = useTheme();
   const router = useRouter();
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());

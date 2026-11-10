@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { demoMode } from "../demo";
+import { sampleBuild } from "../sampleBuild";
 import { endFailedSample, sampleNotices, type PhoneNotice } from "./sample";
 
 interface NoticesState {
@@ -15,7 +16,8 @@ const State = createContext<NoticesState | null>(null);
 
 // One list for the Notices tab and its badge, so marking read clears both.
 export function NoticesProvider({ children }: { children: ReactNode }) {
-  const [notices, setNotices] = useState<readonly PhoneNotice[]>(
+  // A signed-in build reads no notices from the server yet.
+  const [notices, setNotices] = useState<readonly PhoneNotice[]>(!sampleBuild ? [] :
     demoMode === "empty" || demoMode === "band-empty" ? [] : demoMode === "notice-end-failed" || demoMode === "notice-clipped" || demoMode === "notice-clipped-open" ? [endFailedSample, ...sampleNotices] : sampleNotices);
   const add = useCallback((notice: PhoneNotice) => setNotices(previous => [notice, ...previous]), []);
   const dismiss = useCallback((id: string) => setNotices(previous => previous.filter(notice => notice.id !== id)), []);
