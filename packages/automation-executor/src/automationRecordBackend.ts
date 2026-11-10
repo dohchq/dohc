@@ -93,6 +93,8 @@ export interface RunSource {
   reads(access: RecordReads, inventory: AutomationInventory, readable: ReadonlySet<string>): Pick<StepReads, "trigger">;
 }
 const failed = (error: string): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut: false });
+// The largest page a generated read operation returns (packages/security-contract/src/datasetOperations.ts).
+const DATASET_FIND_PAGE = 100;
 
 export async function prepareRecordBackend(deps: RecordRunDependencies, input: RecordRunInput, source: RunSource): Promise<
   { outcome: CollectionAutomationRunOutcome } |
@@ -618,17 +620,31 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
                 if (problem !== null) throw new Error(problem);
                 return { fieldId: field.fieldId, value };
               });
-              let result;
-              try { result = await call(path, operation.operationId, { limit: MAX_FOUND_RECORDS, filters }); }
-              catch (error) {
-                const formulas = (dataset.steps.finds.get(ordinal) ?? []).filter((filter) => filter.value.kind === "formula");
-                if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || formulas.length === 0) throw error;
-                const names = new Intl.ListFormat("en", { type: "conjunction" }).format(formulas.map((filter) => filter.field));
-                return { problem: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.` };
+              // Generated read operations return at most 100 rows a page, so a Find reads
+              // pages from one dataset revision. A revision that moves reads the step again.
+              const rows: DatasetRow[] = [];
+              let after: JsonValue | undefined;
+              let revision: number | undefined;
+              for (;;) {
+                let result;
+                try { result = await call(path, operation.operationId, { limit: DATASET_FIND_PAGE, filters, ...(after === undefined ? {} : { after }) }); }
+                catch (error) {
+                  const formulas = (dataset.steps.finds.get(ordinal) ?? []).filter((filter) => filter.value.kind === "formula");
+                  if (!isAppBackendRuntimeError(error) || error.refusal.code !== "invalid_input" || formulas.length === 0) throw error;
+                  const names = new Intl.ListFormat("en", { type: "conjunction" }).format(formulas.map((filter) => filter.field));
+                  return { problem: `The Find in step ${ordinal + 1} compares ${names} with a value this Collection does not accept.` };
+                }
+                if (revision !== undefined && result.revision !== revision) throw new StepRecordChanged();
+                revision = result.revision;
+                rows.push(...rowsOf(result));
+                const page = result.result;
+                const next = page !== null && typeof page === "object" && !Array.isArray(page) ? page.nextCursor ?? null : null;
+                if (next === null) break;
+                if (rows.length >= MAX_FOUND_RECORDS) return { problem: findOverflowError(ordinal) };
+                after = next;
               }
-              const page = result.result;
-              if (page !== null && typeof page === "object" && !Array.isArray(page) && page.nextCursor != null) return { problem: findOverflowError(ordinal) };
-              return rowsOf(result).map((row) => remember(path, row, table));
+              if (rows.length > MAX_FOUND_RECORDS) return { problem: findOverflowError(ordinal) };
+              return rows.map((row) => remember(path, row, table));
             },
             effects(ordinal, planned) {
               const convert = (planned: readonly PlannedEffect[], path: string) => {

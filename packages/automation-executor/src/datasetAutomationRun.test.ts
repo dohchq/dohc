@@ -507,18 +507,7 @@ automations:
         operation: invoices.edit
 `);
     if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const sent: DatasetInvocation[] = [];
-    const surface: DatasetRunHost = {
-      ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
-      invoke: async (_context, input): Promise<DatasetInvocationResult> => {
-        sent.push(input);
-        const { limit } = input.input as { limit: number };
-        // The trigger read asks for one record; the Find asks for a page and there is more.
-        if (limit === 1) return { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false };
-        const rows = Array.from({ length: limit }, (_, index) => ({ id: `r${index}`, version: 1, values: { [STATUS]: "Open" } }));
-        return { result: { rows, nextCursor: { id: "r49", value: "r49" } }, revision: 7, replayed: false };
-      },
-    };
+    const { sent, surface } = pagedHost(501);
     const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     expect(await runWithRoster({
       withHost: async (work) => await work(surface),
@@ -528,10 +517,74 @@ automations:
       held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 500 records. Narrow its condition, then try again.", timedOut: false });
-    expect(sent.map((input) => input.operationId)).toEqual([LIST, LIST, LIST]);
+    // Five full pages hold 500 records; a sixth page exists, so the Find stops there.
+    expect(findPages(sent)).toEqual([0, 100, 200, 300, 400]);
     expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
   });
+
+  it("reads a Find again from its first page when the dataset changes between pages", async () => {
+    const read = parseAutomationsFile(`version: 1
+automations:
+  - id: count
+    name: Count
+    when: record-added
+    do:
+      - find: "true"
+        as: open
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: open
+        operation: invoices.edit
+`);
+    if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
+    // The second page of the first read comes from a later revision.
+    const { sent, surface } = pagedHost(150, (call) => call === 1 ? 8 : call === 0 ? 7 : 8);
+    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
+    await runWithRoster({
+      withHost: async (work) => await work(surface),
+      evaluator: { runCode: noCode, evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
+      store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
+    }, {
+      held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    expect(findPages(sent).slice(0, 4)).toEqual([0, 100, 0, 100]);
+  });
 });
+
+/**
+ * A host whose list operation pages like a generated one: at most 100 rows, and a cursor after the
+ * last. `revisionOf` names the revision of each Find page, counted from 0.
+ */
+function pagedHost(total: number, revisionOf: (call: number) => number = () => 7) {
+  const sent: DatasetInvocation[] = [];
+  let findCalls = 0;
+  const surface: DatasetRunHost = {
+    ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
+    invoke: async (_context, input): Promise<DatasetInvocationResult> => {
+      sent.push(input);
+      const { limit, after } = input.input as { limit: number; after?: { id: string } };
+      // The trigger read asks for one record.
+      if (limit === 1) return { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false };
+      if (limit > 100) throw new Error("A generated read returns at most 100 rows.");
+      const start = after === undefined ? 0 : Number(after.id.slice(1)) + 1;
+      const rows = Array.from({ length: Math.max(0, Math.min(limit, total - start)) }, (_, index) => ({ id: `r${start + index}`, version: 1, values: { [STATUS]: "Open" } }));
+      const last = rows.at(-1);
+      const nextCursor = start + rows.length < total && last !== undefined ? { id: last.id, value: last.id } : null;
+      return { result: { rows, nextCursor }, revision: revisionOf(findCalls++), replayed: false };
+    },
+  };
+  return { sent, surface };
+}
+
+/** The first record of each Find page the host was asked for. */
+function findPages(sent: readonly DatasetInvocation[]) {
+  return sent.flatMap((input) => {
+    const { limit, after } = input.input as { limit: number; after?: { id: string } };
+    return limit === 1 ? [] : [after === undefined ? 0 : Number(after.id.slice(1)) + 1];
+  });
+}
 
 describe("a record the run reads twice", () => {
   // The record: Find sees a newer version than the trigger read until the
