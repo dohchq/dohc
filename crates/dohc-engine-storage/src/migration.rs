@@ -6046,7 +6046,7 @@ mod tests {
             .expect("enable foreign keys");
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-ydoc-native-authors");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 90);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 91);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         // Each update has its own blob, which names its native row.
         let blob = |seq: i64| seq.to_string().repeat(64);
