@@ -195,7 +195,8 @@ async fn held_drop_rpc_preserves_history_and_undo_without_writing_the_file() {
         )
         .await
         .unwrap_err();
-    assert!(refused.message.contains("changed"), "{refused:?}");
+    assert_eq!(refused.code, dohc_engine_protocol::ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "held-change-stale");
     assert!(
         original_consent.is_consumed(),
         "in-flight consent clones stay revoked"

@@ -2866,14 +2866,10 @@ async fn held_drop_resets_live_state_and_completes_obligations_without_a_file_wr
         .await
         .unwrap();
     assert!(!dropped.held);
-    assert!(
-        !f.settle(false, None)
-            .await
-            .unwrap()
-            .settled()
-            .unwrap()
-            .materialized
-    );
+    let settled = f.settle(false, None).await.unwrap().settled().unwrap();
+    assert!(settled.materialized);
+    assert_eq!(settled.moment_id, "source");
+    assert_eq!(settled.sha256, hex_sha256(f.source.as_bytes()));
     let key = f.key.clone();
     let source = f.source.clone();
     f.actor
@@ -2906,6 +2902,7 @@ async fn held_drop_resets_live_state_and_completes_obligations_without_a_file_wr
                 source
             );
             assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            assert_eq!(store.table_row_count("moments")?, 2);
             Ok(())
         })
         .await
