@@ -251,3 +251,34 @@ fn non_canonical_secret_names_are_refused_both_ways() {
     assert_eq!(secret_tip_len(&db, ".env"), None);
     assert_eq!(secret_tip_len(&db, "%2eenv"), None);
 }
+
+#[test]
+fn secret_read_keeps_text_written_after_its_size_was_read() {
+    // The file can grow between its size check and its read. The wiped buffer
+    // then grows by moving, and an interrupted read resumes.
+    struct Steps(std::collections::VecDeque<Option<&'static [u8]>>);
+    impl std::io::Read for Steps {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(None) => Err(std::io::ErrorKind::Interrupted.into()),
+                Some(Some(chunk)) => {
+                    let read = chunk.len().min(buf.len());
+                    buf[..read].copy_from_slice(&chunk[..read]);
+                    if read < chunk.len() {
+                        self.0.push_front(Some(&chunk[read..]));
+                    }
+                    Ok(read)
+                }
+            }
+        }
+    }
+    let reader = Steps(std::collections::VecDeque::from([
+        Some(&b"TOKEN="[..]),
+        None,
+        Some(&b"alpha\nMODE=grown\n"[..]),
+    ]));
+
+    let bytes = read_wiped(reader, 2).expect("read secret");
+    assert_eq!(&bytes[..], b"TOKEN=alpha\nMODE=grown\n");
+}

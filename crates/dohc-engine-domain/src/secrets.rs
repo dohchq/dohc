@@ -52,6 +52,7 @@ use dohc_engine_storage::{
     enqueue_delete_job, enqueue_job, put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use zeroize::Zeroize;
 
 /// The write origins the store accepts (parity with the TS `WRITE_ORIGINS` set).
 const WRITE_ORIGINS: &[&str] = &["api", "local-file", "restore", "sync", "unknown"];
@@ -92,6 +93,7 @@ impl SecretOp {
 /// plaintext-never-leaks-into-logs invariant). `Clone` is deliberately not
 /// derived: cleartext should live in as few copies as possible, so a caller
 /// must consciously reconstruct the request rather than silently duplicate it.
+/// Dropping it overwrites `text`.
 pub struct SecretWrite {
     pub workspace_id: String,
     pub version_id: String,
@@ -121,7 +123,8 @@ pub enum SecretDiskIntent {
 /// Inputs to [`SecretFileStore::capture_secret`]: the autonomous secret
 /// capture-write. The moment id is derived internally via the length-framed
 /// capture scheme. `Debug` redacts the plaintext (same invariant as
-/// [`SecretWrite`]) and `Clone` is deliberately not derived.
+/// [`SecretWrite`]) and `Clone` is deliberately not derived. Dropping it
+/// overwrites `text`, including the copy a capture retry holds.
 pub struct CaptureSecret {
     pub workspace_id: String,
     pub version_id: String,
@@ -162,6 +165,12 @@ impl core::fmt::Debug for CaptureSecret {
     }
 }
 
+impl Drop for CaptureSecret {
+    fn drop(&mut self) {
+        self.text.zeroize();
+    }
+}
+
 /// Inputs to [`capture_secret_retire_with`]: the autonomous, KEYLESS secret retire
 /// (a delete never decrypts, so it works without the workspace key).
 #[derive(Debug, Clone)]
@@ -199,6 +208,12 @@ impl core::fmt::Debug for SecretWrite {
             .field("metadata_correlation_id", &self.metadata_correlation_id)
             .field("now_ms", &self.now_ms)
             .finish()
+    }
+}
+
+impl Drop for SecretWrite {
+    fn drop(&mut self) {
+        self.text.zeroize();
     }
 }
 
