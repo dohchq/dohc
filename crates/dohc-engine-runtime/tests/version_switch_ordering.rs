@@ -1192,92 +1192,121 @@ async fn finder_metadata_lets_its_folder_become_a_file_on_macos() {
     assert_eq!(std::fs::read_to_string(plans).expect("plans"), "target\n");
 }
 
+// The folder and the file need not be the same kind. Every path inside a
+// `.env` folder is a secret, but a folder named `deploy.env` can hold plain
+// files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn switching_a_secret_folder_to_a_same_named_secret_places_the_file() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let database = engine_db_path(&scratch).expect("database");
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&database, 1).expect("actor").actor;
-    actor
-        .ensure_main_version(
-            WORKSPACE.to_owned(),
-            1,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("main");
-    actor
-        .create_named_version(
-            CreateNamedVersion {
-                workspace_id: WORKSPACE.to_owned(),
-                new_version_id: "later".to_owned(),
-                name: "Later".to_owned(),
-                from_version_id: "main".to_owned(),
-                now_ms: 2,
-                request_id: None,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("later");
-    let key_dir = scratch.path().join(".dohc/engine");
-    let key = create_key_file(&key_dir).expect("secret key");
-    write_secret(
-        &actor,
-        "later",
-        ".env",
-        "MODE=later\n",
-        "secret-folder-to-file-later",
-        3,
-        key,
-        SecretDiskIntent::Materialize,
-    )
-    .await;
-    let key = dohc_engine_crypto::load_key_file(&key_dir)
-        .expect("load key")
-        .expect("key exists");
-    write_secret(
-        &actor,
-        "main",
-        ".env/trip",
-        "TRIP=main\n",
-        "secret-folder-to-file-main",
-        4,
-        key,
-        SecretDiskIntent::AlreadyOnDisk,
-    )
-    .await;
-    std::fs::create_dir_all(scratch.path().join(".env")).expect(".env folder");
-    std::fs::write(scratch.path().join(".env/trip"), "TRIP=main\n").expect("trip");
-    actor
-        .set_active_version(
-            ActiveVersionSwitch {
-                workspace_id: WORKSPACE.to_owned(),
-                version_id: "later".to_owned(),
-                root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(()),
-                now_ms: 5,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("switch");
-    supervisor.close(&database).expect("close");
-    let env = scratch.path().join(".env");
-    assert!(env.is_file(), "the secret folder gives way to the file");
-    assert_eq!(std::fs::read_to_string(env).expect(".env"), "MODE=later\n");
-    let connection = Connection::open(&database).expect("sqlite");
-    let pending: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM materialization_jobs \
-             WHERE job_id GLOB 'version-switch-*' AND target_path = '.env' \
-             AND status = 'pending'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("switch jobs");
-    assert_eq!(pending, 0, "the secret write does not wait");
+async fn switching_a_folder_to_a_same_named_file_of_either_kind_places_the_file() {
+    for (folder, folder_secret, inner, inner_secret) in [
+        (".env", true, ".env/trip", true),
+        ("keys", false, "keys/.env", true),
+        ("deploy.env", true, "deploy.env/notes.md", false),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let database = engine_db_path(&scratch).expect("database");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&database, 1).expect("actor").actor;
+        actor
+            .ensure_main_version(
+                WORKSPACE.to_owned(),
+                1,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("main");
+        actor
+            .create_named_version(
+                CreateNamedVersion {
+                    workspace_id: WORKSPACE.to_owned(),
+                    new_version_id: "later".to_owned(),
+                    name: "Later".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("later");
+        let key_dir = scratch.path().join(".dohc/engine");
+        create_key_file(&key_dir).expect("secret key");
+        for (version_id, path, secret, text, disk_intent, now_ms) in [
+            (
+                "later",
+                folder,
+                folder_secret,
+                "MODE=later\n",
+                SecretDiskIntent::Materialize,
+                3,
+            ),
+            (
+                "main",
+                inner,
+                inner_secret,
+                "TRIP=main\n",
+                SecretDiskIntent::AlreadyOnDisk,
+                4,
+            ),
+        ] {
+            let moment_id = format!("folder-to-file-{version_id}-{now_ms}");
+            if secret {
+                let key = dohc_engine_crypto::load_key_file(&key_dir)
+                    .expect("load key")
+                    .expect("key exists");
+                write_secret(
+                    &actor,
+                    version_id,
+                    path,
+                    text,
+                    &moment_id,
+                    now_ms,
+                    key,
+                    disk_intent,
+                )
+                .await;
+            } else {
+                actor
+                    .versioned_text_write(
+                        write_for(WORKSPACE, version_id, path, text, &moment_id, now_ms),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("write");
+            }
+        }
+        std::fs::create_dir_all(scratch.path().join(folder)).expect("folder");
+        std::fs::write(scratch.path().join(inner), "TRIP=main\n").expect("inner file");
+        actor
+            .set_active_version(
+                ActiveVersionSwitch {
+                    workspace_id: WORKSPACE.to_owned(),
+                    version_id: "later".to_owned(),
+                    root_dir: scratch.path().to_path_buf(),
+                    self_writes: Arc::new(()),
+                    now_ms: 5,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("switch");
+        supervisor.close(&database).expect("close");
+        let file = scratch.path().join(folder);
+        assert!(file.is_file(), "the folder {folder} gives way to the file");
+        assert_eq!(std::fs::read_to_string(file).expect(folder), "MODE=later\n");
+        let connection = Connection::open(&database).expect("sqlite");
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id GLOB 'version-switch-*' AND target_path = ?1 \
+                 AND status = 'pending'",
+                [folder],
+                |row| row.get(0),
+            )
+            .expect("switch jobs");
+        assert_eq!(pending, 0, "the write over {folder} does not wait");
+    }
 }
