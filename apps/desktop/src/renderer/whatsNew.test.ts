@@ -14,7 +14,7 @@ describe("takeUnseenWhatsNew", () => {
   it("stays closed on a first launch and records the newest release", () => {
     const storage = memoryStorage();
     expect(takeUnseenWhatsNew(storage)).toBe(false);
-    expect(storage.getItem("dohc.whatsNew.seen")).toBe(WHATS_NEW[0]!.id);
+    expect(storage.getItem("dohc.whatsNew.seen")).toBe(WHATS_NEW[0]!.version);
   });
 
   it("opens once after an update brings a new release", () => {
@@ -31,8 +31,8 @@ describe("takeUnseenWhatsNew", () => {
     expect(takeUnseenWhatsNew(refusing)).toBe(false);
   });
 
-  it("gives every release a distinct id", () => {
-    expect(new Set(WHATS_NEW.map((release) => release.id)).size).toBe(WHATS_NEW.length);
+  it("gives every release a distinct version", () => {
+    expect(new Set(WHATS_NEW.map((release) => release.version)).size).toBe(WHATS_NEW.length);
   });
 });
 

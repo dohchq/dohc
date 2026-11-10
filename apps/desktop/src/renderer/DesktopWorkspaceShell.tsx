@@ -6852,7 +6852,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             );
-                case "whatsNew": return <WhatsNewPage />;
+                case "whatsNew": return <WhatsNewPage appVersion={appVersion} />;
                 case "versions": return (
               // The same capability gate and lines as a compare tab.
               !captureAvailable ? (
