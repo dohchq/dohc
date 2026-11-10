@@ -483,6 +483,41 @@ describe("a dataset table's ⚡ panel", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it.each([["open", false], ["closed", true]])("reads the Collection again on Try again for a refused field change with Fields %s, then prepares it", async (_state, close) => {
+    const { before, preparation } = buttonApproval();
+    const moved: DatasetDescription = { ...before, revision: 2, revisionSha256: "9".repeat(64) };
+    let current = before;
+    backend.dataset.mockImplementation(async (input: { action: string; revisionSha256?: string }) => {
+      if (input.action === "describe") return { kind: "description", dataset: current };
+      if (input.action === "prepareSchemaChange") {
+        if (input.revisionSha256 !== current.revisionSha256) throw new Error("Collection rules changed. Refresh the Collection before changing fields.");
+        return { kind: "migration-prepared", ...preparation, previousRevision: { ...preparation.previousRevision, revision: 2, revisionSha256: current.revisionSha256 } };
+      }
+      throw new Error(`Unexpected ${input.action}`);
+    });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    // The rules change somewhere else, as from the CLI, which tells this page nothing.
+    current = moved;
+    fireEvent.click(await screen.findByRole("button", { name: "Add as button: Confirm" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not prepare this field change.", expect.any(Error), expect.any(Function)));
+    if (close) {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("dialog", { name: "Fields and names" })).toBeNull();
+    }
+    await act(async () => { (onError.mock.calls[0]![2] as () => void)(); });
+    expect(await screen.findByRole("button", { name: "Approve change" })).toBeTruthy();
+    const calls = backend.dataset.mock.calls.map(([input]) => input as { action: string; revisionSha256?: string });
+    expect(calls.map(call => call.action)).toEqual(["describe", "prepareSchemaChange", "describe", "prepareSchemaChange"]);
+    expect(calls[3]!.revisionSha256).toBe(moved.revisionSha256);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
   it("fills in the action named for a button nothing uses when Choose what it does opens the builder", async () => {
     const { before } = buttonApproval();
     const withButton: DatasetDescription = { ...before, tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };

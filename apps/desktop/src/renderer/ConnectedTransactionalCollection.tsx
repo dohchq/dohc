@@ -5,7 +5,7 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
+import type { DatasetCopyStatus, DatasetMigrationPreparation, DatasetSchemaChange } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
@@ -98,6 +98,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const [viewingPending, setViewingPending] = useState(false);
   // True, or the type of the new field the dialog opens on.
   const [editingFields, setEditingFields] = useState<boolean | "date">(false);
+  // A failed field change that Try again prepares once the page read the Collection again.
+  const [fieldRetry, setFieldRetry] = useState<{ change: DatasetSchemaChange } | null>(null);
   const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -140,6 +142,13 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetPath, onError, onSettled, openIdentity, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
+  // The Collection may have changed somewhere else, as through the CLI, which tells this page nothing.
+  const retryFieldChange = useCallback(async (change: DatasetSchemaChange) => {
+    await refresh();
+    if (!pageOpen.current) return;
+    setFieldRetry({ change });
+    setEditingFields(open => open || true);
+  }, [refresh]);
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
     const result = await bridge().dataset({ ...input, action: "migrationPreviewPage" });
@@ -396,8 +405,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       onChooseButton={table ? chooseButton : undefined}
       onButtonAdded={table ? chooseButton : undefined}
       onLoadPreview={loadMigrationPreview}
-      onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
+      retry={fieldRetry} onRetry={change => { void retryFieldChange(change); }}
+      onClose={() => { setEditingFields(false); setFieldRetry(null); }} onReviewSource={() => { setEditingFields(false); setFieldRetry(null); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
+        setFieldRetry(null);
         signal.throwIfAborted();
         const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
         signal.throwIfAborted();
