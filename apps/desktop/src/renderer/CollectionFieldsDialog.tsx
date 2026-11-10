@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { DatasetSchemaChange, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
@@ -26,6 +26,10 @@ export interface CollectionFieldsDialogProps {
   onButtonAdded?(field: string): void;
   /** The type a new field starts with. */
   addType?: FieldType;
+  /** A change to prepare as the dialog opens: a failed one's Try again, after the page read the Collection again. */
+  retry?: { change: DatasetSchemaChange } | null;
+  /** Try again on a failed change. The Collection may have changed since this dialog opened, so the page reads it first. */
+  onRetry?(change: DatasetSchemaChange): void;
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
@@ -76,11 +80,15 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     if (unique && hasDefault) throw new Error("A new unique field cannot give every record the same default.");
     return DatasetSchemaChange.parse({ kind, tableId: props.tableId, field });
   }
-  async function prepare(button?: string) {
+  function prepare(button?: string) {
     if (locked.current || !active.current) return;
     let change: DatasetSchemaChange;
     try { change = button ? DatasetSchemaChange.parse({ kind: "addButton", tableId: props.tableId, name: button }) : changeFromDraft(); setInvalid(null); }
     catch (error) { setInvalid(error instanceof Error ? error.message : "Check the field values."); return; }
+    void prepareChange(change);
+  }
+  async function prepareChange(change: DatasetSchemaChange) {
+    if (locked.current || !active.current) return;
     locked.current = true; setPending(true); const abort = new AbortController(); lifetime.current = abort;
     try {
       const preparation = await props.onPrepare(change, abort.signal);
@@ -89,9 +97,15 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
           || preparation.previousRevision.revisionSha256 !== props.dataset.revisionSha256) throw new Error("This review belongs to another Collection revision. Refresh the Collection.");
         setReview({ preparation, change });
       }
-    } catch (error) { if (active.current && !abort.signal.aborted) props.onError("dohc could not prepare this field change.", error, () => { if (active.current) void prepare(button); }); }
+    } catch (error) {
+      const { onRetry } = props;
+      if (active.current && !abort.signal.aborted) props.onError("dohc could not prepare this field change.", error,
+        onRetry ? () => onRetry(change) : () => { if (active.current) void prepareChange(change); });
+    }
     finally { if (active.current) { locked.current = false; setPending(false); } }
   }
+  const { retry } = props;
+  useEffect(() => { if (retry) void prepareChange(retry.change); }, [retry]);
   if (review) return <CollectionMigrationReviewDialog workspaceId={props.workspaceId} datasetId={props.dataset.datasetId} initialPreparation={review.preparation} generatedChange
     onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={async (input, signal) => {
       await props.onApprove(input, signal);
