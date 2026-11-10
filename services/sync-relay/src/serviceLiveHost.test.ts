@@ -85,7 +85,19 @@ async function fixture({selfHosted = false} = {}) {
   let closed = false;
   const closeStorage = () => { if (!closed) { deployment.storage.close(); closed = true; } };
   cleanup.push(async () => { closeStorage(); await rm(root, { recursive: true, force: true }); });
-  return { trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), ...deployment, root, config, configPath, save, closeStorage };
+  // Every host started from the fixture calls these as each of its activation passes ends.
+  const passEnds = new Set<() => void>();
+  return { trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), ...deployment, root, config, configPath, save, closeStorage,
+    passEnds, onPass: () => {for (const listener of [...passEnds]) listener();} };
+}
+// Resolves once `count` activation passes that began after the call have ended.
+function afterPasses(f: {passEnds: Set<() => void>}, count = 1) {
+  let ended = 0;
+  return new Promise<void>(resolve => {
+    // The first pass to end may have begun before the call.
+    const listener = () => {if (++ended > count) {f.passEnds.delete(listener); resolve();}};
+    f.passEnds.add(listener);
+  });
 }
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
@@ -1341,15 +1353,16 @@ async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPe
   // The workspace's pulls so far, for waiting on the next one.
   const pullCount = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
   return {...o, sibling, other, attach, detach, pullCount, passes, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
-    // Resolves once a pass that began after the current one has run, on its second new pull or push. A ready
-    // workspace pushes every pass but pulls only for a relay change or unfinished work, so either counts.
+    // Resolves once a pull that began after the current one has been sent, on the second new pull. A ready
+    // workspace whose replica waits on nothing pulls only for a relay change; wait on `nextPass` for it.
     nextPull() {
-      const seen: Record<string, number> = {"sync.pullHosted": 0, "sync.push": 0};
+      let seen = 0;
       return new Promise<void>(resolve => {
-        const listener = (method: string) => {if (method in seen && ++seen[method]! === 2) {o.requestListeners.delete(listener); resolve();}};
+        const listener = (method: string) => {if (method === "sync.pullHosted" && ++seen === 2) {o.requestListeners.delete(listener); resolve();}};
         o.requestListeners.add(listener);
       });
-    }};
+    },
+    nextPass: () => afterPasses(o.f)};
 }
 const stay = {departing: []};
 
@@ -2824,7 +2837,7 @@ it("retires a stopped document only once the engine released it after its replic
   expect(restarted.retains(o.sibling)).toBe(false);
   expect(retiredRow(o).retired).toBe(true);
   const tries = releases();
-  await o.nextPull();
+  await o.nextPass();
   expect(releases()).toBe(tries);
 });
 
@@ -4127,7 +4140,7 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   await o.depart();
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
-  await o.nextPull();
+  await o.nextPass();
   const saved = readAcceptedEdits(o);
   expect(saved, "The accepted edits must stay available after the document is removed.").toEqual(storedAccepted);
   expect(o.native.entries, "The queued edits must stay available after the document is removed.").toEqual(queued);
@@ -4154,13 +4167,13 @@ for (const c of [
   move(o.sibling, "elsewhere/a.md");
   await o.depart();
   await vi.waitFor(() => expect(removed, "The moved document must leave activation.").toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path})));
-  await o.nextPull();
+  await o.nextPass();
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   if (c.replicaGone) {
     o.replies.pass = {}; o.replies.commit = {};
     await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
-    await o.nextPull();
+    await o.nextPass();
     // The service stops listing a moved document once its replica lets it go.
     expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 45})).toBeNull();
     await o.host.update({workspaces: [o.workspace], documents: [], departing: []});
@@ -4737,7 +4750,7 @@ it("keeps an omitted moved document out of restore routes after a later workspac
   expect(creates).toBe(2);
   expect(host.automationLedger("workspace")).not.toBeNull();
   expect(host.automationLedger("workspace-2")).toBeNull();
-  for (let pass = 0; pass < 3; pass++) await o.nextPull();
+  await afterPasses(o.f, 3);
   await vi.waitFor(() => expect({drained: host.drained("workspace"), steps: o.calls(sent).filter(method =>
     ["liveApplication.reconcileActivation", "liveApplication.releaseActivation", "liveApplication.unloadDocument"].includes(method))},
   "An omitted moved document must open no restore route or departure steps after a failed membership update.")
@@ -4838,19 +4851,24 @@ it("keeps a replacement at a moved document's old path ready while the moved doc
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
   await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("The test holds the unload.")));
-  // At the route's unload, which each pass sends: whether the replacement is ready, and whether the workspace
-  // pushed since the last pass's unload. Its replica waits on no pull, so a pull marks no pass.
+  // At the end of each pass that sent the route's unload: whether the replacement is ready, and whether the
+  // workspace pushed after that unload. The route publishes before its unload, so only the workspace's own push counts.
   const ready: boolean[] = [], pushed: boolean[] = [];
-  let pushing = false;
+  let unloaded = false, pushing = false;
   const listener = (method: string) => {
+    if (method === "liveApplication.unloadDocument") {unloaded = true; pushing = false;}
     if (method === "sync.push") pushing = true;
-    if (method === "liveApplication.unloadDocument") {ready.push(driver!.completed(replacement)); pushed.push(pushing); pushing = false;}
   };
-  o.requestListeners.add(listener);
-  await vi.waitFor(() => expect(ready.length).toBeGreaterThanOrEqual(4));
-  o.requestListeners.delete(listener);
+  const sample = () => {
+    if (unloaded) {ready.push(driver!.completed(replacement)); pushed.push(pushing);}
+    unloaded = false; pushing = false;
+  };
+  o.requestListeners.add(listener); o.f.passEnds.add(sample);
+  await afterPasses(o.f, 4);
+  o.requestListeners.delete(listener); o.f.passEnds.delete(sample);
+  expect(ready.length).toBeGreaterThanOrEqual(4);
   expect(ready.filter(value => !value)).toEqual([]);
-  expect(pushed.slice(1).filter(value => !value)).toEqual([]);
+  expect(pushed.filter(value => !value)).toEqual([]);
   expect(host.retains(o.sibling)).toBe(true);
 });
 
@@ -5641,7 +5659,7 @@ it("starts a never-opened note through its first open, and only a later capture 
   await vi.waitFor(() => expect(o.host.blocked(neverOpened)).toBe("without-lineage"));
   const base = JSON.parse(String(o.bases()[0]!.payload_json)) as {lineageClaimId: string};
   expect(o.host.isDocumentReady({workspaceId: "workspace", mainVersionId: "main", objectId: neverOpened.objectId, lineageClaimId: base.lineageClaimId})).toBe(false);
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.fetcher).toHaveBeenCalledOnce();
   expect(o.captures()).toBe(2);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
@@ -5657,7 +5675,7 @@ it("keeps a first-open request running past the deadline of the pass that starte
   await vi.waitFor(() => expect(o.requests).toHaveLength(1));
   const {signal, pass} = o.requests[0]!;
   await vi.waitFor(() => expect(pass?.aborted).toBe(true), {timeout: 5_000});
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(signal.aborted).toBe(false);
   expect(o.requests).toHaveLength(1);
   expect(o.host.blocked(neverOpened)).toBeUndefined();
@@ -5681,7 +5699,7 @@ it.each(["the note leaves the host", "the host closes"] as const)("cancels a fir
   else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   expect(signal.aborted).toBe(true);
   if (ending === "the note leaves the host") {
-    await o.nextPull(); await o.nextPull();
+    await afterPasses(o.f, 2);
     expect(o.host.isDocumentReady(o.document)).toBe(true);
   }
   expect(o.requests).toHaveLength(1);
@@ -5723,7 +5741,7 @@ it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s 
   o.acceptEdit("moving");
   await o.host.drain(o.document);
   expect(o.applied.has("edit-moving")).toBe(true);
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.requests).toHaveLength(1);
   expect(o.bases()).toHaveLength(0);
 });
@@ -5752,7 +5770,7 @@ it.each([
   await vi.waitFor(() => expect(o.captures()).toBe(2));
   await vi.waitFor(() => expect(o.host.blocked(plain)).toBe("refused"));
   expect(status()).toEqual(refused);
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.captures()).toBe(2);
   expect(o.fetcher).toHaveBeenCalledOnce();
   expect(o.host.isDocumentReady(o.document)).toBe(true);
@@ -5760,7 +5778,7 @@ it.each([
   expect(status()).toBeUndefined();
   await vi.waitFor(() => expect(o.captures()).toBe(3));
   await vi.waitFor(() => expect(status()).toEqual(refused));
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.captures()).toBe(3);
   expect(o.fetcher).toHaveBeenCalledOnce();
 });
@@ -5818,7 +5836,7 @@ it("reports a refused activation validation after a first open published its bas
   expect(o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}))).toEqual({
     reason: "ordinary-activation-refused", code: "activation-validation", recovery: "report", source: expect.objectContaining({...plain, path: neverOpened.path})});
   expect(releases()).toBe(1);
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.captures()).toBe(2);
   expect(releases()).toBe(1);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
@@ -5831,7 +5849,7 @@ it("builds nothing for a first-open request with another credential, and asks ag
   let clock = 0;
   const o = await neverOpenedHost({credential: "other", nowMs: () => clock});
   await vi.waitFor(() => expect(o.statuses).toEqual([404]));
-  await o.nextPull(); await o.nextPull();
+  await afterPasses(o.f, 2);
   expect(o.requests).toHaveLength(1);
   // The first failure waits at most 1.5 s, with jitter.
   clock += 1_500;
@@ -7305,11 +7323,7 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
     return request.method === method && request.params?.workspaceId === workspaceId;
   }).length;
   const pulls = (workspaceId: string) => requests("sync.pullHosted", workspaceId);
-  // Every pass pushes each ready workspace once, so pushes count passes.
-  const passes = async (count: number) => {
-    const target = requests("sync.push", workspaceIds[0]!) + count;
-    await vi.waitFor(() => expect(requests("sync.push", workspaceIds[0]!)).toBeGreaterThanOrEqual(target), {timeout: 20_000});
-  };
+  const passes = (count: number) => afterPasses(f, count);
   // The replica applied every row the relay holds and the hosted scope it holds now, and its cursor reached the last row.
   const caughtUp = (workspaceId: string) => {
     const rows = relayRows(workspaceId), replica = replicas.get(workspaceId)!;

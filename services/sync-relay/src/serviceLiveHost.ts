@@ -243,6 +243,8 @@ export async function startServiceLiveHost(options: {
   firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
   /** Times the hosted recovery probe on a monotonic clock, unless a test injects another. */
   nowMs?: () => number;
+  /** Called as each activation pass ends, so a test can wait on passes rather than on the requests they send. */
+  onPass?: () => void;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -1500,6 +1502,7 @@ export async function startServiceLiveHost(options: {
         while (!signal.aborted) {
           // Native passes retain ownership until their actual work settles.
           yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {await pass(); await sweep();})));
+          options.onPass?.();
           yield* pause;
         }
       }));
