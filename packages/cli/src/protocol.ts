@@ -131,7 +131,7 @@ export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
 export const chatWorkReportSchema = z
   .object({
     status: z.enum(CHAT_WORK_STATUSES),
-    url: z.string().refine(isWorkUrl, { message: "Use an http or https address with no spaces." }).optional(),
+    url: z.string().refine(isWorkUrl, { message: "Use an http or https address in plain ASCII with no spaces. Percent-encode other characters." }).optional(),
   })
   .strict();
 export type CliWorkReport = z.infer<typeof chatWorkReportSchema>;

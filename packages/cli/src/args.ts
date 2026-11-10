@@ -460,7 +460,7 @@ const workFlags: readonly CliFlag[] = [
     value: "status",
     text: `Report where your work outside dohc stands: ${CHAT_WORK_STATUSES.join(", ")}. Only an agent reports work.`,
   },
-  { name: "--link", value: "url", text: "Link to that work, such as its thread or pull request. Needs --work." },
+  { name: "--link", value: "url", text: "Link to that work, such as its thread or pull request: an http or https address in plain ASCII. Needs --work." },
 ];
 const workNote = "With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link.";
 function workFields(input: VerbInput): { work?: CliWorkReport } {
@@ -472,7 +472,7 @@ function workFields(input: VerbInput): { work?: CliWorkReport } {
   }
   if (!isChatWorkStatus(status)) fail(`--work requires one of: ${CHAT_WORK_STATUSES.join(", ")}`);
   const work = chatWorkReportSchema.safeParse({ status, ...(url === undefined ? {} : { url }) });
-  if (!work.success) fail("--link requires an http or https address with no spaces");
+  if (!work.success) fail("--link requires an http or https address in plain ASCII with no spaces; percent-encode other characters");
   return { work: work.data };
 }
 

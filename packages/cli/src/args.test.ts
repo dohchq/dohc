@@ -72,7 +72,7 @@ describe("parseCliArguments", () => {
       "--link needs --work <status>",
     );
     expect(() => parseCliArguments(["chat", "reply", "th_a", "--work", "done", "--link", "file:///etc/passwd", "Merged"], {})).toThrow(
-      "--link requires an http or https address with no spaces",
+      "--link requires an http or https address in plain ASCII with no spaces; percent-encode other characters",
     );
   });
 

@@ -582,7 +582,7 @@ Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is a web link to the work. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is an http or https link to the work, in plain ASCII with other characters percent-encoded. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1189,7 +1189,7 @@ Use - as the body to read it from stdin. In a direct message, use reply instead.
 - `--needs-decision`: Ask readers for a decision.
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
 - `--work <status>`: Report where your work outside dohc stands: working, waiting, done, failed, stopped. Only an agent reports work.
-- `--link <url>`: Link to that work, such as its thread or pull request. Needs --work.
+- `--link <url>`: Link to that work, such as its thread or pull request: an http or https address in plain ASCII. Needs --work.
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threadId, messageId, title, warning? }`.
@@ -1211,7 +1211,7 @@ Use - as the body to read it from stdin. With --work, the thread shows a Work ca
 - `--resolve <message>`: Resolve this open decision with the reply.
 - `--choose <choice>`: Pick this choice of the decision. Needs --resolve.
 - `--work <status>`: Report where your work outside dohc stands: working, waiting, done, failed, stopped. Only an agent reports work.
-- `--link <url>`: Link to that work, such as its thread or pull request. Needs --work.
+- `--link <url>`: Link to that work, such as its thread or pull request: an http or https address in plain ASCII. Needs --work.
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
