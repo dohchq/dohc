@@ -378,7 +378,10 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
         panic!("an acknowledged seed needs no journal answer");
     };
     assert_eq!(adoption.unwrap().adoption_id, f.cut.adoption_id);
-    assert!(applications.is_empty() && !has_more_applications && !settle);
+    assert!(applications.is_empty() && !has_more_applications);
+    // The edit before adoption named no author, so the interval names the
+    // unknown author and the document parks only after a settlement.
+    assert!(settle, "the interval names the edit before adoption");
     assert_eq!(native_entries(&f)[0].2, Some(serde_json::to_string(&receipt).unwrap()));
     apply_event(&mut f, seed_event).unwrap();
     let Reconciliation::Reconciled { applications, settle, .. } = reconcile(&mut f, 10, None, None).unwrap()
@@ -500,7 +503,8 @@ fn a_seed_the_journal_never_accepted_is_abandoned_once_and_recognized_after() {
     else {
         panic!("abandoned");
     };
-    assert!(adoption.is_some() && applications.is_empty() && !settle);
+    assert!(adoption.is_some() && applications.is_empty());
+    assert!(settle, "the interval names the edit before adoption");
     assert_eq!(
         native_entries(&f),
         vec![(seed.clone(), false, None, None, None, Some("activation-released".into()))]
