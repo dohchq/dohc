@@ -547,7 +547,8 @@ The phone app (`apps/mobile`) uses this skill's words and behavior. Shared words
 17. **Notices in a signed-in build** list only failures held on this phone, such as a read of Home or Chats, each with Try again. The phone reads no notices from the server yet.
     A change feed that fails 3 times in a row shows as a failed read does, so content never goes out of date without a sign: a toast and a row on the tabs, and a line above a chat or page. Try again starts the feed at once, and its next answer takes the failure back.
 18. **Reading only, in a signed-in build.** The phone can't write to the server yet. A chat has no composer, and a page is read-only, with the Read-only mark. Chats lists groups, people and agents, with no unread marks and no file chats: the server gives the phone neither yet. Home lists Pages and Other files only; the phone has no Collections or Apps yet.
-19. **A page the server won't send.** A file over the editor's limit says "This file is too large to open on a phone. Open it on a computer.", because the server sends none of it. A page whose workspace is being restored says "This page is being restored." with Try again.
+19. **The workspace switcher** lists every workspace that shows on the phone. One whose sync isn't set up yet is dimmed, says "Not synced yet", and can't be chosen. Its Show on phone switch in Settings stays as it is.
+20. **A page the server won't send.** A file over the editor's limit says "This file is too large to open on a phone. Open it on a computer.", because the server sends none of it. A page whose workspace is being restored says "This page is being restored." with Try again.
 
 Browser alerts gain the message text after phone push lands (Ice, Nov 9).
 

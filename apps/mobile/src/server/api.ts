@@ -51,13 +51,15 @@ export interface AccountWorkspace {
   readonly workspaceId: string;
   /** The name its owner's computer last sent, or null before one did. */
   readonly name: string | null;
+  /** It has a sync identity, so the server can make a copy for the phone to read. */
+  readonly canOpen: boolean;
   readonly showOnPhone: boolean;
 }
 
 export function listWorkspaces(client: ServerClient): Promise<AccountWorkspace[]> {
   return client.send("GET", "/sync/account/workspaces", body => each(okAnswer(body)?.workspaces, item =>
-    isFields(item) && text(item.workspaceId, 256) && textOrNull(item.name) && typeof item.showOnPhone === "boolean"
-      ? { workspaceId: item.workspaceId, name: item.name, showOnPhone: item.showOnPhone }
+    isFields(item) && text(item.workspaceId, 256) && textOrNull(item.name) && typeof item.canOpen === "boolean" && typeof item.showOnPhone === "boolean"
+      ? { workspaceId: item.workspaceId, name: item.name, canOpen: item.canOpen, showOnPhone: item.showOnPhone }
       : null));
 }
 

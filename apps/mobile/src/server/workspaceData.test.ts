@@ -20,6 +20,7 @@ const thread = (id: string, body: string) => ({ ok: true, thread: { id, title: "
   dispatch: { paused: null, lastRun: null }, messages: [message("message-1", id, body)], projection: { path: "p", readOnly: true, text: "" } });
 const feedPath = (workspaceId: string, since: string) => `/sync/${workspaceId}/ops/changes?since=${since}&hold=${FEED_HOLD_MS}`;
 const feed = (answer: object): Answer => ({ status: 200, body: { ok: true, ...answer } });
+const NOT_FOUND: Answer = { status: 404, body: { ok: false, error: "not found", code: "not_found" } };
 /** A feed request the test never answers: it waits until its signal aborts. */
 const held = () => new Promise<Answer>(() => {});
 
@@ -159,12 +160,56 @@ describe("what a read answers", () => {
     await vi.waitFor(() => expect(data.state(views.thread("thread-1")).value).toEqual({ kind: "missing" }));
   });
 
+  it("ignores a superseded read's 404: a newer read has landed, and the store stays as it is", async () => {
+    const server = testServer();
+    const old = deferred<Answer>();
+    // The first read lands; a change starts a second, held; a later change starts a third, which lands.
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"), () => old.promise, ops(files(["a.md", "object-a"]), "0.7.2"));
+    const second = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), feed({ cursor: "0.6.2", changed: { files: ["object-a"] } }));
+    server.on("GET", feedPath("ws-a", "0.6.2"), () => second.promise);
+    server.on("GET", feedPath("ws-a", "0.7.2"), held);
+    const onGone = vi.fn();
+    const cache = createReadCache();
+    const data = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache, onGone });
+    data.resume();
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(2));
+    second.resolve(feed({ cursor: "0.7.2", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(1));
+    old.resolve(NOT_FOUND);
+    await settled();
+    expect(onGone).not.toHaveBeenCalled();
+    expect(data.state(views.files)).toMatchObject({ problem: null, value: [{ path: "a.md" }] });
+    expect(cache.entries(cacheScope(signInTo(server), "ws-a"))).toHaveLength(1);
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.7.2"))).toBe(1));
+  });
+
+  it("answers a 503 as a failed read and a feed failure, never as a workspace that has gone", async () => {
+    const server = testServer();
+    const busy: Answer = { status: 503, body: { ok: false, error: "Your server can't open workspaces for the phone right now. Try again later.", code: "server_busy" } };
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["a.md", "object-a"]), "0.5.2"));
+    server.on("POST", "/sync/ws-a/ops/documentRead", busy, ops({ ok: true, path: "a.md", markdown: "# A" }, "0.5.2"));
+    server.on("GET", feedPath("ws-a", "0.5.2"), busy, held);
+    const onGone = vi.fn();
+    const data = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache: createReadCache(), onGone, sleep: async () => {} });
+    data.resume();
+    data.subscribe(views.files, () => {});
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).problem).toBe("server-busy"));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }));
+    expect(data.state(views.files).value).toHaveLength(1);
+    expect(onGone).not.toHaveBeenCalled();
+  });
+
   it("drops everything of a workspace the server answers 404 for, and stops", async () => {
     const server = testServer();
     const cache = createReadCache();
     server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["a.md", "object-a"]), "0.5.2"));
     server.on("GET", feedPath("ws-a", "0.5.2"), held);
-    server.on("POST", "/sync/ws-a/ops/documentRead", { status: 404, body: { ok: false, error: "not found", code: "not_found" } });
+    server.on("POST", "/sync/ws-a/ops/documentRead", NOT_FOUND);
     const onGone = vi.fn();
     const data = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache, onGone });
     data.resume();
@@ -172,9 +217,10 @@ describe("what a read answers", () => {
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
     data.subscribe(views.page("a.md"), () => {});
     await vi.waitFor(() => expect(onGone).toHaveBeenCalledTimes(1));
-    expect(data.state(views.files).value).toBeNull();
+    expect(data.state(views.files)).toMatchObject({ value: null, problem: "refused" });
     expect(cache.entries(cacheScope(signInTo(server), "ws-a"))).toEqual([]);
     expect(server.calls.find(call => call.path === feedPath("ws-a", "0.5.2"))?.signal.aborted).toBe(true);
+    // Try again reads nothing through a store that has gone.
     data.retry(views.files);
     expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
   });

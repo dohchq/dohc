@@ -16,6 +16,12 @@ const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;
 
+/**
+ * The answer while this server has no copies to read from, as when it is still starting. It is the copies' own refusal
+ * of a visit they can't take (serverCopies.ts), and every workspace gets it alike, before any is looked at.
+ */
+const copiesUnavailable = () => new RelayError("server_busy", "Your server can't open workspaces for the phone right now. Try again later.");
+
 /** One sign-in's reads: a burst for opening a workspace, then a steady pace. */
 export function createAccountOperationRateLimiter(): TokenBucketLimiter {
   return new TokenBucketLimiter(60, 2, 4096);
@@ -59,6 +65,8 @@ export function createAccountOperationRoute(options: {
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError("server_busy", "This sign-in is reading faster than your server answers. Try again shortly.");
     }
+    // The feed reads only the relay's log; every other operation needs a copy.
+    if (!feed && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
@@ -85,7 +93,7 @@ export function createAccountOperationRoute(options: {
     }
     await authorize();
     const copies = options.copies();
-    if (copies === undefined) throw notFound();
+    if (copies === undefined) throw copiesUnavailable();
     const { result, cursor } = await runAccountOperation({ storage, copies }, {
       owner: caller.userId, workspaceId: route.workspaceId, operation: route.operation, args, authorize,
       // A Bearer session reads what shows on the phone, whatever the request says.

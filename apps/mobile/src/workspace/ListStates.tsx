@@ -57,7 +57,8 @@ export function NoWorkspace() {
   const server = serverName(useSignIn().origin);
   if (list.status === "failed") return <View style={styles.message}><ProblemLine text={accountWords.problem(list.problem, server)} onRetry={reloadWorkspaces} /></View>;
   if (list.status !== "ready" || currentWorkspaceId !== null) return null;
-  const text = list.workspaces.length === 0 ? accountWords.noWorkspaces(server) : accountWords.noneShown;
+  const text = list.workspaces.length === 0 ? accountWords.noWorkspaces(server)
+    : list.workspaces.some(entry => entry.showOnPhone) ? accountWords.noneSynced : accountWords.noneShown;
   return <View style={styles.message}><Text style={[styles.text, { color: theme.muted }]}>{text}</Text></View>;
 }
 

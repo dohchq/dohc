@@ -42,7 +42,9 @@ another sign-in starts. A change aborts that sign-in's requests. Check `SignIn.i
 a request answered, and use `requestGenerations()` for results that replace each other. The open workspace's reads
 live in one store per sign-in and workspace, which stops when either changes, so a late answer can't reach another
 workspace's screen. A 404 for the workspace, as when another device hides it from the phone, clears and stops its
-store, and the phone opens the next workspace it shows (`src/server/openWorkspace.ts`). The read cache is in memory
+store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`). If the list still shows it and
+the server can open it, it stays open as a failed read until Try again; otherwise the phone opens the next one. The
+phone opens only workspaces the list marks `canOpen`. The read cache is in memory
 and empties when the sign-in changes or ends, and loses a workspace when the phone hides it. Ending a token deletes it from
 the keychain first, then revokes its session, so a phone closed between the two keeps no token.
 

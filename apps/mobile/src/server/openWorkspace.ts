@@ -3,12 +3,13 @@ import { cacheScope, createWorkspaceData, type ReadCache, type WorkspaceData } f
 import type { WorkspaceListStore } from "./workspaceList";
 
 // The workspace open on the phone, and the store that reads it. The open workspace is the one the person chose in the
-// switcher, or else the first the list shows on the phone. Changing it stops the last store and makes another, so
-// nothing the last one started can reach the screen.
+// switcher, or else the first the list shows on the phone that the server can open. Changing it stops the last store
+// and makes another, so nothing the last one started can reach the screen.
 //
-// A store that the server answers 404 has stopped and cleared itself: the workspace is hidden from the phone on
-// another device, or no longer the account's. It isn't opened again, and the list is read again so the phone opens
-// another. Once the list no longer shows it, or the person chooses it, it can open again.
+// A store that the server answers 404 has stopped and cleared itself, and the list is read again to decide. If the
+// list no longer shows the workspace, or the server can't open it, the phone opens the next. If it still shows it, it
+// stays open, empty, as a failed read, until Try again opens it in a new store. Nothing opens again by itself, so a
+// workspace that keeps answering 404 can't make the phone loop.
 
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
@@ -34,7 +35,6 @@ export function createOpenWorkspace(options: {
 }): OpenWorkspace {
   const { signIn, list, cache } = options;
   const listeners = new Set<() => void>();
-  const gone = new Set<string>();
   let chosen: string | null = null;
   let active = false;
   let stopped = false;
@@ -42,29 +42,33 @@ export function createOpenWorkspace(options: {
   let unsubscribe: (() => void) | null = null;
 
   function open(workspaceId: string): WorkspaceData {
-    return createWorkspaceData({
+    const data = createWorkspaceData({
       signIn, workspaceId, cache,
-      onGone: () => {
-        gone.add(workspaceId);
-        list.reload();
-        update();
+      onGone: () => list.reload(),
+      // Only the store open now reopens; a later one has replaced any other.
+      reopen: () => {
+        if (!stopped && state.data === data) show(workspaceId);
       },
     });
+    return data;
+  }
+
+  /** Opens `workspaceId`, or none, in a new store, and stops the last one. */
+  function show(workspaceId: string | null) {
+    state.data?.stop();
+    const data = workspaceId === null ? null : open(workspaceId);
+    if (active) data?.resume();
+    state = { currentWorkspaceId: workspaceId, data };
+    for (const listener of listeners) listener();
   }
 
   function update() {
     if (stopped) return;
     const listed = list.state();
-    const shown = listed.status === "ready" ? listed.workspaces.filter(entry => entry.showOnPhone).map(entry => entry.workspaceId) : [];
-    for (const workspaceId of gone) if (!shown.includes(workspaceId)) gone.delete(workspaceId);
-    const candidates = shown.filter(workspaceId => !gone.has(workspaceId));
-    const current = candidates.find(workspaceId => workspaceId === chosen) ?? candidates[0] ?? null;
-    if (current === state.currentWorkspaceId) return;
-    state.data?.stop();
-    const data = current === null ? null : open(current);
-    if (active) data?.resume();
-    state = { currentWorkspaceId: current, data };
-    for (const listener of listeners) listener();
+    const openable = listed.status === "ready"
+      ? listed.workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => entry.workspaceId) : [];
+    const current = openable.find(workspaceId => workspaceId === chosen) ?? openable[0] ?? null;
+    if (current !== state.currentWorkspaceId) show(current);
   }
 
   update();
@@ -81,7 +85,6 @@ export function createOpenWorkspace(options: {
     },
     choose(workspaceId) {
       chosen = workspaceId;
-      gone.delete(workspaceId);
       update();
     },
     setShowOnPhone(workspaceId, showOnPhone) {

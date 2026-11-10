@@ -76,7 +76,8 @@ export function workspaceName(workspace: AccountWorkspace): string {
 function phoneWorkspace(workspace: AccountWorkspace): PhoneWorkspace {
   const hash = [...workspace.workspaceId].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
   const name = workspaceName(workspace);
-  return { id: workspace.workspaceId, name, initial: [...name][0]?.toUpperCase() ?? "", color: workspaceMarkFills[hash % workspaceMarkFills.length]!, sections: [] };
+  return { id: workspace.workspaceId, name, initial: [...name][0]?.toUpperCase() ?? "", color: workspaceMarkFills[hash % workspaceMarkFills.length]!,
+    canOpen: workspace.canOpen, sections: [] };
 }
 
 export function useWorkspaces(): WorkspacesState {

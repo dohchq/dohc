@@ -111,7 +111,11 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   };
 }
 
-async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub } = {}) {
+async function relay(options: {
+  accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub;
+  /** False for a server whose copies aren't running. */
+  copies?: boolean;
+} = {}) {
   const storage = await testStorage();
   for (const [workspaceId, ownerUserId] of [["trip", "ana"], ["notes", "ana"], ["budget", "ben"]] as const) {
     storage.claimWorkspace({ workspaceId, ownerUserId, createdAtMs: 1 });
@@ -121,7 +125,8 @@ async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSe
   const run = await serverCopies(storage, engine);
   const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
-    accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession, serverCopies: () => run.copies,
+    accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession,
+    serverCopies: () => options.copies === false ? undefined : run.copies,
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
     discussionActivity: activity,
   });
@@ -296,6 +301,20 @@ describe("an account's reads through the server's copy", () => {
     expect(response.status).toBe(413);
     expect(streamsRequestBody(new URL("http://relay.test//sync/trip/%6Fps/groups"), "POST")).toBe(true);
     expect(syncs).toEqual([]);
+  });
+
+  it("answers every workspace's read alike with server_busy while the server has no copies, and keeps the feed", async () => {
+    const { h } = await relay({ copies: false });
+    const bytes = async (workspaceId: string) => {
+      const response = await h(op(workspaceId, "documentRead", { path: "docs/plan.md" }));
+      return { status: response.status, body: await response.text() };
+    };
+    const owned = await bytes("trip");
+    expect(owned.status).toBe(503);
+    expect(JSON.parse(owned.body)).toEqual({ ok: false, code: "server_busy", error: "Your server can't open workspaces for the phone right now. Try again later." });
+    for (const workspaceId of ["notes", "budget", "nowhere"]) expect(await bytes(workspaceId), workspaceId).toEqual(owned);
+    const feed = await h(new Request("http://relay.test/sync/trip/ops/changes?since=0.0.0&hold=0", { headers: signedIn("ana") }));
+    expect(feed.status).toBe(200);
   });
 
   it("answers only POST", async () => {

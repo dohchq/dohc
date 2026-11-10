@@ -24,9 +24,11 @@ import {
 // the feed's failure, so what's on screen never goes stale without a sign. A feed answer takes it back. Try again, and
 // a return from the background, start the feed again at once, counting failures from none.
 //
-// A 404 from the feed or any read means the workspace is gone from this phone: hidden from it on another device, or
-// no longer the account's. The store then drops its cache, clears every view, stops, and says so through `onGone`, so
-// the account reads its workspace list again and opens another.
+// A 404 from the feed, or from a read whose answer still counts, means the workspace may be gone from this phone:
+// hidden from it on another device, no longer the account's, or no longer readable on the server. The store then drops
+// its cache, stops, and shows every view as a failed read, and says so through `onGone`, so the account reads its
+// workspace list again to decide. Try again on a store that has gone asks, through `reopen`, for a new one. A 503 is
+// not this: it's a failed read or feed failure like any other.
 
 export type ReadProblem = ServerProblemKind | "restoring";
 
@@ -207,6 +209,8 @@ export function createWorkspaceData(options: {
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** The server answered 404 for the workspace: the store has stopped and cleared. */
   readonly onGone?: () => void;
+  /** Try again on a store that has gone: the account opens the workspace in a new store. */
+  readonly reopen?: () => void;
 }): WorkspaceData {
   const { signIn, workspaceId, cache } = options;
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
@@ -235,13 +239,17 @@ export function createWorkspaceData(options: {
 
   const live = () => !stopped && signIn.isCurrent();
   const isGone = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
+  let hasGone = false;
 
-  /** The workspace no longer reaches this phone: nothing of it stays, in the cache or on screen. */
+  /**
+   * The workspace may no longer reach this phone: nothing of it stays, in the cache or on screen, and each view shows
+   * a failed read. Its caller has checked that the answer still counts.
+   */
   function gone() {
-    if (!live()) return;
+    hasGone = true;
     cache.drop(scope);
     store.stop();
-    for (const target of entries.values()) set(target, { value: null, loading: false, problem: null, failures: target.state.failures });
+    for (const target of entries.values()) set(target, { value: null, loading: false, problem: "refused", failures: target.state.failures + 1 });
     options.onGone?.();
   }
 
@@ -273,9 +281,11 @@ export function createWorkspaceData(options: {
         follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
       },
       (error: unknown) => {
+        // An answer that no longer counts says nothing, not even that the workspace has gone.
+        if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
         const problem = readProblem(error);
-        if (!live() || !target.reads.isLatest(request) || problem === null) return;
+        if (problem === null) return;
         set(target, { ...target.state, loading: false, problem, failures: target.state.failures + 1 });
       },
     );
@@ -318,7 +328,8 @@ export function createWorkspaceData(options: {
       try {
         answer = await readChanges(signIn.client, workspaceId, cursor, { holdMs, signal });
       } catch (error) {
-        // A 401 has ended the sign-in, and a cancelled request belongs to a feed that has stopped.
+        // A request of a feed that has stopped, or been started again, says nothing, not even that the workspace has
+        // gone. A 401 has ended the sign-in.
         if (signal.aborted || !live() || (error instanceof ServerError && (error.problem === "signed-out" || error.problem === "cancelled"))) return;
         if (isGone(error)) return gone();
         failures += 1;
@@ -391,6 +402,7 @@ export function createWorkspaceData(options: {
       return () => void target.listeners.delete(listener);
     },
     retry(view) {
+      if (hasGone) return options.reopen?.();
       const target = entry(view);
       if (live() && !target.state.loading) read(target);
     },
@@ -400,6 +412,7 @@ export function createWorkspaceData(options: {
       return () => void feedListeners.delete(listener);
     },
     retryFeed() {
+      if (hasGone) return options.reopen?.();
       stopFeed();
       startFeed();
     },
