@@ -288,7 +288,7 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])("settles open Coll
         postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
       };
       await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},
-        roster: {kind: "owner", ownerUserId: "local-person", grants: []}, signal, stopped: signal })).resolves.toMatchObject({kind: "done"});
+        roster: {kind: "owner", ownerUserId: "local-person", grants: []}, signal, stopped: signal })).resolves.toEqual({kind: "done"});
       const runs = (await store.runsOf(claim.automationId, claim.claimId)).runs;
       expect(runs[0]!.applied.flatMap(entry => entry.writes)).toMatchObject([
         {kind: "field", recordId, path, field: "Name", before: "Manual", after: "Automation", sharedFileUpdate: {appendKey: expect.any(String)}},
