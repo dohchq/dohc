@@ -2230,6 +2230,16 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
+      if ("failure" in result) {
+        if (token !== liveToken.current) return;
+        // The post saved, so it is not posted again. The Group reloads to list it.
+        props.onThreadStarted?.();
+        setNewThreadBody("");
+        setNewThreadPoll(null);
+        refreshForActivity();
+        props.onError("Posted your message. dohc could not open it yet.", result.failure);
+        return;
+      }
       // The new message has no reactions yet; the start names the viewer.
       reactions.ingest([{
         threadId: result.thread.id,
@@ -2265,7 +2275,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, refreshForActivity, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2320,7 +2330,7 @@ export function ChatsView(props: {
       latestComposerState.current = next;
     };
     // The message's poll lands with it, so it shows wherever the message does.
-    const showSent = (sent: SendChatMessageResult) => {
+    const showSent = (sent: Exclude<SendChatMessageResult, { failure: string }>) => {
       setMessages((current) =>
         current.some((message) => message.id === sent.message.id)
           ? current
@@ -2353,40 +2363,47 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      showSent(result);
-      const resolvedDecision = result.resolved;
-      if (resolvedDecision) {
-        const decisionWasOpen = reconcileResolvedChatDecision(
-          latestDecisions.current,
-          resolvedDecision,
-        ).wasOpen;
-        setDecisions(
-          (current) =>
-            reconcileResolvedChatDecision(current, resolvedDecision).decisions,
-        );
-        if (decisionWasOpen) {
-          setChannelThreads((current) =>
-            current.map((thread) =>
-              thread.id === nav.thread.id
-                ? {
-                    ...thread,
-                    openDecisionCount: Math.max(
-                      0,
-                      (thread.openDecisionCount ?? 0) - 1,
-                    ),
-                  }
-                : thread,
-            ),
+      if ("failure" in result) {
+        // The message saved, so the thread reloads to show it.
+        refreshForActivity();
+      } else {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        showSent(result);
+        const resolvedDecision = result.resolved;
+        if (resolvedDecision) {
+          const decisionWasOpen = reconcileResolvedChatDecision(
+            latestDecisions.current,
+            resolvedDecision,
+          ).wasOpen;
+          setDecisions(
+            (current) =>
+              reconcileResolvedChatDecision(current, resolvedDecision).decisions,
           );
+          if (decisionWasOpen) {
+            setChannelThreads((current) =>
+              current.map((thread) =>
+                thread.id === nav.thread.id
+                  ? {
+                      ...thread,
+                      openDecisionCount: Math.max(
+                        0,
+                        (thread.openDecisionCount ?? 0) - 1,
+                      ),
+                    }
+                  : thread,
+              ),
+            );
+          }
         }
       }
-      // A reply whose answer failed still leaves the mode, so retrying cannot
-      // silently post the reply twice.
+      // A message that saved leaves the composer, and a reply whose answer
+      // failed leaves the mode, so retrying cannot silently post either twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
         props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+      } else if ("failure" in result) {
+        props.onError("Sent your message. dohc could not show it yet.", result.failure);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -2408,6 +2425,7 @@ export function ChatsView(props: {
     poll,
     props.onAgentWaitsForTrust,
     props.onError,
+    refreshForActivity,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2751,13 +2769,19 @@ export function ChatsView(props: {
           : {}),
       });
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      dmRefreshSeq.current += 1;
-      setMessages((current) =>
-        current.some((message) => message.id === result.message.id)
-          ? current
-          : [...current, result.message],
-      );
+      if ("failure" in result) {
+        // The message saved, so the conversation reloads to show it.
+        refreshForActivity();
+        props.onError("Sent your message. dohc could not show it yet.", result.failure);
+      } else {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        dmRefreshSeq.current += 1;
+        setMessages((current) =>
+          current.some((message) => message.id === result.message.id)
+            ? current
+            : [...current, result.message],
+        );
+      }
       if (latestComposerState.current.composer === composer) {
         latestComposerState.current = {
           ...latestComposerState.current,
@@ -2780,7 +2804,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, refreshForActivity, sendContextKey, sending, workspaceId]);
 
   // A reply in one of the DM's threads.
   const sendDmReply = useCallback(async (rootId: string, body: string) => {
@@ -2796,6 +2820,12 @@ export function ChatsView(props: {
         ...(references.length > 0 ? { fileReferences: references } : {}),
       });
       if (activeSendContext.current !== context) return false;
+      if ("failure" in result) {
+        // The reply saved, so it is not sent again. The conversation reloads to show it.
+        refreshForActivity();
+        props.onError("Sent your reply. dohc could not show it yet.", result.failure);
+        return true;
+      }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       dmRefreshSeq.current += 1;
       setMessages((current) =>
@@ -2806,7 +2836,7 @@ export function ChatsView(props: {
       if (activeSendContext.current === context) props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
       return false;
     }
-  }, [nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, workspaceId]);
+  }, [nav, props.onAgentWaitsForTrust, props.onError, refreshForActivity, sendContextKey, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.

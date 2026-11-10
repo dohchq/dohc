@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
+import { ipcErrorMessage } from "../ipcError";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -299,6 +300,36 @@ describe("ChatLane", () => {
     expect(screen.getByText("Our first message")).toBeTruthy();
   });
 
+  // A send that saved answers with its ids and what failed after the save.
+  it.each(["message", "post"] as const)("says a %s that saved was sent, clears the draft, and shows it on reload", async (kind) => {
+    if (kind === "post") bridgeMock.listChannelThreads.mockResolvedValueOnce({ threads: [] });
+    render(lane());
+    await screen.findByText(kind === "post" ? "No messages in #general yet." : "Old message");
+    const saved = { message: { id: "reply", threadId: "thread-1" }, failure: "Error: Chats stopped because this window changed workspaces." };
+    (kind === "post" ? bridgeMock.startChannelThread : bridgeMock.sendChatMessage).mockImplementationOnce(async () => {
+      bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "reply", body: "Reply" })] });
+      return saved;
+    });
+    send("Reply");
+    await screen.findByText("Reply");
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your message. dohc could not show it yet.", saved.failure);
+    expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(onAgentWaitsForTrust).not.toHaveBeenCalled();
+  });
+
+  it.each(["message", "post"] as const)("says a %s that saved nothing failed to send and keeps the draft", async (kind) => {
+    if (kind === "post") bridgeMock.listChannelThreads.mockResolvedValueOnce({ threads: [] });
+    render(lane());
+    await screen.findByText(kind === "post" ? "No messages in #general yet." : "Old message");
+    const refusal = new Error("Chats stopped because this window changed workspaces.");
+    (kind === "post" ? bridgeMock.startChannelThread : bridgeMock.sendChatMessage).mockRejectedValueOnce(refusal);
+    send("Reply");
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(ipcErrorMessage(refusal, "Could not send that message."), refusal));
+    expect(onError.mock.lastCall?.[0]).not.toMatch(/^Sent/);
+    expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("Reply");
+  });
+
   it("marks the loaded thread read and reports completion only after the write", async () => {
     const read = deferred<void>();
     bridgeMock.markChatThreadRead.mockReturnValueOnce(read.promise);
@@ -434,54 +465,43 @@ describe("ChatLane", () => {
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
-  // A send can fail after main saved the choice, so no failure offers to
-  // send it again.
+  // A choice that saved answers with its ids, so only a refusal says it failed.
   describe("a choice whose send failed", () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
-    async function choose(afterFailure: () => void) {
+    const failure = "Error: Chats stopped because this window changed workspaces.";
+    function choose(answer: () => Promise<unknown>) {
       bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
-        afterFailure();
-        throw new Error("Your server session changed. Try again.");
-      });
+      bridgeMock.sendChatMessage.mockImplementationOnce(answer);
       render(lane());
-      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
-      await waitFor(() => expect(onError).toHaveBeenCalled());
     }
 
-    it("says dohc can't tell whether it was sent, with no Try again, while the question stays open", async () => {
-      await choose(() => undefined);
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
-      expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
-    });
-
-    it("says dohc can't tell whether it was sent when the question can't be read either", async () => {
-      await choose(() => {
-        bridgeMock.listChatThreadDecisions.mockRejectedValueOnce(new Error("The engine stopped."));
-      });
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
-    });
-
-    it("says nothing when the question now shows the choice answered", async () => {
-      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
+    it("says a choice that saved was sent, with no Try again, and shows it answered on reload", async () => {
+      choose(async () => {
         bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
           { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" }] });
-        throw new Error("Your server session changed. Try again.");
+        return { message: { id: "answer", threadId: "thread-1" }, failure };
       });
-      render(lane());
       fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
       await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
-      expect(onError).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your choice. dohc could not show it yet.", failure);
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
     });
 
-    it("still says it can't tell when someone else answered with another choice", async () => {
-      await choose(() => {
-        bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
-          { ...decision, state: "resolved", chosenOption: "Friday", resolvedByMessageId: "other" }] });
-      });
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
+    it("says why a choice that saved left its question open", async () => {
+      choose(async () => ({ message: { id: "answer", threadId: "thread-1" }, failure, resolveFailure: "Error: Pick one of the poll's choices." }));
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
+        "Sent your choice. dohc could not mark the question answered.", "Error: Pick one of the poll's choices."));
+      expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+    });
+
+    it("says a choice that saved nothing could not be sent", async () => {
+      const refusal = new Error("Chats stopped because this window changed workspaces.");
+      choose(async () => { throw refusal; });
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(ipcErrorMessage(refusal, "Could not send that choice."), refusal));
+      expect(onError.mock.lastCall?.[0]).not.toMatch(/^Sent/);
+      expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
     });
   });
 

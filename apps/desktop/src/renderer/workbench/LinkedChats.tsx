@@ -370,7 +370,9 @@ export function LinkedChatsPanel(props: {
         try {
           const result = await bridge().sendChatMessage({ workspaceId, threadId: thread.id, body: trimmed });
           if (token !== liveToken.current) return;
-          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          // The comment saved, so its words stay out of the composer. Opening the chat shows it.
+          if ("failure" in result) props.onError("Posted your comment. dohc could not show it yet.", result.failure);
+          else if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         } catch (error) {
           if (token !== liveToken.current) return;
           setComposer(trimmed);
@@ -406,9 +408,15 @@ export function LinkedChatsPanel(props: {
         body,
       });
       if (token !== liveToken.current) return;
+      setComposer("");
+      if ("failure" in result) {
+        // The message saved, so the chat reloads to show it.
+        props.onError("Sent your message. dohc could not show it yet.", result.failure);
+        void openThread(thread);
+        return;
+      }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       setMessages((current) => [...current, result.message]);
-      setComposer("");
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -421,7 +429,7 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props.onAgentWaitsForTrust, props.onError, sending, workspaceId]);
+  }, [activeThread, composer, openThread, props.onAgentWaitsForTrust, props.onError, sending, workspaceId]);
 
   // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.

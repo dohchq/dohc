@@ -1286,6 +1286,17 @@ describe("LinkedChatsPanel comment on the file", () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
+  it("says a comment that posted was posted, and leaves its words out of the composer, when a later step fails", async () => {
+    const failure = "Error: Chats stopped because this window changed workspaces.";
+    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1", threadId: "thread-new" }, failure });
+    const onError = renderPanel();
+    await writeComment("Tighten the intro");
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Posted your comment. dohc could not show it yet.", failure);
+  });
+
   it("closes the composer on Escape without writing anything", async () => {
     renderPanel();
     fireEvent.click(await screen.findByTestId("linked-chat-new"));

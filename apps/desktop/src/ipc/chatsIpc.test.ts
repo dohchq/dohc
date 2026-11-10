@@ -3,7 +3,7 @@ import { chatLinks as mcpChatLinks } from "@dohc/mcp/tools";
 import { executeCli } from "@dohc/cli";
 import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { handleCliRequestLine, type CliServerOptions, type CliWorkspaceContext } from "../cli/cliServer";
-import { chatOperations } from "./chatOperations";
+import { CHATS_STOPPED, chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -32,6 +32,12 @@ import { createRendererWorkspaceOperationRunner } from "../window/rendererWorksp
 type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged";
 type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
+
+// A send that finished every step after its save, with the message as shown.
+function shown<Result extends object>(result: Result): Exclude<Result, { failure: string }> {
+  if ("failure" in result) throw new Error(`The send saved but did not finish: ${String(result.failure)}`);
+  return result as Exclude<Result, { failure: string }>;
+}
 
 function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
   const stateDirectory = createTestScratchSync("chats-ipc-settings-");
@@ -172,7 +178,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   });
   const sender = { trusted: true };
   const held = authorities.acquire(workspace.workspaceId);
-  const session = { workspaceId: workspace.workspaceId, attachmentId: held.binding.attachmentId, generation: 1, isCurrent: () => true };
+  let sessionCurrent = true;
+  const session = { workspaceId: workspace.workspaceId, attachmentId: held.binding.attachmentId, generation: 1, isCurrent: () => sessionCurrent };
   held.release();
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner({
     currentSession: (value: Event["sender"]) => value === sender ? session : undefined,
@@ -217,7 +224,9 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
-    agentWaitsForTrust, signOutChatWrites: () => { chatCredentials = null; } };
+    agentWaitsForTrust, signOutChatWrites: () => { chatCredentials = null; },
+    // The window opens another workspace, so its session no longer shows this one.
+    endSession: () => { sessionCurrent = false; } };
 }
 
 it("received file chats use tokens after a rename, so clicking the listed path finds the same thread", async () => {
@@ -297,7 +306,9 @@ describe("chat sender binding", () => {
       ...Object.values(h.captureMethods), ...Object.values(h.desktopChatBookmarks)];
     services.forEach(service => service.mockClear());
     const row = Object.values(chatOperations).find(operation => operation.channel === channel);
-    await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(row?.inactiveMessage ?? "no longer active");
+    // A send holds its own workspace operation, with the chats refusal.
+    const refusal = row && "inactiveMessage" in row ? row.inactiveMessage : CHATS_STOPPED;
+    await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(refusal);
     services.forEach(service => expect(service).not.toHaveBeenCalled());
   });
 });
@@ -451,22 +462,69 @@ describe("registered chat writes", () => {
   it("says when Restricted Mode holds the agent a sent message asks, and never fails the send over it", async () => {
     const test = fixture();
     const send = { workspaceId: "workspace", threadId: "thread", body: "@Nova plan the day" };
-    expect(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)).waitsForTrust).toBeUndefined();
+    expect(shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send))).waitsForTrust).toBeUndefined();
     test.agentWaitsForTrust.mockResolvedValueOnce(true);
-    const held = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
+    const held = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)));
     expect(held.waitsForTrust).toBe(true);
     expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", held.message.id);
     test.agentWaitsForTrust.mockRejectedValueOnce(new Error("trust file unreadable"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const unknown = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
+    const unknown = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)));
     warn.mockRestore();
     expect(unknown.waitsForTrust).toBeUndefined();
     test.agentWaitsForTrust.mockResolvedValueOnce(true);
-    const started = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+    const started = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
       workspaceId: "workspace", channelId: "channel", body: "Plan the day",
-    }));
+    })));
     expect(started.waitsForTrust).toBe(true);
     expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", started.message.id);
+  });
+
+  const sends = [
+    { name: "a message", channel: chatOperations.sendChatMessage.channel, payload: { threadId: "thread", body: "Hello" }, method: "sendMessage" },
+    { name: "a choice", channel: chatOperations.sendChatMessage.channel, payload: { threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" } }, method: "sendMessage" },
+    { name: "a post", channel: chatOperations.startChannelThread.channel, payload: { channelId: "channel", body: "Hello" }, method: "startChannelThread" },
+  ] as const;
+  it.each(sends)("answers $name with its ids when the window changes workspaces after the save", async ({ channel, payload, method }) => {
+    const test = fixture();
+    test.warmCredentialCache.mockImplementationOnce(async () => { test.endSession(); });
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...payload });
+    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+    // A post's opening message names the thread it started.
+    expect(result).toEqual({ message: { id: "message", threadId: "thread" }, failure: `Error: ${CHATS_STOPPED}` });
+  });
+  it.each(sends)("answers $name with its ids when the workspace closes after the save", async ({ channel, payload, method }) => {
+    const test = fixture();
+    test.warmCredentialCache.mockImplementationOnce(async () => { void test.authorities.invalidate("workspace"); });
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...payload });
+    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+    expect(result).toEqual({ message: { id: "message", threadId: "thread" }, failure: "Error: This workspace was closed. Open it again." });
+  });
+  it.each(sends)("sends none of $name's presentation once the window changed workspaces after it was read", async ({ channel, payload }) => {
+    const test = fixture();
+    test.agentWaitsForTrust.mockImplementationOnce(async () => { test.endSession(); return true; });
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...payload }))
+      .resolves.toEqual({ message: { id: "message", threadId: "thread" }, failure: `Error: ${CHATS_STOPPED}` });
+  });
+  it.each(sends)("still refuses $name that saved nothing", async ({ channel, payload, method }) => {
+    const test = fixture();
+    test.endSession();
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow(CHATS_STOPPED);
+    expect(test.storeMethods[method]).not.toHaveBeenCalled();
+    const engine = fixture();
+    engine.storeMethods[method].mockRejectedValueOnce(new Error("The workspace engine stopped."));
+    await expect(engine.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow("The workspace engine stopped.");
+  });
+  it("keeps why an answer failed when the reply saved and a later step failed too", async () => {
+    const test = fixture();
+    test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
+    test.warmCredentialCache.mockImplementationOnce(async () => { test.endSession(); });
+    await expect(test.invoke(chatOperations.sendChatMessage.channel, {
+      workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" },
+    })).resolves.toEqual({
+      message: { id: "message", threadId: "thread" }, failure: `Error: ${CHATS_STOPPED}`,
+      resolveFailure: "Error: Pick one of the poll's choices.",
+    });
   });
 
   it("names the reaction's author as the viewer, locally when signed out", async () => {
@@ -740,9 +798,9 @@ describe("poll IPC writes", () => {
     { name: "no decision and no choices", poll: { needsDecision: false, options: [] }, count: 0 },
   ])("returns the opening decision count for $name", async ({ poll, count }) => {
     const test = fixture();
-    const result = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+    const result = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
       workspaceId: "workspace", channelId: "channel", body: "When?", ...poll,
-    }));
+    })));
     expect(result.thread.openDecisionCount).toBe(count);
   });
   it.each(doors)("returns no decision and reads none for a plain message on $name", async ({ channel, target }) => {
@@ -768,7 +826,7 @@ describe("poll IPC writes", () => {
   const answer = { workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" } };
   it("resolves the question a reply answers in the same send", async () => {
     const test = fixture();
-    const result = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer));
+    const result = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer)));
     expect(test.storeMethods.resolveChatDecision).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "question",
       resolvedByMessageId: result.message.id, chosenOption: "Monday",
@@ -779,7 +837,7 @@ describe("poll IPC writes", () => {
   it("returns the landed reply and why its answer failed", async () => {
     const test = fixture();
     test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
-    const result = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer));
+    const result = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, answer)));
     expect(result.message.body).toBe("Monday");
     expect(result).not.toHaveProperty("resolved");
     expect(result.resolveFailure).toBe("Error: Pick one of the poll's choices.");
@@ -800,12 +858,12 @@ it("reads both IPC polls back with their decisions from the live chat store", as
   try {
     const channel = await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
     const test = fixture("local", store);
-    const first = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+    const first = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
       workspaceId: workspace.workspaceId, channelId: channel.id, body: "Which day?", needsDecision: true, options: [" Monday ", "Tuesday"],
-    }));
-    const second = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
+    })));
+    const second = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
       workspaceId: workspace.workspaceId, threadId: first.thread.id, body: "Which time?", options: ["Morning", "Afternoon"],
-    }));
+    })));
     // Each write returns its poll as the engine stored it, choices trimmed.
     expect(first.decision).toMatchObject({ messageId: first.message.id, state: "open", options: ["Monday", "Tuesday"] });
     expect(second.decision).toMatchObject({ messageId: second.message.id, state: "open", options: ["Morning", "Afternoon"] });

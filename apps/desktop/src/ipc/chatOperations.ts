@@ -46,6 +46,12 @@ import {
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
 
+export const CHATS_STOPPED = "Chats stopped because this window changed workspaces.";
+// A send holds the sending window's workspace operation itself, so a step
+// that fails after the save answers with the saved message instead of
+// rejecting.
+const SEND_ADMISSION = "Only the sending window's active workspace can send. A send that saved answers with that message's ids alone when a later step fails.";
+
 export const chatOperations = {
   listFileChats: {
     capabilityId: "file.chats.list", channel: "desktop:list-file-chats",
@@ -163,8 +169,8 @@ export const chatOperations = {
   },
   sendChatMessage: {
     capabilityId: "chat.reply", channel: "desktop:send-chat-message",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "Chats stopped because this window changed workspaces.",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation", reason: SEND_ADMISSION },
     payload: SendChatMessagePayload, result: SendChatMessageResult,
   },
   listPersonalChatFeed: {
@@ -181,8 +187,8 @@ export const chatOperations = {
   },
   startChannelThread: {
     capabilityId: "chat.post", channel: "desktop:start-channel-thread",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "Chats stopped because this window changed workspaces.",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation", reason: SEND_ADMISSION },
     payload: StartChannelThreadPayload, result: StartChannelThreadResult,
   },
 } as const satisfies OperationTable;
