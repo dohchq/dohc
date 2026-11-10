@@ -101,6 +101,8 @@ An action can name its reverse with `"reversedBy": "<action name>"` in the datas
 It then returns `{ undo }`, at most 16 KB: the input its reverse takes.
 The host refuses to commit a result without it, and an automation run's Undo runs the reverse with that input.
 The request identity and operation context stay stable during host retries.
+`ctx.requestId` is a time-ordered UUID. A generated Collection names each new record by it, so with no sort, records list in the order they were added.
+If the clock steps back while the host restarts, a newer record can list before an older one.
 `ctx.files.attach(fileId)` associates an admitted upload with the transaction.
 `ctx.refuse(code, message)` rolls back a business-rule failure.
 Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
