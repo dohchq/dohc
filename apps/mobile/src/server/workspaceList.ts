@@ -15,6 +15,21 @@ export type WorkspaceList =
   }
   | { readonly status: "failed"; readonly problem: ServerProblemKind };
 
+/**
+ * Why no workspace is open, once the list says: it could not load, the account has none, none that shows on the phone
+ * is synced yet, or none shows. Null while the list loads, or once a workspace is open.
+ */
+export type WorkspaceGap =
+  | { readonly kind: "failed"; readonly problem: ServerProblemKind }
+  | { readonly kind: "no-workspaces" | "none-synced" | "none-shown" };
+
+export function workspaceGap(list: WorkspaceList, currentWorkspaceId: string | null): WorkspaceGap | null {
+  if (list.status === "failed") return { kind: "failed", problem: list.problem };
+  if (list.status !== "ready" || currentWorkspaceId !== null) return null;
+  if (list.workspaces.length === 0) return { kind: "no-workspaces" };
+  return { kind: list.workspaces.some(entry => entry.showOnPhone) ? "none-synced" : "none-shown" };
+}
+
 export interface WorkspaceListStore {
   state(): WorkspaceList;
   subscribe(listener: () => void): () => void;

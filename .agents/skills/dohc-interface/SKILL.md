@@ -543,7 +543,12 @@ The phone app (`apps/mobile`) uses this skill's words and behavior. Shared words
 13. **A failed End share's toast** has a 2-line title, not 4. It cuts the file's name and each person's in the middle to fit. Its Notices row and Copy keep the whole text.
 14. **Sign out**, where the desktop says Disconnect. The desktop's Disconnect stops sync and keeps the files on the computer. The phone keeps no work of its own, so it only signs out.
 15. **Settings** opens from your mark at the right of the Chats header, as in Slack. It holds the account and its server, Show on phone for each workspace, the account's sessions with End session, and its agents with Sign out, Remove and Restore. The desktop has no session or agent list yet.
-16. **Connect and Settings show their errors in place**, as a line with Try again, and file no toast or Notices row. Both sit outside the tabs, where toasts show, and the phone keeps no Notices of its own yet.
+16. **Connect, Settings, a chat and a page show their errors in place**, with Try again, and file no toast or Notices row. They sit outside the tabs, where toasts show. A failed refresh keeps what's shown, with the cause and Try again above it.
+17. **Notices in a signed-in build** list only failures held on this phone, such as a read of Home or Chats, each with Try again. The phone reads no notices from the server yet.
+    A change feed that fails 3 times in a row shows as a failed read does, so content never goes out of date without a sign: a toast and a row on the tabs, and a line above a chat or page. Try again starts the feed at once, and its next answer takes the failure back.
+18. **Reading only, in a signed-in build.** The phone can't write to the server yet. A chat has no composer, and a page is read-only, with the Read-only mark. Chats lists groups, people and agents, with no unread marks and no file chats: the server gives the phone neither yet. Home lists Pages and Other files only; the phone has no Collections or Apps yet.
+19. **The workspace switcher** lists every workspace that shows on the phone. One whose sync isn't set up yet is dimmed, says "Not synced yet", and can't be chosen. Its Show on phone switch in Settings stays as it is.
+20. **A page the server won't send.** A file over the editor's limit says "This file is too large to open on a phone. Open it on a computer.", because the server sends none of it. A page whose workspace is being restored says "This page is being restored." with Try again.
 
 Browser alerts gain the message text after phone push lands (Ice, Nov 9).
 
