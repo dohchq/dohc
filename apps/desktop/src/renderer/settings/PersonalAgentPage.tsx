@@ -19,7 +19,7 @@ import { formatChatTime } from "../time";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
-import { Menu, MENU_SEPARATOR } from "../ui/Menu";
+import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { BOX, PageRow, ROW, SECTION, VALUE } from "./AgentPage";
@@ -264,7 +264,7 @@ export function PersonalAgentPage(props: {
             ...(signedOut ? [
               MENU_SEPARATOR,
               { id: "remove", label: "Remove", icon: <Trash2 size={14} aria-hidden />, danger: true, onSelect: props.onRemove },
-            ] : []),
+            ] satisfies MenuEntry[] : []),
           ]}
         />
       </div>
