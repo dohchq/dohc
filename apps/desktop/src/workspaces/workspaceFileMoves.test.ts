@@ -15,7 +15,7 @@ import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { createWorkspaceEngineCapture, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { admitPath, deleteWorkspacePathByHand, moveWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { admitPath, deleteWorkspacePathByHand, moveWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, putBackStoppedMoves, type PathChangeOptions } from "./workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
@@ -26,6 +26,10 @@ import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { forceStoredNameListing } from "../testing/storedNameListing";
 import * as storedEntryPaths from "./storedEntryPath";
+import { randomUUID } from "node:crypto";
+import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
+import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import { resumeWorkspaceLinkRewrites } from "./workspaceLinkRewrites";
 
 vi.mock("./storedEntryPath", async importOriginal => ({ ...await importOriginal<typeof import("./storedEntryPath")>() }));
 
@@ -957,6 +961,64 @@ describe("agent moves and deletes", () => {
     expect((await readFile(join(f.rootPath, result.replaced.trashPath))).byteLength).toBe(7 * 1024 * 1024);
     expect((await readFile(join(f.rootPath, "dest.png"))).byteLength).toBe(6 * 1024 * 1024);
     expect(await readFile(join(f.rootPath, "source.png"), "utf8")).toBe("theirs");
+    expect((await f.workspaceTrash()).filter(name => name.startsWith("replace-"))).toEqual([]);
+    await f.engine().stop();
+  });
+
+  // A stop is a move that never runs again. The move waits at its file move
+  // while the next open's pass runs on what the disk holds.
+  it.each([
+    { stop: "beforeRequest", tracked: true }, { stop: "beforeRequest", tracked: false },
+    { stop: "afterRequest", tracked: true }, { stop: "afterRequest", tracked: false },
+  ] as const)("puts the replaced file back at the next open after dohc stops a replacing move, $stop, tracked=$tracked", async ({ stop, tracked }) => {
+    const stopped = barrier(), resume = barrier();
+    const f = await fixture({ [stop]: async (request: Request) => {
+      if (request.method !== "capture.moveFile") return;
+      stopped.release();
+      await resume.promise;
+      throw new Error("dohc stopped");
+    } });
+    const [from, to] = tracked ? ["a.txt", "b.txt"] : ["a.png", "b.png"];
+    const mine = tracked ? Buffer.from("mine") : Buffer.alloc(6 * 1024 * 1024, 1);
+    const theirs = tracked ? Buffer.from("theirs") : Buffer.alloc(7 * 1024 * 1024, 2);
+    await write(f.rootPath, from, mine);
+    await write(f.rootPath, to, theirs);
+    await f.start();
+    const moving = f.move(from, to, named, true);
+    await stopped.promise;
+    expect(existsSync(join(f.rootPath, from))).toBe(stop === "beforeRequest");
+    expect(existsSync(join(f.rootPath, to))).toBe(stop === "afterRequest");
+    await putBackStoppedMoves(f.operation.workspace, () => undefined);
+    expect((await readFile(join(f.rootPath, from))).equals(mine)).toBe(true);
+    expect((await readFile(join(f.rootPath, to))).equals(theirs)).toBe(true);
+    expect(await f.workspaceTrash()).toEqual([]);
+    resume.release();
+    await moving;
+    await f.engine().stop();
+  });
+
+  it("puts back a replaced file a stop left in the workspace trash when the workspace opens", async () => {
+    const f = await fixture();
+    const workspace = f.operation.workspace;
+    await write(f.rootPath, "b.txt", "theirs");
+    const record = { operationId: `dohc-operation:${randomUUID()}`, from: "a.txt", to: "b.txt", place: "b.txt", staged: `${Date.now()}-${randomUUID()}-` };
+    await saveRecoveryRecord(workspace, record, "replace");
+    await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "b.txt"), record.staged);
+    await resumeWorkspaceLinkRewrites(workspace, { workspaceId: workspace.workspaceId, history: { rewriteHistoryLinks: vi.fn() } });
+    expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("theirs");
+    expect(await f.workspaceTrash()).toEqual([]);
+  });
+
+  it("leaves a finished replacing move alone at the next open", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "mine");
+    await write(f.rootPath, "b.txt", "theirs");
+    await f.start();
+    expect(await f.move("a.txt", "b.txt", named, true)).toMatchObject({ ok: true });
+    await putBackStoppedMoves(f.operation.workspace, () => undefined);
+    expect(existsSync(join(f.rootPath, "a.txt"))).toBe(false);
+    expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("mine");
+    expect(await f.workspaceTrash()).toEqual([]);
     await f.engine().stop();
   });
 

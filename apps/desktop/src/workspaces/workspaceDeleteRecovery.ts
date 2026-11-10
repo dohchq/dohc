@@ -82,7 +82,7 @@ async function prune(workspace: LocalStateWorkspace): Promise<void> {
   await readOwnedLocalStateFolder(workspace.rootPath, "trash", async (dir) => {
     if (dir === null || dir === "unusable") return;
     for (const name of await readdir(dir)) {
-      if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
+      if (!/^(?:delete|move|replace)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
       try {
         const path = join(dir, name), entry = await lstat(path);
         if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
@@ -92,8 +92,9 @@ async function prune(workspace: LocalStateWorkspace): Promise<void> {
     }
   });
 }
-export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete"): Promise<void> {
-  const dir = await workspaceTrashForWrite(workspace, "save Undo information");
+export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete",
+  what = "save Undo information"): Promise<void> {
+  const dir = await workspaceTrashForWrite(workspace, what);
   const path = join(dir, recordName(record.operationId, kind));
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
@@ -104,6 +105,9 @@ export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record:
     // Atomic replacement, not a power-loss durability guarantee on Windows.
     await rename(temp, path);
   } finally { await unlink(temp).catch(() => undefined); }
+}
+export async function removeRecoveryRecord(workspace: LocalStateWorkspace, operationId: string, kind: string): Promise<void> {
+  await rm(join(await workspaceTrashForWrite(workspace, "remove Undo information"), recordName(operationId, kind)), { force: true });
 }
 /**
  * A recovery record's text, read from the workspace trash. A record decides
@@ -134,7 +138,7 @@ async function readRecoveryFileText(path: string): Promise<RecoveryRecordRead> {
   if (read?.status === "missing") return { status: "missing" };
   return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
 }
-export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move"): Promise<{ name: string; text: string }[]> {
+export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move" | "replace"): Promise<{ name: string; text: string }[]> {
   return readOwnedLocalStateFolder(root, "trash", async dir => {
     if (dir === null || dir === "unusable") return [];
     const records: { name: string; text: string }[] = [];
