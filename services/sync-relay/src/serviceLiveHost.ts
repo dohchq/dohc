@@ -1311,20 +1311,35 @@ export async function startServiceLiveHost(options: {
           }
         }
       }));
+    // What a restore step can change that a pass continues: whether a restore runs, which retirement is open,
+    // and whether the document is dormant. Undefined while this connection cannot read it.
+    const restoreProgress = (document: {workspaceId: string; objectId: string}, key: string | undefined) => {
+      try {
+        const open = storage.serviceActivationRetirement(document), row = key === undefined ? undefined : hosted.get(key);
+        return JSON.stringify([storage.serviceRestoreInProgress(document), open ? movedRetirementKey(open) : null, row ? activation?.dormant(row.target) ?? null : null]);
+      } catch {return undefined;}
+    };
     // Restore work takes a turn, so no idle unload runs beside it. A step that
     // registers on a dormant document reloads it, and passes then settle it.
-    // A step can also end a restore or open a retirement, so each wakes the pass that continues it.
+    // A step can also end a restore or open a retirement. A step that changed any of these wakes the pass that
+    // continues it. One that changed none leaves passes nothing new, so it wakes none: a pass would only retry
+    // a capture the engine refused.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
       operation: (consumer: NonNullable<ReturnType<typeof consumerForRestore>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
       check();
       const lookup = snapshotStopRestoreLookup(value);
       return exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
         const document = consumers.get(lookup.workspaceId)?.documentForRestore(lookup), key = document && hostedKey(document);
-        if (key) {await resolveUnload(key, joined); touch(key);}
-        const consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
-      })).finally(wakePass);
+        const before = document && restoreProgress(document, key);
+        try {
+          if (key) {await resolveUnload(key, joined); touch(key);}
+          const consumer = consumerForRestore(lookup);
+          if (!consumer) throw new Error("Workspace is not configured on this service host.");
+          return await runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
+        } finally {
+          if (document && (before === undefined || restoreProgress(document, key) !== before)) wakePass();
+        }
+      }));
     };
     const update = (value: ServiceHostedSet, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
       if (!activation || config.workspaces.length || config.activation!.targets.length) throw new Error("Only an activation host that starts empty takes membership updates.");
