@@ -4851,8 +4851,8 @@ export function ChatsView(props: {
     // Only when the agent can't answer: what's wrong, and the fix. An agent
     // you run has no launch; it answers whenever it's connected.
     const agentProblem = !agentDm || !props.agentSetup ? null
-      : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-      : channelSettingsAgent.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+      : agentRemoved(nav.channel) ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+      : channelSettingsAgent?.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
       : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []

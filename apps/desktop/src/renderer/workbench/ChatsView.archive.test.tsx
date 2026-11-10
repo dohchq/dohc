@@ -261,11 +261,22 @@ describe("ChatsView archive and row menus", () => {
       channels: [channel(), channel({ id: "chat-grok", name: "Grok", slug: "agent-grok", kind: "agent", agentId: grok })],
       fileThreads: [],
     });
-    renderView(vi.fn(), vi.fn(), { userSettings: settingsWithAgent({ name: "Nova" }) });
+    renderView(vi.fn(), vi.fn(), {
+      userSettings: settingsWithAgent({ name: "Nova" }),
+      agentSetup: {
+        workspaceId: "workspace-a", preferredName: "Sam", agentName: "Nova", runnerConfigured: true, runnerEnabled: true,
+        agentRunActive: false, agents: [{ id: "default", name: "Nova", enabled: true }],
+      },
+      onSetupAgent: vi.fn(),
+    });
     await waitFor(() => expect(screen.getAllByTestId("chats-my-agent").some((row) => row.textContent?.includes("Grok"))).toBe(true));
     expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
+    // Open, it names no problem: Settings doesn't list a personal agent.
+    fireEvent.click(screen.getAllByTestId("chats-my-agent").find((row) => row.textContent?.includes("Grok"))!);
+    await screen.findByRole("button", { name: "Grok settings" });
+    expect(screen.queryByTestId("chats-agent-problem")).toBeNull();
 
     act(() => setPersonalAgents([]));
-    await screen.findByTestId("chats-archived-toggle");
+    expect((await screen.findByTestId("chats-agent-problem")).textContent).toContain("Grok was removed.");
   });
 });
