@@ -258,6 +258,8 @@ import {
   useWorkspaceVersions,
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
+import { WhatsNewPage } from "./workbench/WhatsNewPage";
+import { openUnseenWhatsNewOnce } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -288,6 +290,7 @@ import {
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   VERSIONS_TAB_PATH,
+  WHATS_NEW_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
   mergeSavedTabs,
@@ -1747,6 +1750,32 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // After the saved tabs return, What's new opens over them once per release,
+  // reusing a restored What's new tab in any group. At the tab limit, a new
+  // tab would close one of the person's tabs, so it waits for a launch with
+  // room.
+  const openUnseenWhatsNew = async () => {
+    const id = workspaceIdRef.current;
+    const canOpen = () => {
+      if (workspaceIdRef.current !== id) return false;
+      const tabs = allTabs(wbRef.current);
+      return tabs.length < MAX_OPEN_TABS || tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
+    };
+    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, true);
+    if (!(await openUnseenWhatsNewOnce(canOpen, open)) || workspaceIdRef.current !== id) return;
+    // A restored file it covers no longer holds back the restored-surface
+    // phase. A file in another group still shows and reports itself.
+    const surface = restoredActiveFileSurface.current;
+    if (
+      surface !== null &&
+      surface.groupId === activeGroup(wbRef.current).id &&
+      activeTabPath(wbRef.current) === WHATS_NEW_TAB_PATH &&
+      markCurrentSwitchPhase("restored-active-surface-ready")
+    ) {
+      restoredActiveFileSurface.current = null;
+    }
+  };
+
   // A failed read is read again once the workspace opens (useSavedTabsReread).
   const layoutReadStartedAt = useRef(0);
   const [layoutReadFailure, setLayoutReadFailure] = useState<{
@@ -1790,6 +1819,7 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
+        void openUnseenWhatsNew();
       },
       onError: (error) => {
         restoredActiveFileSurface.current = null;
@@ -1823,6 +1853,7 @@ export function DesktopWorkspaceShell(props: {
       writeWb({ ...shown });
     }
     uiStateLoaded.current = true;
+    void openUnseenWhatsNew();
   }, [writeWb]);
   useSavedTabsReread({
     workspaceId,
@@ -4953,6 +4984,7 @@ export function DesktopWorkspaceShell(props: {
       "check-updates": () => void runDesktopUpdate("check"),
       "download-update": () => void runDesktopUpdate("download"),
       "install-update": () => void runDesktopUpdate("install"),
+      "whats-new": () => openVirtualTab(WHATS_NEW_TAB_PATH),
       "toggle-theme": toggleTheme,
       "zoom-in": () =>
         void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
@@ -6832,6 +6864,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             );
+                case "whatsNew": return <WhatsNewPage appVersion={appVersion} />;
                 case "versions": return (
               // The same capability gate and lines as a compare tab.
               !captureAvailable ? (

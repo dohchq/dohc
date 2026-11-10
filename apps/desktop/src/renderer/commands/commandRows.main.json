@@ -133,6 +133,10 @@
       "label": "Restart to update"
     },
     {
+      "id": "whats-new",
+      "label": "What's new"
+    },
+    {
       "id": "toggle-theme",
       "label": "Toggle light/dark theme"
     },
