@@ -230,7 +230,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
-import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
+import { currentWindowSession, windowShowsWorkspace } from "./window/workspaceWindowReuse";
 import { createOldWindows } from "./window/oldWindows";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
@@ -903,7 +903,7 @@ function notifyWorkspaceWindows(workspaceId: string, channel: string, details: R
 
 const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
   targets: () => BrowserWindow.getAllWindows().map(window => window.webContents),
-  currentSession: sender => rendererWorkspaceSessions.current(sender),
+  currentSession: sender => currentWindowSession(rendererWorkspaceSessions.current(sender), workspaceAuthorities),
   isSharedView: workspaceId => shareViewIsPresent(findWorkspace(workspaceId)?.shareView),
 });
 
