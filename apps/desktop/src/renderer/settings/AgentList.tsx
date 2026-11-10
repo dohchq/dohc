@@ -3,12 +3,11 @@ import { ChevronRight, CircleAlert, Ear, FilePenLine, History, Pause, Play, Plug
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
-import { isAgentIdTaken, withErrorWords } from "../../ipc/errorWords";
+import { withErrorWords } from "../../ipc/errorWords";
 import {
   agentNameTaken,
   automationAgent,
   DEFAULT_AGENT_ID,
-  listAgents,
   newAgentDefaults,
   newAgentId,
   withAgent,
@@ -32,37 +31,7 @@ import { ownPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar, useAgentInk } from "../workbench/ChatAvatar";
 import { AddAgentSheet, type NewAgent, type ToolTileState } from "./AddAgentSheet";
 import { AgentPage, checkStatus, type AgentRunControl, type CheckState } from "./AgentPage";
-
-export type AgentListRow =
-  | { kind: "agent"; agent: Agent }
-  | { kind: "broken"; problem: AgentProblem };
-
-/** Your agents and the entries dohc could not use, in the order the file lists them. */
-export function agentListRows(settings: Pick<DesktopUserSettings, "agents">, problems: readonly AgentProblem[] = []): AgentListRow[] {
-  const agents = listAgents(settings);
-  const rows: AgentListRow[] = [];
-  let next = 0;
-  for (const problem of [...problems].sort((left, right) => left.position - right.position)) {
-    while (rows.length < problem.position && next < agents.length) rows.push({ kind: "agent", agent: agents[next++]! });
-    rows.push({ kind: "broken", problem });
-  }
-  return [...rows, ...agents.slice(next).map((agent) => ({ kind: "agent" as const, agent }))];
-}
-
-const rowId = (row: AgentListRow) => (row.kind === "agent" ? row.agent.id : row.problem.id);
-
-/**
- * `order` with `id` back where it was: after the entry it followed, or in
- * front of the one after it when that entry is gone, or first. It never goes
- * ahead of `keep`, an agent chosen since that should go on waking automations.
- */
-function placeBack(order: readonly string[], id: string, before: string | undefined, after: string | undefined, keep?: string): string[] {
-  const rest = order.filter((entry) => entry !== id);
-  let at = before !== undefined && rest.includes(before) ? rest.indexOf(before) + 1
-    : after !== undefined && rest.includes(after) ? rest.indexOf(after) : 0;
-  if (keep !== undefined && rest.includes(keep)) at = Math.max(at, rest.indexOf(keep) + 1);
-  return [...rest.slice(0, at), id, ...rest.slice(at)];
-}
+import { agentListRows, checkIdentity, placeBack, removeAgentWithUndo, rowId, type AgentListRow } from "./agentRemoval";
 
 /** A problem sentence, with each key in backticks set in monospace. */
 export function ProblemText(props: { text: string }) {
@@ -78,10 +47,6 @@ export function runnerEngineNote(sharedView: boolean, sessionRecorderOn: boolean
   return sessionRecorderOn === false
     ? "The workspace engine starts when dohc starts. Restart dohc to check an agent."
     : null;
-}
-
-function checkIdentity(workspaceId: string, agentId: string): string {
-  return `agent-check:${workspaceId}:${agentId}`;
 }
 
 const PAUSED_CHECK_REASON = "Agents are paused. Resume them, then try again.";
@@ -537,21 +502,11 @@ export function AgentList(props: {
     })());
   };
 
-  // Undo puts the agent back under the name and settings it had, where it
-  // was (`placeBack`). Every other entry keeps its place in the file as it is
-  // then. An agent in the file with its id by then stays.
   const remove = async (agent: Agent) => {
-    const [before, after] = neighbours(agent.id);
-    const { [agent.id]: entry, ...agents } = settings.agents;
-    if (!entry) return;
-    const saved = await onSave({ ...settings, agents });
-    if (!saved) return;
-    // The file can hold the agent again by the time main saves.
-    if (Object.hasOwn(saved.settings.agents, agent.id) || saved.agentProblems?.some((problem) => problem.id === agent.id)) {
-      onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
-      return;
-    }
-    const left = agentListRows(saved.settings, saved.agentProblems).map(rowId);
+    const removed = await removeAgentWithUndo({
+      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave, order: onOrder, onError, onClearError, onNotice,
+    });
+    if (!removed) return;
     setRenaming((current) => (current === agent.id ? null : current));
     // Its page goes with it, and focus goes to the Agents heading.
     setOpened((current) => {
@@ -559,40 +514,6 @@ export function AgentList(props: {
       focusAfter.current = "heading";
       return null;
     });
-    // Its failed check goes with it, and Undo doesn't bring that back.
-    onClearError?.(checkIdentity(workspaceId, agent.id));
-    onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
-      let file: DesktopUserSettingsResult;
-      try {
-        file = await bridge().getUserSettings();
-      } catch (cause) {
-        onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
-        return;
-      }
-      const current = file.settings;
-      const problem = file.agentProblems?.find((entry) => entry.id === agent.id);
-      const holder = current.agents[agent.id]?.name ?? (problem ? problem.name ?? problem.id : null);
-      const keep = (name: string) => onError?.(`Undo didn't replace the new ${name}, so the one you removed stays removed.`);
-      if (holder !== null) {
-        keep(holder);
-        return;
-      }
-      // If the agents are in the order this Remove left them, it goes back
-      // exactly where it was. Otherwise it doesn't go ahead of the agent that
-      // wakes automations now.
-      const now = agentListRows(current, file.agentProblems).map(rowId);
-      const unchanged = now.length === left.length && now.every((id, at) => id === left[at]);
-      const order = placeBack(now, agent.id, before, after, unchanged ? undefined : automationAgent(current)?.id);
-      // Saved from the file just read, so main refuses it if the agent came back since.
-      try {
-        await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agent.id]: entry } }, base: current });
-      } catch (cause) {
-        if (isAgentIdTaken(cause)) keep(agent.name);
-        else onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
-        return;
-      }
-      await onOrder(order, `dohc brought back ${agent.name} but could not put it back in its place.`);
-    })());
   };
 
   const setPaused = (next: boolean) => {

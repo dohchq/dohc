@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  SetAgentColorPayload, DesktopUserSettingsResult, OrderAgentsPayload, SetAppPinnedPayload, SetUserSettingsPayload,
+  SetAgentColorPayload, DesktopUserSettingsResult, OrderAgentsPayload, SetAppPinnedPayload, SetChatArchivedPayload, SetUserSettingsPayload,
   WorkspaceSettingsPayload, SetWorkspaceSettingsPayload, WorkspaceSettingsResult,
   WorkspaceIdPayload, GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload, OpenWorkspacePolicyFilePayload,
 } from "./bridgeContract";
@@ -27,6 +27,12 @@ export const settingsOperations = {
     capabilityId: "app.pin.set", channel: "desktop:set-app-pinned",
     scope: "device", guard: "trusted-sender",
     payload: SetAppPinnedPayload, result: DesktopUserSettingsResult,
+  },
+  setChatArchived: {
+    capabilityId: "chat.archive.set", channel: "desktop:set-chat-archived",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Archive stopped because this window changed workspaces.",
+    payload: SetChatArchivedPayload, result: DesktopUserSettingsResult,
   },
   orderAgents: {
     capabilityId: "settings.agents.order", channel: "desktop:order-agents",

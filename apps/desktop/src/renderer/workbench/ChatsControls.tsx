@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
+import { Archive, ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -257,6 +257,25 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
 // Over an agent DM's composer, only when the agent can't answer: what's
 // wrong, and the one action that fixes it. An agent that's off is a state,
 // not a fault, so it reads without the warning.
+// Under an archived chat's header: it stays out of the sidebar's lists until
+// you unarchive it.
+export function ArchivedLine(props: { onUnarchive: () => void }) {
+  return (
+    <div data-testid="chats-archived-line" className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5">
+      <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
+      <span className="min-w-0 flex-1 truncate text-[11px] text-muted">Archived</span>
+      <button
+        type="button"
+        data-testid="chats-unarchive"
+        onClick={props.onUnarchive}
+        className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+      >
+        Unarchive
+      </button>
+    </div>
+  );
+}
+
 export function AgentProblemLine(props: { words: string; action: string; off?: boolean; onAction?: (() => void) | undefined }) {
   return (
     <div data-testid="chats-agent-problem" className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted">

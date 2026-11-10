@@ -277,5 +277,6 @@
   "share.link.agents.list",
   "share.link.agent.disconnect",
   "agent.listening.read",
-  "crash.mark"
+  "crash.mark",
+  "chat.archive.set"
 ]
