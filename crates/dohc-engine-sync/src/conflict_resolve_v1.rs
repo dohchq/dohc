@@ -402,7 +402,9 @@ fn invalid(reason: &'static str) -> SyncError {
 /// Only the relay writes a personal agent's moments, so no resolution names one.
 fn refuse_personal_agent(agent_id: String) -> Result<String, SyncError> {
     if agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX) {
-        return Err(invalid("conflict.resolve author cannot be a personal agent"));
+        return Err(invalid(
+            "conflict.resolve author cannot be a personal agent",
+        ));
     }
     Ok(agent_id)
 }
