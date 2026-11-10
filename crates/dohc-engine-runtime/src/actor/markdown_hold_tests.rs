@@ -2652,50 +2652,7 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         .unwrap()
         .remove(0)
         .obligation;
-    let key = f.key.clone();
-    let next_claim = f
-        .actor
-        .run(move |store, cache| {
-            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
-            store.write_with(&NoFaults, |tx| {
-                dohc_engine_collab::record_base_coordinate_in_tx(
-                    tx,
-                    dohc_engine_collab::BaseCoordinateRecord {
-                        key: &key,
-                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
-                        origin_id: "old-base",
-                        origin_seq: 0,
-                        relay_seq: Some(20),
-                        now_ms: 20,
-                    },
-                )
-            })?;
-            let doc = dohc_engine_collab::load_persisted(store, &key)?
-                .unwrap()
-                .doc;
-            doc.richdoc_append_paragraph("A replacement lineage edit");
-            let base = doc.encode_full_state();
-            let result = dohc_engine_collab::claim_base_at_relay(
-                store,
-                &key,
-                ContentKind::Richdoc,
-                &base,
-                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
-                &NoFaults,
-                21,
-            )?;
-            assert!(matches!(
-                result,
-                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
-            ));
-            cache.remove(&key);
-            Ok(dohc_engine_collab::read_marker(store, &key)?
-                .unwrap()
-                .lineage_claim_id
-                .unwrap())
-        })
-        .await
-        .unwrap();
+    let next_claim = replace_lineage(&f).await;
     assert_ne!(next_claim, f.claim);
     // Recovery retires the old row without writing, so the review shows no
     // held change rather than the replacement lineage's document.
@@ -2802,6 +2759,92 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         saved.contains("Accepted text remains available")
             && saved.contains("A replacement lineage edit")
     );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+/// Replaces the note's lineage with a relay base that adds a paragraph, and
+/// returns the new lineage's claim.
+async fn replace_lineage(f: &Fixture) -> String {
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, cache| {
+            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+            store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_base_coordinate_in_tx(
+                    tx,
+                    dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
+                        origin_id: "old-base",
+                        origin_seq: 0,
+                        relay_seq: Some(20),
+                        now_ms: 20,
+                    },
+                )
+            })?;
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            doc.richdoc_append_paragraph("A replacement lineage edit");
+            let base = doc.encode_full_state();
+            let result = dohc_engine_collab::claim_base_at_relay(
+                store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
+                &NoFaults,
+                21,
+            )?;
+            assert!(matches!(
+                result,
+                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
+            ));
+            cache.remove(&key);
+            Ok(dohc_engine_collab::read_marker(store, &key)?
+                .unwrap()
+                .lineage_claim_id
+                .unwrap())
+        })
+        .await
+        .unwrap()
+}
+
+// A replaced lineage's row can still wait beside a new hold under the
+// current lineage; the review shows the current one, which a save writes.
+#[tokio::test]
+async fn markdown_hold_review_shows_the_current_lineage_hold_beside_a_retiring_one() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let next_claim = replace_lineage(&f).await;
+    let root = f.scratch.path().to_owned();
+    assert!(matches!(
+        f.actor
+            .ydoc_settle(
+                root,
+                f.key.clone(),
+                "note.md".into(),
+                ContentKind::Richdoc,
+                Some(next_claim),
+                Some(hex_sha256(f.source.as_bytes())),
+                "owner-session".into(),
+                Arc::new(()),
+                23,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+                None
+            )
+            .await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let Some(HeldMarkdownChange::Ready { held, .. }) = f.held_change("note.md").await else {
+        panic!("the current lineage's hold must be reviewable");
+    };
+    assert!(held.contains("A replacement lineage edit"));
     f.supervisor.close(&f.db).unwrap();
 }
 
