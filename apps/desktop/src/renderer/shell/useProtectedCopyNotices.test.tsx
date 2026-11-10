@@ -61,20 +61,22 @@ describe("useProtectedCopyNotices", () => {
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));
     const row = h.errors().shellErrors[0]!;
     const failed = (message: string) => h.errors().shellErrors.find((error) => error.message === message);
-    const tooBig = "dohc could not restore .env. Your change is over the 1 MB limit for protected files.";
-    const inTheWay = "dohc could not restore .env. It must save what is there now first, and cannot save that item. Move the item to another folder, then try again.";
+    const title = "dohc could not restore your change to .env";
+    const tooBig = "Your change is over the 1 MB limit for protected files.";
+    const inTheWay = "dohc saves what is at .env first, and it cannot save that item. Move the item to another folder, then try again.";
 
     h.bridge.restoreProtectedCopy.mockRejectedValueOnce(new Error(`Error invoking remote method 'restoreProtectedCopy': ProtectedCopyFinalError: ${tooBig}`));
     act(() => h.errors().runShellErrorAction(row.id));
-    await waitFor(() => expect(failed(tooBig)).toMatchObject({ retry: null }));
+    await waitFor(() => expect(failed(tooBig)).toMatchObject({ title, retry: null }));
 
     h.bridge.restoreProtectedCopy.mockRejectedValueOnce(new Error(`Error invoking remote method 'restoreProtectedCopy': Error: ${inTheWay}`));
     act(() => h.errors().runShellErrorAction(row.id));
-    await waitFor(() => expect(failed(inTheWay)).toMatchObject({ retry: expect.any(Function) }));
+    await waitFor(() => expect(failed(inTheWay)).toMatchObject({ title, retry: expect.any(Function) }));
 
     h.bridge.restoreProtectedCopy.mockRejectedValueOnce(new Error(""));
     act(() => h.errors().runShellErrorAction(row.id));
     await waitFor(() => expect(failed("dohc could not restore your change to .env.")).toMatchObject({ retry: expect.any(Function) }));
+    expect(failed("dohc could not restore your change to .env.")).not.toHaveProperty("title");
   });
 
   it("discards a kept change only after the warning is confirmed", async () => {

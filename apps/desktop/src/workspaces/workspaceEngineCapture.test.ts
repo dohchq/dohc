@@ -4194,7 +4194,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       await elsewhere.keep(".env", "TOKEN=elsewhere\n", "trip");
       const tripId = (await elsewhere.list())[0]![1];
       await expect(engine.restoreProtectedCopy(tripId))
-        .rejects.toThrow("This change was kept in a different version. Switch to that version to restore it.");
+        .rejects.toThrow("Your change was kept in a different version. Switch to that version to restore it.");
       expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
       await expect(engine.discardProtectedCopy(tripId)).resolves.toEqual({ path: ".env", status: "discarded" });
       expect(await protectedCopyFiles(root)).toEqual([]);
@@ -4204,7 +4204,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       const bigId = (await elsewhere.list())[0]![1];
       await expect(engine.restoreProtectedCopy(bigId)).rejects.toMatchObject({
         name: "ProtectedCopyFinalError",
-        message: "dohc could not restore .env. Your change is over the 1 MB limit for protected files.",
+        message: "Your change is over the 1 MB limit for protected files.",
       });
       expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
     } finally { await engine.stop(); }
