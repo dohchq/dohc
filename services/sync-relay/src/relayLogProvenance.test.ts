@@ -105,6 +105,32 @@ describe("client log provenance", () => {
     expect(() => assertChatAuthorship([{opKind: "chat.message.append", payload: {...post, authorKind: "agent", authorAgentId: "helper"}}], user))
       .not.toThrow();
   });
+  it.each(["owner", "recipient"] as const)("refuses an %s's resolution or live update that names a personal agent", async user => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
+    const url = user === "owner" ? "/sync/workspace/log" : `/sync/shares/${share}/log`;
+    const resolve = (agentId: string) => ({opKind: "conflict.resolve", payload: {effectContext: {author: {kind: "agent", agentId, onBehalfOf: "owner", agentRunId: null}}}});
+    const agent = {actorKind: "agent", onBehalfOf: "owner", depth: 0};
+    const update = (attribution: object, actorOriginId?: string) => ({opKind: "ydoc.update", payload: {attribution, ...(actorOriginId ? {actorOriginId} : {})}});
+    const forged = [
+      ["device", resolve(PERSONAL_AGENT)],
+      ["device", update(agent, PERSONAL_AGENT)],
+      [PERSONAL_AGENT, update(agent)],
+    ] as const;
+    for (const [originId, op] of forged) {
+      expect(() => assertClientLogProvenance(originId, [op], {deferMomentRefusal: true})).toThrow();
+      const response = await handler(request(user, url, jsonBody({originId, ops: [{originSeq: 0, recordedAtMs: 1, ...op}]})));
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({code: "authorship_mismatch"});
+    }
+    expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows).toEqual([]);
+    // The account's own agents still resolve and edit.
+    for (const op of [resolve("helper"), update(agent, "helper")]) {
+      expect(() => assertClientLogProvenance("device", [op], {deferMomentRefusal: true})).not.toThrow();
+    }
+  });
   it("lets only the service host's feed write from its reserved origins", () => {
     expect(() => assertClientLogProvenance(`${SERVICE_HOST_ORIGIN_PREFIX}host`, [], {serviceHost: true})).not.toThrow();
     for (const origin of ["device", `${SHARE_MEMBER_ORIGIN_PREFIX}grant`]) {

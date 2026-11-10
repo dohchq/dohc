@@ -399,6 +399,14 @@ fn invalid(reason: &'static str) -> SyncError {
     SyncError::InvalidInput { reason }
 }
 
+/// Only the relay writes a personal agent's moments, so no resolution names one.
+fn refuse_personal_agent(agent_id: String) -> Result<String, SyncError> {
+    if agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX) {
+        return Err(invalid("conflict.resolve author cannot be a personal agent"));
+    }
+    Ok(agent_id)
+}
+
 fn ensure_limit(
     constraint: &'static str,
     limit_bytes: usize,
@@ -686,7 +694,7 @@ fn parse_author(value: &Value) -> Result<Option<AgentAuthorV1>, SyncError> {
         return Err(invalid("conflict.resolve author kind must be agent"));
     }
     Ok(Some(AgentAuthorV1 {
-        agent_id: author_field(field(record, "agentId")?)?,
+        agent_id: refuse_personal_agent(author_field(field(record, "agentId")?)?)?,
         on_behalf_of: if field(record, "onBehalfOf")?.is_null() {
             None
         } else {
@@ -4039,7 +4047,7 @@ fn local_author(author_json: Option<&str>) -> Result<Option<AgentAuthorV1>, Sync
         ),
     };
     Ok(Some(AgentAuthorV1 {
-        agent_id: required("agentId")?,
+        agent_id: refuse_personal_agent(required("agentId")?)?,
         on_behalf_of: Some(required("onBehalfOf")?),
         agent_run_id,
     }))
@@ -4652,6 +4660,31 @@ mod tests {
                 },
             },
         })
+    }
+
+    #[test]
+    fn a_resolution_cannot_name_a_personal_agent() {
+        let context = ConflictResolveEnvelopeContext {
+            workspace_id: "workspace-a",
+            recorded_at_ms: 21,
+        };
+        let personal = format!("p-{}", "a".repeat(26));
+        assert!(validate_conflict_resolve_v1(&compact_path_change(), context).is_ok());
+        let mut forged = compact_path_change();
+        forged["effectContext"]["author"]["agentId"] = json!(personal);
+        assert!(matches!(
+            validate_conflict_resolve_v1(&forged, context),
+            Err(SyncError::InvalidInput {
+                reason: "conflict.resolve author cannot be a personal agent"
+            })
+        ));
+        let local = json!([{"kind": "agent", "agentId": personal, "onBehalfOf": "user-1"}]);
+        assert!(matches!(
+            local_author(Some(&local.to_string())),
+            Err(SyncError::InvalidInput {
+                reason: "conflict.resolve author cannot be a personal agent"
+            })
+        ));
     }
 
     #[test]

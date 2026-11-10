@@ -69,11 +69,27 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[],
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
+    if (namesPersonalAgent(op, originId)) throw relayError("authorship_mismatch");
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
     if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
     if (clientMomentAuthorsRefused(payload?.authors) && !deferMomentRefusal) throw relayError("authorship_mismatch");
   }
+}
+
+// A resolution's effects and a live update's agent become moment authors, and
+// only the relay writes a personal agent's moments.
+function namesPersonalAgent(op: Record<string, unknown>, originId: string): boolean {
+  const payload = objectOrEmpty(op.payload);
+  if (op.opKind === "conflict.resolve") {
+    return isPersonalAgentId(objectOrEmpty(objectOrEmpty(payload.effectContext).author).agentId);
+  }
+  if (op.opKind !== "ydoc.update" || objectOrEmpty(payload.attribution).actorKind !== "agent") return false;
+  return isPersonalAgentId(typeof payload.actorOriginId === "string" ? payload.actorOriginId : originId);
+}
+
+function objectOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {

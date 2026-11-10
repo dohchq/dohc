@@ -4445,6 +4445,8 @@ fn a_personal_agent_author_is_refused_from_every_other_origin() {
         NAMED_ORIGIN,
         "relay:collection-create:grant",
         "relay:personal-agent:p-abcdefghijklmnopqrstuvwxyz",
+        "shared:share-1:device-origin",
+        "shared:share-1:relay:personal-collection:p-abcdefghijklmnopqrstuvwxyz",
     ] {
         let payload = with_author(
             absent_text_payload(
@@ -4466,6 +4468,59 @@ fn a_personal_agent_author_is_refused_from_every_other_origin() {
         );
     }
     assert!(snapshot(&store, "trip-automations").is_none());
+}
+
+#[test]
+fn a_ydoc_update_cannot_name_a_personal_agent() {
+    let (_scratch, mut store) = test_store();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "base text");
+    let base_sha = store
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("Y.Doc base blob");
+    let update_sha = store
+        .put_binary_blob(&doc.plaintext_insert(9, " and more"))
+        .expect("Y.Doc update blob");
+    let agent = json!({"actorKind": "agent", "onBehalfOf": "user-1", "depth": 0});
+    for (origin, actor) in [
+        ("device-origin", json!(PERSONAL_AGENT)),
+        (PERSONAL_AGENT, Value::Null),
+    ] {
+        let forged = ReplicationEnvelope {
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main",
+                "objectId": "agent-note",
+                "path": "notes/agent.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": update_sha,
+                "lineageClaimId": base_sha,
+                "isBaseState": false,
+                "actorOriginId": actor,
+                "attribution": agent,
+            }),
+            ..envelope(origin, 0, "ws", json!({}))
+        };
+        let outcome = apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &forged,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("refusal is recorded");
+        assert!(
+            matches!(
+                &outcome.primary,
+                ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { reason },
+                    ..
+                }) if reason == "ydoc.update agent cannot be a personal agent"
+            ),
+            "{origin}: {:?}",
+            outcome.primary
+        );
+    }
 }
 
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
