@@ -2817,6 +2817,21 @@ impl Fixture {
     }
 
     async fn hold_and_review(&self) -> crate::actor::HeldChangeResult {
+        self.actor
+            .run(|store, _| {
+                dohc_engine_sync::create_claim_identity(
+                    store,
+                    "w",
+                    "drop-owner",
+                    "epoch",
+                    "stream",
+                    8,
+                    &NoFaults,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert!(matches!(
             self.settle(false, None).await,
             Err(RuntimeError::MarkdownWriteHeld { .. })

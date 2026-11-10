@@ -40,3 +40,6 @@ mod test_common;
 
 pub(super) mod files;
 pub(super) mod links;
+
+#[cfg(test)]
+mod held_change_tests;
