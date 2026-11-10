@@ -5695,7 +5695,8 @@ fn filesystem_job_component(id: &str) -> String {
 /// temp for a file that exists, or for a secret, takes none of the folder's
 /// inherited ACL entries; a new ordinary file takes them, as a job's does. On
 /// Windows the temp takes the file's DACL. A temp a stopped write left at
-/// that name is removed first.
+/// that name is removed first. A rename another program's handle blocks is
+/// retried as a job's is, and ends as `FileLocked` if the file stays held.
 pub fn replace_file_whole(
     root: &Path,
     rel: &str,
@@ -5717,7 +5718,13 @@ pub fn replace_file_whole(
         file.sync_all()
             .map_err(|err| MaterializeError::io(&tmp, &err))?;
         drop(file);
-        std::fs::rename(&tmp, &target).map_err(|err| MaterializeError::io(&target, &err))
+        retry_while_locked(&target, &target, &StdBackoff, MAX_REPLACE_ATTEMPTS, || {
+            match std::fs::rename(&tmp, &target) {
+                Ok(()) => Ok(Attempt::Done(())),
+                Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
+                Err(err) => Err(MaterializeError::io(&target, &err)),
+            }
+        })
     });
     if replaced.is_err() {
         let _ = std::fs::remove_file(&tmp);
