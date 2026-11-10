@@ -6,7 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { FirstOpenBaseInput, FirstOpenBaseResult } from "./firstOpenBase.js";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationValidation.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationWork } from "./storage/ordinaryActivationValidation.js";
+import type { OrdinaryActivationCapacityValidator } from "./storage/ordinaryActivationSource.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import type { FirstOpenHistory, FirstOpenHistoryRead } from "./storage/firstOpenHistory.js";
 import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
@@ -108,7 +109,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         waiters.delete(wake);
         signal?.removeEventListener("abort", abort);
       };
+      // A slot another kind of work may not take leaves this waiter waiting.
       const wake = () => {
+        if (!closed && !hasCapacity(auxiliary)) return;
         dispose();
         if (closed) reject(new Error("Live validation closed."));
         else resolve();
@@ -309,11 +312,11 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
-  /** Activation does not wait for a slot: a busy pool answers `retry`, and a later pass captures again. */
-  function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
+  /** Activation does not wait for a slot: a busy pool answers `retry` with the wait for one, after which a pass captures again. */
+  function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationCapacityValidator {
     const ownedPolicy = Object.freeze({ ...policy });
     return (input, signal) =>
-      submit<OrdinaryActivationValidation>(
+      submit<Exclude<OrdinaryActivationValidation, { kind: "retry" }>>(
         { kind: "activation", policy: ownedPolicy, input },
         { kind: "capacity-refused" },
         signal,

@@ -16,9 +16,9 @@ interface RetryState {
 }
 
 /**
- * Pass-driven retries, one state per document. The caller supplies monotonic
- * time, cancels requests when their target leaves, and forgets the document
- * once it goes live or leaves this host.
+ * Retries, one state per document. The caller supplies monotonic time, asks
+ * again once `next` falls due, cancels requests when their target leaves, and
+ * forgets the document once it goes live or leaves this host.
  */
 export class FirstOpenRetry {
   readonly #states = new Map<string, RetryState>();
@@ -38,6 +38,17 @@ export class FirstOpenRetry {
 
   /** Whether the document's source stopped after repeated build deadlines, so a caller reads its current source only then. */
   stopped(document: {workspaceId: string; objectId: string}): boolean {return this.#states.get(documentKey(document))?.stop !== undefined;}
+
+  /** The earliest time after now at which a source with no request running may be asked about again, or undefined while none waits for one. */
+  next(): number | undefined {
+    const now = this.#now();
+    let next: number | undefined;
+    for (const state of this.#states.values()) {
+      if (state.retryAtMs <= now || state.retryAtMs === Infinity || this.#flights.has(sourceKey(state.source))) continue;
+      if (next === undefined || state.retryAtMs < next) next = state.retryAtMs;
+    }
+    return next;
+  }
 
   /**
    * Starts a new attempt sequence, as Try again does. The first request

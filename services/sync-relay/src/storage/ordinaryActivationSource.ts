@@ -13,14 +13,19 @@ import {NATIVE_MOMENT_FIELDS} from "./serviceActivationPublication";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import {stableJsonStringify} from "../canonicalJson";
 import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
-import type {OrdinaryActivationBaseline,OrdinaryActivationHistory,OrdinaryActivationProof,Projection} from "./ordinaryActivationValidation";
+import type {OrdinaryActivationBaseline,OrdinaryActivationHistory,OrdinaryActivationProof,OrdinaryActivationValidation,OrdinaryActivationWork,Projection} from "./ordinaryActivationValidation";
 
 export class ServiceActivationStaleCut extends Error {
   constructor(){super("Ordinary replication advanced before service activation.");}
 }
-/** Live validation had no slot free for the capture. A later pass captures it again. */
+/** Live validation had no slot free for a capture. `waitForCapacity` settles once one may be free, which another operation can still take first. */
+export type OrdinaryActivationCapacityRetry={kind:"retry";reason:"admission-unavailable";waitForCapacity(signal?:AbortSignal):Promise<void>};
+/** A capture's validation, which answers a busy pool with the wait for its slot. */
+export type OrdinaryActivationCapacityValidator=(work:OrdinaryActivationWork,signal?:AbortSignal)=>
+  Promise<Exclude<OrdinaryActivationValidation,{kind:"retry"}>|OrdinaryActivationCapacityRetry>;
+/** Live validation had no slot free for the capture. A pass captures it again once `waitForCapacity` settles. */
 export class ServiceActivationBusy extends Error {
-  constructor(){super("Live validation is busy.");}
+  constructor(readonly waitForCapacity:(signal?:AbortSignal)=>Promise<void>){super("Live validation is busy.");}
 }
 /** Validating the capture ran its validation process out of memory, as the same capture would again. */
 export class ServiceActivationTooLarge extends Error {

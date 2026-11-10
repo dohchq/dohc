@@ -141,6 +141,11 @@ export class ServiceActivationDriver {
   readonly #opening=new Map<string,AbortController>();
   // Targets without lineage whose first open may still start them: a request is outstanding or due later. Each reads as preparing.
   readonly #pursued=new Set<string>();
+  // The timer for the next first-open retry deadline, and how a test's clock sets one.
+  #retryTimer:{atMs:number;cancel:()=>void}|undefined;
+  readonly #schedule:(atMs:number,fire:()=>void)=>()=>void;
+  // Targets whose capture validation answered busy, each until a slot may be free. Activation skips them meanwhile.
+  readonly #capacity=new Map<string,AbortController>();
   #firstOpenError:string|undefined;
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
   readonly #retirements=new Map<string,number>();
@@ -160,14 +165,47 @@ export class ServiceActivationDriver {
     firstOpen?(target:ServiceActivationTarget):ServiceFirstOpenRequest|undefined;
     /** Ends with the host. Every first-open request ends with it. */
     lifetime:AbortSignal;
-    /** The retry clock and jitter, unless a test injects others. */
-    firstOpenClock?:{nowMs?:()=>number;random?:()=>number};}){
+    /** Runs another pass soon: a first-open request ended or fell due, or validation may have a slot for a capture it refused. */
+    wake():void;
+    /** The retry clock, its jitter and its timer, which calls `fire` once the clock reaches `atMs`, unless a test injects others. */
+    firstOpenClock?:{nowMs?:()=>number;random?:()=>number;schedule?:(atMs:number,fire:()=>void)=>()=>void};}){
     this.#store=options.storage.createServiceActivationStore(options.history);
     this.#delivery=options.storage.createLiveCommittedDeliveryStore(options.history);
     this.#targets=options.config.targets;
     const c=options.config;
     this.#firstOpenContext=Object.freeze({policy:JSON.stringify(c.validation),bounds:JSON.stringify([c.maxCaptureBytes,c.maxBytesPerDrain,c.validation])});
     this.#firstOpenRetry=new FirstOpenRetry(options.firstOpenClock);
+    const now=options.firstOpenClock?.nowMs ?? (()=>performance.now());
+    this.#schedule=options.firstOpenClock?.schedule ?? ((atMs,fire)=>{
+      const timer=setTimeout(fire,Math.min(2_147_483_647,Math.max(0,Math.ceil(atMs-now()))));
+      timer.unref();
+      return ()=>clearTimeout(timer);
+    });
+    options.lifetime.addEventListener("abort",()=>{this.#retryTimer?.cancel();this.#retryTimer=undefined;},{once:true});
+  }
+  // Wakes a pass at the next first-open retry deadline, after each request ends and after Try again.
+  #armRetry(){
+    const atMs=this.#firstOpenRetry.next();
+    if(this.#retryTimer?.atMs===atMs)return;
+    this.#retryTimer?.cancel();this.#retryTimer=undefined;
+    if(atMs===undefined || this.options.lifetime.aborted)return;
+    // A timer that fires early wakes a pass that asks nothing, and arms again for the same deadline.
+    const timer={atMs,cancel:()=>{}};
+    this.#retryTimer=timer;
+    timer.cancel=this.#schedule(atMs,()=>{
+      if(this.#retryTimer!==timer)return;
+      this.#retryTimer=undefined;
+      this.options.wake();this.#armRetry();
+    });
+  }
+  // Waits outside the pass for the slot a capture's validation found busy, then wakes a pass that captures again.
+  #awaitCapacity(key:string,busy:ServiceActivationBusy){
+    const o=this.options,wait=new AbortController();
+    this.#capacity.get(key)?.abort();this.#capacity.set(key,wait);
+    busy.waitForCapacity(AbortSignal.any([wait.signal,o.lifetime])).then(()=>{
+      if(this.#capacity.get(key)!==wait)return;
+      this.#capacity.delete(key);o.wake();
+    },()=>{if(this.#capacity.get(key)===wait)this.#capacity.delete(key);});
   }
   /** The configuration this driver activates with, which a first-open base must fit. */
   get config(){return this.options.config;}
@@ -201,6 +239,7 @@ export class ServiceActivationDriver {
   forgetMoved(target:ServiceActivationTarget,objectId:string){this.#forget(movedKey(target,objectId));}
   #forget(key:string){
     this.#cancelFirstOpen(key);
+    this.#capacity.get(key)?.abort();this.#capacity.delete(key);
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
     this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);this.#enrolled.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
@@ -269,7 +308,10 @@ export class ServiceActivationDriver {
     const retried=document!==undefined && this.#firstOpen.retry(document);
     const stopped=document!==undefined && this.#firstOpenRetry.stopped(document);
     if(document)this.#firstOpenRetry.retry(document);
-    return this.#unblock(key) || retried || stopped;
+    const unblocked=this.#unblock(key) || retried || stopped;
+    // The capture or request it allows runs on the pass this wakes, or once the relay's own wait ends.
+    if(unblocked){this.#armRetry();this.options.wake();}
+    return unblocked;
   }
   #unblock(key:string){return this.#blocked.get(key)?.reason!=="released-lineage-unsettled" && this.#blocked.delete(key);}
   /** Keeps the relay's answer to a first-open request, which decides whether this host asks again and what the owner sees. */
@@ -298,9 +340,10 @@ export class ServiceActivationDriver {
     const source=head?.path===target.path && head.contentKind==="text" && head.sourceDigest?{workspaceId:target.workspaceId,objectId:objectId!,
       path:head.path,sourceMomentId:head.sourceMomentId,sourceDigest:head.sourceDigest}:undefined;
     if(!source || this.#firstOpen.standing(source,this.#firstOpenContext) || this.#firstOpenRetry.state(source)?.stop){this.#pursued.delete(key);return;}
-    const abort=new AbortController(),signal=AbortSignal.any([abort.signal,o.lifetime]);
+    const abort=new AbortController(),signal=AbortSignal.any([abort.signal,o.lifetime]),attached=o.workspace(target.workspaceId);
+    let asked=false;
     this.#pursued.add(key);this.#opening.set(key,abort);
-    void this.#firstOpenRetry.attempt(source,joined=>request(source,joined),signal).then(outcome=>{
+    void this.#firstOpenRetry.attempt(source,joined=>{asked=true;return request(source,joined);},signal).then(outcome=>{
       if(!outcome || this.#opening.get(key)!==abort || signal.aborted)return;
       o.assertCurrent();
       this.#firstOpen.record(outcome,this.#firstOpenContext);
@@ -312,7 +355,12 @@ export class ServiceActivationDriver {
       if(signal.aborted || message===this.#firstOpenError)return;
       this.#firstOpenError=message;
       try{console.error("Service first-open request failed.",message);}catch{ /* Reporting must not stop activation. */ }
-    }).finally(()=>{if(this.#opening.get(key)===abort)this.#opening.delete(key);});
+    }).finally(()=>{
+      if(this.#opening.get(key)===abort)this.#opening.delete(key);
+      // Its answer, or its release after Try again, a new source or a departure replaced it, lets a pass
+      // capture the target or ask again. One that never asked waits for the request that did, or for its deadline.
+      if(asked && !o.lifetime.aborted && o.workspace(target.workspaceId)===attached){this.#armRetry();o.wake();}
+    });
   }
   // The source of the base the target's first open published, while it or a refused activation of it stands.
   #firstOpenBase(target:ServiceActivationTarget){
@@ -718,6 +766,8 @@ export class ServiceActivationDriver {
       if(owner)return fenced;
     }
     if(!owner){
+      // Validation refused its last capture for want of a slot. It captures fresh input once one may be free.
+      if(this.#capacity.has(key))return {kind:"pending" as const,reason:"Live validation is busy."};
       let update=this.#latestUpdate(target);
       if(catchUp || !saved){
         let pulling=catchUp?.get(target.workspaceId);
@@ -770,6 +820,7 @@ export class ServiceActivationDriver {
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge)throw error;
           // The same capture would run its validation out of memory again, so it waits for its owner.
           if(tooLarge)this.#blocked.set(key,{reason:"refused"});
+          if(error instanceof ServiceActivationBusy)this.#awaitCapacity(key,error);
           await releaseStale();
           return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }

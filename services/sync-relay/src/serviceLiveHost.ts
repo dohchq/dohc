@@ -237,10 +237,10 @@ export async function startServiceLiveHost(options: {
   frameChanges?: LiveHostChanges;
   /**
    * Asks the relay to start hosted documents that have no Y.Doc lineage, as
-   * each workspace's service host. `fetch` reaches the relay, and `nowMs` and
-   * `random` time the retries, unless a test injects others.
+   * each workspace's service host. `fetch` reaches the relay, and `nowMs`,
+   * `random` and `schedule` time the retries, unless a test injects others.
    */
-  firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
+  firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number; schedule?: (atMs: number, fire: () => void) => () => void};
   /** Times the hosted recovery probe on a monotonic clock, unless a test injects another. */
   nowMs?: () => number;
   /** Called as each activation pass ends, so a test can wait on passes rather than on the requests they send. */
@@ -1338,12 +1338,15 @@ export async function startServiceLiveHost(options: {
     if(config.activation){
       // A configured replica checks its origin before the host serves restores or passes activate. One that could not retries on each pass.
       for(const workspaceId of [...attachments.keys()])yield* Effect.promise(()=>checkOrigin(workspaceId,signal).catch(()=>{}));
+      // A wake during a pass runs one more pass after it; one during the pause ends the pause.
+      let woken=false,rouse:(()=>void)|undefined;
+      const wakePass=()=>{woken=true;rouse?.();};
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         maxApplications:config.settlement?.maxApplicationsPerSettlement,
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation),
         firstOpen:target=>leaving.has(JSON.stringify([target.workspaceId,target.path]))?undefined:checked(target.workspaceId)?.firstOpen,
-        lifetime:signal,firstOpenClock:options.firstOpen});
+        lifetime:signal,wake:wakePass,firstOpenClock:options.firstOpen});
       registerRetained();
       // What the workspace's replica waits on from its own pulls, which no relay write announces.
       const pullDuties=(workspaceId:string,attached:HostedAttachment):HostedPullDuties=>{
@@ -1494,9 +1497,17 @@ export async function startServiceLiveHost(options: {
         }
       };
       const pause = Effect.callback<void>(resume => {
-        const timer = setTimeout(() => resume(Effect.void),config.activation!.pollIntervalMs);
+        let ended = false;
+        const end = () => {
+          if (ended) return;
+          ended = true; woken = false; rouse = undefined;
+          clearTimeout(timer);
+          resume(Effect.void);
+        };
+        const timer = setTimeout(end,config.activation!.pollIntervalMs);
         timer.unref();
-        return Effect.sync(() => clearTimeout(timer));
+        if (woken) end(); else rouse = end;
+        return Effect.sync(() => {rouse = undefined; clearTimeout(timer);});
       });
       yield* Effect.forkScoped(Effect.gen(function* () {
         while (!signal.aborted) {

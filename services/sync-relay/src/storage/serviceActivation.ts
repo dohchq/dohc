@@ -16,8 +16,7 @@ import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
-  type OrdinaryActivationBounds} from "./ordinaryActivationSource";
-import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+  type OrdinaryActivationBounds,type OrdinaryActivationCapacityValidator} from "./ordinaryActivationSource";
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
@@ -332,7 +331,7 @@ export class ServiceActivationStore {
    */
   async prepare(input: {
     capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate; shareId: string; registeredAtMs: number; guard(): void;
-    validate: OrdinaryActivationValidator; bounds: OrdinaryActivationBounds; signal?: AbortSignal;
+    validate: OrdinaryActivationCapacityValidator; bounds: OrdinaryActivationBounds; signal?: AbortSignal;
   }) {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
@@ -378,7 +377,7 @@ export class ServiceActivationStore {
     });
     const validation = await input.validate({document, currentPath: source.currentPath, baselineBytes,
       ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
-    if (validation.kind === "retry") throw new ServiceActivationBusy();
+    if (validation.kind === "retry") throw new ServiceActivationBusy(validation.waitForCapacity);
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
     if (validation.kind !== "accepted") throw new Error(validation.message);
     const base = validation.baseline;
