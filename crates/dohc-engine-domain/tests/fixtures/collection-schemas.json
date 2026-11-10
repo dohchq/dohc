@@ -812,7 +812,7 @@
     },
     {
       "name": "degraded-c1-relation-target-salvages-siblings",
-      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning\u0085projects\"\n    many: false\n",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planningprojects\"\n    many: false\n",
       "expected": {
         "status": "degraded",
         "schema": {
@@ -1123,6 +1123,91 @@
           {
             "code": "schema-collection-limit-exceeded",
             "path": "/views/0/sort"
+          }
+        ]
+      }
+    },
+    {
+      "name": "select-option-colors",
+      "yaml": "version: 1\nfields:\n  Status:\n    type: select\n    options: [Backlog, Blocked, Done]\n    colors:\n      Blocked: rust\n      Done: teal\n  Tags:\n    type: multi-select\n    options: [ui]\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "Status",
+              "type": "select",
+              "options": [
+                "Backlog",
+                "Blocked",
+                "Done"
+              ],
+              "colors": {
+                "Blocked": "rust",
+                "Done": "teal"
+              }
+            },
+            {
+              "name": "Tags",
+              "type": "multi-select",
+              "options": [
+                "ui"
+              ]
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "select-option-colors-degrade-per-entry",
+      "yaml": "version: 1\nfields:\n  Status:\n    type: select\n    options: [Backlog, Blocked]\n    colors:\n      Blocked: red\n      Backlog: 3\n      Gone: teal\n      Blocked: rust\n      [x]: blue\n  Tags:\n    type: multi-select\n    options: [ui]\n    colors: [ui]\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "Status",
+              "type": "select",
+              "options": [
+                "Backlog",
+                "Blocked"
+              ],
+              "colors": {
+                "Blocked": "rust"
+              }
+            },
+            {
+              "name": "Tags",
+              "type": "multi-select",
+              "options": [
+                "ui"
+              ]
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "expected-text",
+            "path": "/fields/Status/colors/Backlog"
+          },
+          {
+            "code": "unknown-option-reference",
+            "path": "/fields/Status/colors/Gone"
+          },
+          {
+            "code": "expected-text",
+            "path": "/fields/Status/colors/<non-text-key>"
+          },
+          {
+            "code": "expected-mapping",
+            "path": "/fields/Tags/colors"
           }
         ]
       }

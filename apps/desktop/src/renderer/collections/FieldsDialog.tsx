@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import type { CollectionFieldType, CollectionSchema } from "@dohc/workspace-contracts";
+import type { CollectionFieldType, CollectionSchema, OptionColor } from "@dohc/workspace-contracts";
+import { OptionColorPicker } from "@dohc/collection-views/color-picker";
+import { OptionPill, optionColor } from "@dohc/collection-views/values";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -75,6 +77,9 @@ export function FieldsDialog(props: {
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editOptions, setEditOptions] = useState("");
+  // Colors chosen while editing, by option. Options without one keep the
+  // color their name picks.
+  const [editColors, setEditColors] = useState<Record<string, OptionColor>>({});
   const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft("", props.addType));
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
@@ -87,6 +92,7 @@ export function FieldsDialog(props: {
     }
     setEditing(name);
     setEditOptions(field.options.join(", "));
+    setEditColors({ ...field.colors });
     setError(null);
   }
 
@@ -94,7 +100,7 @@ export function FieldsDialog(props: {
     const options = parseOptionsText(editOptions);
     await run(
       options.length === 0 ? NO_OPTIONS_PROBLEM : null,
-      (schema) => setFieldOptions(schema, name, options),
+      (schema) => setFieldOptions(schema, name, options, editColors),
       () => setEditing(null),
     );
   }
@@ -145,6 +151,26 @@ export function FieldsDialog(props: {
                   onChange={(event) => setEditOptions(event.target.value)}
                   className={inputClass}
                 />
+                {field.type === "select" || field.type === "multi-select" ? (
+                  <ul aria-label="Option colors" className="m-0 flex list-none flex-col p-0">
+                    {parseOptionsText(editOptions).map((option) => {
+                      const color = Object.hasOwn(editColors, option) ? editColors[option]! : optionColor(field, option);
+                      return (
+                        <li key={option} className="flex h-8 items-center gap-2 px-1">
+                          <span className="flex min-w-0 flex-1">
+                            <OptionPill label={option} color={color} dot={field.type === "select"} />
+                          </span>
+                          <OptionColorPicker
+                            label={`Color for ${option}`}
+                            value={color}
+                            disabled={pending}
+                            onChange={(next) => setEditColors((colors) => ({ ...colors, [option]: next }))}
+                          />
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
                 <div className="flex justify-end gap-2">
                   <SecondaryButton disabled={pending} onClick={() => setEditing(null)}>
                     Cancel

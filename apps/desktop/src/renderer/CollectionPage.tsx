@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { CalendarDays, Database, Plus, SquareKanban, Table2 } from "lucide-react";
 import {
   BoardView,
   CalendarView,
@@ -21,13 +22,15 @@ import type {
   CollectionQueryParams,
   CollectionRecord,
   CollectionSchema,
+  CollectionValue,
   FieldDefinition,
+  OptionColor,
   ViewDefinition,
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { SecondaryButton } from "./ui/controls";
+import { GhostButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { MoreMenu } from "./ui/MoreMenu";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
@@ -40,6 +43,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
+import { setOptionColor } from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 import {
@@ -83,7 +87,11 @@ export interface CollectionPageProps {
   onActiveViewChange: (viewName: string | null) => void;
   // The shell creates the record file (untitled naming needs the file
   // listing, which the shell owns) and opens it; adoption mints the id.
-  onNewRecord: (collectionPath: string) => void;
+  // `created` runs once the record exists, before it opens.
+  onNewRecord: (
+    collectionPath: string,
+    created?: (record: { path: string; recordId: string }) => void,
+  ) => void;
   // The md file IS the record: opening one goes through the shell's normal
   // file tab machinery, which composes PropertiesPanel and the live editor.
   onOpenRecord: (recordPath: string) => void;
@@ -103,15 +111,19 @@ export interface CollectionPageProps {
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
   return (
-    <SecondaryButton
+    <PrimaryButton
       type="button"
       data-testid="collection-new-record"
       onClick={onClick}
+      className="inline-flex items-center gap-2 pl-2"
     >
+      <Plus size={14} strokeWidth={1.9} aria-hidden />
       New record
-    </SecondaryButton>
+    </PrimaryButton>
   );
 }
+
+const VIEW_KIND_ICONS = { table: Table2, board: SquareKanban, calendar: CalendarDays } as const;
 
 export function CollectionPage({
   readOnly = false,
@@ -396,6 +408,18 @@ export function CollectionPage({
     () => onNewRecord(collectionPath),
     [onNewRecord, collectionPath],
   );
+  // A board column's New: the record starts with the column's value, written
+  // through the same queue as any edit once the record exists.
+  const groupBy = activeView?.kind === "board" ? activeView.groupBy : undefined;
+  const newRecordInGroup = useCallback(
+    (value: CollectionValue) => {
+      if (!groupBy || value === null) return onNewRecord(collectionPath);
+      onNewRecord(collectionPath, (record) => {
+        enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field: groupBy, value });
+      });
+    },
+    [onNewRecord, collectionPath, groupBy, enqueueCellChange],
+  );
   const openRecord = useCallback(
     (record: CollectionRecord) => onOpenRecord(record.path),
     [onOpenRecord],
@@ -496,6 +520,14 @@ export function CollectionPage({
     [workspaceId, collectionPath, refreshDetails, store, onError, schemaWrites],
   );
 
+  const changeOptionColor = useCallback(
+    (option: string, color: OptionColor) => {
+      if (!groupBy) return;
+      void applySchemaChange((current) => setOptionColor(current, groupBy, option, color));
+    },
+    [applySchemaChange, groupBy],
+  );
+
   // A typed select value not in the options yet: the whole edit enters the
   // global queue synchronously — before any schema IPC — so navigation and
   // lineage gates see it. The queue writes the option to the schema first,
@@ -593,23 +625,28 @@ export function CollectionPage({
   // Automations and Fields set up a Collection, so they stay in the header
   // even before it has records.
   const collectionName = (
-    <span className="min-w-0 truncate text-sm font-semibold text-ink">
-      {schema.name ?? collectionPath.split("/").at(-1)}
-    </span>
+    <h1 className="m-0 flex min-w-0 items-center gap-2 text-base font-semibold text-ink">
+      <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-md bg-panel-2 text-muted">
+        <Database size={14} strokeWidth={1.9} />
+      </span>
+      <span className="truncate">{schema.name ?? collectionPath.split("/").at(-1)}</span>
+    </h1>
   );
   const setupButtons = (
     <>
       <AutomationsButton
+        toolbar
         open={automationsOpen}
         count={automationCount(automations.file)}
         onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
       />
-      {!readOnly ? <SecondaryButton
+      {!readOnly ? <GhostButton
+        size="toolbar"
         data-testid="collection-fields-button"
         onClick={() => setFieldsOpen(true)}
       >
         Fields
-      </SecondaryButton> : null}
+      </GhostButton> : null}
       <MoreMenu
         label="Collection actions"
         items={[{ label: "Customize…", onSelect: () => setCustomizing(true) }]}
@@ -653,59 +690,69 @@ export function CollectionPage({
       data-testid="collection-page"
       className="flex min-h-0 flex-1 flex-col bg-bg"
     >
-      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+      <div className="flex shrink-0 items-center gap-2 px-5 pt-4">
         {collectionName}
-        {views.length > 1 ? (
-          <div
-            data-testid="collection-view-switcher"
-            className="flex rounded-lg border border-line bg-panel-2 p-0.5"
-          >
-            {views.map((view) => (
-              <button
-                key={view.name}
-                type="button"
-                onClick={() => onActiveViewChange(view.name)}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  view.name === (activeView?.name ?? "")
-                    ? "bg-bg text-ink shadow-sm"
-                    : "text-muted hover:text-ink"
-                }`}
-              >
-                {view.name}
-              </button>
-            ))}
-          </div>
-        ) : null}
         <span className="flex-1" />
         {state.status === "error" ? (
           <>
-            <span className="truncate text-[11px] text-danger">
+            <span className="truncate text-[12px] text-danger">
               dohc could not read this collection's records. {state.error}
             </span>
-            <SecondaryButton onClick={() => void store.refresh()}>
+            <SecondaryButton size="compact" onClick={() => void store.refresh()}>
               Retry
             </SecondaryButton>
           </>
         ) : writesPaused ? (
           <span
             data-testid="collection-writes-paused"
-            className="truncate text-[11px] text-muted"
+            className="truncate text-[12px] text-muted"
           >
             Editing is paused while dohc changes files in this workspace.
           </span>
         ) : writeError ? (
-          <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
+          <span data-testid="collection-write-error" className="truncate text-[12px] text-danger">
             {writeError}
           </span>
         ) : null}
-        {setupButtons}
-        {!readOnly ? <SecondaryButton
-          data-testid="collection-views-button"
-          onClick={() => setViewsOpen(true)}
-        >
-          Views
-        </SecondaryButton> : null}
-        {!readOnly ? <NewRecordButton onClick={newRecord} /> : null}
+      </div>
+      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 pt-2">
+        {views.length > 1 ? (
+          <div
+            data-testid="collection-view-switcher"
+            className="dohc-tab-strip flex min-w-0 items-center self-stretch overflow-x-auto overflow-y-hidden"
+          >
+            {views.map((view) => {
+              const Icon = VIEW_KIND_ICONS[view.kind];
+              const active = view.name === (activeView?.name ?? "");
+              return (
+                <button
+                  key={view.name}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => onActiveViewChange(view.name)}
+                  className={`flex h-10 shrink-0 items-center gap-2 border-b-2 px-2 text-[13px] font-medium transition-colors duration-75 ${
+                    active ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink"
+                  }`}
+                >
+                  <Icon size={14} strokeWidth={1.9} aria-hidden />
+                  {view.name}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+        <span className="flex-1" />
+        <div className="flex shrink-0 items-center gap-1 pb-1">
+          {setupButtons}
+          {!readOnly ? <GhostButton
+            size="toolbar"
+            data-testid="collection-views-button"
+            onClick={() => setViewsOpen(true)}
+          >
+            Views
+          </GhostButton> : null}
+          {!readOnly ? <span className="ml-1"><NewRecordButton onClick={newRecord} /></span> : null}
+        </div>
       </div>
       {drainCapped ? (
         <div
@@ -733,6 +780,8 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
+            onNewRecord={readOnly || writesPaused ? undefined : newRecordInGroup}
+            onOptionColorChange={readOnly ? undefined : changeOptionColor}
           />
         ) : calendarReady ? (
           <CalendarView

@@ -294,7 +294,7 @@ const SHELL_PROPS = {
 // The page plus the ONE writer host the shell mounts; rerenders reuse this
 // element so the host is never doubled or dropped.
 function pageWithHost(
-  onNewRecord: (collectionPath: string) => void = () => undefined,
+  onNewRecord: CollectionPageProps["onNewRecord"] = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
@@ -331,7 +331,7 @@ function pageWithHost(
 
 function renderPage(
   bridge: ReturnType<typeof makeBridge>,
-  onNewRecord: (collectionPath: string) => void = () => undefined,
+  onNewRecord: CollectionPageProps["onNewRecord"] = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
@@ -1810,6 +1810,45 @@ describe("record click-through", () => {
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
+  it("starts a record from a board column with the column's value", async () => {
+    const schema: CollectionSchema = {
+      ...BOARD_SCHEMA,
+      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+    };
+    const bridge = makeBridge([selectRecord()], schema, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-new");
+    docMock.current = engineDocState({ available: true, doc });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    renderPage(bridge, onNewRecord);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New record in Doing" }));
+    expect(onNewRecord).toHaveBeenCalledOnce();
+    const [path, created] = onNewRecord.mock.calls[0]!;
+    expect(path).toBe("tasks");
+    act(() => created!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
+  });
+
+  it("saves a board column's color to the schema", async () => {
+    const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
+    renderPage(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Todo options" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
+      name: "status",
+      type: "select",
+      options: ["Todo"],
+      colors: { Todo: "plum" },
+    });
+  });
+
   it("shows a table, not a board, when the board groups by a button", async () => {
     const parsed = parseCollectionSchema([
       "fields:",
@@ -1881,7 +1920,7 @@ describe("pagination", () => {
     });
     const { container } = renderPage(bridge);
     await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("102"));
-    const scroller = container.querySelector<HTMLElement>("[role=grid] .overflow-auto")!;
+    const scroller = container.querySelector<HTMLElement>("[role=grid]")!;
     scroller.scrollTop = 2800;
     fireEvent.scroll(scroller);
     await waitFor(() => expect(pages).toBe(1));

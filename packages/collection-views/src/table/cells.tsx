@@ -8,6 +8,7 @@ import type {
 import type { CollectionQueryExecutor } from "../store";
 import { useAcknowledgedSelection } from "../useAcknowledgedSelection";
 import { RelationPicker } from "../relation/RelationPicker";
+import { isPastDate, OptionPill, optionColor, PersonChip, shortDate } from "../values";
 
 export interface FieldCellProps {
   field: FieldDefinition;
@@ -452,17 +453,19 @@ export function FieldCell({
       reason,
       <input
         type="checkbox"
+        aria-label={field.name}
         checked={checked}
         disabled={onChange === undefined}
         onChange={() => onChange?.(!checked)}
+        className="size-3.5 cursor-pointer accent-accent disabled:cursor-default"
       />,
     );
   }
 
-  const text = fieldDisplayText(field, indexed, personLabel);
-  if (!onEditStart) {
-    return wrapFlagged(reason, <span className="truncate text-[13px]">{text}</span>);
-  }
+  const shown = reason === null
+    ? <FieldValue field={field} indexed={indexed} personLabel={personLabel} />
+    : <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>;
+  if (!onEditStart) return wrapFlagged(reason, shown);
   return wrapFlagged(
     reason,
     <button
@@ -470,10 +473,60 @@ export function FieldCell({
       // min-h keeps an empty cell clickable: with no text the button's
       // content box collapses to zero height and the cell cannot be edited
       // by mouse at all.
-      className="block min-h-5 w-full truncate text-left text-[13px]"
+      className="flex min-h-5 w-full min-w-0 items-center text-left text-[13px]"
       onClick={onEditStart}
     >
-      {text}
+      {shown}
     </button>,
   );
+}
+
+/**
+ * A valid value as every view shows it: options as colored pills, people
+ * with their initial, dates as "Nov 8". Empty shows nothing.
+ */
+export function FieldValue({
+  field,
+  indexed,
+  personLabel,
+}: {
+  field: FieldDefinition;
+  indexed: CollectionIndexedValue | undefined;
+  personLabel?: (userId: string) => string | null;
+}) {
+  const value = indexed?.value ?? null;
+  if (value === null) return null;
+  switch (field.type) {
+    case "select": {
+      const option = asText(value);
+      return <OptionPill label={option} color={optionColor(field, option)} dot />;
+    }
+    case "multi-select":
+      return (
+        <span className="flex min-w-0 items-center gap-1 overflow-hidden">
+          {asTextArray(value).map((option) => (
+            <OptionPill key={option} label={option} color={optionColor(field, option)} />
+          ))}
+        </span>
+      );
+    case "person": {
+      const id = asText(value);
+      return <PersonChip id={id} label={personLabel?.(id) ?? id} />;
+    }
+    case "date": {
+      const date = asText(value);
+      return <span className={`truncate text-[13px] ${isPastDate(date) ? "text-danger" : ""}`}>{shortDate(date)}</span>;
+    }
+    case "number":
+      return <span className="ml-auto truncate text-[13px] tabular-nums">{asText(value)}</span>;
+    case "relation":
+    case "url":
+      return (
+        <span className="truncate text-[13px] underline decoration-line underline-offset-[3px]">
+          {fieldDisplayText(field, indexed, personLabel)}
+        </span>
+      );
+    default:
+      return <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>;
+  }
 }

@@ -113,19 +113,27 @@ describe("FieldCell display", () => {
     expect(checkbox.disabled).toBe(true);
   });
 
-  it("renders a date value", () => {
-    render(<FieldCell field={field("due")} indexed={indexedValue("due", "2026-09-15")} />);
-    expect(screen.getByText("2026-09-15")).toBeDefined();
+  it("renders a date as people read it, marking a past one", () => {
+    render(<FieldCell field={field("due")} indexed={indexedValue("due", "2024-09-15")} />);
+    expect(screen.getByText("Sep 15, 2024").className).toContain("text-danger");
   });
 
-  it("renders a select value", () => {
-    render(<FieldCell field={field("status")} indexed={indexedValue("status", "doing")} />);
-    expect(screen.getByText("doing")).toBeDefined();
+  it("renders a select value as a pill in its chosen color", () => {
+    const status: FieldDefinition = { name: "status", type: "select", options: ["todo", "doing"], colors: { doing: "amber" } };
+    render(<FieldCell field={status} indexed={indexedValue("status", "doing")} />);
+    expect(screen.getByText("doing").parentElement?.dataset.optionColor).toBe("amber");
   });
 
-  it("renders multi-select values joined", () => {
+  it("renders multi-select values as one pill each, colored by name without a choice", () => {
     render(<FieldCell field={field("tags")} indexed={indexedValue("tags", ["alpha", "gamma"])} />);
-    expect(screen.getByText("alpha, gamma")).toBeDefined();
+    const alpha = screen.getByText("alpha").parentElement?.dataset.optionColor;
+    expect(alpha).toBeDefined();
+    expect(screen.getByText("gamma").parentElement?.dataset.optionColor).toBeDefined();
+    cleanup();
+    // The same name keeps its color in another field, so reordering never recolors it.
+    const other: FieldDefinition = { name: "labels", type: "multi-select", options: ["zeta", "alpha"] };
+    render(<FieldCell field={other} indexed={indexedValue("labels", ["alpha"])} />);
+    expect(screen.getByText("alpha").parentElement?.dataset.optionColor).toBe(alpha);
   });
 
   it("renders a person through personLabel and falls back to the id", () => {

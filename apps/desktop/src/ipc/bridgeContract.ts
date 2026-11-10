@@ -63,6 +63,7 @@ import {
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
+  OPTION_COLORS,
 } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath, MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
 import type {
@@ -690,6 +691,7 @@ const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
   type: z.enum(["select", "multi-select"]),
   options: z.array(z.string().max(500)).max(MAX_SCHEMA_COLLECTION_ITEMS),
+  colors: z.record(z.string().max(500), z.enum(OPTION_COLORS)).optional(),
 });
 const RelationFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,

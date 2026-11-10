@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
+import { ArrowDown, ArrowUp, Maximize2, Plus } from "lucide-react";
 import type {
   CollectionQuerySort,
   CollectionRecord,
@@ -13,6 +14,7 @@ import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
 import { Tooltip, useTooltip } from "../tooltip";
+import { FieldTypeIcon } from "../values";
 import { CellEditor, FieldCell } from "./cells";
 
 /**
@@ -100,26 +102,30 @@ export interface TableViewProps {
 
 const TABLE_FEATURES = tableFeatures({});
 const COLUMN_WIDTH = 180;
-const OPEN_COLUMN_WIDTH = 56;
-const ROW_HEIGHT = 28;
+/** The first field names the record, so it gets room to read. */
+const TITLE_COLUMN_WIDTH = 260;
+/** The gutter left of the fields that holds each row's Open control. */
+const OPEN_COLUMN_WIDTH = 36;
+const ROW_HEIGHT = 32;
+const HEADER_HEIGHT = 32;
 /** How close to the end of the loaded rows `onNearEnd` starts firing. */
 const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
-function NewRecordRow(props: { disabled: boolean; openColumn: boolean; onClick: () => void }) {
+const columnWidth = (index: number) => (index === 0 ? TITLE_COLUMN_WIDTH : COLUMN_WIDTH);
+
+function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: number; onClick: () => void }) {
   return (
     <div role="row" className="flex shrink-0">
-      {props.openColumn ? <div role="gridcell" style={{ width: OPEN_COLUMN_WIDTH }} /> : null}
-      <div role="gridcell" className="flex-1">
+      {props.openColumn ? <div role="gridcell" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} /> : null}
+      <div role="gridcell" className="shrink-0 border-b border-line" style={{ width: props.width }}>
         <button
           type="button"
           disabled={props.disabled}
           onClick={props.onClick}
-          className="flex h-8 w-full items-center gap-1.5 px-2 text-left text-[13px] text-subtle transition-colors hover:text-ink dohc-focus-row disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-8 w-full items-center gap-2 px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-row disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
-            <path d="M5 12h14M12 5v14" />
-          </svg>
+          <Plus size={14} strokeWidth={1.9} aria-hidden />
           New record
         </button>
       </div>
@@ -144,6 +150,8 @@ interface EditingCell {
  */
 function FieldHeader(props: {
   name: string;
+  type: FieldDefinition["type"];
+  width: number;
   sorted: "asc" | "desc" | null;
   mark: TableFieldMark | undefined;
   onSort: () => void;
@@ -154,16 +162,17 @@ function FieldHeader(props: {
     <div
       role="columnheader"
       aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
-      className="relative"
-      style={{ width: COLUMN_WIDTH }}
+      className="relative shrink-0 border-b border-r border-line last:border-r-0"
+      style={{ width: props.width }}
       {...(mark ? tooltip.hoverProps : {})}
     >
       <button
         type="button"
-        className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
+        className="flex h-full w-full items-center gap-2 px-2 text-left text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
         onClick={props.onSort}
         {...(mark ? tooltip.focusProps : {})}
       >
+        <FieldTypeIcon type={props.type} />
         <span className="truncate">{props.name}</span>
         {mark ? (
           <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
@@ -171,8 +180,8 @@ function FieldHeader(props: {
           </span>
         ) : null}
         {sorted ? (
-          <span aria-hidden="true" className="text-subtle">
-            {sorted === "asc" ? "↑" : "↓"}
+          <span aria-hidden="true" className="ml-auto inline-flex shrink-0 text-accent">
+            {sorted === "asc" ? <ArrowUp size={13} strokeWidth={2} /> : <ArrowDown size={13} strokeWidth={2} />}
           </span>
         ) : null}
       </button>
@@ -204,6 +213,7 @@ export function TableView({
     () => deriveColumns(schema, visibleFields),
     [schema, visibleFields],
   );
+  const rowWidth = fields.reduce((total, _field, index) => total + columnWidth(index), 0);
 
   const [editing, setEditing] = useState<EditingCell | null>(null);
 
@@ -290,6 +300,8 @@ export function TableView({
     estimateSize: () => ROW_HEIGHT,
     getItemKey: (index) => rows[index]?.id ?? index,
     overscan: 5,
+    // The sticky header scrolls with the rows, so they start below it.
+    scrollMargin: HEADER_HEIGHT,
     rangeExtractor,
   });
   const virtualItems = virtualizer.getVirtualItems();
@@ -315,45 +327,53 @@ export function TableView({
     }
   };
 
+  const openColumn = Boolean(onOpenRecord);
   return (
-    <div role="grid" aria-rowcount={records.length + (onNewRecord ? 2 : 1)} className="flex h-full flex-col">
-      <div role="row" className="flex shrink-0 border-b border-line bg-panel">
-        {onOpenRecord ? (
-          <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
-        ) : null}
-        {fields.map((field) => {
-          // A button stores no value to sort by, so its header is a label.
-          if (field.type === "button") {
+    <div
+      ref={scrollRef}
+      role="grid"
+      aria-rowcount={records.length + (onNewRecord ? 2 : 1)}
+      className="h-full overflow-auto"
+    >
+      <div className="w-max min-w-full pb-6 pr-5">
+        <div role="row" className="sticky top-0 z-20 flex bg-bg" style={{ height: HEADER_HEIGHT }}>
+          {openColumn ? (
+            <div role="columnheader" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} />
+          ) : null}
+          {fields.map((field, index) => {
+            // A button stores no value to sort by, so its header is a label.
+            if (field.type === "button") {
+              return (
+                <div
+                  key={field.name}
+                  role="columnheader"
+                  className="flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0"
+                  style={{ width: columnWidth(index) }}
+                >
+                  <FieldTypeIcon type={field.type} />
+                  <span className="truncate">{field.name}</span>
+                </div>
+              );
+            }
             return (
-              <div
+              <FieldHeader
                 key={field.name}
-                role="columnheader"
-                className="flex h-7 items-center px-2 text-[12px] font-medium text-muted"
-                style={{ width: COLUMN_WIDTH }}
-              >
-                <span className="truncate">{field.name}</span>
-              </div>
+                name={field.name}
+                type={field.type}
+                width={columnWidth(index)}
+                sorted={primarySort?.field === field.name ? primarySort.direction : null}
+                mark={fieldMarks?.get(field.name)}
+                onSort={() => toggleSort(field.name)}
+              />
             );
-          }
-          return (
-            <FieldHeader
-              key={field.name}
-              name={field.name}
-              sorted={primarySort?.field === field.name ? primarySort.direction : null}
-              mark={fieldMarks?.get(field.name)}
-              onSort={() => toggleSort(field.name)}
-            />
-          );
-        })}
-      </div>
-      {records.length === 0 ? (
-        onNewRecord ? (
-          <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} />
-        ) : (
-          <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>
-        )
-      ) : (
-        <div ref={scrollRef} className="flex-1 overflow-auto">
+          })}
+        </div>
+        {records.length === 0 && !onNewRecord ? (
+          <div className="py-4 pr-2 text-sm text-muted" style={{ paddingLeft: (openColumn ? OPEN_COLUMN_WIDTH : 0) + 8 }}>
+            No records in this collection yet.
+          </div>
+        ) : null}
+        {records.length > 0 ? (
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualItems.map((item) => {
               const row = rows[item.index];
@@ -363,31 +383,34 @@ export function TableView({
                   key={row.id}
                   role="row"
                   data-index={item.index}
-                  className="group absolute left-0 top-0 flex w-full border-b border-line"
-                  style={{ height: ROW_HEIGHT, transform: `translateY(${item.start}px)` }}
+                  className="group absolute left-0 top-0 flex"
+                  style={{ height: ROW_HEIGHT, transform: `translateY(${item.start - HEADER_HEIGHT}px)` }}
                 >
                   {onOpenRecord ? (
                     <div
                       role="gridcell"
-                      className="flex items-center justify-center"
+                      className="flex shrink-0 items-center justify-center"
                       style={{ width: OPEN_COLUMN_WIDTH }}
                     >
                       <button
                         type="button"
                         aria-label={`Open ${recordLabel(row.original)}`}
-                        className="rounded border border-line bg-panel px-1.5 text-[11px] text-muted opacity-0 transition-opacity duration-75 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                        title="Open"
+                        className="grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
                         onClick={() => onOpenRecord(row.original)}
                       >
-                        Open
+                        <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
                       </button>
                     </div>
                   ) : null}
-                  {row.getAllCells().map((cell) => (
+                  {row.getAllCells().map((cell, index) => (
                     <div
                       key={cell.id}
                       role="gridcell"
-                      className="flex items-center overflow-hidden px-2 text-ink"
-                      style={{ width: COLUMN_WIDTH }}
+                      className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
+                        index === 0 ? "font-medium" : ""
+                      }`}
+                      style={{ width: columnWidth(index) }}
                     >
                       <table.FlexRender cell={cell} />
                     </div>
@@ -410,13 +433,15 @@ export function TableView({
                 onBlurCapture={(event) => {
                   if (editingDisabled) event.stopPropagation();
                 }}
-                className="absolute z-10 m-0 min-w-0 rounded border border-line bg-panel p-1 shadow-md"
+                className="dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
                 style={{
                   top: editingRowIndex * ROW_HEIGHT,
                   left:
-                    (onOpenRecord ? OPEN_COLUMN_WIDTH : 0) +
-                    fields.indexOf(editingField) * COLUMN_WIDTH,
-                  width: COLUMN_WIDTH,
+                    (openColumn ? OPEN_COLUMN_WIDTH : 0) +
+                    fields
+                      .slice(0, fields.indexOf(editingField))
+                      .reduce((total, _field, index) => total + columnWidth(index), 0),
+                  width: columnWidth(fields.indexOf(editingField)),
                   minHeight: ROW_HEIGHT,
                 }}
               >
@@ -453,9 +478,11 @@ export function TableView({
               </fieldset>
             ) : null}
           </div>
-          {onNewRecord ? <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} /> : null}
-        </div>
-      )}
+        ) : null}
+        {onNewRecord ? (
+          <NewRecordRow disabled={editingDisabled} openColumn={openColumn} width={rowWidth} onClick={onNewRecord} />
+        ) : null}
+      </div>
     </div>
   );
 }
