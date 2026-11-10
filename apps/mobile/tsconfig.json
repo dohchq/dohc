@@ -1,5 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The phone runs Hermes, not Electron, Node or a browser, and which
+    // ES2023 and ES2024 built-ins it has is unchecked. Phone code stays on ES2022.
+    "lib": ["dom", "dom.iterable", "ES2022"]
+  },
   "include": [
     "app/**/*.ts",
     "app/**/*.tsx",
