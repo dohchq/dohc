@@ -25,7 +25,7 @@ import {
   type NoticeTarget,
 } from "../../notices/noticeTarget";
 import { findNoticeChat } from "./findNoticeChat";
-import type { SentNotices } from "./useSentNotices";
+import { useSentNotices, type SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
 import { showChat } from "../workbench/chatsOnScreen";
@@ -942,5 +942,36 @@ describe("a share this workspace holds", () => {
     const trip = workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } });
     const { sentNotices } = setup(rows, [workspace("notes"), trip], "notes");
     expect(sentNotices.read).not.toHaveBeenCalled();
+  });
+
+  it("asks once for a row whose read fails, which the list then shows unread", async () => {
+    const listNotices = vi.fn(async () => ({ account: "ana@example.com", notices: [shared("s1", "share-1")] }));
+    const marks: ReturnType<typeof deferred<void>>[] = [];
+    const markNotices = vi.fn(() => {
+      const mark = deferred<void>();
+      marks.push(mark);
+      return mark.promise;
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...(Reflect.get(globalThis, "dohcDesktop") as object), listNotices, markNotices, onNoticesChanged: () => () => undefined,
+    });
+    const { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError } =
+      setup([], [workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })], "trip");
+    const input = { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError };
+    const { result } = renderHook(() => {
+      const sentNotices = useSentNotices(true);
+      useSentNoticeProps({ ...input, sentNotices });
+      return sentNotices;
+    });
+    await waitFor(() => expect(markNotices).toHaveBeenCalledTimes(1));
+    // The row shows read while main has the mark, then main refuses it.
+    await waitFor(() => expect(result.current.notices[0]?.readAtMs).not.toBeNull());
+    await act(async () => {
+      marks[0]!.reject(new Error("offline"));
+      await marks[0]!.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(listNotices).toHaveBeenCalledTimes(2));
+    expect(result.current.notices.map((row) => row.readAtMs)).toEqual([null]);
+    expect(markNotices).toHaveBeenCalledTimes(1);
   });
 });

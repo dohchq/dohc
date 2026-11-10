@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
 import type { AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
-import type { ChatDispatchFailedRun, GetRelayReceivedShareResult, NoticeRef, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { ChatDispatchFailedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
@@ -166,23 +166,24 @@ export function useSentNoticeProps(input: {
   // A "Shared … with you" row is about its share. While this workspace holds
   // that share, as its own view or in shared-with-me, the person has opened
   // it: the row reads and its toast closes, and the row stays until dismissed.
-  // A read that fails leaves the row unread; the same rows ask again only
-  // once they change.
+  // Each row asks once. A read shows the row read until main answers, so a
+  // read that fails shows it unread again, and the person can still reach it.
   const here = workspaces.find((candidate) => candidate.workspaceId === workspaceId);
-  const openedShareRows = useMemo(() => {
+  const askedRead = useRef(new Set<string>());
+  useEffect(() => {
+    if (!readNotices) return;
     const shares = new Set([
       ...(here?.shareView?.shareId === undefined ? [] : [here.shareView.shareId]),
       ...(here?.shareMounts ?? []).map((mount) => mount.shareId),
     ]);
-    return JSON.stringify((sentNotices?.notices ?? [])
+    const refs = (sentNotices?.notices ?? [])
       .filter((notice) => notice.kind === "share-received" && notice.readAtMs === null &&
-        notice.recipientShareId !== null && shares.has(notice.recipientShareId))
-      .map(sentNoticeRef));
-  }, [here, sentNotices?.notices]);
-  useEffect(() => {
-    const refs = JSON.parse(openedShareRows) as NoticeRef[];
-    if (refs.length > 0) readNotices?.(refs).catch(() => undefined);
-  }, [openedShareRows, readNotices]);
+        notice.recipientShareId !== null && shares.has(notice.recipientShareId) &&
+        !askedRead.current.has(`${notice.store}:${notice.noticeId}`))
+      .map(sentNoticeRef);
+    for (const ref of refs) askedRead.current.add(`${ref.store}:${ref.noticeId}`);
+    if (refs.length > 0) readNotices(refs).catch(() => undefined);
+  }, [here, readNotices, sentNotices?.notices]);
   const toast = useMemo(
     () => (sentNotices?.toast && sentNotices.toast !== seenRun?.notice && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
     [describe, seenRun, sentNotices?.toast, workspaceId],
