@@ -89,6 +89,22 @@ it("previews actual changed values and approves the exact candidate without runn
   expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("no longer available");
 });
 
+it("gives records named by their request id the order they were added, while the clock repeats or steps back",async()=>{
+  let clock=1_000;
+  const f=await fixture({nowMs:()=>clock,source:`globalThis.operations = { run(ctx,input) {
+    if(input.value) ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);
+    return ctx.db.query('SELECT id,value FROM items ORDER BY id');
+  }}`});
+  const added=["Ada","Grace","Katherine","Hedy","Joan","Radia","Barbara","Frances"];
+  for(const [index,value] of added.entries()){
+    clock=[1_000,1_000,1_000,999,999,5_000,5_000,4_000][index]!;
+    await f.invoke({value},{idempotencyKey:value});
+  }
+  const rows=(await f.invoke({},{readOnly:true})).result as {id:string;value:string}[];
+  expect(rows.map(row=>row.value)).toEqual(added);
+  for(const row of rows) expect(row.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
 it("rejects changed owner and stale data and replaces a discarded candidate without leaks",async()=>{
   let balance=0;
   const f=await fixture({maintenanceStorage:{authorize(){},account({bytes}){balance+=bytes;}}});

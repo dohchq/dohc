@@ -172,6 +172,28 @@ const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.worksp
   left.hostEpoch === right.hostEpoch && left.approvedRevisionHash === right.approvedRevisionHash;
 
 /** Coordinates one authority journal and recoverable workers. This is not a public request handler. */
+/**
+ * Version 7 UUIDs from one clock, each sorting after the one before even when the clock repeats or steps back.
+ * Generated Collection rules use the request id as a new record's id and list by id when no sort is set,
+ * so records list in the order they were added.
+ */
+function orderedRequestIds(now: () => number): () => string {
+  let lastMs = -1, counter = 0;
+  return () => {
+    let ms = Math.max(Math.trunc(now()), 0);
+    if (ms > lastMs) counter = 0;
+    else if (++counter > 0xfff) { ms = lastMs + 1; counter = 0; }
+    else ms = lastMs;
+    lastMs = ms;
+    const bytes = randomBytes(16);
+    bytes.writeUIntBE(ms, 0, 6);
+    bytes[6] = 0x70 | counter >> 8; bytes[7] = counter & 0xff;
+    bytes[8] = 0x80 | bytes[8]! & 0x3f;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+}
+
 export async function createDatasetSupervisor(options: DatasetSupervisorOptions) {
   const maxWorkers = options.maxWorkers ?? 4, idleMs = options.idleMs ?? 30_000, queueMs = options.queueMs ?? 30_000;
   const materializationEvents = options.materializationEvents ?? 128, replayCacheMs = options.replayCacheMs ?? 1000;
@@ -231,7 +253,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
-  const now = options.nowMs ?? Date.now;
+  const now = options.nowMs ?? Date.now, requestId = orderedRequestIds(now);
 
   function reportMaintenanceError(scope:DatasetScope,error:unknown):void {
     const key=JSON.stringify(scope);
@@ -588,7 +610,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         if (receipt) { currentAuthority(); return { result: JSON.parse(receipt.resultJson), revision: receipt.revision, replayed: true }; }
       }
       const prepared = await worker.runtime.prepare({ expected: worker.cursor, source: captured.source, operation: input.operation,
-        caller: input.caller, input: input.input, nowMs: now(), requestId: randomUUID(), secret: randomBytes(32).toString("base64url"),
+        caller: input.caller, input: input.input, nowMs: now(), requestId: requestId(), secret: randomBytes(32).toString("base64url"),
         files: input.files, readOnly: input.readOnly, tables: input.tables });
       currentAuthority();
       if (input.readOnly) {
