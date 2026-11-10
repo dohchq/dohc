@@ -920,3 +920,27 @@ describe("an agent run's notice while its chat is on screen", () => {
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
   });
 });
+
+// Being in a share reads its "Shared … with you" row, wherever it opened from.
+describe("a share this workspace holds", () => {
+  const shared = (noticeId: string, recipientShareId: string, readAtMs: number | null = null) => notice({
+    noticeId, kind: "share-received", recipientShareId, senderKind: "person", title: "Ana shared Trip with you",
+    body: "Edit access · From Ana", target: { share: recipientShareId }, readAtMs,
+  });
+  const rows = [shared("s1", "share-1"), shared("s2", "share-2"), notice({ noticeId: "report" }), shared("old", "share-1", 5)];
+
+  it.each([
+    ["its own view", workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })],
+    ["shared-with-me", workspace("trip", { shareMounts: [{ shareId: "share-1", label: "ana", granterEmail: null }] })],
+  ])("reads only that share's unread row while this workspace holds it as %s", (_where, trip) => {
+    const { sentNotices } = setup(rows, [trip], "trip");
+    expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([{ store: "account", noticeId: "s1" }]);
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("reads no row in a workspace that holds no share", () => {
+    const trip = workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } });
+    const { sentNotices } = setup(rows, [workspace("notes"), trip], "notes");
+    expect(sentNotices.read).not.toHaveBeenCalled();
+  });
+});
