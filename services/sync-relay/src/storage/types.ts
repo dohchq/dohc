@@ -738,7 +738,7 @@ export interface SyncRelayStorage {
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
-  accountFeedJournalPages(input: { workspaceId: string; after: number; through: number }): Array<{ objectId: string; path: string }>;
+  accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;
   accountFeedThreadPaths(workspaceId: string, threadId: string): { lastKnownPath: string | null; named: string[] };
   currentAutomationWorkspace(workspaceId: string): import("./automationWorkspaces").AutomationWorkspace | null;
   automationWorkspaceLogSeq(input: { workspaceId: string; originId: string; originSeq: number }): number | null;

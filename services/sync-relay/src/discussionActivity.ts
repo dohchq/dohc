@@ -80,11 +80,12 @@ export class DiscussionActivityHub {
     this.waiters.wake(shareId, undefined);
   }
 
-  /** The workspace log changed: wakes its link readers and its owner's devices. */
+  /** The workspace log changed: wakes its link readers, its owner's devices, its personal agents, and its account change feeds. */
   wakeLog(workspaceId: string): void {
     this.waiters.wake(linkLogWaitGroup(workspaceId), undefined);
     this.waiters.wake(ownerLogWaitGroup(workspaceId), undefined);
     this.personal.wake(ownerLogWaitGroup(workspaceId), undefined);
+    this.waiters.wake(accountFeedWaitGroup(workspaceId), undefined);
   }
 
   stats(): { shares: number; waiters: number } {

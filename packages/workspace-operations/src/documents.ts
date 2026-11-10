@@ -39,9 +39,10 @@ export interface WorkspaceFile {
   byteLength: number | null;
 }
 
-/** What the host found at a path it was asked to read as text. */
+/** What the host found at a path it was asked to read as text. A text file over the host's limit is not read. */
 export type FileTextRead =
-  | { kind: "text"; text: string; byteLength: number }
+  | { kind: "text"; text: string }
+  | { kind: "too-large"; maxBytes: number }
   | { kind: "binary" }
   | { kind: "missing" };
 
@@ -50,8 +51,6 @@ export type FileTextRead =
 export interface FilesHost {
   list(): Promise<readonly WorkspaceFile[]>;
   readText(path: string): Promise<FileTextRead>;
-  /** The largest text file a read answers. */
-  maxTextBytes: number;
   errorDetail: ErrorDetail;
 }
 
@@ -114,8 +113,6 @@ export async function readText(files: FilesHost, path: string, platform: string)
   }
   if (read.kind === "missing") return { ok: false, reason: `dohc: No file at ${normalized}.` };
   if (read.kind === "binary") return { ok: false, reason: `dohc: ${normalized} is not a text file.`, refusal: "binary" };
-  if (read.byteLength > files.maxTextBytes) {
-    return { ok: false, reason: `dohc: ${normalized} is larger than ${files.maxTextBytes} bytes.`, refusal: "too-large" };
-  }
+  if (read.kind === "too-large") return { ok: false, reason: `dohc: ${normalized} is larger than ${read.maxBytes} bytes.`, refusal: "too-large" };
   return { ok: true, path: normalized, text: read.text };
 }

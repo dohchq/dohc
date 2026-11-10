@@ -6,7 +6,7 @@ import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
-import { createAccountFeedWaits } from "./accountFeed";
+import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, createAccountFeedWaits } from "./accountFeed";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
@@ -44,14 +44,14 @@ function op(workspaceId: string, operation: string, args: unknown = {}, headers:
 
 /**
  * One engine for chats and files, which fails a method on request. Its file
- * listing can also name `listedSecrets`, as an engine that kept a secret file
- * among the others would.
+ * listing can also name `listedHidden`, as an engine that kept a secret file,
+ * or a path it ignores, among the others would.
  */
 class TestEngine implements EngineTransport {
   readonly chats = new ChatsLoopbackEngine();
   readonly files = new VersionedLoopbackEngine();
   readonly failing = new Map<string, Error>();
-  readonly listedSecrets: string[] = [];
+  readonly listedHidden: string[] = [];
   onEvent() { return () => undefined; }
   close() {}
   async sendRequest(request: Parameters<EngineTransport["sendRequest"]>[0]) {
@@ -59,9 +59,9 @@ class TestEngine implements EngineTransport {
     if (failure) throw failure;
     if (request.method.startsWith("chats.")) return await this.chats.sendRequest(request);
     const response = await this.files.sendRequest(request);
-    if (request.method !== "versionedText.list" || this.listedSecrets.length === 0) return response;
+    if (request.method !== "versionedText.list" || this.listedHidden.length === 0) return response;
     const page = response.result as { files: Array<Record<string, JsonValue>> };
-    const listed = this.listedSecrets.map((path) => ({ ...page.files[0]!, path, objectId: `object-${path}` }));
+    const listed = this.listedHidden.map((path) => ({ ...page.files[0]!, path, objectId: `object-${path}` }));
     return { ...response, result: { ...page, files: [...page.files, ...listed] } };
   }
   methods(): string[] {
@@ -117,12 +117,13 @@ async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSe
   }
   const engine = new TestEngine();
   const run = await serverCopies(storage, engine);
+  const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
     accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession, serverCopies: () => run.copies,
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
-    ...(options.activity ? { discussionActivity: options.activity } : {}),
+    discussionActivity: activity,
   });
-  return { storage, engine, h, ...run };
+  return { storage, engine, h, activity, ...run };
 }
 
 /** A trip with a Group, a thread with two attachments, a page, and a thread on the page. */
@@ -146,11 +147,14 @@ async function answer(response: Response) {
   return (await json(response)).result as Record<string, unknown>;
 }
 
-/** Appends one row to a workspace's log as a relay write. A moment also places its object at its path, or deletes it. */
-function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
+/**
+ * Appends one row to a workspace's log and wakes its waits, as the relay's
+ * log routes do. A moment also places its object at its path, or deletes it.
+ */
+function logWriter(storage: SyncRelayStorage, activity: DiscussionActivityHub, workspaceId = "trip") {
   const context = storage as StorageContext;
   let originSeq = 0;
-  return (opKind: string, payload: Record<string, unknown>) => context.tx(() => {
+  const append = (opKind: string, payload: Record<string, unknown>) => context.tx(() => {
     const row = context.db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
       VALUES (?, 'origin-test', ?, ?, ?, 1) RETURNING relay_seq`).get(workspaceId, ++originSeq, opKind, JSON.stringify(payload))!;
     const relaySeq = Number(row.relay_seq);
@@ -160,6 +164,11 @@ function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
     }
     return relaySeq;
   });
+  return (opKind: string, payload: Record<string, unknown>) => {
+    const relaySeq = append(opKind, payload);
+    activity.wakeLog(workspaceId);
+    return relaySeq;
+  };
 }
 
 function changes(since: string, options: { hold?: number; headers?: Record<string, string>; workspaceId?: string; signal?: AbortSignal } = {}): Request {
@@ -574,14 +583,14 @@ describe("file reads through the server's copy", () => {
     for (const [path, text] of [["docs/plan.md", "# Plan\n"], ["docs/trips/lisbon.md", "Alfama\n"], ["Docs/old.md", "Old\n"]] as const) {
       engine.files.seedTextFile({ workspace: "trip", path, text, objectId: `object-${path}` });
     }
-    engine.listedSecrets.push(".env", "docs/.env.local", "a/.env/b.md");
+    engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
     engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
   }
   const paths = (result: Record<string, unknown>) => ({
     files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
   });
 
-  it("lists the copy's files in lexical order without secret ones, and reads a text file", async () => {
+  it("lists the copy's files in lexical order without hidden ones, and reads a text file", async () => {
     const { engine, h, syncs } = await relay();
     seedFiles(engine);
     const listed = await answer(await h(op("trip", "listFiles")));
@@ -608,6 +617,15 @@ describe("file reads through the server's copy", () => {
     expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
   });
 
+  it("refuses a text file over the desktop's editor limit without fetching its body", async () => {
+    const { engine, h } = await relay();
+    engine.files.seedTextFile({ workspace: "trip", path: "big.txt", text: "a".repeat(2 * 1024 * 1024 + 1) });
+    expect(await answer(await h(op("trip", "readText", { path: "big.txt" }))))
+      .toEqual({ ok: false, reason: "dohc: big.txt is larger than 2097152 bytes.", refusal: "too-large" });
+    expect(engine.methods()).toContain("versionedText.read");
+    expect(engine.methods()).not.toContain("versionedText.readBlob");
+  });
+
   it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
     const { engine, h } = await relay();
     seedFiles(engine);
@@ -623,17 +641,17 @@ describe("file reads through the server's copy", () => {
 
 describe("an account's change feed", () => {
   it("answers each read with the cursor of what its copy had synced", async () => {
-    const { storage, h } = await relay();
+    const { storage, activity, h } = await relay();
     expect((await json(await h(op("trip", "groups")))).cursor).toBe("0.0.0");
-    const relaySeq = logWriter(storage)("chat.channel.create", { channelId: "c" });
+    const relaySeq = logWriter(storage, activity)("chat.channel.create", { channelId: "c" });
     expect((await json(await h(op("trip", "groups")))).cursor).toBe(`0.${relaySeq}.0`);
   });
 
   it("delivers a change made between a read and the feed's start, from the log alone", async () => {
-    const { storage, engine, h, syncs } = await relay();
+    const { storage, activity, engine, h, syncs } = await relay();
     await seedTrip(engine);
     const { cursor } = await json(await h(op("trip", "groups")));
-    const write = logWriter(storage);
+    const write = logWriter(storage, activity);
     write("moment.append", { objectId: "object-plan", path: "docs/plan.md", versionId: "main" });
     write("chat.message.append", { threadId: "thread-stay", messageId: "m" });
     write("chat.channel.create", { channelId: "c" });
@@ -648,15 +666,17 @@ describe("an account's change feed", () => {
 
   it("leaves out changes on secret files, and keeps waiting through them", async () => {
     let checks = 0;
-    const activity = new DiscussionActivityHub();
-    const { storage, h } = await relay({ activity, resolve: async (request) => { checks += 1; return await resolveAccountSession(request); } });
-    const write = logWriter(storage);
+    const { storage, activity, h } = await relay({ resolve: async (request) => { checks += 1; return await resolveAccountSession(request); } });
+    const write = logWriter(storage, activity);
     write("moment.append", { objectId: "object-keys", path: "docs/keys.md", versionId: "main" });
-    const start = write("chat.thread.create", { threadId: "thread-keys", linkedObjectId: "object-env", linkedPathHint: ".env" });
+    // A thread made on .env whose object now sits at a public path stays hidden, as its reads hide it.
+    write("moment.append", { objectId: "object-moved", path: "docs/moved.md", versionId: "main" });
+    const start = write("chat.thread.create", { threadId: "thread-keys", linkedObjectId: "object-moved", linkedPathHint: ".env" });
     const held = h(changes(`0.${start}.0`, { hold: 30_000 }));
     await expect.poll(() => activity.stats().waiters).toBe(1);
     const parked = checks;
     write("moment.append", { objectId: "object-env", path: ".env", versionId: "main" });
+    write("moment.append", { objectId: "object-ignored", path: "docs/.DS_Store.", versionId: "main" });
     write("chat.message.append", { threadId: "thread-keys", messageId: "m" });
     // The wake checks the sign-in again, finds nothing it may answer, and waits on.
     await expect.poll(() => checks).toBeGreaterThan(parked);
@@ -682,11 +702,16 @@ describe("an account's change feed", () => {
     const held = h(changes(String(delivered.cursor), { workspaceId: "workspace", headers: signedIn("owner"), hold: 30_000 }));
     edit("Porto");
     expect((await feed(await held)).changed).toEqual({ pages: ["object"] });
+    // The journal is read a part at a time, in cursor order.
+    const rows = f.storage.accountFeedJournalRows({ workspaceId: "workspace", after: 0, through: Number.MAX_SAFE_INTEGER, limit: 1 });
+    expect(rows).toEqual([{ journalCursor: expect.any(Number), objectId: "object", path: "docs/a.md" }]);
+    expect(f.storage.accountFeedJournalRows({ workspaceId: "workspace", after: rows[0]!.journalCursor, through: Number.MAX_SAFE_INTEGER, limit: 5 }))
+      .toHaveLength(1);
   });
 
   it("answers replace for a cursor from before a restore, or past what the workspace holds", async () => {
-    const { storage, h } = await relay();
-    const relaySeq = logWriter(storage)("chat.channel.create", { channelId: "c" });
+    const { storage, activity, h } = await relay();
+    const relaySeq = logWriter(storage, activity)("chat.channel.create", { channelId: "c" });
     const current = `0.${relaySeq}.0`;
     for (const since of ["1.0.0", `0.${relaySeq + 1}.0`, `0.${relaySeq}.1`]) {
       expect(await feed(await h(changes(since))), since).toEqual({ ok: true, cursor: current, replace: true });
@@ -739,20 +764,18 @@ describe("an account's change feed", () => {
     await denialBytes(await h(changes("0.0.0")));
   });
 
-  it("answers as missing when the sign-in, the owner, or \"Show on phone\" changes during a wait", async () => {
+  it("answers as missing, at the next check, when the sign-in, the owner, \"Show on phone\" or the fence changes during a wait", async () => {
     for (const change of ["sign-in", "show on phone", "owner", "fence"] as const) {
       let signedOut = false;
-      const activity = new DiscussionActivityHub();
-      const { storage, h } = await relay({ activity, resolve: async (request) => {
+      const { storage, activity, h } = await relay({ resolve: async (request) => {
         const session = await resolveAccountSession(request);
         return signedOut ? { ...session, sessionId: "another" } : session;
       } });
-      const write = logWriter(storage);
+      const write = logWriter(storage, activity);
       const held = h(changes("0.0.0", { hold: 30_000 }));
       await expect.poll(() => activity.stats().waiters).toBe(1);
       if (change === "sign-in") {
         signedOut = true;
-        write("chat.channel.create", { channelId: "c" });
       } else if (change === "show on phone") {
         storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
       } else if (change === "owner") {
@@ -761,10 +784,28 @@ describe("an account's change feed", () => {
         createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer-test", fenceKey: "fence-test", invalidate() {}, deleteRuntime: async () => {} })
           .fence("ana", "ana@example.test");
       }
+      write("chat.channel.create", { channelId: "c" });
       const response = await held;
       expect(response.status, change).toBe(404);
       expect(await response.text()).not.toContain("changed");
     }
+  });
+
+  it("answers server_busy past one account's waits, across its sign-ins, while another account still waits", async () => {
+    const { storage, activity, h } = await relay();
+    const stop = new AbortController();
+    const held = Array.from({ length: ACCOUNT_FEED_WAITS_PER_ACCOUNT }, (_, index) =>
+      h(changes("0.0.0", { hold: 30_000, signal: stop.signal, headers: signedIn("ana", `phone-${index}`) })));
+    await expect.poll(() => activity.stats().waiters).toBe(ACCOUNT_FEED_WAITS_PER_ACCOUNT);
+    const busy = await h(changes("0.0.0", { hold: 30_000, headers: signedIn("ana", "another-phone") }));
+    expect(busy.status).toBe(503);
+    expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
+    const other = h(changes("0.0.0", { hold: 30_000, workspaceId: "budget", headers: signedIn("ben") }));
+    await expect.poll(() => activity.stats().waiters).toBe(ACCOUNT_FEED_WAITS_PER_ACCOUNT + 1);
+    const relaySeq = logWriter(storage, activity, "budget")("chat.channel.create", { channelId: "c" });
+    expect(await feed(await other)).toEqual({ ok: true, cursor: `0.${relaySeq}.0`, changed: { chats: [] } });
+    stop.abort();
+    for (const response of await Promise.all(held)) expect(response.status).toBe(200);
   });
 
   it("answers server_busy past one sign-in's waits, and keeps no copy open while it waits", async () => {

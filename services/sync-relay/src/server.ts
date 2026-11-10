@@ -1214,6 +1214,7 @@ export function createSyncRelayHandler({
     personalAgents,
     dispose() {
       replicaLinkReads?.close();
+      accountFeedWaits.close();
       return personalAgents.dispose();
     },
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {

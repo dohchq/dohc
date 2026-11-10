@@ -43,7 +43,7 @@ describe("readDocument", () => {
 function files(entries: Array<WorkspaceFile & { text?: string }>, fail?: Error): FilesHost & { reads: string[] } {
   const reads: string[] = [];
   return {
-    reads, maxTextBytes: 8, errorDetail: "operation-only",
+    reads, errorDetail: "operation-only",
     list: async () => {
       if (fail) throw fail;
       return entries.map(({ text: _text, ...file }) => file);
@@ -53,7 +53,8 @@ function files(entries: Array<WorkspaceFile & { text?: string }>, fail?: Error):
       if (fail) throw fail;
       const file = entries.find((entry) => entry.path === path);
       if (!file) return { kind: "missing" };
-      return file.text === undefined ? { kind: "binary" } : { kind: "text", text: file.text, byteLength: new TextEncoder().encode(file.text).length };
+      if (file.text === undefined) return { kind: "binary" };
+      return file.text.length > 8 ? { kind: "too-large", maxBytes: 8 } : { kind: "text", text: file.text };
     },
   };
 }

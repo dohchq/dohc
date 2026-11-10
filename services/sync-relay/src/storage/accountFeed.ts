@@ -62,15 +62,17 @@ export function accountFeedLogRows(
   })));
 }
 
-/** The pages the journal accepted edits for in (after, through], with the path each edit was accepted at. */
-export function accountFeedJournalPages(
+/** The journal's accepted edits in (after, through], at most `limit`, in cursor order, with the path each was accepted at. */
+export function accountFeedJournalRows(
   storage: StorageContext,
-  input: { workspaceId: string; after: number; through: number },
-): Array<{ objectId: string; path: string }> {
+  input: { workspaceId: string; after: number; through: number; limit: number },
+): Array<{ journalCursor: number; objectId: string; path: string }> {
   return storage.readTx(() => storage.db.prepare(
-    `SELECT DISTINCT object_id, current_path FROM sync_relay_live_update_journal
-     WHERE workspace_id = ? AND journal_cursor > ? AND journal_cursor <= ?`,
-  ).all(input.workspaceId, input.after, input.through).map((row) => ({ objectId: String(row.object_id), path: String(row.current_path) })));
+    `SELECT journal_cursor, object_id, current_path FROM sync_relay_live_update_journal
+     WHERE workspace_id = ? AND journal_cursor > ? AND journal_cursor <= ? ORDER BY journal_cursor LIMIT ?`,
+  ).all(input.workspaceId, input.after, input.through, input.limit).map((row) => ({
+    journalCursor: Number(row.journal_cursor), objectId: String(row.object_id), path: String(row.current_path),
+  })));
 }
 
 /**

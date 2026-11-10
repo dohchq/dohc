@@ -925,8 +925,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return accountFeedStorage.accountFeedLogRows(this, input);
   }
 
-  accountFeedJournalPages(input: { workspaceId: string; after: number; through: number }) {
-    return accountFeedStorage.accountFeedJournalPages(this, input);
+  accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }) {
+    return accountFeedStorage.accountFeedJournalRows(this, input);
   }
 
   accountFeedThreadPaths(workspaceId: string, threadId: string) {
