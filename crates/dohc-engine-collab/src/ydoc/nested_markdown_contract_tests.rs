@@ -889,7 +889,7 @@ fn nested_contract_r25_multiline_heading_reread_stabilizes() {
         )
         .unwrap();
         let second = doc.project_richdoc().unwrap();
-        assert_eq!(second, "- \n  ## a\n\n  b\n\n&#32;x");
+        assert_eq!(second, "- \n  ## a\n\n  b\n\n&#32;x\n");
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
             &second,

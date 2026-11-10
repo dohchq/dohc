@@ -10867,7 +10867,7 @@ mod projection_tests {
         assert_eq!(
             doc.project_richdoc().unwrap(),
             format!(
-                "&#91;&#93;&#40;u &#34;{}\n&#35; {}&#34;&#41;",
+                "&#91;&#93;&#40;u &#34;{}\n&#35; {}&#34;&#41;\n",
                 "&#42;".repeat(1 << 16),
                 "&#96;".repeat(1 << 16),
             )
@@ -10982,10 +10982,10 @@ mod projection_tests {
                 "[x]: u \"a\u{a0}b\"",
                 "&#91;x&#93;&#58; u &#34;a&#160;b&#34;\n",
             ),
-            ("[x]: u \"a\rb\"", "&#91;x&#93;&#58; u &#34;a&#13;b&#34;"),
+            ("[x]: u \"a\rb\"", "&#91;x&#93;&#58; u &#34;a&#13;b&#34;\n"),
             (
                 "[x]: https://e.example/日本 \"😀 é\"",
-                "&#91;x&#93;&#58; https&#58;//e&#46;example/日本 &#34;😀 é&#34;",
+                "&#91;x&#93;&#58; https&#58;//e&#46;example/日本 &#34;😀 é&#34;\n",
             ),
         ] {
             let doc = remote_doc_with_body([paragraph(text)]);
@@ -11058,7 +11058,17 @@ mod projection_tests {
         );
         // Each line the link keeps.
         LITERAL_LINKS_WRITTEN.with(|count| assert_eq!(count.get(), 5));
-        refused(&lines(4, length, tail + 1));
+        // One more `b` still fits the link, but not the note's final line
+        // break after it.
+        let doc = remote_doc_with_body([paragraph(lines(4, length, tail + 1).as_str())]);
+        assert!(matches!(
+            doc.project_richdoc(),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
+        refused(&lines(4, length, tail + 2));
     }
 
     // The engine's reader resolves the references the projector writes inside
@@ -11881,7 +11891,7 @@ mod projection_tests {
             .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
             .unwrap();
         assert_eq!(native.project_richdoc().unwrap(), canonical);
-        assert_eq!(canonical, source.trim_end());
+        assert_eq!(canonical, source);
         assert_eq!(
             settled(&desktop, &canonical, source).as_deref(),
             Some(source)
@@ -12199,7 +12209,7 @@ fn main() {}
     #[test]
     fn empty_frontmatter_mappings_settle_and_roundtrip_as_mappings() {
         let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text\n";
-        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text";
+        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text\n";
         let expected_frontmatter = json!({
             "top": {},
             "nested": { "child": {} },
@@ -12222,7 +12232,7 @@ fn main() {}
     #[test]
     fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
         let chosen = "---\n1.5: value\n---\n\nbody text\n";
-        let canonical = "---\n'1.5': value\n---\n\nbody text";
+        let canonical = "---\n'1.5': value\n---\n\nbody text\n";
         for markdown in [chosen, canonical] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
@@ -12477,7 +12487,7 @@ fn main() {}
         write_key_directly(&doc, "wifi", Some("changed"));
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody"
+            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody\n"
         );
     }
 
@@ -12508,7 +12518,7 @@ fn main() {}
         a.frontmatter_set("editor", "rec_d").unwrap();
         assert_eq!(
             a.project_richdoc().unwrap(),
-            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody"
+            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody\n"
         );
     }
 
@@ -12763,7 +12773,7 @@ fn main() {}
         doc.frontmatter_set("title", "Plan").unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\ntitle: Plan\n---\n\nBody"
+            "---\ntitle: Plan\n---\n\nBody\n"
         );
 
         let removed = Ydoc::wire();
@@ -12779,7 +12789,7 @@ fn main() {}
             frontmatter.remove(&mut txn, "z");
             frontmatter.remove(&mut txn, "title");
         }
-        assert_eq!(removed.project_richdoc().unwrap(), "Body");
+        assert_eq!(removed.project_richdoc().unwrap(), "Body\n");
     }
 
     #[test]

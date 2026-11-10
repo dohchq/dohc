@@ -144,7 +144,7 @@ it('holds inline constructs on both native builders and probes desktop nodes and
 
 it('accepts plain prose and fenced code at the alphabet edges', () => {
   for (const source of [
-    '- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - /\n  - child\n',
+    '- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - /\n  - child',
     '- a  \n  - child',
     '- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child',
   ]) {
