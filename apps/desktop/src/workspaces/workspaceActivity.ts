@@ -20,6 +20,9 @@ import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 // gone from this layer — the engine capture is a workspace's only history.
 // Legacy history left on disk by pre-flip versions is a read-only relic.
 
+// How long syncNow keeps trying while the server answers that it is busy.
+const SYNC_NOW_BUSY_WAIT_MS = 15_000;
+
 export interface ActivityWorkspace extends CreatedWorkspace {
   attachmentId: symbol;
 }
@@ -848,14 +851,25 @@ export function createWorkspaceActivity(
 
   // One sync pass now, for work that must act on the relay's state, such
   // as Stop and restore between its passes. Throws unless the pass ended
-  // without a failure on a connected engine.
+  // without a failure on a connected engine. A busy server only asks dohc to
+  // wait, so it gets more passes, each after a longer pause, for up to
+  // SYNC_NOW_BUSY_WAIT_MS.
   async function syncNow(state: WorkspaceActivityState): Promise<void> {
     const engine = state.entry?.engine;
     const unsynced = "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.";
     if (!engine) throw new Error(unsynced);
-    await engine.retryNow({ countsAsAttempt: false });
-    const snapshot = engine.snapshot();
-    if (snapshot.authExpired || snapshot.updateRequired || snapshot.syncFailure) throw new Error(unsynced);
+    const deadlineMs = Date.now() + SYNC_NOW_BUSY_WAIT_MS;
+    for (let pauseMs = 1_000; ; pauseMs *= 2) {
+      await engine.retryNow({ countsAsAttempt: false });
+      const snapshot = engine.snapshot();
+      if (snapshot.authExpired || snapshot.updateRequired) throw new Error(unsynced);
+      if (!snapshot.syncFailure) return;
+      if (snapshot.syncFailure.cause !== "server-busy" || state.entry?.engine !== engine) throw new Error(unsynced);
+      if (Date.now() + pauseMs > deadlineMs) {
+        throw new Error("The server is busy, so dohc stopped undoing runs part way. Try again in a moment.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
   }
 
   // Pushes everything the workspace recorded so far. Rejects when a pass fails.

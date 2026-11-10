@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 type SyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
@@ -26,12 +26,19 @@ export function syncFailureNotice(failure: SyncFailure): { title?: string; messa
       message: `dohc can't apply a change to ${path}, because this machine has a different file there. Other changes wait behind it.`,
     };
   }
+  if (failure.cause === "server-busy") {
+    return { message: "The server is busy. dohc keeps trying to sync this workspace." };
+  }
   return {
     message: failure.cause === "server-unreachable"
       ? "dohc could not reach the server."
       : "dohc could not sync this workspace.",
   };
 }
+
+// A busy server is a state dohc fixes by itself. The title bar shows its ring
+// at once, and the toast and row wait until the failure has lasted this long.
+export const BUSY_SERVER_NOTICE_MS = 15_000;
 
 // One failed pass, named the same way whether the retry's answer or the
 // status reports it, so the two file one row. A reconnect retry changes the
@@ -52,8 +59,9 @@ export function forgetSyncFailureNoticesForTests(): void {
   shownFailures.clear();
 }
 
-// A failed sync goes to the titlebar, a toast, and a Notices row at once. One
-// failure toasts once, however many passes fail before it ends; later passes
+// A failed sync goes to the titlebar, a toast, and a Notices row at once,
+// except a busy server's, whose toast and row wait out BUSY_SERVER_NOTICE_MS.
+// One failure toasts once, however many passes fail before it ends; later passes
 // only update the row. A retry the person asked for that fails toasts again.
 // Recovery clears the row and any open toast. Try again runs a pass now;
 // coming back online does the same without a toast of its own.
@@ -141,6 +149,8 @@ export function useSyncFailureNotice(input: {
   const attempts = failure?.attempts ?? null;
   const cause = failure?.cause ?? null;
   const detail = failure?.detail ?? null;
+  // Counts the ends of busy-server waits, so the effect below runs again.
+  const [busyWaitsEnded, setBusyWaitsEnded] = useState(0);
   useEffect(() => {
     const current = failureRef.current;
     // A status still loading says nothing. Only a status with no failure
@@ -156,6 +166,13 @@ export function useSyncFailureNotice(input: {
     // raise a toast, because the attempts did not grow.
     const key = failedPassKey(current);
     if (filedRef.current?.key === key) return;
+    if (current.cause === "server-busy") {
+      const waitMs = current.sinceMs + BUSY_SERVER_NOTICE_MS - Date.now();
+      if (waitMs > 0) {
+        const timer = setTimeout(() => setBusyWaitsEnded((ended) => ended + 1), waitMs);
+        return () => clearTimeout(timer);
+      }
+    }
     let shown = shownFailures.get(workspaceId);
     if (shown?.sinceMs !== current.sinceMs) {
       shown = { sinceMs: current.sinceMs, toasted: false, dismissed: false };
@@ -165,7 +182,7 @@ export function useSyncFailureNotice(input: {
     const toast = !shown.toasted;
     if (toast) shown.toasted = true;
     file({ ...syncFailureNotice(current), detail: current.detail, toast }, key);
-  }, [attempts, cause, clear, detail, file, known, sinceMs, workspaceId]);
+  }, [attempts, busyWaitsEnded, cause, clear, detail, file, known, sinceMs, workspaceId]);
 
   // Back online after an outage: try now instead of waiting out the backoff.
   // Its outcome arrives as status, like any automatic pass.

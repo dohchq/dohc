@@ -972,6 +972,49 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("syncs now through a busy server's answers, and names the server when it stays busy", async () => {
+    let busyPasses = 0;
+    let passes = 0;
+    const busy: CloudSyncFailure = { cause: "server-busy", detail: "RelayBusyError: The server is busy.", sinceMs: 1, attempts: 1 };
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queueWatchedUpload: () => {},
+      queuePull: () => {},
+      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      snapshot: () => ({
+        syncFailure: passes <= busyPasses ? busy : null, retrying: false, syncing: false, lastSyncedAtMs: null,
+        pendingChangeCount: 0, conflictCount: 0, authExpired: false, sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({}),
+    });
+    try {
+      await activity.open(workspace());
+      vi.useFakeTimers();
+      busyPasses = 2;
+      const recovered = activity.syncNow("activity-test");
+      await vi.advanceTimersByTimeAsync(3_000);
+      await expect(recovered).resolves.toBeUndefined();
+      expect(passes).toBe(3);
+
+      passes = 0;
+      busyPasses = Infinity;
+      const stayedBusy = activity.syncNow("activity-test");
+      const settled = expect(stayedBusy).rejects.toThrow("The server is busy, so dohc stopped undoing runs part way.");
+      await vi.advanceTimersByTimeAsync(15_000);
+      await settled;
+      // Passes at 0, 1, 3, 7 and 15 seconds. The next pause would end past 15.
+      expect(passes).toBe(5);
+    } finally {
+      vi.useRealTimers();
+      await activity.stopAll();
+    }
+  });
+
   it("says why it can't sync on this session, and syncs again once it can, stopping nothing", async () => {
     let blocked: "not-connected" | "account-unconfirmed" | undefined = "not-connected";
     let authExpired = false;

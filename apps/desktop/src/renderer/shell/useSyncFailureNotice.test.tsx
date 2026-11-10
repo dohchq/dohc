@@ -140,6 +140,42 @@ describe("useSyncFailureNotice", () => {
     expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
+  // #3294: a busy server is a state dohc fixes by itself. The title bar shows
+  // its ring at once; the toast and row wait until it has lasted 15 s.
+  it("holds a busy server's toast and row until the failure has lasted 15 s", () => {
+    vi.useFakeTimers({ now: 50_000 });
+    try {
+      const busy = (sinceMs: number, attempts: number): Failure =>
+        ({ cause: "server-busy", detail: "RelayBusyError: The server is busy.", sinceMs, attempts });
+      // A busy answer that a later pass clears never reaches a toast or row.
+      const view = renderNotice({ failure: busy(50_000, 1) });
+      act(() => vi.advanceTimersByTime(5_000));
+      view.rerender({ workspaceId: "ws-a", failure: busy(50_000, 2) });
+      act(() => vi.advanceTimersByTime(9_999));
+      expect(view.rows()).toEqual([]);
+      view.rerender({ workspaceId: "ws-a", failure: null });
+      act(() => vi.advanceTimersByTime(20_000));
+      expect(view.rows()).toEqual([]);
+
+      // One that lasts toasts once its 15 s are up, counted from its first pass.
+      view.rerender({ workspaceId: "ws-a", failure: busy(Date.now(), 1) });
+      act(() => vi.advanceTimersByTime(14_999));
+      expect(view.rows()).toEqual([]);
+      act(() => vi.advanceTimersByTime(1));
+      expect(view.toasts()).toHaveLength(1);
+      expect(view.toasts()[0]!.message).toBe("The server is busy. dohc keeps trying to sync this workspace.");
+      expect(view.rows()[0]!.retry).toBeTypeOf("function");
+
+      // A failure that needs the person still shows at once.
+      view.rerender({ workspaceId: "ws-a", failure: null });
+      view.rerender({ workspaceId: "ws-a", failure: { cause: "unknown", detail: "Error: no", sinceMs: Date.now(), attempts: 1 } });
+      expect(view.toasts()).toHaveLength(1);
+      expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a dismissed failure dismissed when the shell remounts, until it ends", () => {
     const first = renderNotice({ failure: unreachable(100, 2) });
     expect(first.toasts()).toHaveLength(1);
