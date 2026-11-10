@@ -7314,10 +7314,10 @@ export function createWorkspaceEngineCapture(
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         if (copy.versionId !== activeVersionId) {
-          throw new Error("This change was kept in a different version. Switch to that version to restore it.");
+          throw new Error("Your change was kept in a different version. Switch to that version to restore it.");
         }
         if (Buffer.byteLength(copy.text) > MAX_PROTECTED_HISTORY_BYTES) {
-          throw new ProtectedCopyFinalError(`dohc could not restore ${path}. Your change is over the 1 MB limit for protected files.`);
+          throw new ProtectedCopyFinalError("Your change is over the 1 MB limit for protected files.");
         }
         await engine.flushCapture?.();
         const secrets = secretStoreFor();
@@ -7327,7 +7327,7 @@ export function createWorkspaceEngineCapture(
         const disk = await readDiskSecretState(rootPath, path);
         if (disk.kind === "unreadable") throw new Error(`dohc could not read ${path} on disk.`);
         if (disk.kind === "untracked-content") {
-          throw new Error(`dohc could not restore ${path}. It must save what is there now first, and cannot save that item. Move the item to another folder, then try again.`);
+          throw new Error(`dohc saves what is at ${path} first, and it cannot save that item. Move the item to another folder, then try again.`);
         }
         const saved = { origin: "local-file" as const, summary: "Saved latest edits", correlationId };
         if (disk.kind === "text") {

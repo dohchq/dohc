@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
-import { isProtectedCopyFinal } from "../../ipc/errorWords";
+import { isProtectedCopyFinal, readError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
-import { ipcErrorMessage } from "../ipcError";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import type { useShellError } from "./useShellError";
 
@@ -10,6 +9,13 @@ type ProtectedCopyRow = readonly [path: string, id: string, keptAtMs: number];
 
 const identityOf = (id: string) => `protected-copy:${id}`;
 const READ_ERROR_IDENTITY = "protected-copy-list";
+
+// The title names what failed and the error says why. An error with no words
+// gets one untitled sentence, so the row doesn't say it twice.
+function failure(failed: string, error: unknown): { title?: string; message: string } {
+  const { words } = readError(error);
+  return words === null ? { message: `${failed}.` } : { title: failed, message: words };
+}
 
 /**
  * One Notices row for each change to a protected file that a sync replaced or
@@ -48,7 +54,7 @@ export function useProtectedCopyNotices(input: {
     }, (error: unknown) => {
       if (currentWorkspace.current !== asked) return;
       latest.current.reportShellFailure({
-        message: ipcErrorMessage(error, `dohc could not restore your change to ${path}.`),
+        ...failure(`dohc could not restore your change to ${path}`, error),
         cause: error,
         retry: isProtectedCopyFinal(error) ? null : () => restore(asked, path, id),
       });
@@ -62,7 +68,7 @@ export function useProtectedCopyNotices(input: {
     }, (error: unknown) => {
       if (currentWorkspace.current !== asked) return;
       latest.current.reportShellFailure({
-        message: ipcErrorMessage(error, `dohc could not discard your change to ${path}.`),
+        ...failure(`dohc could not discard your change to ${path}`, error),
         cause: error,
         retry: isProtectedCopyFinal(error) ? null : () => setDiscarding({ workspaceId: asked, path, id }),
       });
