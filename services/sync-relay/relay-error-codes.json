@@ -51,7 +51,7 @@
   { "code": "quota_exceeded", "status": 413 },
   { "code": "secret_path", "status": 400 },
   { "code": "self_share", "status": 400 },
-  { "code": "server-busy", "status": 503 },
+  { "code": "server_busy", "status": 503 },
   { "code": "share_op_rejected", "status": 403 },
   { "code": "share_read_only", "status": 403 },
   { "code": "sign_in_again", "status": 403 },

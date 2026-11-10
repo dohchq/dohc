@@ -1,7 +1,7 @@
 import {createAccountDeletionRoute} from "./accountDeletionRoute";
 import {initializeAccountDeletion} from "./storage/accountDeletion";
 import type {StorageContext} from "./storage/context";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -1314,6 +1314,73 @@ describe("the automation replicas", () => {
     expect(folders(root)).toHaveLength(1);
   });
 
+  // Holds the engine's opening of `workspaceId` until the answer is released.
+  function holdOpen(engine: ReturnType<typeof fakeEngine>, workspaceId: string) {
+    const answer = spawn.getMockImplementation()!;
+    const held = gate();
+    let reached!: () => void;
+    const opening = new Promise<void>((resolve) => { reached = resolve; });
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "workspace.open" && request.params.workspaceId === workspaceId) { reached(); await held.promise; }
+        return await send(request);
+      });
+      return client;
+    });
+    engine.engines.at(-1)?.exit();
+    return { opening, release: held.resolve };
+  }
+
+  it("keeps a copy a visit wants again while its pass opened another, and its folder at the leave deadline", async () => {
+    const { storage } = await relay();
+    storage.claimWorkspace({ workspaceId: "ledger", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "ledger", replicationEpoch: "epoch", streamIdentity: "stream" });
+    const engine = fakeEngine();
+    const clock = { ms: 0 };
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const { replicas: running, root } = await copies(storage, () => wanted, clock);
+    const held = holdOpen(engine, "ledger");
+    await running.settled();
+    const opened = running.replica(WORKSPACE);
+    expect(opened).toBeDefined();
+    const [folder] = folders(root);
+    // What the copy keeps, which goes only with its folder.
+    await writeFile(join(root, folder!, String(opened!.incarnation), "kept"), "");
+    // A pass that excludes the open account copy waits on another workspace's open.
+    wanted = new Map([["ledger", ["automation"]]]);
+    running.reconcile();
+    await held.opening;
+    // A visit is admitted to the excluded copy meanwhile, and asks for a pass, as admission does.
+    wanted = new Map([["ledger", ["automation"]], [WORKSPACE, ["account"]]]);
+    running.reconcile(WORKSPACE);
+    held.release();
+    await running.settled();
+    expect(running.replica(WORKSPACE), "the visit's copy stayed open").toBe(opened);
+
+    // The visit ends; the idle account copy closes and waits a day to leave.
+    wanted = new Map([["ledger", ["automation"]]]);
+    running.reconcile(); await running.settled();
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    // Its pass at the leave deadline, after an engine restart, waits on reopening another workspace, and a visit is admitted meanwhile.
+    clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
+    const again = holdOpen(engine, "ledger");
+    await again.opening;
+    wanted = new Map([["ledger", ["automation"]], [WORKSPACE, ["account"]]]);
+    running.reconcile(WORKSPACE);
+    again.release();
+    await running.settled();
+    expect(existsSync(join(root, folder!, String(opened!.incarnation), "kept")), "the visit's copy keeps its folder").toBe(true);
+    expect(running.replica(WORKSPACE)).toBeDefined();
+    // The visit ends, and the copy leaves a day after that.
+    wanted = new Map([["ledger", ["automation"]]]);
+    running.reconcile(); await running.settled();
+    clock.ms += AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
+    running.reconcile(); await running.settled();
+    expect(existsSync(join(root, folder!))).toBe(false);
+  });
+
   it("tells its listener when an open account copy comes to be kept for automations", async () => {
     const { storage } = await relay();
     fakeEngine();
@@ -1785,8 +1852,9 @@ describe("the automation replicas", () => {
     const hold = holdStartups();
     const passes = passEnds();
     const clock = { ms: 0 };
-    let reads = 0;
-    const running = await start(storage, { onReconciled: passes.onReconciled, nowMs: () => clock.ms, wanted: () => { reads += 1; return []; } });
+    // Each pass asks what is wanted more than once, so the test counts the passes that ended.
+    let ended = 0;
+    const running = await start(storage, { onReconciled: () => { ended += 1; passes.onReconciled(); }, nowMs: () => clock.ms, wanted: () => [] });
     let next = passes.next();
     await vi.advanceTimersByTimeAsync(0);
     await next;
@@ -1799,13 +1867,13 @@ describe("the automation replicas", () => {
     next = passes.next();
     started();
     await next;
-    expect(reads).toBe(2);
+    expect(ended).toBe(2);
     expect(storage.currentAutomationWorkspace(WORKSPACE), "that pass ran before the deadline").not.toBeNull();
     clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
     next = passes.next();
     await vi.advanceTimersByTimeAsync(100);
     await next;
-    expect(reads).toBe(3);
+    expect(ended).toBe(3);
     expect(storage.currentAutomationWorkspace(WORKSPACE)).toBeNull();
     expect(running.unavailable).toBe(false);
   });
@@ -1819,19 +1887,20 @@ describe("the automation replicas", () => {
     vi.spyOn(storage, "unwantAutomationWorkspace").mockImplementation(() => { throw new Error("The row did not write."); });
     fakeEngine();
     const passes = passEnds();
-    let reads = 0;
-    const running = await start(storage, { onError: () => {}, onReconciled: passes.onReconciled,
-      nowMs: () => AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, wanted: () => { reads += 1; return []; } });
+    // Each pass asks what is wanted more than once, so the test counts the passes that ended.
+    let ended = 0;
+    const running = await start(storage, { onError: () => {}, onReconciled: () => { ended += 1; passes.onReconciled(); },
+      nowMs: () => AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, wanted: () => [] });
     let next = passes.next();
     await vi.advanceTimersByTimeAsync(0);
     await next;
     expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
     await vi.advanceTimersByTimeAsync(1_999);
-    expect(reads, "only its retry wakes the replicas").toBe(1);
+    expect(ended, "only its retry wakes the replicas").toBe(1);
     next = passes.next();
     await vi.advanceTimersByTimeAsync(1);
-    expect(reads).toBe(2);
     await next;
+    expect(ended).toBe(2);
   });
 
   it("goes on with its passes when onError or onReconciled throws", async () => {

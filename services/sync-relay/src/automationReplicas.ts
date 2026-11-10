@@ -393,8 +393,15 @@ export async function startAutomationReplicas(options: {
       if (wanted.has(row.workspaceId)) continue;
       syncRetries.delete(row.workspaceId);
       ok = await each(row.workspaceId, async () => {
+        // A visit admitted while this pass ran wants the copy again, so each
+        // step asks once more just before it acts. The pass the visit asked
+        // for joins the copy again.
+        const unwanted = () => !options.wanted().has(row.workspaceId);
+        if (!unwanted()) return;
+        const close = async () => { if (unwanted()) await replicas.get(row.workspaceId)?.close(); };
         const retire = async () => {
-          await replicas.get(row.workspaceId)?.close();
+          await close();
+          if (!unwanted()) return;
           await rm(folderOf(row.workspaceId), {recursive: true, force: true});
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
         };
@@ -404,12 +411,12 @@ export async function startAutomationReplicas(options: {
         } else if (row.leftAtMs === null) {
           const left = storage.unwantAutomationWorkspace({workspaceId: row.workspaceId, nowMs: nowMs()});
           if (left && !kept) await retire();
-          else if (left || !kept) await replicas.get(row.workspaceId)?.close();
+          else if (left || !kept) await close();
         } else if (!kept || nowMs() - row.leftAtMs >= AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS) {
           await retire();
         } else {
           // A copy an owner's action opened again leaves once the action ends.
-          await replicas.get(row.workspaceId)?.close();
+          await close();
         }
       }) && ok;
     }

@@ -3,7 +3,7 @@ import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/rela
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import { RelayError } from "./errors";
-import { ACCOUNT_VISIT_WORKSPACES, ACCOUNT_VISITS_PER_CALLER, startServerCopies, type CopyAutomations, type CopyVisitor } from "./serverCopies";
+import { ACCOUNT_VISIT_WORKSPACES, ACCOUNT_VISITS_PER_ACCOUNT, ACCOUNT_VISITS_PER_CALLER, startServerCopies, type CopyAutomations, type CopyVisitor } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, testStorage } from "./testing";
@@ -18,10 +18,10 @@ afterEach(async () => { for (const close of cleanup.splice(0)) await close(); })
 
 const OWNER = "ana";
 
-async function relay(workspaceIds: readonly string[] = ["trip"]) {
+async function relay(workspaceIds: readonly string[] = ["trip"], ownerOf: (workspaceId: string, n: number) => string = () => OWNER) {
   const storage = await testStorage();
-  for (const workspaceId of workspaceIds) {
-    storage.claimWorkspace({ workspaceId, ownerUserId: OWNER, createdAtMs: 1 });
+  for (const [n, workspaceId] of workspaceIds.entries()) {
+    storage.claimWorkspace({ workspaceId, ownerUserId: ownerOf(workspaceId, n), createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch", streamIdentity: "stream" });
   }
   return storage;
@@ -62,18 +62,30 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
     copies: started, open,
     wanted: () => hooks!.wanted(),
     holdOpens: () => { opens = false; },
+    releaseOpens: () => { opens = true; pass(); },
+    /** A copy the replicas module still has open, as one kept after the workspace left. */
+    keepOpen(workspaceId: string) {
+      const row = storage.listAutomationWorkspaces().find((kept) => kept.workspaceId === workspaceId)!;
+      open.set(workspaceId, {
+        workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
+        root: "unused", metadataDir: "unused", client: {} as unknown as EngineClient, workspace: "handle", signal: new AbortController().signal,
+        nextRequestId: () => 1, sync: async () => undefined, withRecordWork: (work) => work(),
+      });
+    },
   };
 }
 
-const phone = (caller = "session-1", signal = new AbortController().signal): CopyVisitor => ({ reason: "account", caller, signal });
+const phone = (caller = "session-1", signal = new AbortController().signal): CopyVisitor => ({ reason: "account", caller, signal, phone: true });
+// An account visit "Show on phone" does not limit, as an agent's will be.
+const agent = (caller = "agent:connection-1"): CopyVisitor => ({ reason: "account", caller, signal: new AbortController().signal, phone: false });
 
 /** A visit that holds its copy until `release` is called. */
-function holding(run: Awaited<ReturnType<typeof copies>>, workspaceId: string, visitor: CopyVisitor = phone()) {
+function holding(run: Awaited<ReturnType<typeof copies>>, workspaceId: string, visitor: CopyVisitor = phone(), owner = OWNER) {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   let entered!: () => void;
   const inside = new Promise<void>((resolve) => { entered = resolve; });
-  const visit = run.copies.withServerCopy(OWNER, workspaceId, visitor, async (replica) => { entered(); await held; return replica.workspaceId; });
+  const visit = run.copies.withServerCopy(owner, workspaceId, visitor, async (replica) => { entered(); await held; return replica.workspaceId; });
   return { visit, inside, release };
 }
 
@@ -96,14 +108,11 @@ describe("an account's visits to the server's copies", () => {
     expect(run.wanted()).toEqual(new Map());
   });
 
-  it("refuses another owner's workspace, one without a sync identity, and one hidden from the phone, all alike", async () => {
-    const storage = await relay(["trip", "notes", "budget"]);
-    storage.claimWorkspace({ workspaceId: "theirs", ownerUserId: "ben", createdAtMs: 1 });
-    storage.claimWorkspaceIdentity({ workspaceId: "theirs", replicationEpoch: "epoch", streamIdentity: "stream" });
+  it("refuses another owner's workspace, one without a sync identity, and a missing one, all alike", async () => {
+    const storage = await relay(["trip", "theirs"], (id) => id === "theirs" ? "ben" : OWNER);
     storage.claimWorkspace({ workspaceId: "unsynced", ownerUserId: OWNER, createdAtMs: 1 });
-    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "budget", showOnPhone: false });
     const run = await copies(storage);
-    for (const workspaceId of ["theirs", "unsynced", "budget", "missing"]) {
+    for (const workspaceId of ["theirs", "unsynced", "missing"]) {
       const error = await refusal(run.copies.withServerCopy(OWNER, workspaceId, phone(), async () => undefined));
       expect([error.code, error.statusCode], workspaceId).toEqual(["not_found", 404]);
     }
@@ -111,15 +120,25 @@ describe("an account's visits to the server's copies", () => {
     expect(storage.listAutomationWorkspaces()).toEqual([]);
   });
 
-  it("holds at most ACCOUNT_VISITS_PER_CALLER visits for one sign-in, and none of another's", async () => {
+  it("refuses a phone's visit to a workspace hidden from the phone, and admits an account visit the phone setting does not limit", async () => {
+    const storage = await relay(["budget"]);
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "budget", showOnPhone: false });
+    const run = await copies(storage);
+    const error = await refusal(run.copies.withServerCopy(OWNER, "budget", phone(), async () => undefined));
+    expect([error.code, error.statusCode]).toEqual(["not_found", 404]);
+    expect(await run.copies.withServerCopy(OWNER, "budget", agent(), async (replica) => replica.workspaceId)).toBe("budget");
+    expect(storage.listAutomationWorkspaces(), "the phone setting ends only the phone's reason").toMatchObject([{ reasons: ["account"] }]);
+  });
+
+  it("holds at most ACCOUNT_VISITS_PER_CALLER visits for one sign-in", async () => {
     const ids = Array.from({ length: ACCOUNT_VISITS_PER_CALLER + 1 }, (_, n) => `w-${n}`);
-    const storage = await relay(ids);
+    const storage = await relay([...ids, "theirs"], (id) => id === "theirs" ? "ben" : OWNER);
     const run = await copies(storage);
     const held = ids.slice(0, ACCOUNT_VISITS_PER_CALLER).map((id) => holding(run, id));
     await Promise.all(held.map((visit) => visit.inside));
     const busy = await refusal(run.copies.withServerCopy(OWNER, ids.at(-1)!, phone(), async () => undefined));
-    expect([busy.code, busy.statusCode]).toEqual(["server-busy", 503]);
-    expect(await run.copies.withServerCopy(OWNER, ids.at(-1)!, phone("session-2"), async (replica) => replica.workspaceId)).toBe(ids.at(-1));
+    expect([busy.code, busy.statusCode]).toEqual(["server_busy", 503]);
+    expect(await run.copies.withServerCopy("ben", "theirs", phone("ben-session"), async (replica) => replica.workspaceId)).toBe("theirs");
     held[0]!.release();
     await held[0]!.visit;
     expect(await run.copies.withServerCopy(OWNER, ids.at(-1)!, phone(), async (replica) => replica.workspaceId)).toBe(ids.at(-1));
@@ -127,16 +146,36 @@ describe("an account's visits to the server's copies", () => {
     await Promise.all(held.map((visit) => visit.visit));
   });
 
+  it("holds at most ACCOUNT_VISITS_PER_ACCOUNT visits for one account across its sign-ins, and leaves another account its place", async () => {
+    const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT + 1 }, (_, n) => `w-${n}`);
+    const storage = await relay([...ids, "theirs"], (id) => id === "theirs" ? "ben" : OWNER);
+    const run = await copies(storage);
+    const held = ids.slice(0, ACCOUNT_VISITS_PER_ACCOUNT).map((id, n) => holding(run, id, phone(n % 2 === 0 ? "phone" : "tablet")));
+    await Promise.all(held.map((visit) => visit.inside));
+    for (const session of ["phone", "tablet", "laptop"]) {
+      const busy = await refusal(run.copies.withServerCopy(OWNER, ids.at(-1)!, phone(session), async () => undefined));
+      expect([busy.code, busy.statusCode], session).toEqual(["server_busy", 503]);
+    }
+    expect(await run.copies.withServerCopy("ben", "theirs", phone("ben-session"), async (replica) => replica.workspaceId)).toBe("theirs");
+    held[0]!.release();
+    await held[0]!.visit;
+    expect(await run.copies.withServerCopy(OWNER, ids.at(-1)!, phone("laptop"), async (replica) => replica.workspaceId)).toBe(ids.at(-1));
+    for (const visit of held.slice(1)) visit.release();
+    await Promise.all(held.map((visit) => visit.visit));
+  });
+
   it("lets account visits hold at most ACCOUNT_VISIT_WORKSPACES places, so the server's automations keep the rest", async () => {
     const accountIds = Array.from({ length: ACCOUNT_VISIT_WORKSPACES + 1 }, (_, n) => `a-${n}`);
     const runningIds = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES - ACCOUNT_VISIT_WORKSPACES }, (_, n) => `r-${n}`);
-    const storage = await relay([...accountIds, ...runningIds]);
+    // Each account holds as many visits as it may.
+    const ownerOf = (n: number) => `owner-${Math.floor(n / ACCOUNT_VISITS_PER_ACCOUNT)}`;
+    const storage = await relay([...accountIds, ...runningIds], (_, n) => n < accountIds.length ? ownerOf(n) : OWNER);
     const run = await copies(storage, { wanted: () => runningIds, running: () => runningIds, ready: () => true });
-    const held = accountIds.slice(0, ACCOUNT_VISIT_WORKSPACES)
-      .map((id, n) => holding(run, id, phone(`session-${Math.floor(n / ACCOUNT_VISITS_PER_CALLER)}`)));
+    const held = accountIds.slice(0, ACCOUNT_VISIT_WORKSPACES).map((id, n) => holding(run, id, phone(`session-${n}`), ownerOf(n)));
     await Promise.all(held.map((visit) => visit.inside));
-    const busy = await refusal(run.copies.withServerCopy(OWNER, accountIds.at(-1)!, phone("another-session"), async () => undefined));
-    expect([busy.code, busy.statusCode]).toEqual(["server-busy", 503]);
+    const last = accountIds.length - 1;
+    const busy = await refusal(run.copies.withServerCopy(ownerOf(last), accountIds[last]!, phone("another-session"), async () => undefined));
+    expect([busy.code, busy.statusCode]).toEqual(["server_busy", 503]);
     const wanted = run.wanted();
     expect(wanted.size).toBe(AUTOMATION_SERVER_MAX_WORKSPACES);
     for (const id of runningIds) expect(wanted.get(id), id).toEqual(["automation"]);
@@ -179,6 +218,40 @@ describe("an account's visits to the server's copies", () => {
     // The copy opens in the next pass, after the owner changed.
     (storage as StorageContext).db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run();
     expect((await refusal(visit)).code).toBe("not_found");
+  });
+});
+
+describe("the server's places", () => {
+  const running = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES }, (_, n) => `r-${n}`);
+
+  it("refuses a visit to a copy still open after its workspace left, when automations hold every place", async () => {
+    const storage = await relay([...running, "kept"]);
+    storage.joinAutomationWorkspace({ workspaceId: "kept", nowMs: 1, reasons: ["automation"] });
+    const run = await copies(storage, { wanted: () => running, running: () => running, ready: () => true });
+    run.keepOpen("kept");
+    for (const visitor of [phone(), { reason: "automation" } as const]) {
+      const busy = await refusal(run.copies.withServerCopy(OWNER, "kept", visitor, async () => undefined));
+      expect(busy.statusCode, visitor.reason).toBe(503);
+    }
+    expect([...run.wanted().keys()]).toEqual(running);
+  });
+
+  it("admits a visit to a workspace that holds a place while its copy still opens", async () => {
+    const storage = await relay(running);
+    const others = running.slice(1);
+    const run = await copies(storage, { wanted: () => others, running: () => others, ready: () => true });
+    run.holdOpens();
+    // The visit takes the last place, and its copy has not opened yet.
+    const first = holding(run, running[0]!, phone("phone"));
+    const second = holding(run, running[0]!, phone("tablet"));
+    // A running workspace's copy that has not opened yet holds its place too.
+    const third = holding(run, others[0]!, phone("laptop"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(run.wanted().size).toBe(AUTOMATION_SERVER_MAX_WORKSPACES);
+    run.releaseOpens();
+    await Promise.all([first.inside, second.inside, third.inside]);
+    for (const visit of [first, second, third]) visit.release();
+    expect(await Promise.all([first.visit, second.visit, third.visit])).toEqual([running[0], running[0], others[0]]);
   });
 });
 
