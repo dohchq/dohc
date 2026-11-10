@@ -6,12 +6,17 @@ export interface DiscussionActivityWaitOptions {
   // Called only after the waiter is registered. Returning false settles the
   // wait synchronously, closing the observation-to-park race.
   shouldPark: () => boolean;
+  // A personal agent's wait holds one slot per workspace in its reach, so it
+  // parks in its own pool and can't use up the slots link readers and the
+  // owner's devices wait in.
+  personal?: boolean;
 }
 
 export interface DiscussionActivityHubOptions {
   maxTotalWaiters?: number;
   maxWaitersPerShare?: number;
   maxWaitersPerActor?: number;
+  maxPersonalWaiters?: number;
 }
 
 export class DiscussionActivityCapacityError extends Error {
@@ -36,20 +41,29 @@ export function ownerLogWaitGroup(workspaceId: string): string {
 // data, so losing this object on restart cannot invalidate a saved watermark.
 export class DiscussionActivityHub {
   private readonly waiters: WaiterRegistry;
+  private readonly personal: WaiterRegistry;
 
   constructor(options: DiscussionActivityHubOptions = {}) {
+    const perGroup = options.maxWaitersPerShare ?? 512;
+    const perActor = options.maxWaitersPerActor ?? 64;
     this.waiters = new WaiterRegistry({
       maxTotal: options.maxTotalWaiters ?? 4_096,
-      maxPerGroup: options.maxWaitersPerShare ?? 512,
-      maxPerActor: options.maxWaitersPerActor ?? 64,
+      maxPerGroup: perGroup,
+      maxPerActor: perActor,
+    });
+    this.personal = new WaiterRegistry({
+      maxTotal: options.maxPersonalWaiters ?? 1_024,
+      maxPerGroup: perGroup,
+      maxPerActor: perActor,
     });
   }
 
   wait(shareId: string, actorId: string, options: DiscussionActivityWaitOptions): Promise<void> {
-    if (this.waiters.atCapacity(shareId, actorId)) {
+    const waiters = options.personal ? this.personal : this.waiters;
+    if (waiters.atCapacity(shareId, actorId)) {
       throw new DiscussionActivityCapacityError();
     }
-    return this.waiters.park(shareId, actorId, {
+    return waiters.park(shareId, actorId, {
       holdMs: options.holdMs,
       signal: options.signal,
       settle: () => undefined,
@@ -65,10 +79,12 @@ export class DiscussionActivityHub {
   wakeLog(workspaceId: string): void {
     this.waiters.wake(linkLogWaitGroup(workspaceId), undefined);
     this.waiters.wake(ownerLogWaitGroup(workspaceId), undefined);
+    this.personal.wake(ownerLogWaitGroup(workspaceId), undefined);
   }
 
   stats(): { shares: number; waiters: number } {
-    const { groups, waiters } = this.waiters.stats();
-    return { shares: groups, waiters };
+    const shared = this.waiters.stats();
+    const personal = this.personal.stats();
+    return { shares: shared.groups + personal.groups, waiters: shared.waiters + personal.waiters };
   }
 }

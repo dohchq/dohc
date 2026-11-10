@@ -393,7 +393,7 @@ export function createPersonalAgentToolRoutes(input: {
         try {
           await Promise.race(ids.map((workspaceId, index) => activity.wait(
             ownerLogWaitGroup(workspaceId), `personal:${connectionId}:${workspaceId}`, {
-              holdMs, signal: AbortSignal.any([held, parked.signal]),
+              holdMs, signal: AbortSignal.any([held, parked.signal]), personal: true,
               shouldPark: index < ids.length - 1 ? () => true : () => {
                 try {
                   return caughtUp(storage.readPersonalScope(credential(current), nowMs()));
