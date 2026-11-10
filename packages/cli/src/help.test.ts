@@ -47,6 +47,17 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
 };
 
 describe("CLI help", () => {
+  it("gives agents a next step for each held-change refusal", async () => {
+    const text = flat(await help("document", "held-change", "--help"));
+    for (const words of [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ]) expect(text).toContain(words);
+    expect(text).not.toContain("Edit anyway");
+  });
   it("gives every dispatched verb a line in help and its own flags", async () => {
     const top = await help("--help");
     for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {

@@ -59,7 +59,7 @@ export function HeldNoteDrop(props: {
       };
       props.onNotice?.("Dropped the held change", undo);
     } catch (error) {
-      props.onError?.("dohc could not drop the held change. Review it again.", error, () => { void open(); });
+      props.onError?.("dohc could not drop the held change.", error, () => { void open(); });
     } finally { if (current.current === scope) setBusy(false); }
   }
 
@@ -70,7 +70,7 @@ export function HeldNoteDrop(props: {
       confirmLabel="Drop" testId="held-note-drop-dialog" cancelTestId="held-note-drop-cancel" confirmTestId="held-note-drop-confirm"
       onCancel={() => setReview(null)} onConfirm={() => { void drop(review.result.token); }}>
       <p className="max-h-40 overflow-y-auto break-words">{waitingAuthors(review.result.authors)}</p>
-      <p>The note returns to the file on disk. History keeps the waiting text, and Undo brings it back as held.</p>
+      <p>The note returns to the file on disk. If it's shared, the waiting edits are removed for everyone. History keeps the waiting text, and Undo brings it back as held.</p>
     </ConfirmDialog> : null}
   </>;
 }

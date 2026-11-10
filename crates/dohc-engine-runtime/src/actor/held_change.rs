@@ -71,12 +71,16 @@ impl ActorHandle {
         now_ms: i64,
     ) -> Result<HeldChangeResult, RuntimeError> {
         self.run(move |store, cache| {
+            let undo = matches!(&action, HeldChangeAction::Undo { .. });
+            let stale_reason = if undo { "held-change-undo-stale" } else { "held-change-stale" };
+            let missing_reason = if undo { "held-change-undo-stale" } else { "held-change-missing" };
+            let conflict_reason = if undo { "held-change-undo-stale" } else { "held-change-conflict" };
             if VersionedTextStore::new(store).get_active_version(&key.workspace_id)?.version_id != key.version_id {
-                return Err(refusal("held-change-stale"));
+                return Err(refusal(stale_reason));
             }
-            let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or_else(|| refusal("held-change-missing"))?;
+            let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or_else(|| refusal(missing_reason))?;
             if marker.path.as_deref() != Some(path.as_str()) || marker.content_kind != ContentKind::Richdoc {
-                return Err(refusal("held-change-stale"));
+                return Err(refusal(stale_reason));
             }
             let restore = store.read_with(|conn| {
                 dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, &key)?;
@@ -89,18 +93,18 @@ impl ActorHandle {
                 "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2 AND path=?3 AND status='open')",
                 params![key.workspace_id,key.version_id,path], |row| row.get::<_, bool>(0))
                 .map_err(StorageError::corrupt_public))? {
-                return Err(refusal("held-change-conflict"));
+                return Err(refusal(conflict_reason));
             }
             let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &path)?
                 .filter(|head| head.object_id == key.object_id)
-                .ok_or_else(|| refusal("held-change-stale"))?;
+                .ok_or_else(|| refusal(stale_reason))?;
             if !matches!(probe_projection_target(&root, &path, ProjectionTargetKind::Plaintext),
                 ProjectionTargetState::Text { sha256 } if sha256 == head.blob_sha256) {
-                return Err(refusal("held-change-stale"));
+                return Err(refusal(stale_reason));
             }
-            let persisted = dohc_engine_collab::load_persisted(store, &key)?.ok_or_else(|| refusal("held-change-missing"))?;
+            let persisted = dohc_engine_collab::load_persisted(store, &key)?.ok_or_else(|| refusal(missing_reason))?;
             let doc = persisted.doc;
-            if doc.has_pending_dependencies() { return Err(refusal("held-change-conflict")); }
+            if doc.has_pending_dependencies() { return Err(refusal(conflict_reason)); }
             let checkpoint_sha = document_fingerprint(&doc);
             let current_token = fingerprint(&marker, &head.blob_sha256, &checkpoint_sha, restore);
             let owed = store.read_with(|conn| obligations::pending_in(conn, &key.workspace_id))?
@@ -117,7 +121,7 @@ impl ActorHandle {
             let result = store.write_with(&NoFaults, |tx| -> Result<HeldChangeResult, RuntimeError> {
                 if !matches!(probe_projection_target(&root, &path, ProjectionTargetKind::Plaintext),
                     ProjectionTargetState::Text { sha256 } if sha256 == head.blob_sha256) {
-                    return Err(refusal("held-change-stale"));
+                    return Err(refusal(stale_reason));
                 }
                 let (delta, token, history_moment_id, held, result_authors) = match &action {
                     HeldChangeAction::Drop { token } => {

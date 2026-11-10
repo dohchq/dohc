@@ -100,7 +100,7 @@ function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
 }
 
 it.each([
-  ["held-change-shared-owner", "Drop is not available for shared notes yet. Use Edit anyway to save the waiting edits."],
+  ["held-change-shared-owner", "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing."],
   ["held-change-stale", "The note or its file changed. Choose Drop again to review the waiting edits."],
   ["held-change-missing", "There is no held change to drop. Open the note again."],
   ["held-change-conflict", "The note has a conflict. Resolve it before using Drop."],

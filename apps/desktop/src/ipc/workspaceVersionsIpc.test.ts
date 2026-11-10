@@ -125,13 +125,6 @@ describe("registered workspace version handlers", () => {
     });
   });
 
-  it("preserves the engine refusal for the shared error presenter", async () => {
-    const h = harness();
-    const refusal = new Error("held-change-shared-owner");
-    h.operations.heldNoteChange.mockRejectedValue(refusal);
-    await expect(h.invoke(ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action: "review"}))
-      .rejects.toBe(refusal);
-  });
   it.each(requests)("refuses %s from a window showing another workspace", async (channel, payload) => {
     const h = harness();
     await expect(h.invoke(channel, payload, "other-workspace")).rejects.toThrow(

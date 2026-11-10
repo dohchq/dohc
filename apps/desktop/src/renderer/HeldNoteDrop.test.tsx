@@ -36,7 +36,7 @@ it("names the waiting authors, cancels safely, and offers Undo after the band di
   const dialog = await screen.findByRole("dialog", {name: "Drop the held change?"});
   expect(within(dialog).getByText("Waiting edits by Ice, Codex.")).toBeTruthy();
   expect(document.getElementById(dialog.getAttribute("aria-describedby")!)?.textContent).toContain("Waiting edits by Ice, Codex.");
-  expect(dialog.textContent).toContain("History keeps the waiting text");
+  expect(within(dialog).getByText("The note returns to the file on disk. If it's shared, the waiting edits are removed for everyone. History keeps the waiting text, and Undo brings it back as held.")).toBeTruthy();
   await user.click(within(dialog).getByRole("button", {name: "Cancel"}));
   expect(heldNoteChange.mock.calls.map(([input]) => input.action)).toEqual(["review"]);
   await user.click(screen.getByRole("button", {name: "Drop"}));
@@ -99,6 +99,7 @@ it("keeps a refused Drop in Notices after its toast closes and retries with a ne
   await user.click(within(await screen.findByRole("dialog")).getByRole("button", {name: "Drop"}));
   const toast = await screen.findByRole("alert");
   expect(toast.textContent).toContain("dohc could not drop the held change");
+  expect(toast.textContent).not.toContain("Review it again.");
   await user.click(within(toast).getByRole("button", {name: "Dismiss workspace error"}));
   await user.click(screen.getByRole("button", {name: /Notices/u}));
   expect(screen.getByText(/dohc could not drop the held change/u)).toBeTruthy();
@@ -125,7 +126,7 @@ it("shows the engine's shared-note refusal in the toast and Notices without Try 
   render(<FailureHarness />);
   await user.click(screen.getByRole("button", {name: "Drop"}));
   const toast = await screen.findByRole("alert");
-  const words = "Drop is not available for shared notes yet. Use Edit anyway to save the waiting edits.";
+  const words = "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.";
   expect(toast.textContent).toContain(words);
   expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
   await user.click(within(toast).getByRole("button", {name: "Dismiss workspace error"}));

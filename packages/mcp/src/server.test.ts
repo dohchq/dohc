@@ -104,6 +104,15 @@ it("uses the owner socket operation for held Review, Drop, and Undo", async () =
     requests.push(request);
     return {ok: true, path: "note.md", token, authors: [], held: request.verb === "heldNoteChange" && request.args.action !== "drop", historyMomentId: "history"};
   }});
+  const description = (await client.listTools()).tools.find(tool => tool.name === "dohc_held_note_change")!.description;
+  for (const words of [
+    "held-change-stale: Run review again and use its new token for drop.",
+    "held-change-missing: Read the note again; there is no held change to drop.",
+    "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+    "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+    "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+  ]) expect(description).toContain(words);
+  expect(description).not.toContain("Edit anyway");
   for (const action of ["review", "drop", "undo"]) {
     const result = await client.callTool({name: "dohc_held_note_change", arguments: {path: "note.md", action, ...(action === "review" ? {} : {token})}});
     expect(result.isError).not.toBe(true);

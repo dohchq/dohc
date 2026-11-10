@@ -3187,12 +3187,16 @@ async fn held_drop_refuses_an_open_conflict_without_discarding() {
         .unwrap();
     assert!(matches!(
         f.held_action(HeldChangeAction::Drop {
-            token: review.token
+            token: review.token.clone()
         })
         .await,
         Err(RuntimeError::Domain(DomainError::InvalidInput {
             reason: "held-change-conflict"
         }))
+    ));
+    assert!(matches!(
+        f.held_action(HeldChangeAction::Undo {token: review.token}).await,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {reason: "held-change-undo-stale"}))
     ));
     f.unchanged().await;
     f.supervisor.close(&f.db).unwrap();
@@ -3256,15 +3260,43 @@ async fn held_drop_does_not_bypass_the_adopted_owner_audit() {
     let f = Fixture::new().await;
     let review = f.hold_and_review().await;
     f.adopt().await;
-    assert!(matches!(
-        f.held_action(HeldChangeAction::Drop {
-            token: review.token
-        })
-        .await,
-        Err(RuntimeError::Domain(DomainError::InvalidInput {reason: "held-change-shared-owner"}))
-    ));
+    for action in [HeldChangeAction::Drop {token: review.token.clone()}, HeldChangeAction::Undo {token: review.token}] {
+        assert!(matches!(f.held_action(action).await,
+            Err(RuntimeError::Domain(DomainError::InvalidInput {reason: "held-change-shared-owner"}))));
+    }
     f.unchanged().await;
     f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_undo_prechecks_use_history_refusal_after_disk_path_or_document_changes() {
+    use crate::actor::HeldChangeAction;
+    for changed in ["disk", "path", "document"] {
+        let mut f = Fixture::new().await;
+        let review = f.hold_and_review().await;
+        let dropped = f.held_action(HeldChangeAction::Drop {token: review.token}).await.unwrap();
+        let original_key = f.key.clone();
+        match changed {
+            "disk" => std::fs::write(f.scratch.path().join("note.md"), "Outside edit").unwrap(),
+            "path" => f.actor.run(|store, _| {
+                store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET path='moved.md'", [])
+                    .map_err(StorageError::persist_public))?;
+                Ok(())
+            }).await.unwrap(),
+            "document" => f.key = DocKey::new("w", "main", "replacement").unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(f.held_action(HeldChangeAction::Undo {token: dropped.token}).await,
+            Err(RuntimeError::Domain(DomainError::InvalidInput {reason: "held-change-undo-stale"}))));
+        f.actor.run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &original_key)?.unwrap().doc;
+            assert!(!doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+            if changed == "disk" { "Outside edit" } else { &f.source });
+        f.supervisor.close(&f.db).unwrap();
+    }
 }
 
 impl Fixture {
@@ -3351,6 +3383,10 @@ async fn held_drop_and_undo_work_with_only_a_sync_projection_hold() {
     use crate::actor::HeldChangeAction;
     let f = Fixture::new().await;
     f.hold_peer_delta().await;
+    let key = f.key.clone();
+    let peer_checkpoint = f.actor.run(move |store, _| {
+        Ok(dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc.encode_full_state())
+    }).await.unwrap();
     let path = f.scratch.path().join("note.md");
     let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
     let review = f.held_action(HeldChangeAction::Review).await.unwrap();
@@ -3370,6 +3406,18 @@ async fn held_drop_and_undo_work_with_only_a_sync_projection_hold() {
         let moment = VersionedTextStore::new(store).get_moment("w", &drop_moment)?.unwrap();
         assert!(moment.before_text.unwrap().contains("Waiting peer edit"));
         assert_eq!(moment.metadata_correlation_id, Some(expected_correlation));
+        let outbound: Vec<u8> = store.read_with(|conn| conn.query_row(
+            "SELECT b.bytes FROM replication_log r JOIN binary_blobs b \
+             ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
+             WHERE r.workspace_id=?1 AND r.imported=0 AND r.op_kind='ydoc.update' \
+             AND json_extract(r.payload_json,'$.objectId')=?2 ORDER BY r.origin_seq DESC LIMIT 1",
+            params![key.workspace_id,key.object_id], |row| row.get(0))
+            .map_err(StorageError::corrupt_public))?;
+        let peer = Ydoc::wire();
+        peer.apply(&peer_checkpoint)?;
+        assert!(peer.project(ContentKind::Richdoc)?.content.contains("Waiting peer edit"));
+        peer.apply(&outbound)?;
+        assert!(!peer.project(ContentKind::Richdoc)?.content.contains("Waiting peer edit"));
         assert_eq!(store.table_row_count("materialization_jobs")?, 0);
         Ok(())
     }).await.unwrap();
@@ -3383,6 +3431,7 @@ async fn held_drop_and_undo_work_with_only_a_sync_projection_hold() {
         let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
         assert_eq!(owed.len(), 1);
         assert!(owed[0].held_checkpoint_sha256.is_some());
+        assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
         let moment = VersionedTextStore::new(store).get_moment("w", &undo_moment)?.unwrap();
         assert_eq!(moment.metadata_correlation_id, Some(format!("held-change:undo:{token}")));
         assert_eq!(store.table_row_count("materialization_jobs")?, 0);

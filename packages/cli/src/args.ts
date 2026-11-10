@@ -304,6 +304,13 @@ const DOCUMENT_VERBS = {
     operands: "<path>",
     flags: [{name: "--action", value: "review|drop|undo", text: "Review returns the token needed for Drop."},
       {name: "--token", value: "token", text: "Use the review token for Drop or the Drop token for Undo."}],
+    notes: [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ],
     parse: (input: VerbInput): CliCommandBody => {
       const path = parsePath(input, "document held-change");
       const action = lastValue(input, "--action") ?? "review";

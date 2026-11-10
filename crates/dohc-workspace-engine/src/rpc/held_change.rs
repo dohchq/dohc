@@ -66,7 +66,11 @@ impl EngineService {
                 .ok_or_else(|| {
                     WireError::new(
                         ErrorCode::InvalidParams,
-                        "held-change-stale",
+                        if matches!(&params.action, HeldChangeAction::Undo { .. }) {
+                            "held-change-undo-stale"
+                        } else {
+                            "held-change-stale"
+                        },
                     )
                 })?;
             let key = DocKey::new(&open.workspace_id, version, object)
