@@ -728,12 +728,12 @@ describe("desktop user settings store", () => {
     expect(await readFile(path, "utf8")).toBe("{}");
   });
 
-  it("keeps sidebar order, hidden views, and pins, and turns off only a list it cannot use", async () => {
+  it("keeps sidebar order, hidden views, pins, and archived chats, and turns off only a list it cannot use", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
     const pinned: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
-      sidebar: { order: ["history", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] } },
+      sidebar: { order: ["history", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] }, archivedChats: { "ws-a": ["channel-1"] } },
     };
     await writeUserSettingsFile(root, pinned, DEFAULT_USER_SETTINGS);
     expect((await readUserSettingsFile(root)).settings.sidebar).toEqual(pinned.sidebar);
@@ -767,7 +767,7 @@ describe("desktop user settings store", () => {
     const root = await createTestScratch("dohc-user-settings-");
     const withChats: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
-      sidebar: { order: ["chats", "explorer", "search", "graph", "history"], hidden: ["chats"], pinnedApps: {} },
+      sidebar: { order: ["chats", "explorer", "search", "graph", "history"], hidden: ["chats"], pinnedApps: {}, archivedChats: {} },
     };
     await writeUserSettingsFile(root, withChats, DEFAULT_USER_SETTINGS);
     const read = await readUserSettingsFile(root);

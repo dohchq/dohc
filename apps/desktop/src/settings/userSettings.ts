@@ -314,6 +314,9 @@ export type AgentProblem = z.infer<typeof AgentProblem>;
 export const MAX_PINNED_APPS = 20;
 const MAX_PINNED_WORKSPACES = 200;
 const PinnedAppsWorkspaceId = z.string().max(200).regex(/^[a-z0-9][a-z0-9-]*$/);
+// Archived chats follow the same rule: hiding a chat from your sidebar is
+// your choice on this computer, and the chat's members still see it.
+export const MAX_ARCHIVED_CHATS = 500;
 
 export const SidebarSettings = z.object({
   // dohc's own views in the order the sidebar shows them. A view the list
@@ -326,6 +329,13 @@ export const SidebarSettings = z.object({
     .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
       message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
     }),
+  // Each workspace's archived chats, by the chat's id in that workspace.
+  archivedChats: z
+    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+    .refine((archived) => Object.keys(archived).length <= MAX_PINNED_WORKSPACES, {
+      message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+    })
+    .default({}),
 }).strict();
 export type SidebarSettings = z.infer<typeof SidebarSettings>;
 
@@ -333,6 +343,7 @@ export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
   order: [],
   hidden: [],
   pinnedApps: {},
+  archivedChats: {},
 };
 
 // Reports this computer sends to dohc's developers. A release build that
