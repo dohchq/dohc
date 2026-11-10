@@ -55,8 +55,7 @@ type PersonalToolStorage = Pick<SyncRelayStorage,
 /**
  * A message for the agent, with the workspace and the place it is in: a
  * channel, or for a thread on a file, no channel and the file's current path.
- * Both are null when the file is gone, and for a thread its chat names only
- * by slug.
+ * Exactly one of them is null.
  */
 export type PersonalWaitMessage = LinkChatMessage & { workspaceId: string; channelWireId: string | null; filePath: string | null };
 

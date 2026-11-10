@@ -1448,12 +1448,14 @@ describe("a personal agent's wait", () => {
       fileThread("thread-unknown", { linkedObjectId: "object-unknown", linkedPathHint: "notes/unknown.md" }),
       // Bound by the path the file left.
       fileThread("thread-old-path", { linkedPath: "notes/plan.md" }),
-      ...["moved", "gone", "unknown", "old-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
+      // Bound by the path the file moved to.
+      fileThread("thread-by-path", { linkedPath: "notes/moved.md" }),
+      ...["moved", "gone", "unknown", "old-path", "by-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
     ]);
 
     const answer = await waitOnce(f, agent);
     expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([
-      ["moved", "notes/moved.md"],
+      ["moved", "notes/moved.md"], ["by-path", "notes/moved.md"],
     ]);
   });
 
