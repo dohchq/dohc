@@ -4,7 +4,7 @@ import { lstat, open, readFile, readdir, unlink, type FileHandle } from "node:fs
 import { dirname, join, posix, relative, sep } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
-import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
+import { localStateFolder, localStateOpened, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 const CopyRecord = z.object({ path: z.string(), copy: z.string(), sha256: z.string(), createdAtMs: z.number(), id: z.string() }).strict();
@@ -102,7 +102,13 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
   async function list(onReadError: (error: unknown) => void): Promise<[string, string, string][]> {
     const rows: [string, string, string][] = [];
     // Cached rows can't show that the folder was blocked or replaced since.
-    await directory().catch(error => { loaded = null; throw error; });
+    // Right after launch the sync client's first request reopens the engine's
+    // binding, so a list refused meanwhile waits once for that open.
+    await directory().catch(async (error: unknown) => {
+      if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+      await localStateOpened(workspace);
+      return directory();
+    }).catch(error => { loaded = null; throw error; });
     const { rows: savedRecords, errors } = await records();
     errors.forEach(onReadError);
     for (const record of [...savedRecords].sort((a, b) => a.createdAtMs - b.createdAtMs)) {
