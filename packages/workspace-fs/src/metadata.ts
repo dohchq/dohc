@@ -47,20 +47,32 @@ export function isSqliteMediaType(mediaType: string, path = "") {
   );
 }
 
-// The Collection files that dohc reads and writes as text. The media table
-// has no entry for `.yaml`, so these names are text by rule. The engine's
-// `is_text_media_type` holds the same list, and `text-media-cases.json`
-// holds both rules to the same answers.
-const COLLECTION_TEXT_FILENAMES = new Set(["collection.yaml", "automations.yaml"]);
+// Extensions that are text whatever the media type says: data formats and the
+// common code and configuration formats. An unlisted extension the media table
+// doesn't know stays binary. A file here that isn't valid UTF-8 is still
+// stored as binary. The engine's `TEXT_EXTENSIONS` is the same list, and
+// `text-media-cases.json` holds both rules to the same answers.
+const TEXT_EXTENSIONS = new Set([
+  // Data and documents.
+  ".json", ".geojson", ".json5", ".json-seq", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".txt",
+  // Code.
+  ".ts", ".tsx", ".cts", ".mts", ".vue", ".svelte", ".astro", ".less", ".sass",
+  ".py", ".pyi", ".rs", ".go", ".java", ".kt", ".kts", ".scala", ".groovy", ".gradle",
+  ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".cs", ".swift",
+  ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".dart", ".ex", ".exs", ".erl", ".hrl", ".hs",
+  ".clj", ".cljs", ".cljc", ".edn", ".zig", ".sql", ".graphql", ".gql", ".proto",
+  ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+  // Configuration.
+  ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".xml", ".tf", ".hcl", ".nix",
+  ".editorconfig", ".gitignore", ".gitattributes", ".dockerignore", ".nvmrc",
+]);
 
 export function isTextMediaType(mediaType: string, path = "") {
   const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
-  const name = fileName(path);
-  const extension = name.toLowerCase().match(/(\.[^.]+)$/)?.[1] ?? "";
+  const extension = fileName(path).toLowerCase().match(/(\.[^.]+)$/)?.[1] ?? "";
   return (
     !isSqliteMediaType(mediaType, path) &&
-    (COLLECTION_TEXT_FILENAMES.has(name) ||
-      type.startsWith("text/") ||
+    (type.startsWith("text/") ||
       type.endsWith("/json") ||
       type.endsWith("+json") ||
       type === "application/x-ndjson" ||
@@ -68,6 +80,6 @@ export function isTextMediaType(mediaType: string, path = "") {
       type === "application/csv" ||
       type === "application/x-csv" ||
       isSiteSourcePath(path) ||
-      [".json", ".geojson", ".json5", ".json-seq", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".sh", ".txt"].includes(extension))
+      TEXT_EXTENSIONS.has(extension))
   );
 }

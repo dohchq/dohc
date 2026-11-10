@@ -30,15 +30,106 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
     }
 }
 
-/// The Collection files that dohc reads and writes as text. The media table
-/// maps `.yaml` to binary, so these names are text by rule. Ports
-/// `COLLECTION_TEXT_FILENAMES` (`packages/workspace-fs/src/metadata.ts`).
-const COLLECTION_TEXT_FILENAMES: [&str; 2] = ["collection.yaml", "automations.yaml"];
+/// Extensions that are text whatever the media type says: data formats and
+/// the common code and configuration formats. An unlisted extension the media
+/// table doesn't know stays binary. A file here that isn't valid UTF-8 is
+/// still stored as binary. `TEXT_EXTENSIONS` in
+/// `packages/workspace-fs/src/metadata.ts` is the same list.
+const TEXT_EXTENSIONS: &[&str] = &[
+    // Data and documents.
+    "json",
+    "geojson",
+    "json5",
+    "json-seq",
+    "jsonl",
+    "ndjson",
+    "csv",
+    "excalidraw",
+    "md",
+    "markdown",
+    "txt",
+    // Code.
+    "ts",
+    "tsx",
+    "cts",
+    "mts",
+    "vue",
+    "svelte",
+    "astro",
+    "less",
+    "sass",
+    "py",
+    "pyi",
+    "rs",
+    "go",
+    "java",
+    "kt",
+    "kts",
+    "scala",
+    "groovy",
+    "gradle",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "cxx",
+    "hpp",
+    "hh",
+    "hxx",
+    "cs",
+    "swift",
+    "rb",
+    "php",
+    "pl",
+    "pm",
+    "lua",
+    "r",
+    "dart",
+    "ex",
+    "exs",
+    "erl",
+    "hrl",
+    "hs",
+    "clj",
+    "cljs",
+    "cljc",
+    "edn",
+    "zig",
+    "sql",
+    "graphql",
+    "gql",
+    "proto",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "psm1",
+    "bat",
+    "cmd",
+    // Configuration.
+    "toml",
+    "yaml",
+    "yml",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "xml",
+    "tf",
+    "hcl",
+    "nix",
+    "editorconfig",
+    "gitignore",
+    "gitattributes",
+    "dockerignore",
+    "nvmrc",
+];
 
 /// The text/binary routing decision the capture pipeline makes before any
 /// UTF-8 sniffing. Matches `isTextMediaType` in `packages/workspace-fs/src/metadata.ts`:
 /// MIME tokens and basename extensions identify text; directory names do not.
-/// Collection filenames and site source paths retain their explicit text rules.
+/// Site source paths retain their explicit text rule.
 pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
     if is_sqlite_media_type(media_type, rel_path) {
         return false;
@@ -55,8 +146,7 @@ pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
         .rsplit_once('.')
         .map(|(_, extension)| extension)
         .unwrap_or_default();
-    COLLECTION_TEXT_FILENAMES.contains(&basename)
-        || media.starts_with("text/")
+    media.starts_with("text/")
         || media.ends_with("/json")
         || media.ends_with("+json")
         || matches!(
@@ -64,21 +154,7 @@ pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
             "application/x-ndjson" | "application/ndjson" | "application/csv" | "application/x-csv"
         )
         || is_site_source_path(rel_path)
-        || matches!(
-            extension,
-            "json"
-                | "geojson"
-                | "json5"
-                | "json-seq"
-                | "jsonl"
-                | "ndjson"
-                | "csv"
-                | "excalidraw"
-                | "md"
-                | "markdown"
-                | "sh"
-                | "txt"
-        )
+        || TEXT_EXTENSIONS.contains(&extension)
 }
 
 /// Ports `isSqliteMediaType` (`packages/workspace-fs/src/metadata.ts`).

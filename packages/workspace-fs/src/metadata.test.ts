@@ -24,7 +24,7 @@ describe("workspace filesystem metadata", () => {
     expect(mediaTypeForPath("client/src/App.tsx")).toBe("application/typescript");
     expect(isTextMediaType("application/octet-stream", "sites/review/src/App.tsx")).toBe(true);
     expect(isTextMediaType("application/octet-stream", "Sites/review/src/App.tsx")).toBe(true);
-    expect(isTextMediaType("application/octet-stream", "client/src/App.tsx")).toBe(false);
+    expect(isTextMediaType("application/octet-stream", "client/src/App.tsx")).toBe(true);
   });
 
   // The engine's `is_text_media_type` reads the same cases, so the two rules
@@ -33,9 +33,9 @@ describe("workspace filesystem metadata", () => {
     expect(isTextMediaType(mediaType, path)).toBe(text);
   });
 
-  it("gives a Collection's schema and automations the media type the capture reads", () => {
+  it("reads a Collection's schema, its automations and other YAML as text", () => {
     expect(isTextMediaType(mediaTypeForPath("trip/collection.yaml"), "trip/collection.yaml")).toBe(true);
     expect(isTextMediaType(mediaTypeForPath("trip/automations.yaml"), "trip/automations.yaml")).toBe(true);
-    expect(isTextMediaType(mediaTypeForPath("trip/notes.yaml"), "trip/notes.yaml")).toBe(false);
+    expect(isTextMediaType(mediaTypeForPath("trip/notes.yaml"), "trip/notes.yaml")).toBe(true);
   });
 });
