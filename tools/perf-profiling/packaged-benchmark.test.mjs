@@ -817,7 +817,7 @@ const caseNamed = (cases, name) => cases.find(spec => spec.name === name);
 test('automation limits default to the current ones and belong to the collection scenario', () => {
   const collection = [...required, '--scenario', 'collection'];
   assert.deepEqual([parseOptions(collection).findCap, parseOptions(collection).writeCap], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
-  assert.deepEqual([50, 200], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
+  assert.deepEqual([500, 200], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
   const candidate = parseOptions([...collection, '--find-cap', '500', '--write-cap', '1000']);
   assert.deepEqual([candidate.findCap, candidate.writeCap], [500, 1000]);
   for (const extra of [['--find-cap', '500'], ['--scenario', 'soak', '--write-cap', '10'], ['--scenario', 'collection', '--find-cap', '0'], ['--scenario', 'collection', '--write-cap', '1.5']]) {
@@ -830,7 +830,7 @@ test('automation cases expect the package limits to refuse only the cases over t
   assert.deepEqual(cases.map(spec => [spec.name, spec.expected]), [['baseline', 'done'], ['find-500', 'refused'], ['five-finds', 'refused'], ['set-then-find', 'done'],
     ['add-then-find', 'done'], ['find-at-cap', 'done'], ['find-over-cap', 'refused'], ['wide', 'done'], ['baseline-typing', 'done'], ['find-500-typing', 'refused']]);
   assert.deepEqual(automationCases({ findCap: 500, writeCap: 1000 }).filter(spec => spec.expected === 'refused').map(spec => spec.name), ['find-over-cap']);
-  assert.deepEqual(cases.map(spec => spec.seed.length), [50, 500, 300, 40, 10, 50, 51, 50, 50, 500]);
+  assert.deepEqual(cases.map(spec => spec.seed.length), [50, 500, 300, 40, 10, 500, 501, 50, 50, 500]);
   assert.deepEqual(cases.filter(spec => spec.contention).map(spec => spec.name), ['baseline-typing', 'find-500-typing']);
   // Five Finds of 100 records each, so their 1,000 assignments count records in two Finds twice.
   const five = caseNamed(cases, 'five-finds');
@@ -863,7 +863,7 @@ test('automation fixtures are deterministic, sort the trigger first, and pre-min
   assert.deepEqual(datasetAutomationDefinition(cases).tables.map(table => table.name), [DATASET_NAME]);
   assert.equal(automationFixtureDigest(cases), automationFixtureDigest(automationCases(DEFAULT_LIMITS)));
   // A case's digest changes only when its own records, steps, or expected outcome do.
-  const candidate = automationCases({ findCap: 500, writeCap: 1000 });
+  const candidate = automationCases({ findCap: 1000, writeCap: 1000 });
   assert.equal(caseNamed(candidate, 'baseline').fixtureSha256, caseNamed(cases, 'baseline').fixtureSha256);
   for (const name of ['find-500', 'find-at-cap']) assert.notEqual(caseNamed(candidate, name).fixtureSha256, caseNamed(cases, name).fixtureSha256);
   assert.equal(new Set(cases.map(spec => spec.fixtureSha256)).size, cases.length);

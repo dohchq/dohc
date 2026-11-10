@@ -2555,10 +2555,14 @@ describe("Collection automations", () => {
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
 
-  it.each([50, 51])("requires a complete Find before using its records with %i matches", async (count) => {
+  // A Find may match 500 records, but a run may change only 200 fields, so the
+  // full Find only counts.
+  const COUNT_ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Note: '=items.length'}\n";
+
+  it.each([500, 501])("requires a complete Find before using its records with %i matches", async (count) => {
     let boundCount: number | undefined;
     const w = await world({
-      collections: ["Tasks", "Items"], automations: { Tasks: ITEMS },
+      collections: ["Tasks", "Items"], automations: { Tasks: COUNT_ITEMS },
       evaluator: {
         runCode: evaluator.runCode,
         evaluate: async (...args) => {
@@ -2568,22 +2572,34 @@ describe("Collection automations", () => {
         },
       },
     });
-    const items = Array.from({ length: count }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
-    const claim = w.claim("collection:Tasks#tick", w.addRecord("Tasks", "one", { Status: "Done" }));
+    Array.from({ length: count }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#tick", task);
     await w.executor.open();
     await w.settledClaim(claim);
-    if (count === 50) {
+    if (count === 500) {
       expect(claim.state).toBe("done");
-      expect(boundCount).toBe(50);
-      expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(50).fill(1));
+      expect(boundCount).toBe(500);
+      expect(w.fieldsOf(task).Note).toBe(500);
     } else {
       expect(claim.state).toBe("failed");
-      expect(claim.error).toBe("The Find in step 1 matched more than 50 records. Narrow its condition, then try again.");
+      expect(claim.error).toBe("The Find in step 1 matched more than 500 records. Narrow its condition, then try again.");
       expect(boundCount).toBeUndefined();
       expect(w.saves()).toBe(0);
       expect(w.journaled).toEqual([]);
-      expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(51).fill(0));
+      expect(w.fieldsOf(task).Note).toBeUndefined();
     }
+  });
+
+  it("refuses a Find of 500 records that sets a field on each, before writing anything", async () => {
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: ITEMS } });
+    const items = Array.from({ length: 500 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const claim = w.claim("collection:Tasks#tick", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.error).toBe("Step 2 would make this run change more than 200 fields. Narrow its Find steps, or split it into smaller automations.");
+    expect(w.journaled).toEqual([]);
+    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(500).fill(0));
   });
 
   it.each(["branch", "only-if", "count"])("handles a truncated Find in %s without partial writes", async (mode) => {
@@ -2600,7 +2616,7 @@ describe("Collection automations", () => {
       "      - find: 'true'",
       "        collection: Items",
       "        as: items",
-      "      - if: items.length > 50",
+      "      - if: items.length > 500",
       "        do: [{set: {Note: many}}]",
       "        otherwise: [{set: {Note: few}}]",
     ];
@@ -2613,12 +2629,12 @@ describe("Collection automations", () => {
       ...steps,
     ].join("\n");
     const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: body } });
-    const items = Array.from({ length: 51 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const items = Array.from({ length: 501 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const claim = w.claim("collection:Tasks#overflow", task);
     await w.executor.open();
     await w.settledClaim(claim);
-    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(51).fill(0));
+    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(501).fill(0));
     if (mode === "branch") {
       expect(claim.state).toBe("done");
       expect(w.fieldsOf(task).Note).toBe("fallback");
@@ -2630,7 +2646,7 @@ describe("Collection automations", () => {
         expect(claim.error).toBeUndefined();
       } else {
         expect(claim.state).toBe("failed");
-        expect(claim.error).toBe("The Find in step 1 matched more than 50 records. Narrow its condition, then try again.");
+        expect(claim.error).toBe("The Find in step 1 matched more than 500 records. Narrow its condition, then try again.");
         expect(w.fieldsOf(task).Note).toBeUndefined();
       }
     }

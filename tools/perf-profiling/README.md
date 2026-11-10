@@ -100,7 +100,7 @@ The automation phase measures Collection automations in both kinds of Collection
 - `find-500`: one Find of 500 records, then 2 fields on each, 1,000 assignments.
 - `five-finds`: five Finds of 100 records each, overlapping by 50, then 2 fields on each, 1,000 assignments.
 - `set-then-find` and `add-then-find`: a Find after a Set or an Add. `visibility` records whether the later Find saw the earlier step's change (`stepwise`) or the records as they were when the run started (`run-start`).
-- `find-at-cap` and `find-over-cap`: a Find of exactly `--find-cap` records and of one more.
+- `find-at-cap` and `find-over-cap`: a Find of exactly `--find-cap` records and of one more. A second Find then sets one field on 10 of them, so the case stays under the write limit.
 - `wide`: 50 records with 4,000-character notes, about 200 KB of formula scope, set to a 3,900-character literal.
 - `baseline-typing` and `find-500-typing`: the baseline and 500-match cases again, with the typing workload in `small.md` while they run. A case expected to finish fails when no keystroke arrived between the press and the settle text.
 

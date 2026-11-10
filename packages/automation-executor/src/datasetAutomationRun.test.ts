@@ -527,7 +527,7 @@ automations:
     }, {
       held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 50 records. Narrow its condition, then try again.", timedOut: false });
+    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 500 records. Narrow its condition, then try again.", timedOut: false });
     expect(sent.map((input) => input.operationId)).toEqual([LIST, LIST, LIST]);
     expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
   });
