@@ -36,7 +36,7 @@ test("@whats-new What's new opens once after an update brings new notes", async 
     await expect(desktop.page.getByTestId("whats-new-page")).toBeVisible();
     await expect(tab(desktop.page)).toBeVisible();
     await shoot(desktop.page, "whats-new");
-    await desktop.page.getByRole("button", { name: "Close What's new" }).click();
+    await tab(desktop.page).getByRole("button", { name: "Close What's new" }).click();
     await expect(tab(desktop.page)).toHaveCount(0);
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await desktop.close();
