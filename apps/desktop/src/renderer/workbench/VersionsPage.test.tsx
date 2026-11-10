@@ -794,6 +794,22 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(shownRows()).toEqual([{ message: historyFailed(READS_FAILED), toast: true }]));
   });
 
+  it("files a new row and toast when a count's own Try again fails after the person dismissed its row", async () => {
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) => {
+      if (versionId !== "draft") throw new Error("count failed");
+      return { count: 2 };
+    });
+    const counted = withErrorWords("dohc could not count the files that differ from Main.", new Error("count failed"));
+    const user = userEvent.setup();
+    render(<ShellPage />);
+    await waitFor(() => expect(within(row("fresh")).queryByTestId("versions-page-count-retry")).not.toBeNull());
+    await waitFor(() => expect(shownRows()).toEqual([{ message: counted, toast: true }]));
+    act(() => shell!.dismissShellError(shell!.shellErrors[0]!.id));
+    await user.click(within(row("nested")).getByTestId("versions-page-count-retry"));
+    await waitFor(() => expect(within(row("nested")).queryByTestId("versions-page-count-retry")).not.toBeNull());
+    await waitFor(() => expect(shownRows()).toEqual([{ message: counted, toast: true }]));
+  });
+
   it("files nothing when reads work after the person dismissed the combined row", async () => {
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
     bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) => {

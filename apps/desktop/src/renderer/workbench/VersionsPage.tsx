@@ -54,7 +54,9 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
   current.current = failures;
   // The row's sentence, or null with no row.
   const filed = useRef<string | null>(null);
-  const dismissed = useRef(false);
+  // Set when the person dismisses the row. Any failure clears it, and the
+  // change runs the effect again, even for a read that already failed.
+  const [dismissed, setDismissed] = useState(false);
   // Its Try again reads for this page, so the row goes with the page, as when
   // its tab closes or another tab shows in its place.
   useEffect(() => () => {
@@ -66,10 +68,9 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
     if (failures.size === 0) {
       if (filed.current !== null) reports.onSettled(identity);
       filed.current = null;
-      dismissed.current = false;
       return;
     }
-    if (dismissed.current || (filed.current === null && reading.size > 0)) return;
+    if (dismissed || (filed.current === null && reading.size > 0)) return;
     const [first, ...others] = [...failures.keys()];
     const sentence = others.length > 0 || filed.current === READS_FAILED ? READS_FAILED : READ_FAILED[first!];
     if (sentence === filed.current) return;
@@ -86,9 +87,9 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
       retry(failed);
     }, identity, quiet, () => {
       filed.current = null;
-      dismissed.current = true;
+      setDismissed(true);
     });
-  }, [failures, reading]);
+  }, [failures, reading, dismissed]);
   const settled = (read: Read) => setReading((now) => {
     if (!now.has(read)) return now;
     const next = new Set(now);
@@ -100,7 +101,7 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
       setReading((now) => (now.has(read) ? now : new Set(now).add(read)));
     },
     failed(read: Read, error: unknown) {
-      dismissed.current = false;
+      setDismissed(false);
       settled(read);
       setFailures((now) => (now.has(read) ? now : new Map(now).set(read, error)));
     },
