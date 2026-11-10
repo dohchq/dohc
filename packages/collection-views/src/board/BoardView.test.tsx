@@ -189,6 +189,14 @@ describe("BoardView", () => {
     expect(within(shipped).getByText("0")).toBeDefined();
   });
 
+  it("shows only the given groups when the host pages them", () => {
+    render(
+      <BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" groupFooter={() => <span>More</span>} />,
+    );
+    const columns = screen.getAllByRole("list");
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing"]);
+  });
+
   it("colors each option column with the schema's chosen color", () => {
     const schema = makeSchema([
       { name: "title", type: "text" },

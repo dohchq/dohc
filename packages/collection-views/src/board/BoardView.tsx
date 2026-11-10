@@ -48,7 +48,8 @@ export interface BoardViewProps {
   personLabel?: (userId: string) => string | null;
   /**
    * Hosts with paged queries provide controls and a truthful page count.
-   * Both receive the query's group and its index in `groups`.
+   * Both receive the query's group and its index in `groups`. A paged board
+   * shows only the groups it was given, not every option.
    */
   groupFooter?: (group: CollectionRecordGroup, index: number) => ReactNode;
   groupCount?: (group: CollectionRecordGroup, index: number) => string;
@@ -70,11 +71,16 @@ const valueKey = (value: CollectionValue) => JSON.stringify(value, (_key, raw: u
 /**
  * A select field's columns follow its options, so empty ones still show.
  * The query's no-value group comes first when it returned one; values the
- * options do not have (flagged) follow the options.
+ * options do not have (flagged) follow the options. Paged groups are one
+ * page of the query, so they stay as given.
  */
-function boardColumns(groups: CollectionRecordGroup[], groupField: FieldDefinition | null): BoardColumnModel[] {
+function boardColumns(
+  groups: CollectionRecordGroup[],
+  groupField: FieldDefinition | null,
+  paged: boolean,
+): BoardColumnModel[] {
   const fromQuery = groups.map((group, groupIndex) => ({ value: group.value, records: group.records, groupIndex }));
-  if (groupField?.type !== "select") return fromQuery;
+  if (paged || groupField?.type !== "select") return fromQuery;
   const byKey = new Map(fromQuery.map((column) => [valueKey(column.value), column]));
   const used = new Set<string>();
   const take = (value: CollectionValue): BoardColumnModel => {
@@ -468,7 +474,8 @@ export function BoardView({
     () => schema.fields.find((field) => field.name === groupBy) ?? null,
     [schema, groupBy],
   );
-  const columns = useMemo(() => boardColumns(groups, groupField), [groups, groupField]);
+  const paged = groupFooter !== undefined;
+  const columns = useMemo(() => boardColumns(groups, groupField, paged), [groups, groupField, paged]);
   const cardIndex = useMemo(() => {
     const map = new Map<string, { record: CollectionRecord; columnIndex: number }>();
     columns.forEach((column, columnIndex) => {

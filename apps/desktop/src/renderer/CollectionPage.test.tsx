@@ -1849,6 +1849,24 @@ describe("record click-through", () => {
     });
   });
 
+  it("reports a board column color that could not be saved, with a retry", async () => {
+    const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
+    bridge.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
+    const onError = vi.fn<CollectionPageProps["onError"]>();
+    renderPage(bridge, undefined, undefined, { onError });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Todo options" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const [message, , retry] = onError.mock.calls[0]!;
+    expect(message).toMatch(/^dohc could not update this collection\./);
+    retry!();
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toMatchObject({ colors: { Todo: "plum" } });
+  });
+
   it("shows a table, not a board, when the board groups by a button", async () => {
     const parsed = parseCollectionSchema([
       "fields:",

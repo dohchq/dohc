@@ -521,11 +521,17 @@ export function CollectionPage({
   );
 
   const changeOptionColor = useCallback(
-    (option: string, color: OptionColor) => {
+    function change(option: string, color: OptionColor) {
       if (!groupBy) return;
-      void applySchemaChange((current) => setOptionColor(current, groupBy, option, color));
+      const dialog = currentSchemaDialog.current;
+      void applySchemaChange((current) => setOptionColor(current, groupBy, option, color)).then((failure) => {
+        // applySchemaChange reports a failure itself only when a dialog changed.
+        if (failure !== null && currentSchemaDialog.current === dialog) {
+          onError(failure, new Error(failure), () => change(option, color));
+        }
+      });
     },
-    [applySchemaChange, groupBy],
+    [applySchemaChange, groupBy, onError],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
