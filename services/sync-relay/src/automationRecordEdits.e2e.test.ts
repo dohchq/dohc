@@ -247,7 +247,7 @@ it.skipIf(engine.missing)("writes an automation's records and posts on the serve
   await owner.sync();
 
   // The server joins the workspace as its owner and pulls it.
-  const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now() });
+  const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["automation"] });
   if (row === null) throw new Error("The relay did not let the server join the workspace.");
   const server = await computer({
     root: join(root, "server"), relayUrl,
@@ -390,7 +390,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
     ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
-  const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now()})!;
+  const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["automation"] })!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
   const recipient = await computer({root: join(root, "recipient"), relayUrl, bearerToken: "test:owner", identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
   await copy.sync(); await recipient.sync();
@@ -488,7 +488,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     recordWork = run.then(() => undefined, () => undefined);
     return run;
   };
-  let hostedReplica: AutomationReplica = {...replica, ownerUserId: "owner", incarnation: row.incarnation, startedAtMs: row.startedAtMs,
+  let hostedReplica: AutomationReplica = {...replica, ownerUserId: "owner", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs,
     metadataDir, withRecordWork, pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await copy.sync(); hooks?.onPulled?.(WORKSPACE, []);})};
   let executor: CollectionAutomations | undefined;
   const serverOptions: Parameters<typeof startAutomationServer>[0] = {storage, server: serverHost,
@@ -694,7 +694,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   const freshMetadataDir = join(afterRestore.root, ".dohc/server-automations");
   await mkdir(freshMetadataDir, {recursive: true});
   hostedReplica = {...afterRestore, workspaceId: WORKSPACE, signal: afterRestore.lifetime, ownerUserId: "owner",
-    incarnation: row.incarnation, startedAtMs: row.startedAtMs, metadataDir: freshMetadataDir, withRecordWork,
+    incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs, metadataDir: freshMetadataDir, withRecordWork,
     pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await afterRestore.sync(); hooks?.onPulled?.(WORKSPACE, []);})};
   running = await startAutomationServer(serverOptions);
   cleanup.push(() => running.close());
@@ -796,7 +796,7 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
   await mkdir(join(localRoot, ".dohc/bench"), {recursive: true});
   let laneEntries = 0;
   const replica: AutomationReplica = {...copy, workspaceId: WORKSPACE, ownerUserId: "owner", root: localRoot, metadataDir: join(localRoot, ".dohc/bench"),
-    signal: copy.lifetime, incarnation: 1, startedAtMs: Date.now(), pulledHead: 0,
+    signal: copy.lifetime, incarnation: 1, reasons: ["automation"], startedAtMs: Date.now(), pulledHead: 0,
     sync: async () => undefined, withRecordWork: async work => {laneEntries++; return work();}};
   const bindingReads = vi.spyOn(storage, "automationRecordBinding");
   const capture = vi.fn(async (): Promise<never> => {throw Error("Find must not capture the owner host");});

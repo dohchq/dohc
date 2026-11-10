@@ -721,12 +721,17 @@ export interface SyncRelayStorage {
   lostAutomationServerRuns(input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1]): import("./automationHosts").LostAutomationServerRun[];
   unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
   reportAutomationServerRunsLost(input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1]): void;
-  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number; reasons: readonly import("./automationWorkspaces").CopyReason[] }): import("./automationWorkspaces").AutomationWorkspace | null;
   replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
   forgetAutomationWorkspaces(): void;
+  endCopyReasonEverywhere(reason: import("./automationWorkspaces").CopyReason): void;
+  endCopyReason(workspaceId: string, reason: import("./automationWorkspaces").CopyReason): void;
+  listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
+  showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
+  setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
   currentAutomationWorkspace(workspaceId: string): import("./automationWorkspaces").AutomationWorkspace | null;
   automationWorkspaceLogSeq(input: { workspaceId: string; originId: string; originSeq: number }): number | null;
   liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }): number | null;

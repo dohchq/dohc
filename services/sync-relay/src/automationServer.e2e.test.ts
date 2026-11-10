@@ -144,7 +144,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
   await owner.close();
 
   // The server joins as the owner and opens its copy.
-  const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now() });
+  const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["automation"] });
   if (row === null) throw new Error("The relay did not let the server join the workspace.");
   const copy = await computer({
     root: join(root, "server", "workspace"), relayUrl,
@@ -164,7 +164,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
   const errors: string[] = [];
   const replica: AutomationReplica = {
     pulledHead: 0,
-    workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, startedAtMs: row.startedAtMs,
+    workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs,
     root: join(root, "server", "workspace"), metadataDir, client: copy.client, workspace: copy.workspace, signal: copy.lifetime,
     nextRequestId: copy.nextRequestId,
     withRecordWork: work => work(),

@@ -12,7 +12,7 @@ import { removeAutomationReplicas, startAutomationReplicas } from "./automationR
 import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
-import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS } from "./storage/automationWorkspaces";
+import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, type CopyReason } from "./storage/automationWorkspaces";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage, closeTestStorage, reopenTestStorage } from "./testing";
 import { notifyRelayWrite } from "./relayWriteChanges";
 
@@ -39,6 +39,12 @@ const key = new Uint8Array(32).fill(7), namespace = "automation-replica-test";
 // vi.waitFor has its own 1 s default, independent of the package's expect.poll timeout.
 const WAIT_TIMEOUT_MS = 10_000;
 
+type ReplicaOptions = Parameters<typeof startAutomationReplicas>[0];
+// Most tests keep copies for automations; they name the workspaces, and this gives each its reason.
+type AutomationOptions = Omit<ReplicaOptions, "wanted"> & { wanted: () => readonly string[] };
+const automation = (ids: readonly string[]) => new Map(ids.map((id) => [id, ["automation"] as const]));
+const startReplicas = (options: AutomationOptions) => startAutomationReplicas({ ...options, wanted: () => automation(options.wanted()) });
+
 async function relay() {
   const storage = await testStorage();
   storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: "owner", createdAtMs: 1 });
@@ -64,25 +70,25 @@ const pressState = (raw: ReturnType<typeof inspectDatabase>, hostPressId: string
 describe("the workspaces this server keeps a replica of", () => {
   it("joins once per identity, and a changed identity starts a new incarnation that ends the presses the server took", async () => {
     const { storage, raw } = await relay();
-    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10 })!;
+    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10, reasons: ["automation"] })!;
     expect(first).toMatchObject({ ownerUserId: "owner", replicationEpoch: "epoch-1", streamIdentity: "stream-1", incarnation: 1, startedAtMs: 10 });
-    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 20 })).toEqual(first);
+    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 20, reasons: ["automation"] })).toEqual(first);
 
     acceptedPress(raw, "taken-here", "server");
     acceptedPress(raw, "taken-there", "laptop");
     storage.rotateWorkspaceIdentity({ workspaceId: WORKSPACE, ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 30 });
     expect(storage.currentAutomationWorkspace(WORKSPACE), "the old replica's credential stops").toBeNull();
-    const second = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 40 })!;
+    const second = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 40, reasons: ["automation"] })!;
     expect(second).toMatchObject({ replicationEpoch: "epoch-2", incarnation: 2, startedAtMs: 40 });
     expect(second.credentialNonce).not.toBe(first.credentialNonce);
     expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
     expect(pressState(raw, "taken-there")).toEqual({ state: "accepted", outcome: null });
-    expect(storage.joinAutomationWorkspace({ workspaceId: "unknown", nowMs: 1 })).toBeNull();
+    expect(storage.joinAutomationWorkspace({ workspaceId: "unknown", nowMs: 1, reasons: ["automation"] })).toBeNull();
   });
 
   it("replaces a lost replica only once the server began running automations in its incarnation", async () => {
     const { storage, raw } = await relay();
-    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10 })!;
+    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10, reasons: ["automation"] })!;
     acceptedPress(raw, "taken-here", "server");
     expect(storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 20 }), "nothing ran in it").toEqual(first);
     storage.beginAutomationServerCopy({ workspaceId: WORKSPACE, incarnation: 1 });
@@ -95,14 +101,28 @@ describe("the workspaces this server keeps a replica of", () => {
 
   it("leaves a day after no condition needs it, and rejoins as it was", async () => {
     const { storage } = await relay();
-    const joined = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 })!;
+    const joined = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] })!;
     expect(storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 100 })).toBeNull();
     expect(storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 100 + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS - 1 })).toBeNull();
     const left = storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 100 + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS });
     expect(left).toMatchObject({ leftAtMs: 100 + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS });
     expect(storage.currentAutomationWorkspace(WORKSPACE)).toBeNull();
-    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 200 })).toEqual(joined);
+    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 200, reasons: ["automation"] })).toEqual(joined);
     expect(storage.currentAutomationWorkspace(WORKSPACE)).toEqual(joined);
+  });
+
+  it("keeps each reason a copy was joined for, and a reason added later is a change", async () => {
+    const { storage } = await relay();
+    const joined = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] })!;
+    expect(joined.reasons).toEqual(["automation"]);
+    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 1, reasons: [] })).toEqual(joined);
+    const both = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 2, reasons: ["account"] })!;
+    expect(both).toEqual({ ...joined, reasons: ["account", "automation"] });
+    storage.endCopyReason(WORKSPACE, "automation");
+    expect(storage.currentAutomationWorkspace(WORKSPACE)?.reasons).toEqual(["account"]);
+    storage.rotateWorkspaceIdentity({ workspaceId: WORKSPACE, ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 3 });
+    expect(storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 4, reasons: [] }), "a new incarnation keeps its reasons")
+      .toMatchObject({ incarnation: 2, reasons: ["account"] });
   });
 
   it("lists the workspaces whose automation host is the server, running or handing over", async () => {
@@ -120,7 +140,7 @@ describe("the workspaces this server keeps a replica of", () => {
 describe("the automation replica's credential", () => {
   it("replicates only its own workspace, as its owner, while the replica is current", async () => {
     const { storage } = await relay();
-    const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 })!;
+    const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] })!;
     const bearer = deriveAutomationReplicaBearer(row, { key, namespace });
     expect(bearer).toMatch(/^dohc-automation-v1\./u);
     const authorize = (input: { workspaceId?: string; bearer?: string; pathname?: string; method?: string }) => authorizeAutomationReplication(storage, {
@@ -280,9 +300,9 @@ describe("the automation replicas", () => {
     return (error: unknown) => { errors.push(error); };
   }
 
-  async function start(storage: SyncRelayStorage, options: Partial<Parameters<typeof startAutomationReplicas>[0]> = {}, closes = true) {
+  async function start(storage: SyncRelayStorage, options: Partial<AutomationOptions> = {}, closes = true) {
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => [], onError: unexpectedErrors(), ...options });
     cleanup.push(async () => { if (closes) await running.close(); await rm(root, { recursive: true, force: true }); });
     return running;
@@ -296,7 +316,7 @@ describe("the automation replicas", () => {
     onPulled?: (workspaceId: string, paths: readonly string[]) => void,
   ) {
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const started = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const started = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted, nowMs: () => clock.ms, onError, ...(onPulled ? { onPulled } : {}) });
     cleanup.push(async () => { await started.close(); await rm(root, { recursive: true, force: true }); });
     await started.settled();
@@ -337,7 +357,7 @@ describe("the automation replicas", () => {
     await running.close();const path=storagePath(storage);closeTestStorage(storage);
     const restartedStorage=reopenTestStorage(path) as StorageContext;
     initializeAccountDeletion(restartedStorage,"fence");
-    const restarted=await startAutomationReplicas({storage:restartedStorage,root,engineExecutable:process.execPath,relayOrigin:"https://relay.example",key,namespace,wanted:()=>[WORKSPACE],onError:unexpectedErrors()});
+    const restarted=await startReplicas({storage:restartedStorage,root,engineExecutable:process.execPath,relayOrigin:"https://relay.example",key,namespace,wanted:()=>[WORKSPACE],onError:unexpectedErrors()});
     cleanup.push(()=>restarted.close());await restarted.settled();
     expect(restarted.replica(WORKSPACE)).toBeUndefined();expect(existsSync(deletedRoot)).toBe(false);
     const resume=createAccountDeletionRoute({storage:restartedStorage,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>{throw Error("runtime must not repeat");}});
@@ -389,7 +409,7 @@ describe("the automation replicas", () => {
     fakeEngine();
     spawn.mockRejectedValueOnce(new Error("engine failed to start"));
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({storage, root, engineExecutable: process.execPath,
+    const running = await startReplicas({storage, root, engineExecutable: process.execPath,
       relayOrigin: "https://relay.example", key, namespace, wanted: () => [], onError: error => errors.push(error)});
     cleanup.push(async () => { await running.close(); await rm(root, {recursive: true, force: true}); });
     expect(running.unavailable).toBe(true);
@@ -522,7 +542,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage, log } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const errors: unknown[] = [];
@@ -572,7 +592,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage, log } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const reported: number[] = [];
@@ -618,10 +638,10 @@ describe("the automation replicas", () => {
     for (const workspaceId of ["healthy", "leaving"]) {
       storage.claimWorkspace({ workspaceId, ownerUserId: "owner", createdAtMs: 1 });
       storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-      storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+      storage.joinAutomationWorkspace({ workspaceId, nowMs: 0, reasons: ["automation"] });
     }
     storage.unwantAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const errors: unknown[] = [];
@@ -672,7 +692,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const errors: unknown[] = [];
@@ -710,7 +730,7 @@ describe("the automation replicas", () => {
     const { storage, raw } = await relay();
     storage.claimWorkspace({ workspaceId: "healthy", ownerUserId: "owner", createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId: "healthy", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const steps: Array<[string, number]> = [];
@@ -739,7 +759,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const pushed = gate(), pushing = gate();
     let hold = false;
@@ -783,7 +803,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage, raw } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     engine.failPush(true);
     const passes = passEnds();
@@ -812,7 +832,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     engine.failPush(true);
     const passes = passEnds();
@@ -835,7 +855,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     const steps: number[] = [];
@@ -859,7 +879,7 @@ describe("the automation replicas", () => {
     const { storage, raw, log } = await relay();
     storage.claimWorkspace({ workspaceId: "healthy", ownerUserId: "owner", createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId: "healthy", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+    for (const workspaceId of [WORKSPACE, "healthy"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const pushing = gate(), pushed = gate();
     let healthy: string | undefined;
@@ -914,7 +934,7 @@ describe("the automation replicas", () => {
     const { storage } = await relay();
     storage.claimWorkspace({ workspaceId: "other", ownerUserId: "owner", createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId: "other", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    for (const workspaceId of [WORKSPACE, "other"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0 });
+    for (const workspaceId of [WORKSPACE, "other"]) storage.joinAutomationWorkspace({ workspaceId, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     engine.failPush(true);
     const passes = passEnds();
@@ -939,7 +959,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     let refuse = false;
     refuseOpens(engine, () => refuse);
@@ -991,7 +1011,7 @@ describe("the automation replicas", () => {
     vi.setSystemTime(0);
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     const passes = passEnds();
     let completed = 0;
@@ -1191,6 +1211,88 @@ describe("the automation replicas", () => {
     expect(storage.listAutomationWorkspaces()).toEqual([]);
   });
 
+  // Copies an owner's account reads, beside those automations keep.
+  async function copies(storage: SyncRelayStorage, wanted: () => ReadonlyMap<string, readonly CopyReason[]>, clock: { ms: number },
+    onChanged?: (workspaceId: string) => void) {
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const started = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+      key, namespace, wanted, nowMs: () => clock.ms, onError: unexpectedErrors(), ...(onChanged ? { onChanged } : {}) });
+    cleanup.push(async () => { await started.close(); await rm(root, { recursive: true, force: true }); });
+    await started.settled();
+    return { replicas: started, root };
+  }
+  const folders = (root: string) => readdirSync(root).filter(entry => /^[0-9a-f]{64}$/u.test(entry));
+
+  it("closes an account copy as soon as nothing wants it, and removes its folder and row when it leaves", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const clock = { ms: 0 };
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const { replicas: running, root } = await copies(storage, () => wanted, clock);
+    expect(running.replica(WORKSPACE)?.reasons).toEqual(["account"]);
+    wanted = new Map();
+    running.reconcile(); await running.settled();
+    expect(running.replica(WORKSPACE), "an idle account copy holds no engine").toBeUndefined();
+    expect(engine.methods()).toContain("workspace.close");
+    expect(folders(root), "its folder stays a day, so the next visit only catches up").toHaveLength(1);
+    wanted = new Map([[WORKSPACE, ["account"]]]);
+    running.reconcile(); await running.settled();
+    expect(running.replica(WORKSPACE)).toBeDefined();
+    wanted = new Map();
+    running.reconcile(); await running.settled();
+    clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
+    running.reconcile(); await running.settled();
+    expect(folders(root), "no hold for run history").toEqual([]);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  it("removes a copy at once when its last reason ends", async () => {
+    const { storage } = await relay();
+    fakeEngine();
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const { replicas: running, root } = await copies(storage, () => wanted, { ms: 0 });
+    wanted = new Map();
+    running.reconcile(); await running.settled();
+    expect(folders(root)).toHaveLength(1);
+    storage.endCopyReason(WORKSPACE, "account");
+    running.reconcile(); await running.settled();
+    expect(folders(root)).toEqual([]);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  it("keeps an account copy when the server stops running automations, and lets the automations' copies go", async () => {
+    const { storage } = await relay();
+    storage.claimWorkspace({ workspaceId: "ledger", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "ledger", replicationEpoch: "epoch", streamIdentity: "stream" });
+    fakeEngine();
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["automation", "account"]], ["ledger", ["automation"]]]);
+    const first = await copies(storage, () => wanted, { ms: 0 });
+    await first.replicas.close();
+    // The server restarts without automations: only the account's reason stays.
+    storage.endCopyReasonEverywhere("automation");
+    wanted = new Map([[WORKSPACE, ["account"]]]);
+    const { replicas: running, root } = await copies(storage, () => wanted, { ms: 0 });
+    expect(running.replica(WORKSPACE)?.reasons).toEqual(["account"]);
+    expect(running.replica("ledger")).toBeUndefined();
+    expect(storage.listAutomationWorkspaces().map(row => [row.workspaceId, row.reasons])).toEqual([[WORKSPACE, ["account"]]]);
+    expect(folders(root)).toHaveLength(1);
+  });
+
+  it("tells its listener when an open account copy comes to be kept for automations", async () => {
+    const { storage } = await relay();
+    fakeEngine();
+    const changed: string[] = [];
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const { replicas: running } = await copies(storage, () => wanted, { ms: 0 }, id => changed.push(id));
+    const opened = running.replica(WORKSPACE);
+    changed.length = 0;
+    wanted = new Map([[WORKSPACE, ["automation", "account"]]]);
+    running.reconcile(); await running.settled();
+    expect(changed).toEqual([WORKSPACE]);
+    expect(running.replica(WORKSPACE), "the same copy").toBe(opened);
+    expect(opened?.reasons).toEqual(["account", "automation"]);
+  });
+
   it("replaces a replica whose workspace identity changed, and reopens every replica after its engine exits", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
@@ -1253,7 +1355,7 @@ describe("the automation replicas", () => {
       return client;
     });
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => [WORKSPACE], onError: (error) => errors.push(error) });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     await vi.waitFor(() => expect(errors).toHaveLength(1), { timeout: WAIT_TIMEOUT_MS });
@@ -1286,14 +1388,14 @@ describe("the automation replicas", () => {
       return client;
     });
     // "leaving" has not been wanted for a day.
-    storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
     const clock = { ms: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS };
     const errors: Array<[unknown, string | undefined]> = [];
     let passes = 0;
     const waiting: Array<() => void> = [];
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => ["broken", WORKSPACE], nowMs: () => clock.ms,
       onError: (error, workspaceId) => errors.push([error, workspaceId]),
       onReconciled: () => { passes += 1; for (const resolve of waiting.splice(0)) resolve(); } });
@@ -1356,7 +1458,7 @@ describe("the automation replicas", () => {
     let opened = true, cursor = 1;
     const clock = { ms: 5 };
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => ["busy", WORKSPACE], nowMs: () => clock.ms, onError: unexpectedErrors() });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The busy one never catches up, and the quiet one still opens.
@@ -1383,7 +1485,7 @@ describe("the automation replicas", () => {
     const { storage } = await relay();
     const errors: number[] = [];
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => { throw new Error("The host records did not read."); }, onError: () => errors.push(Date.now()) });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     const start = Date.now();
@@ -1400,7 +1502,7 @@ describe("the automation replicas", () => {
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
     const start = Date.now();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: start });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: start, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: start });
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
     // Each pass reads and writes real folders, which fake time does not wait
@@ -1408,7 +1510,7 @@ describe("the automation replicas", () => {
     const waiting: Array<() => void> = [];
     const nextPass = () => new Promise<void>((resolve) => waiting.push(resolve));
     const opened = nextPass();
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted: () => [], onError: unexpectedErrors(),
       onReconciled: () => { for (const resolve of waiting.splice(0)) resolve(); } });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
@@ -1541,7 +1643,7 @@ describe("the automation replicas", () => {
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
     // Joined already, so a pass's join writes nothing that asks for another pass.
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const engine = fakeEngine();
     refuseOpens(engine, () => true);
     const passes = passEnds();
@@ -1611,9 +1713,9 @@ describe("the automation replicas", () => {
     const { storage } = await relay();
     storage.claimWorkspace({ workspaceId: "leaving", ownerUserId: "owner", createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId: "leaving", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     let refuse = true;
     refuseOpens(fakeEngine(), () => refuse);
     const passes = passEnds();
@@ -1641,7 +1743,7 @@ describe("the automation replicas", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     const engine = fakeEngine();
     const hold = holdStartups();
@@ -1676,7 +1778,7 @@ describe("the automation replicas", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     vi.spyOn(storage, "unwantAutomationWorkspace").mockImplementation(() => { throw new Error("The row did not write."); });
     fakeEngine();
@@ -1737,7 +1839,7 @@ describe("the automation replicas", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     cleanup.push(async () => { vi.useRealTimers(); });
     const { storage } = await relay();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     const list = storage.listAutomationWorkspaces.bind(storage);
     let failing = true;

@@ -1426,6 +1426,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
         "self_share" => RelayError::SelfShare,
+        "server-busy" => RelayError::HttpStatus(503),
         "settlement_proof_budget" => RelayError::SettlementProofBudget,
         "share_access_rate_limited" => RelayError::ShareAccessRateLimited,
         "share_op_rejected" => RelayError::ShareOperationRejected,

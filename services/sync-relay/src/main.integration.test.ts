@@ -1076,6 +1076,20 @@ describe("sync relay startup guards", () => {
     expect(code).toBe(1); expect(stderr).toContain("DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
     await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
   });
+  it.each(["true", "", "2"])("refuses an invalid account API flag before opening storage: %j", async value => {
+    const dbPath = join(await tempRoot("invalid-account-api"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_ACCOUNT_API: value});
+    expect(code).toBe(1); expect(stderr).toContain("DOHC_ACCOUNT_API must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
+  it("refuses the account API without what its copies of workspaces need", async () => {
+    const dbPath = join(await tempRoot("account-api-without-copies"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_ACCOUNT_API: "1"});
+    expect(code).toBe(1);
+    expect(stderr).toContain("Automations and the account API on this server require a deployment");
+  });
   it.each(["true", "", "2"])("refuses an invalid self-host live flag before opening storage: %j", async value => {
     const dbPath = join(await tempRoot("invalid-self-host"), "relay.sqlite");
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",

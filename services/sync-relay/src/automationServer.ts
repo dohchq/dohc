@@ -57,7 +57,8 @@ import {automationRecordDelivery, AutomationRecordBindingChanged} from "./automa
 import {createAutomationAcceptedRecords} from "./automationAcceptedRecords";
 import type {NamedFrameHostSession} from "./namedLiveFrameSession";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
+import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
+import { startServerCopies, type ServerCopiesOptions } from "./serverCopies";
 import type { OwnerScope, ServerRuns } from "./automationServerRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { DatasetServerPress } from "./datasetAutomations";
@@ -110,8 +111,6 @@ const SYNC_FAILURES_REPORTED = 3;
 // long poll does.
 const PRESS_WAIT_MS = 25_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-// An owner's action on a copy the server keeps closed waits this long for it to open.
-const RETAINED_COPY_OPEN_MS = 30_000;
 // The effects a run makes in its copy, which reach the relay only when the
 // copy syncs. Notices and agent wakes go straight to the relay.
 const COPY_EFFECTS: ReadonlySet<string> = new Set(["set", "add", "message"]);
@@ -143,7 +142,7 @@ export interface AutomationServerOptions {
   };
   /** This server, as the owner's settings name it. */
   server: AutomationServer;
-  replicas: Omit<Parameters<typeof startAutomationReplicas>[0], "storage" | "wanted" | "onChanged" | "onEngineEvent" | "onPulled" | "onReconciled" | "onError">;
+  replicas: Omit<ServerCopiesOptions, "storage" | "automations" | "startReplicas" | "onChanged" | "onEngineEvent" | "onPulled" | "onReconciled" | "onError">;
   /** A GET of the owner's share listings, answered in process (createSyncRelayHandler's readOwnerShares). */
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
   lookupUserDisplayName(userId: string): Promise<string | null> | string | null;
@@ -222,11 +221,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   const { storage, server } = options;
   const nowMs = options.nowMs ?? Date.now;
   const hosted = new Map<string, Hosted>();
-  // Copies owners' actions hold open, with how many actions still use each,
-  // and when a copy nothing else needed stopped being needed and left.
-  const visits = new Map<string, { actions: number; times: { incarnation: number; unwantedSinceMs: number; leftAtMs: number | null } | null }>();
-  // Actions waiting for a copy to open.
-  const copyWaiters = new Set<() => void>();
   const evaluator = createAutomationFormulaEvaluator();
   const gate = createRunGate({ nowMs, onWaiting: (workspaceId) => overBudget(workspaceId) });
   let unavailable = false;
@@ -987,7 +981,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     });
     hosted.set(replica.workspaceId, ws);
     reportLostRuns(ws);
-    for (const check of [...copyWaiters]) check();
+    copies.notifyReady();
     // A write to the host record wakes the scheduler; it never asks on a timer.
     scheduler.add(replica.workspaceId, ws.executor, { ...hostSeam(state, () => ws), asksAgain: () => false });
     if (ws.flushRecordDelivery) syncSoon(ws);
@@ -1028,14 +1022,17 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     await ws.reporting.catch(() => undefined);
   }
 
-  // A replica opened, closed, or was replaced: its executor follows it.
+  // A copy opened, closed, was replaced, or changed why it is kept: its
+  // executor follows it. Only a copy automations keep has one, so a copy an
+  // account reads runs nothing.
   function replicaChanged(workspaceId: string): void {
-    const replica = replicas.replica(workspaceId);
+    const opened = copies.replica(workspaceId);
+    const replica = opened?.reasons.includes("automation") ? opened : undefined;
     const current = hosted.get(workspaceId);
-    if (current && current.replica === replica) return;
+    if (current ? current.replica === replica : replica === undefined) return;
     const opening = current ? close(current) : Promise.resolve();
     void opening.then(() => {
-      if (!closed && !workspaceIsDeleted(storage, workspaceId) && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
+      if (!closed && !workspaceIsDeleted(storage, workspaceId) && replica && copies.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
     }).catch((error: unknown) => options.onError(`close the automations of workspace "${workspaceId}"`, error));
   }
 
@@ -1054,14 +1051,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   let capacityReporting = Promise.resolve();
   const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
   const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])].filter(id => !workspaceIsDeleted(storage, id));
-  function wantedWorkspaces(): string[] {
-    const running = runningWorkspaces();
-    // A copy an owner's action reopened stays open while the action runs,
-    // within the same cap as the copies the server runs. An admitted action
-    // keeps its place: a workspace that needs the server since waits for it.
-    const visiting = [...visits.keys()];
-    return [...new Set([...visiting, ...running])].slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
-  }
   function runningWorkspaces(): string[] {
     const all = allWantedWorkspaces();
     const waiting = new Set(all.slice(AUTOMATION_SERVER_MAX_WORKSPACES));
@@ -1091,11 +1080,12 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     return all.slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
   }
 
-  const replicas = await (options.startReplicas ?? startAutomationReplicas)({
+  const copies = await startServerCopies({
     ...options.replicas,
     storage,
     nowMs,
-    wanted: wantedWorkspaces,
+    automations: { wanted: allWantedWorkspaces, running: runningWorkspaces, ready: (workspaceId) => copyIsOpen(workspaceId) },
+    ...(options.startReplicas ? { startReplicas: options.startReplicas } : {}),
     onChanged: replicaChanged,
     onEngineEvent: engineEvent,
     onBeforeSync: workspaceId => hosted.get(workspaceId)?.refreshAcceptedRecords?.() ?? Promise.resolve(),
@@ -1162,73 +1152,15 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     };
   }
 
-  /**
-   * Runs `work` on the owner's copy of a workspace. A copy the server keeps
-   * after the workspace left it, for run history and Undo
-   * (AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS), opens again for the
-   * action. It runs no schedules, Group triggers or presses, since the host
-   * record names another host, and leaves again a day after the action.
-   */
-  async function withCopy<T>(scope: OwnerScope, work: (ws: Hosted) => Promise<T>): Promise<T> {
-    const { workspaceId, ownerUserId } = scope;
-    const kept = storage.listAutomationWorkspaces().find((row) => row.workspaceId === workspaceId);
-    if (kept?.ownerUserId !== ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw notFound();
-    const visit = visits.get(workspaceId);
-    if (visit === undefined && !copyIsOpen(workspaceId) &&
-      new Set([...allWantedWorkspaces().slice(0, AUTOMATION_SERVER_MAX_WORKSPACES), ...visits.keys()]).size >= AUTOMATION_SERVER_MAX_WORKSPACES) {
-      throw new RelayError("conflict", "Your server has as many workspaces open as it can. Try again later.", 503);
-    }
-    // Every action holds the copy open, one waiting to leave included, until
-    // it ends. Opening joins the copy again; its times go back afterwards.
-    visits.set(workspaceId, {
-      actions: (visit?.actions ?? 0) + 1,
-      times: visit ? visit.times : kept.unwantedSinceMs === null ? null
-        : { incarnation: kept.incarnation, unwantedSinceMs: kept.unwantedSinceMs, leftAtMs: kept.leftAtMs },
-    });
-    try {
-      replicas.reconcile(workspaceId);
-      await copyOpened(workspaceId);
-      return await work(ownedCopy(scope));
-    } finally {
-      const current = visits.get(workspaceId)!;
-      if (current.actions > 1) {
-        visits.set(workspaceId, { ...current, actions: current.actions - 1 });
-      } else {
-        visits.delete(workspaceId);
-        if (current.times !== null && !allWantedWorkspaces().includes(workspaceId)) {
-          storage.restoreAutomationWorkspaceTimes({ workspaceId, ...current.times });
-        }
-      }
-      replicas.reconcile();
-    }
+  /** Runs `work` on the owner's copy of a workspace, with its executor (ServerCopies.withServerCopy). */
+  function withCopy<T>(scope: OwnerScope, work: (ws: Hosted) => Promise<T>): Promise<T> {
+    return copies.withServerCopy(scope.ownerUserId, scope.workspaceId, { reason: "automation" }, () => work(ownedCopy(scope)));
   }
 
   const copyIsOpen = (workspaceId: string) => {
     const ws = hosted.get(workspaceId);
     return ws !== undefined && !ws.closed;
   };
-
-  /** Resolves once the replicas module opened this workspace's copy, or refuses after RETAINED_COPY_OPEN_MS. */
-  function copyOpened(workspaceId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const done = () => {
-        clearTimeout(timer);
-        copyWaiters.delete(check);
-      };
-      const check = () => {
-        if (!copyIsOpen(workspaceId)) return;
-        done();
-        resolve();
-      };
-      const timer = setTimeout(() => {
-        done();
-        reject(new RelayError("conflict", "Your server is opening its copy of this workspace. Try again.", 503));
-      }, RETAINED_COPY_OPEN_MS);
-      timer.unref?.();
-      copyWaiters.add(check);
-      check();
-    });
-  }
 
   /**
    * The owner's copy, caught up with what the relay has, so an Undo keeps
@@ -1333,8 +1265,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       for (const ws of hosted.values()) ws.names.delete(userId);
     },
     async deleteWorkspaces(workspaceIds: readonly string[]) {
-      for (const id of workspaceIds) {const ws = hosted.get(id); if (ws) await close(ws); visits.delete(id); excluded.delete(id); toldOverBudget.delete(id); gate.forgetWorkspace(id);}
-      await replicas.deleteWorkspaces(workspaceIds);
+      for (const id of workspaceIds) {const ws = hosted.get(id); if (ws) await close(ws); excluded.delete(id); toldOverBudget.delete(id); gate.forgetWorkspace(id);}
+      await copies.deleteWorkspaces(workspaceIds);
     },
     async pressDataset(auth: Extract<AppBackendAuth, { kind: "named" }>, input: DatasetServerPress, signal: AbortSignal) {
       if (!options.datasetHost) throw notFound();
@@ -1353,9 +1285,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     },
     /** The owner's view of each workspace's runs here, for the owner routes. */
     runs,
+    /** This server's copies of workspaces, which its owners' accounts read too. */
+    copies,
     /** Whether this server's copies of workspaces keep failing to open or sync. */
     get unavailable(): boolean {
-      return unavailable || replicas.unavailable;
+      return unavailable || copies.unavailable;
     },
     async close(): Promise<void> {
       closed = true;
@@ -1364,7 +1298,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       stopDatasetClaims?.();
       scheduler.dispose();
       for (const ws of [...hosted.values()]) await close(ws);
-      await replicas.close();
+      await copies.close();
       await capacityReporting;
       await evaluator.close();
     },

@@ -24,7 +24,7 @@ import type { LiveClaimLedger } from "./automationLiveClaims";
 import { createRunGate, SERVER_RUN_BURST, startAutomationServer, type AutomationServerOptions, type ServerExecutor } from "./automationServer";
 import type { Event } from "@dohc/workspace-engine-client";
 import type { ServerRuns } from "./automationServerRoutes";
-import { AUTOMATION_WORKSPACE_LEAVE_AFTER_MS } from "./storage/automationWorkspaces";
+import { AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, type CopyReason } from "./storage/automationWorkspaces";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -189,6 +189,11 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   });
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   const errors: Array<[string, unknown]> = [];
+  const replicaOf = (): AutomationReplica => ({
+    workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, reasons: ["automation"], startedAtMs: input.startedAtMs ?? at(7),
+    root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal: new AbortController().signal,
+    nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
+  });
   const run = await startAutomationServer({
     storage, datasetHost: input.datasetHost,
     server: { label: "My dohc server" },
@@ -220,16 +225,20 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     run, errors, marks, sync,
     /** What the replicas module reports to the server. */
     replicaHooks: () => hooks!,
-    /** What the replicas module is asked to keep. */
-    wanted: () => hooks!.wanted(),
+    /** The workspaces the replicas module is asked to keep. */
+    wanted: () => [...hooks!.wanted().keys()],
+    /** How many executors the server made. */
+    executors: () => executors.length,
+    /** The replicas module opened a copy kept only for the owner's account, which can come to be kept for automations too. */
+    openAccountCopy() {
+      const copy = { ...replicaOf(), reasons: ["account"] as CopyReason[] };
+      open.set(WORKSPACE, copy);
+      hooks!.onChanged?.(WORKSPACE);
+      return { keepForAutomations: () => { copy.reasons = ["account", "automation"]; hooks!.onChanged?.(WORKSPACE); } };
+    },
     /** The replicas module opened this server's copy of the workspace. */
     async openReplica(): Promise<Fake> {
-      const signal = new AbortController().signal;
-      open.set(WORKSPACE, {
-        workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
-        root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
-        nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
-      });
+      open.set(WORKSPACE, replicaOf());
       hooks!.onChanged?.(WORKSPACE);
       await vi.waitFor(() => expect(executors).toHaveLength(1));
       // Most fake replicas keep no History. A test can provide a real client or override these instance reads.
@@ -794,6 +803,18 @@ describe("a server that runs a workspace's automations", () => {
   });
 });
 
+describe("a server's copy that the owner's account reads", () => {
+  it("runs no automations in it until automations keep it too", async () => {
+    const { storage, h } = await relay();
+    const s = await server(storage, h);
+    const copy = s.openAccountCopy();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(s.executors()).toBe(0);
+    copy.keepForAutomations();
+    await vi.waitFor(() => expect(s.executors()).toBe(1));
+  });
+});
+
 describe("a server whose copies of workspaces fail", () => {
   it("stays available when one workspace's copy fails, and not when a whole pass does", async () => {
     clock = at(8);
@@ -1313,7 +1334,7 @@ describe("the owner's routes to the server's runs", () => {
     await claimWorkspace(h, OWNER, WORKSPACE);
     // The server keeps a copy of the workspace.
     storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const s = await server(storage, h);
     serverRuns = s.run.runs;
     const call = async (userId: string, action: string, body?: Record<string, unknown>, init: RequestInit = {}) => {
@@ -1414,7 +1435,7 @@ describe("the owner's routes to the server's runs", () => {
       const h = testHandler(storage, { nowMs: () => clock, automationServer: { label: "My dohc server" }, serverRuns: () => serverRuns });
       await claimWorkspace(h, OWNER, WORKSPACE);
       storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-      storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+      storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
       // The server runs this workspace's automations.
       await h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "laptop", label: "Laptop", claim: true })));
       const call = async (action: string, body?: Record<string, unknown>) => {
@@ -1745,7 +1766,7 @@ describe("the owner's routes to the server's runs", () => {
     const undone = call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null });
     await vi.waitFor(() => expect(s.wanted()).toEqual([WORKSPACE]));
     // The replicas module joins the copy again as it opens it.
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: clock });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: clock, reasons: ["automation"] });
     const fake = await s.openReplica();
     expect(await undone).toMatchObject({ status: 200, body: { status: "undone" } });
     expect(fake.asked).toEqual([["undo", { automationId: PRESSED, claimId: "claim-1", deletes: null }]]);
@@ -1769,7 +1790,7 @@ describe("the owner's routes to the server's runs", () => {
     clock = 0;
     const { storage, h } = await relay();
     storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     inspectDatabase(storagePath(storage)).prepare("INSERT INTO sync_relay_automation_hosts (workspace_id, install_id, generation, handover_from) VALUES (?, 'server', 1, NULL)").run(WORKSPACE);
     const root = await mkdtemp(join(tmpdir(), "automation-owner-retry-"));
     cleanup.push(async () => { await rm(root, { recursive: true, force: true }); });
@@ -1833,7 +1854,7 @@ describe("the owner's routes to the server's runs", () => {
     const ids = Array.from({ length: AUTOMATION_SERVER_MAX_WORKSPACES }, (_, index) => `workspace-${index}`);
     const datasetHost = { automations: { wantedWorkspaces: () => ids }, observeAutomationClaims: () => () => undefined } as unknown as RelayDatasetHost;
     storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const s = await server(storage, h, { datasetHost });
     await expect(s.run.runs.list({ workspaceId: WORKSPACE, ownerUserId: OWNER }, PRESSED))
       .rejects.toMatchObject({ statusCode: 503, message: "Your server has as many workspaces open as it can. Try again later." });
@@ -1849,7 +1870,7 @@ describe("the owner's routes to the server's runs", () => {
       observeAutomationClaims: () => () => undefined,
     } as unknown as RelayDatasetHost;
     storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation"] });
     const s = await server(storage, h, { datasetHost });
     const listed = s.run.runs.list({ workspaceId: WORKSPACE, ownerUserId: OWNER }, PRESSED);
     await vi.waitFor(() => expect(s.wanted()).toContain(WORKSPACE));
