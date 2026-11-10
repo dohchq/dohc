@@ -32,7 +32,7 @@ async function runJavascript(groups, record, save, availability) {
   const tasks = groups.flatMap(group => group.tasks);
   const selected = new Map(tasks.map(task => [task.id, task]));
   groups = [...groups];
-  groups.sort((a, b) => Number(b.native) - Number(a.native) || b.weight - a.weight);
+  groups.sort((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
   const step = async (name, action) => {
     const row = { name }; record.steps.push(row);
     return timed(row, action, save);

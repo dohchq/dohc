@@ -752,6 +752,23 @@ it("keeps the closed-record open, journal, settle and close path", async () => {
   expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
 });
 
+it("opens the next record writer after the previous writer releases its session", async () => {
+  const first = await capture.openRecordSession(PATH);
+  const entered = deferred();
+  const release = deferred();
+  beforeClose = async () => { entered.resolve(); await release.promise; };
+  const closing = first.close();
+  await entered.promise;
+  const next = capture.openRecordSession(PATH);
+  void next.catch(() => undefined);
+  release.resolve();
+  await closing;
+  const second = await next;
+  await second.close();
+  expect(methodCount(YDOC_METHOD.open)).toBe(2);
+  expect(methodCount(YDOC_METHOD.close)).toBe(2);
+});
+
 it("settles an open record before a person's delete and credits the person in History", async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
   await openedLocalState({ workspaceId: "record-delete", rootPath: root });

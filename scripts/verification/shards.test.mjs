@@ -155,23 +155,26 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
   assert.deepEqual(passedRustTests("PASS [ 0.1s] (1/2) crate retained\nFAIL [ 0.2s] crate broken\nFLAKY 2/2 [ 0.1s] crate retry"), ["crate retained"]);
 });
 
-test("shared preparation waits for this attempt and keeps the original group deadline", async () => {
+for (const [scope, jobName, artifact, seconds] of [
+  ["js", "shared preparation + confinement", "javascript-prepared", 300],
+  ["rust", "Rust build once", "rust-tests", 600],
+]) test(`${scope} preparation waits for this attempt and keeps the original group deadline`, async () => {
   const env = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
   const started = Date.parse("2026-11-09T00:00:00Z");
   let clock = started + 10_000, reads = 0;
-  const jobs = [{ name: "what changed", started_at: new Date(started).toISOString() }, { name: "shared preparation + confinement", status: "in_progress" }];
+  const jobs = [{ name: "what changed", started_at: new Date(started).toISOString() }, { name: jobName, status: "in_progress" }];
   const response = value => ({ ok: true, json: async () => value });
-  await waitForPreparation("js", { env, now: () => clock, pause: async ms => { clock += ms; }, request: async url => {
+  await waitForPreparation(scope, { env, now: () => clock, pause: async ms => { clock += ms; }, request: async url => {
     reads++;
-    return response(url.includes("/jobs?") ? { jobs } : { artifacts: reads < 4 ? [] : [{ name: "javascript-prepared-2", expired: false }] });
+    return response(url.includes("/jobs?") ? { jobs } : { artifacts: reads < 4 ? [] : [{ name: `${artifact}-2`, expired: false }] });
   } });
   assert.equal(reads, 4);
   assert.equal(clock, started + 20_000);
-  clock = started + 299_000;
-  await assert.rejects(waitForPreparation("js", { env, now: () => clock, pause: async ms => { clock += ms; },
-    request: async url => response(url.includes("/jobs?") ? { jobs } : { artifacts: [{ name: "javascript-prepared-1", expired: false }] }),
-  }), /exceeded.*300s/u);
-  await assert.rejects(waitForPreparation("js", { env, now: () => started + 1000, request: async () => response({
+  clock = started + seconds * 1000 - 1000;
+  await assert.rejects(waitForPreparation(scope, { env, now: () => clock, pause: async ms => { clock += ms; },
+    request: async url => response(url.includes("/jobs?") ? { jobs } : { artifacts: [{ name: `${artifact}-1`, expired: false }] }),
+  }), new RegExp(`exceeded.*${seconds}s`, "u"));
+  await assert.rejects(waitForPreparation(scope, { env, now: () => started + 1000, request: async () => response({
     jobs: [jobs[0], { ...jobs[1], status: "completed", conclusion: "failure" }],
   }) }), /ended with failure/u);
 });

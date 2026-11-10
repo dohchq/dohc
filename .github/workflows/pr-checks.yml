@@ -481,9 +481,9 @@ jobs:
           compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, rust-archive]
+    needs: changes
     if: >-
-      always() && !cancelled() && needs.changes.result == 'success' && needs.rust-archive.result == 'success' &&
+      always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -505,6 +505,7 @@ jobs:
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -521,6 +522,8 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
           tool: cargo-nextest@0.9.143
+      - name: Wait for the shared Rust archive
+        run: node scripts/verification/wait-preparation.mjs rust
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: rust-tests-${{ github.run_attempt }}
@@ -583,7 +586,7 @@ jobs:
           compression-level: 0
   rust:
     name: engine gate
-    needs: [changes, rust-archive]
+    needs: changes
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -607,6 +610,8 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
           tool: cargo-nextest@0.9.143
+      - name: Wait for the shared Rust archive
+        run: node scripts/verification/wait-preparation.mjs rust
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: rust-tests-${{ github.run_attempt }}

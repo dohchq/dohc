@@ -6362,7 +6362,8 @@ export function createWorkspaceEngineCapture(
             ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
           }),
           settleNow: opts => publicSession.settleNow(opts),
-          close: opts => publicSession.close(opts),
+          // A later record open must follow this writer's lease release.
+          close: opts => enqueueResult("close record session", () => publicSession.close(opts)),
         } satisfies RecordEditSession;
         return publicSession;
       }

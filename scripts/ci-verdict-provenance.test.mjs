@@ -389,7 +389,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
   assert.equal(jobs.javascript.needs, "changes");
-  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive"]);
+  assert.equal(jobs.rust.needs, "changes");
   assert.equal(jobs["rust-policy"].needs, "changes");
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
     const steps = jobs[name].steps;
@@ -404,11 +404,15 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");
   assert.equal(workers.steps.find(step => step.name === "Run the complete assigned inventory").run, "node scripts/verification/cloud.mjs worker ${{ matrix.shard }}");
   const tests = jobs["rust-tests"];
-  assert.deepEqual(tests.needs, ["changes", "rust-archive"], "Rust execution must not wait for JavaScript");
-  const install = tests.steps.findIndex(step => step.name === "Install dependencies");
-  const download = tests.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
-  assert.ok(install >= 0 && install < download);
-  assert.equal(tests.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");
+  assert.equal(tests.needs, "changes", "Rust setup must overlap the archive build");
+  for (const job of [tests, jobs.rust]) {
+    assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
+    const install = job.steps.findIndex(step => step.name === "Install dependencies");
+    const wait = job.steps.findIndex(step => step.run === "node scripts/verification/wait-preparation.mjs rust");
+    const download = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+    assert.ok(install >= 0 && install < wait && wait < download);
+    assert.equal(job.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");
+  }
 });
 
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
