@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-heading-leading-hash",
  "updates": [
-  "AQTnyJrPCwAHAQRib2R5AwdoZWFkaW5nBwDnyJrPCwAGBADnyJrPCwESIyBzdGFydHMgd2l0aCBoYXNoKADnyJrPCwAFbGV2ZWwBfQIA",
-  "AQHnyJrPCxUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA"
+  "AQTs+tXQBAAHAQRib2R5AwdoZWFkaW5nBwDs+tXQBAAGBADs+tXQBAESIyBzdGFydHMgd2l0aCBoYXNoKADs+tXQBAAFbGV2ZWwBfQIA",
+  "AQHs+tXQBBUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA"
  ],
- "mergedUpdateB64": "AQXnyJrPCwAHAQRib2R5AwdoZWFkaW5nBwDnyJrPCwAGBADnyJrPCwESIyBzdGFydHMgd2l0aCBoYXNoKADnyJrPCwAFbGV2ZWwBfQIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA",
- "stateVectorB64": "AefIms8LFg==",
+ "mergedUpdateB64": "AQXs+tXQBAAHAQRib2R5AwdoZWFkaW5nBwDs+tXQBAAGBADs+tXQBAESIyBzdGFydHMgd2l0aCBoYXNoKADs+tXQBAAFbGV2ZWwBfQIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA",
+ "stateVectorB64": "Aez61dAEFg==",
  "coverage": {
   "nodes": [
    "doc",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "## # starts with hash"
+  "markdown": "## # starts with hash\n"
  }
 }

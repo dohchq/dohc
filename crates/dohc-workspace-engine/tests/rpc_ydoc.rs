@@ -6390,8 +6390,8 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 
 /// #815 pin 1: a session whose only update is the client-declared seed closes
 /// without writing — file bytes, mtime, and history untouched — for both
-/// projection-normalization victims (a trailing newline the projection trims,
-/// and CRLF line endings the round trip rewrites as LF).
+/// projection-normalization victims (a trailing blank line the projection
+/// trims, and CRLF line endings the round trip rewrites as LF).
 ///
 /// Mutation kill: remove the seed-only skip in `ydoc_settle_on_store` (or the
 /// seed-only coverage arm in `close_session`) and this test goes red — the
@@ -6399,7 +6399,7 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n\n");
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
     let service = Arc::new(EngineService::new());

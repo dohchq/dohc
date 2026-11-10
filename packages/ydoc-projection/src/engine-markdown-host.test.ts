@@ -170,9 +170,12 @@ it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bo
     const second = await success(host, 3)
     expect(second.result.kind).toBe('proved'); expect(second.delta.length).toBe(0)
     expect(second.result.sourceSha256).toBe(hash(source)); expect(second.result.sourceByteLength).toBe(source.length)
+    // A forged projection digest leaves a stale witness, which is ignored. The canonical
+    // source still proves from the document; the BOM spelling needed the witness.
     base.getMap('meta').set('dohcMarkdownSourceProjectionSha256', hash(Buffer.from('forged')))
     request(host.child, 4, 'prove', source, Y.encodeStateAsUpdate(base))
-    expect(await host.json()).toMatchObject({id: 4, kind: 'refused'})
+    if (bom) expect(await host.json()).toMatchObject({id: 4, kind: 'refused'})
+    else expect((await success(host, 4)).result.kind).toBe('proved')
     request(host.child, 5, 'construct', new Uint8Array([255]), Y.encodeStateAsUpdate(base))
     expect(await host.json()).toEqual({id: 5, kind: 'refused', reason: 'invalid-source'})
     await host.expectNoUnreadOutput()
@@ -358,7 +361,8 @@ it.runIf(process.platform === 'win32')('starts the bundle through a directory ju
 
 it('accepts a source of exactly 2 MiB', async () => {
   const host = await start(), base = markdownToYDoc('Earlier')
-  const source = Buffer.alloc(2 * 1024 * 1024, 97)
+  // The limit counts the saved file, final newline included.
+  const source = Buffer.concat([Buffer.alloc(2 * 1024 * 1024 - 1, 97), Buffer.from('\n')])
   try {
     await hello(host); request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
     expect((await success(host, 2)).result).toMatchObject({kind: 'constructed', sourceByteLength: source.length, sourceSha256: hash(source)})

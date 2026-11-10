@@ -144,7 +144,7 @@ it('holds inline constructs on both native builders and probes desktop nodes and
 
 it('accepts plain prose and fenced code at the alphabet edges', () => {
   for (const source of [
-    '- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - /\n  - child',
+    '- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - /\n  - child\n',
     '- a  \n  - child',
     '- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child',
   ]) {
@@ -161,7 +161,7 @@ it('holds lone carriage returns that desktop imports as line breaks', () => {
   expect(cases.find(row => row.source === source)).toMatchObject({ held: true, builders: [] })
   const doc = markdownToYDoc(source, { reading: 'source' })
   try {
-    expect(yDocToMarkdown(doc)).toBe('- a\n  b\n  - child')
+    expect(yDocToMarkdown(doc)).toBe('- a\n  b\n  - child\n')
   } finally { doc.destroy() }
 })
 

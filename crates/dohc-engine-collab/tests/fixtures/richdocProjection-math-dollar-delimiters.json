@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-math-dollar-delimiters",
  "updates": [
-  "AQe18L7oAgAHAQRib2R5AwlwYXJhZ3JhcGgHALXwvugCAAYEALXwvugCAQdpbmxpbmUgh7XwvugCAQMKbWF0aElubGluZSgAtfC+6AIJA3RleAF3CHByaWNlICQ1h7XwvugCAAMJbWF0aEJsb2NrKAC18L7oAgsDdGV4AXcNbGVmdCAkJCByaWdodAA=",
-  "AQG18L7oAg0oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWF0aC1kb2xsYXItZGVsaW1pdGVycwA="
+  "AQfZ37DcDAAHAQRib2R5AwlwYXJhZ3JhcGgHANnfsNwMAAYEANnfsNwMAQdpbmxpbmUgh9nfsNwMAQMKbWF0aElubGluZSgA2d+w3AwJA3RleAF3CHByaWNlICQ1h9nfsNwMAAMJbWF0aEJsb2NrKADZ37DcDAsDdGV4AXcNbGVmdCAkJCByaWdodAA=",
+  "AQHZ37DcDA0oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWF0aC1kb2xsYXItZGVsaW1pdGVycwA="
  ],
- "mergedUpdateB64": "AQi18L7oAgAHAQRib2R5AwlwYXJhZ3JhcGgHALXwvugCAAYEALXwvugCAQdpbmxpbmUgh7XwvugCAQMKbWF0aElubGluZSgAtfC+6AIJA3RleAF3CHByaWNlICQ1h7XwvugCAAMJbWF0aEJsb2NrKAC18L7oAgsDdGV4AXcNbGVmdCAkJCByaWdodCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXRoLWRvbGxhci1kZWxpbWl0ZXJzAA==",
- "stateVectorB64": "AbXwvugCDg==",
+ "mergedUpdateB64": "AQjZ37DcDAAHAQRib2R5AwlwYXJhZ3JhcGgHANnfsNwMAAYEANnfsNwMAQdpbmxpbmUgh9nfsNwMAQMKbWF0aElubGluZSgA2d+w3AwJA3RleAF3CHByaWNlICQ1h9nfsNwMAAMJbWF0aEJsb2NrKADZ37DcDAsDdGV4AXcNbGVmdCAkJCByaWdodCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXRoLWRvbGxhci1kZWxpbWl0ZXJzAA==",
+ "stateVectorB64": "AdnfsNwMDg==",
  "coverage": {
   "nodes": [
    "doc",
@@ -19,6 +19,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "inline $price $5$\n\n$$left $$ right$$"
+  "markdown": "inline $price $5$\n\n$$left $$ right$$\n"
  }
 }

@@ -40,11 +40,11 @@ const paragraph = (text?: string) => text
   : { type: 'paragraph' }
 
 describe('documentMarkdown', () => {
-  test('reads an ordinary document as its file does', () => {
+  test('reads an ordinary document as its file does, without the final newline', () => {
     const markdown = '---\ntitle: Trip\n---\n\n# Kyoto\n\n- Day one\n- Day two\n\nA **bold** plan.'
     const doc = markdownToYDoc(markdown)
     expect(markdownOf(doc)).toBe(markdown)
-    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc))
+    expect(`${markdownOf(doc)}\n`).toBe(yDocToMarkdown(doc))
     expect(settledDocumentMarkdown('# Kyoto\n\n* Day one\n')).toBe('# Kyoto\n\n- Day one')
   })
 })
@@ -136,7 +136,7 @@ describe('documentCreateUpdate', () => {
     const doc = new Y.Doc()
     Y.applyUpdate(doc, documentCreateUpdate(state(doc), '# Kyoto\n\n- Day one\n- Day two', open)!)
     expect(markdownOf(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
-    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two\n')
   })
 
   test.each([
