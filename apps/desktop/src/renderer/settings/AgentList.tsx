@@ -615,6 +615,7 @@ export function AgentList(props: {
       && personalEntries(personal.state.accounts).some((entry) => entry.agent.agentId === wanted);
     if (held) {
       focusAfter.current = "page";
+      setRenaming((current) => (current === wanted ? current : null));
       setOpened(wanted);
       return;
     }

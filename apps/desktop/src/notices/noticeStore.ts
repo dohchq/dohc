@@ -286,7 +286,8 @@ const RelayPage = z.object({
   nextCursor: z.string().min(1).max(64),
   hasMore: z.boolean(),
   replace: z.boolean(),
-  personalAgentsRevision: z.number().int().nonnegative(),
+  // A relay from before personal agents sends no revision.
+  personalAgentsRevision: z.number().int().nonnegative().optional(),
 });
 
 class RelayRefusal extends Error {
@@ -657,7 +658,7 @@ export function createNoticeStore(deps: {
           await saveAccount(account, file);
           return merged;
         }) || changed;
-        personalAgentsRevision = page.personalAgentsRevision;
+        personalAgentsRevision = page.personalAgentsRevision ?? personalAgentsRevision;
         more = page.hasMore;
       }
       if (personalAgentsRevision !== null && session.isCurrent()) {

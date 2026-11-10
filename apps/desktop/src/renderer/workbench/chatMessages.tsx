@@ -930,6 +930,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       </li>
     );
   }, [props, candidates, reactionsByMessage, density, anchor, observeDayEdge, personalNames]);
+  // The list draws a row again only when this changes, so a rename shows on rows already drawn.
+  const listExtraData = useMemo(() => ({ props, personalNames }), [props, personalNames]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
     return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
@@ -958,7 +960,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     <LegendList
     ref={list}
     data={props.messages}
-    extraData={props}
+    extraData={listExtraData}
     keyExtractor={messageKeyExtractor}
     renderItem={renderMessage}
     onViewableItemsChanged={onViewableItemsChanged}

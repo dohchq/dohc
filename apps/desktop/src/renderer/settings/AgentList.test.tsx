@@ -1602,6 +1602,20 @@ it("goes back to the list from another agent's page when the roster no longer ho
   expect(screen.queryByTestId("agent-name-input")).toBeNull();
 });
 
+it("ends a rename when a notice opens another agent's page", async () => {
+  const { rerender } = await renderServer();
+  await chooseAction("Grok Bot", "Rename");
+  const input = screen.getByTestId("agent-name-input");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Codex");
+  rerender({ openAgent: { agentId: NOVA_ID } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe(NOVA.name));
+  // A later notice for Grok opens its page, not the rename it left.
+  rerender({ openAgent: { agentId: GROK_ID } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot"));
+  expect(screen.queryByTestId("agent-name-input")).toBeNull();
+});
+
 it("says in the list that the account's agents couldn't be listed, with the cause in a toast", async () => {
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({
     accounts: [{ ...account(), roster: null, failure: "dohc could not reach relay.test. Check your connection." }],

@@ -25,6 +25,8 @@ export class TestAccounts implements CredentialFence {
   readonly sessionCookie: string;
   listener: CredentialFenceListener | undefined;
   private readonly sessions = new Map<string, string>();
+  // Sessions that began before their account's password last changed.
+  private readonly stale = new Set<string>();
   private signIns = 0;
 
   constructor(origin: string, private readonly accounts: readonly TestAccount[]) {
@@ -70,9 +72,14 @@ export class TestAccounts implements CredentialFence {
     return 0;
   }
 
-  async readConsentCredentials(userId: string): Promise<ConsentCredentials | null> {
+  /** The account's password changes, so every session it has now began before the change. */
+  changePassword(userId: string): void {
+    for (const [session, owner] of this.sessions) if (owner === userId) this.stale.add(session);
+  }
+
+  async readConsentCredentials(userId: string, sessionId: string): Promise<ConsentCredentials | null> {
     const account = this.account(userId);
-    return account ? { epoch: 0, sessionCurrent: true } : null;
+    return account ? { epoch: 0, sessionCurrent: this.sessions.get(sessionId) === userId && !this.stale.has(sessionId) } : null;
   }
 
   async changedSince(): Promise<CredentialFenceChange[]> {

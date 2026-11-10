@@ -260,6 +260,18 @@ it("says when a sign-in request expired, and never calls another account's works
   expect(refusal).toContain("<form method=\"post\" action=\"/oauth/authorize/sign-out\">");
 });
 
+it("asks a browser that signed in before the password last changed to sign in again before it allows", async () => {
+  const s = await stack();
+  const { as, html } = await s.open(new CookieJar(), TRIP);
+  s.accounts.changePassword(ADA.userId);
+  const allowed = await s.choose(as, html, { as: "new", name: "Trip helper", [`w:${TRIP}`]: "comment", decision: "allow" });
+  expect(allowed.status).toBe(200);
+  const page = await allowed.text();
+  expect(page).toContain("<h1>Sign in to dohc</h1>");
+  expect(page).toContain("This browser signed in before your password last changed. Sign in again.");
+  expect(page).not.toContain("type=\"radio\"");
+});
+
 it("offers only Cancel when the account has no workspace on this server", async () => {
   const s = await stack();
   s.answerNoWorkspaces();
