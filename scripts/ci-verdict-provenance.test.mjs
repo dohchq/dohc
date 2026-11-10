@@ -391,7 +391,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   assert.equal(jobs.javascript.needs, "changes");
   assert.deepEqual(jobs.rust.needs, ["changes", "javascript"]);
   assert.equal(jobs["rust-archive"].needs, "changes", "Rust compilation can overlap JavaScript");
-  assert.deepEqual(jobs["rust-policy"].needs, ["changes", "javascript"]);
+  assert.equal(jobs["rust-policy"].needs, "changes", "cold policy checks can overlap JavaScript");
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
     const steps = jobs[name].steps;
     const wait = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs wait ${scope}`);
