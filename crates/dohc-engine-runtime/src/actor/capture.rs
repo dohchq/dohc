@@ -1022,6 +1022,29 @@ mod capture_file_hold_tests {
                 .map_err(StorageError::persist_public)
             })
             .unwrap();
+        // dohc#3193. Another version's switch write with the same bytes waits
+        // for that version, so it doesn't hold this head.
+        let other_version = MaterializationJobSpec {
+            job_id: crate::actor::versions::switch_projection_job_id(
+                "hold-proof",
+                "feature",
+                "placed.md",
+                MaterializationOperation::Write,
+                &head.blob_sha256,
+                false,
+            ),
+            target_generation: 1,
+            ..settle
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &other_version,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
         assert!(retire_once(&mut store).unwrap().retired.is_some());
         assert!(moments(&store) > count);
     }
@@ -2978,9 +3001,9 @@ fn ensure_no_pending_head_placement(
     workspace: &str,
     path: &str,
 ) -> Result<(), RuntimeError> {
-    let pending: bool = conn
+    let mut jobs = conn
         .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+            "SELECT j.job_id, a.version_id, j.content_sha256 FROM materialization_jobs j
          JOIN versioned_workspaces w ON w.workspace_id=?1
          JOIN path_aliases a ON a.workspace_id=w.workspace_id AND a.path=j.target_path
              AND a.version_id=coalesce((SELECT version_id FROM active_versions
@@ -2992,17 +3015,34 @@ fn ensure_no_pending_head_placement(
              AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
              AND (j.job_id GLOB 'version-switch-mat_*' OR EXISTS(SELECT 1 FROM moments m
                  WHERE m.workspace_id=a.workspace_id AND m.moment_id=s.latest_moment_id
-                     AND m.moment_order=j.target_generation)))",
+                     AND m.moment_order=j.target_generation))",
         )
-        .map_err(StorageError::corrupt_public)?
-        .query_row(params![workspace, path], |r| r.get(0))
         .map_err(StorageError::corrupt_public)?;
-    if pending {
-        return Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "head-placement-pending",
-            },
-        ));
+    let mut rows = jobs
+        .query(params![workspace, path])
+        .map_err(StorageError::corrupt_public)?;
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let version: String = row.get(1).map_err(StorageError::corrupt_public)?;
+        let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        // A switch job names its version only in its id (dohc#3193).
+        if !job.starts_with("version-switch-mat_")
+            || job
+                == super::versions::switch_projection_job_id(
+                    workspace,
+                    &version,
+                    path,
+                    dohc_engine_storage::MaterializationOperation::Write,
+                    &sha,
+                    false,
+                )
+        {
+            return Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "head-placement-pending",
+                },
+            ));
+        }
     }
     Ok(())
 }
