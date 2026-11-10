@@ -1664,7 +1664,9 @@ describe("importDroppedPaths", () => {
       expect(await readFile(join(target, "notes.md"), "utf8")).toBe("outside");
     } finally { spy.mockRestore(); }
   });
-  describe.each(shortNamePairs(join(process.cwd(), "containment-folders"), ".dohc"))("$name", ({ parent, child }) => {
+  // The registered workspace's `.dohc` resolves to a folder with another name,
+  // as it does through a link, so only the registered-root check can see it.
+  describe.each(shortNamePairs(join(process.cwd(), "containment-folders"), "metadata"))("$name", ({ parent, child }) => {
     it.each(folderIdentities)("keeps the screening result for $name", async ({ identity }) => {
       const inside = identity !== "different";
       const fsPromises = await import("node:fs/promises");
@@ -1688,6 +1690,26 @@ describe("importDroppedPaths", () => {
         expect(statSpy).toHaveBeenCalled();
       } finally { statSpy.mockRestore(); realpathSpy.mockRestore(); }
     });
+  });
+
+  it("leaves a file dropped from a .dohc folder no registered workspace owns out as workspace data", async () => {
+    const kept = join(root, "Removed", ".dohc", "local", "protected-copies");
+    await mkdir(kept, { recursive: true });
+    await writeFile(join(kept, "copy.json"), "{\"text\":\"SECRET\"}");
+    await writeFile(join(root, "plain.md"), "plain");
+    const registered = join(root, "Registered");
+    await mkdir(join(registered, ".dohc"), { recursive: true });
+    const target = join(root, "target");
+    await mkdir(target);
+
+    const outcome = await importDroppedPaths(target, [join(kept, "copy.json"), join(root, "plain.md")], [registered]);
+
+    expect(outcome).toEqual({
+      imported: ["plain.md"],
+      skipped: 1,
+      skippedSources: [{ path: "copy.json", reason: "workspace-data" }],
+    });
+    expect(existsSync(join(target, "copy.json"))).toBe(false);
   });
 
   it("stored spelling decides screening without stat", async () => {
@@ -1789,7 +1811,7 @@ describe("importDroppedPaths", () => {
       skippedSources: [
         { path: ".DS_Store", reason: "system-file" },
         { path: "node_modules", reason: "left-out" },
-        { path: ".dohc", reason: "dohc-name" },
+        { path: ".dohc", reason: "workspace-data" },
       ],
     });
   });

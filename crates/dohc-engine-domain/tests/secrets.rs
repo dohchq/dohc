@@ -2327,6 +2327,9 @@ fn secret_text_held_matches_only_text_history_holds_for_that_path() {
         12,
     );
     insert_synced_change(&mut store, &key, "rec-lost", "TOKEN=lost", 5, false);
+    insert_synced_change(&mut store, &key, "rec-won", "TOKEN=won", 20, true);
+    // Arrives after the change at 20 but was made earlier, so it loses.
+    insert_synced_change(&mut store, &key, "rec-late", "TOKEN=late", 15, false);
     // A row that does not open (sealed for another path) or does not decode
     // counts as a different text, not a failure.
     let foreign = aead::seal(&key, WS, "other.env", b"TOKEN=moved").expect("seal");
@@ -2355,7 +2358,11 @@ fn secret_text_held_matches_only_text_history_holds_for_that_path() {
     let held = |text: &[u8]| secrets.secret_text_recorded(WS, ".env", text).unwrap();
     assert!(held(b"TOKEN=older"));
     assert!(held(b"TOKEN=newer"));
-    assert!(held(b"TOKEN=lost"));
+    // A synced change that won became the tip; one that lost never did, and
+    // no restore can bring it back, so History does not count it.
+    assert!(held(b"TOKEN=won"));
+    assert!(!held(b"TOKEN=lost"));
+    assert!(!held(b"TOKEN=late"));
     assert!(!held(b"TOKEN=mine!"));
     assert!(!held(b"TOKEN=moved"));
     assert!(!held(b"TOKEN=olde"));
