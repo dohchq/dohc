@@ -10896,7 +10896,7 @@ mod projection_tests {
         // A highlighted link whose line starts with `=` keeps its source
         // spelling, `&` too, with each `=` written as `\=`, in one part.
         INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
-        assert_eq!(remote.project_richdoc().unwrap(), "==[](u \"&\\=\n\\=\")==");
+        assert_eq!(remote.project_richdoc().unwrap(), "==[](u \"&\\=\n\\=\")==\n");
         INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), 1));
     }
 
@@ -12258,7 +12258,7 @@ fn main() {}
         edited.frontmatter_set("1.5", "changed").unwrap();
         assert_eq!(
             edited.project(ContentKind::Richdoc).unwrap().content,
-            "---\n'1.5': changed\n---\n\nbody text"
+            "---\n'1.5': changed\n---\n\nbody text\n"
         );
     }
 

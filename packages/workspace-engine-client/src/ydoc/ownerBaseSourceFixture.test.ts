@@ -13,7 +13,7 @@ const fixture = new URL(
 );
 
 it("the daemon source fixture comes from the real captured Markdown seeder", async () => {
-  const markdown = "# Shared\n\nStarting together.\n\n";
+  const markdown = "# Shared\n\nStarting together.";
   const canonical = "# Shared\n\nStarting together.\n";
   const engine = new YdocLoopbackEngine();
   engine.seedFile({ workspace: "workspace", versionId: "main", path: "owner.md", content: markdown, contentKind: "richdoc" });

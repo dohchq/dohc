@@ -67,7 +67,7 @@ fn fixture(joined: bool) -> (ScratchDir, EngineStore, DocKey) {
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
-    let source = "Before\n\n- parent\n  - child";
+    let source = "Before\n\n- parent\n  - child\n";
     let snapshot = VersionedTextStore::new(&mut store)
         .capture_ingest(&input(source), &NoFaults)
         .unwrap()
@@ -146,8 +146,8 @@ fn commit(
 async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history() {
     for joined in [false, true] {
         for source in [
-            "Changed beside list\n\n- parent\n  - child",
-            "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child",
+            "Changed beside list\n\n- parent\n  - child\n",
+            "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n",
         ] {
             let (scratch, mut store, key) = fixture(joined);
             std::fs::write(scratch.path().join("note.md"), source).unwrap();
@@ -186,7 +186,7 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 [&result.moment.moment_id], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
             assert_eq!(
                 history,
-                ("Before\n\n- parent\n  - child".into(), source.into())
+                ("Before\n\n- parent\n  - child\n".into(), source.into())
             );
             assert_ne!(before.encode_state_vector(), doc.encode_state_vector());
             let marker = dohc_engine_collab::read_marker(&store, &key)
@@ -233,7 +233,7 @@ async fn outside_reader_fold_noncanonical_and_native_match_existing_capture() {
         "- parent\n    - child",
         "__bold__",
         "- first\ncontinuation",
-        "Changed\n\n- parent\n  - child\n",
+        "Changed\n\n- parent\n  - child",
         "Changed\r\n\r\n- parent\r\n  - child\r\n",
     ] {
         let mut outcomes = Vec::new();
@@ -288,7 +288,7 @@ async fn outside_reader_fold_noncanonical_and_native_match_existing_capture() {
 
 async fn refuse_stale_preparation(change_file: bool) {
     let (scratch, mut store, key) = fixture(false);
-    let source = "Changed\n\n- parent\n  - child";
+    let source = "Changed\n\n- parent\n  - child\n";
     std::fs::write(scratch.path().join("note.md"), source).unwrap();
     let prepared = fold(&store, &key, source).await;
     if change_file {
@@ -314,7 +314,7 @@ async fn refuse_stale_preparation(change_file: bool) {
         .read_text("w", "main", "note.md")
         .unwrap()
         .unwrap();
-    assert_eq!(snapshot.text, "Before\n\n- parent\n  - child");
+    assert_eq!(snapshot.text, "Before\n\n- parent\n  - child\n");
 }
 
 #[tokio::test]
@@ -332,7 +332,7 @@ async fn outside_reader_fold_refuses_file_staleness() {
 #[tokio::test]
 async fn outside_reader_fold_unavailable_and_cap_preserve_strict_hold() {
     let (scratch, mut store, key) = fixture(false);
-    let source = "Changed\n\n- parent\n  - child";
+    let source = "Changed\n\n- parent\n  - child\n";
     let preparation = store
         .read_with(|conn| reader_resolver::prepare_fold(conn, &key, "note.md", source))
         .unwrap()
@@ -840,7 +840,7 @@ async fn outside_reader_fold_round1_later_batch_failure_keeps_committed_receipts
         .configure_reader_resolver(Arc::new(resolver()))
         .await
         .unwrap();
-    let rich = input("Changed\n\n- parent\n  - child");
+    let rich = input("Changed\n\n- parent\n  - child\n");
     let mut sibling = input("Committed sibling");
     sibling.path = "sibling.md".into();
     std::fs::write(scratch.path().join("note.md"), &rich.text).unwrap();
@@ -922,7 +922,7 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
         let (scratch, store, _) = fixture(false);
         let db = store.database_path().to_owned();
         drop(store);
-        let source = "Changed\n\n- parent\n  - child";
+        let source = "Changed\n\n- parent\n  - child\n";
         std::fs::write(scratch.path().join("note.md"), source).unwrap();
         let supervisor = crate::WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 3).unwrap().actor;
@@ -1049,7 +1049,7 @@ async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
     for file in [false, true] {
         for changes in [1, 2] {
             let (scratch, store, key) = fixture(false);
-            let source = "Changed\n\n- parent\n  - child";
+            let source = "Changed\n\n- parent\n  - child\n";
             std::fs::write(scratch.path().join("note.md"), source).unwrap();
             let db = store.database_path().to_owned();
             drop(store);
@@ -1069,7 +1069,7 @@ async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
                 (0..changes)
                     .map(|n| {
                         if file {
-                            Change::File(format!("Changed {n}\n\n- parent\n  - child"))
+                            Change::File(format!("Changed {n}\n\n- parent\n  - child\n"))
                         } else {
                             Change::Remote(key.clone())
                         }
@@ -1127,7 +1127,7 @@ async fn outside_reader_fold_batch_retry_preserves_committed_sibling_receipts() 
         .write_with(&NoFaults, |tx| record_capture_file_hold_in(tx, &sibling))
         .unwrap();
     sibling.text = "Sibling after".into();
-    let source = "Changed\n\n- parent\n  - child";
+    let source = "Changed\n\n- parent\n  - child\n";
     std::fs::write(scratch.path().join("note.md"), source).unwrap();
     std::fs::write(scratch.path().join("sibling.md"), &sibling.text).unwrap();
     let root = scratch.path().to_owned();
@@ -1174,13 +1174,13 @@ async fn outside_reader_fold_batch_retry_preserves_committed_sibling_receipts() 
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
-    for ending in ["\n", "\r\n"] {
+    for ending in ["", "\r\n"] {
         let (scratch, mut store, key) = fixture(false);
-        let canonical = "A **bold** word";
+        let canonical = "A **bold** word\n";
         let delta = fold(&store, &key, canonical).await.delta;
-        let source = format!("{canonical}{ending}");
+        let source = format!("{}{ending}", canonical.trim_end());
         std::fs::write(scratch.path().join("note.md"), &source).unwrap();
-        // A byte-bound, schema-valid child result whose native output omits the file's newline.
+        // A byte-bound, schema-valid child result whose native output ends unlike the file.
         let config = scripted_reader(&scratch, |script| {
             script
             .replace("r.method === 'construct'", "r.method !== 'prove'")
@@ -1216,7 +1216,7 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_preserves_existing_history_undo_refusal() {
     let (scratch, mut store, key) = fixture(false);
-    let source = "Changed beside list\n\n- parent\n  - child";
+    let source = "Changed beside list\n\n- parent\n  - child\n";
     std::fs::write(scratch.path().join("note.md"), source).unwrap();
     let prepared = fold(&store, &key, source).await;
     commit(&mut store, scratch.path(), source, prepared).unwrap();
