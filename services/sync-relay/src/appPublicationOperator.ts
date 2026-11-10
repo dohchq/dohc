@@ -5,9 +5,9 @@ import { constants } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { RelayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
-import { OPERATOR_MAX_REQUEST_BYTES, OPERATOR_TIMEOUT_MS, parseDisableRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
+import { OPERATOR_MAX_REQUEST_BYTES, OPERATOR_TIMEOUT_MS, parseOperatorRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
-export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication">, path: string, secretPath: string) {
+export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication" | "liftAppPublishingHold">, path: string, secretPath: string) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   const unix = uid !== undefined, directory = dirname(path);
   if (unix) {
@@ -61,12 +61,18 @@ export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "
         if (offered.length !== secret.length || !timingSafeEqual(offered, Buffer.from(secret))) {
           reply({code: 1, message: "Operator authentication failed. Run takedown with access to the relay continuity volume."}); return;
         }
-        request = parseDisableRequest(value);
+        request = parseOperatorRequest(value);
       }
       catch {reply({code: 2, message: "Invalid takedown request. Supply a publication ID and a reason of 1 to 1024 characters."}); return;}
       try {
+        if (request.type === "lift-publishing-hold") {
+          const {publicationId} = request;
+          if (storage.liftAppPublishingHold(publicationId)) reply({code: 0, message: `Lifted the app publishing hold from the owner of publication ${publicationId}. The publication stays disabled.`, publicationId});
+          else reply({code: 3, message: `No app publishing hold matches publication ${publicationId}. Check the publication ID.`});
+          return;
+        }
         const result = storage.disableAppPublication({...request, nowMs: Date.now()});
-        reply({code: 0, message: `Disabled publication ${result.publicationId}. Its owner cannot reactivate this publication.`,
+        reply({code: 0, message: `Disabled publication ${result.publicationId}. Its owner cannot publish apps on this server until you lift the hold.`,
           publicationId: result.publicationId, authorityRevision: result.authorityRevision, operatorTakedown: result.operatorTakedown});
       } catch (error) {
         if (error instanceof RelayError && error.code === "not_found") reply({code: 3, message: `Publication ${request.publicationId} was not found. Check the publication ID.`});

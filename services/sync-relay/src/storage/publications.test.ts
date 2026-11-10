@@ -629,6 +629,70 @@ it("persists the first operator record, prevents owner reactivation and publish 
   expect(() => f.storage.reactivateAppPublication({...owner, publicationId: original.publicationId, expectedAuthorityRevision: 2, limits})).toThrow(/operator disabled/);
 });
 
+const held = /The server operator stopped your account from publishing apps\. Contact the server operator\./;
+function addShare(storage: SyncRelayStorage, workspaceId: string, id: string, ownerUserId = "owner") {
+  storage.createShare({share: {shareId: `s-${id}`, workspaceId, granterUserId: ownerUserId, selectorJson: JSON.stringify({paths: ["app", "shared"], versionId: null}), createdAtMs: 1},
+    grant: {grantId: `g-${id}`, shareId: `s-${id}`, principalKind: "user", principalUserId: "reader", principalEmail: null, access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
+  return {workspaceId, shareId: `s-${id}`, grantId: `g-${id}`, ownerUserId};
+}
+const edited = () => ({...request().candidate, sourceRevision: digest("edited revision")});
+
+// #1899: a takedown holds app publishing for the owner's whole account.
+it("holds the owner's app publishing after a takedown until the operator lifts the hold", async () => {
+  const f = httpFixture(); await f.upload();
+  const original = await (await f.http("w/app-publications", f.body)).json();
+  const withdrawn = f.storage.publishAppPublication({...request(), candidate: {...request().candidate, sourceRevision: digest("withdrawn revision")}});
+  f.storage.withdrawAppPublication({...owner, publicationId: withdrawn.publicationId, expectedAuthorityRevision: 1});
+  f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Malware", nowMs: 30});
+  const newLink = addShare(f.storage, "w", "new-link");
+  const refused = await f.http("w/app-publications", {...f.body, shareId: newLink.shareId, grantId: newLink.grantId});
+  expect(refused.status).toBe(409);
+  expect((await refused.json()).error).toMatch(held);
+  expect((await f.http("w/app-publications", {...f.body, candidate: edited()})).status).toBe(409);
+  expect((await f.http(`w/app-publications/${withdrawn.publicationId}/reactivate`, {expectedAuthorityRevision: 2})).status).toBe(409);
+  f.storage.claimWorkspace({workspaceId: "moved", ownerUserId: "owner", createdAtMs: 1});
+  const moved = {...request(), ...addShare(f.storage, "moved", "moved")};
+  expect(() => f.storage.publishAppPublication(moved)).toThrow(held);
+  const elsewhere = {...request(), ...addShare(f.storage, "other", "elsewhere", "other-owner")};
+  expect(f.storage.publishAppPublication(elsewhere).active).toBe(true);
+  f.restart();
+  expect(() => f.storage.publishAppPublication({...request(), candidate: edited()})).toThrow(held);
+  expect(f.storage.liftAppPublishingHold(original.publicationId)).toBe(true);
+  expect(f.storage.liftAppPublishingHold(original.publicationId)).toBe(false);
+  expect(f.storage.publishAppPublication({...request(), candidate: edited()}).active).toBe(true);
+  expect(f.storage.publishAppPublication(moved).active).toBe(true);
+  expect(f.storage.reactivateAppPublication({...owner, publicationId: withdrawn.publicationId, expectedAuthorityRevision: 2, limits}).active).toBe(true);
+  expect(f.storage.readAppPublication({...owner, publicationId: original.publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Malware"}});
+});
+
+it("keeps the hold after the taken-down app's workspace is deleted, and lifts it by that publication", () => {
+  const f = fixture();
+  f.storage.claimWorkspace({workspaceId: "doomed", ownerUserId: "owner", createdAtMs: 1});
+  const doomed = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "doomed", "doomed")});
+  f.storage.disableAppPublication({publicationId: doomed.publicationId, reason: "Malware", nowMs: 30});
+  f.raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id='doomed'").run();
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publications WHERE publication_id=?").get(doomed.publicationId)!.n).toBe(0);
+  expect(() => f.storage.publishAppPublication(request())).toThrow(held);
+  expect(f.storage.liftAppPublishingHold(doomed.publicationId)).toBe(true);
+  expect(f.storage.publishAppPublication(request()).active).toBe(true);
+});
+
+it("holds the owner of a takedown made before the hold existed", () => {
+  const f = fixture(), p = f.storage.publishAppPublication(request());
+  f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
+  f.raw.exec("DROP TABLE sync_relay_app_publishing_holds; DELETE FROM sync_relay_migrations WHERE migration_id='app-publishing-holds-v1'");
+  f.restart();
+  expect(() => f.storage.publishAppPublication({...request(), candidate: edited()})).toThrow(held);
+  expect(f.raw.prepare("SELECT owner_user_id,publication_id,held_at_ms FROM sync_relay_app_publishing_holds").all())
+    .toEqual([{owner_user_id: "owner", publication_id: p.publicationId, held_at_ms: 30}]);
+});
+
+it("refuses to recreate a missing marked hold table", () => {
+  const f = fixture();
+  f.raw.exec("DROP TABLE sync_relay_app_publishing_holds");
+  expect(() => openSyncRelayStorage(f.path)).toThrow("App publishing hold schema is missing or damaged.");
+});
+
 it("records takedowns of withdrawn and damaged publications without reading their manifests", () => {
   const f = fixture(), p = f.storage.publishAppPublication(request());
   f.storage.withdrawAppPublication({...owner, publicationId: p.publicationId, expectedAuthorityRevision: 1});

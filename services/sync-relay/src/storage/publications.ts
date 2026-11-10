@@ -139,6 +139,7 @@ export function publishAppPublication(storage: StorageContext, input: PublishApp
     }
     const existing = storage.db.prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId);
     if (existing) return withOperatorTakedown(storage, stored(storage, {...owner, publicationId, limits: input.limits})); // A retry never reactivates a withdrawn publication.
+    assertPublishingNotHeld(storage, owner.ownerUserId);
     put(storage, owner.workspaceId, manifestHash, bytes, now);
     storage.db.prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision)
       VALUES(?,?,?,?,?,?,?,?,1,1)`).run(publicationId,owner.workspaceId,owner.shareId,owner.grantId,owner.generation,owner.ownerUserId,manifestHash,now);
@@ -226,6 +227,9 @@ export function disableAppPublication(storage: StorageContext, input: DisableApp
     const row = storage.db.prepare("SELECT workspace_id,owner_user_id FROM sync_relay_app_publications WHERE publication_id=?").get(input.publicationId);
     if (!row) throw notFound();
     const current = withOperatorTakedown(storage, header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id)).state);
+    // A takedown holds the owner's app publishing, and a retry after a lift holds it again.
+    storage.db.prepare("INSERT OR IGNORE INTO sync_relay_app_publishing_holds(owner_user_id,publication_id,held_at_ms) VALUES(?,?,?)")
+      .run(String(row.owner_user_id), input.publicationId, now);
     if (current.operatorTakedown) return current;
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     const operatorTakedown: AppPublicationTakedown = {actor: "operator", disabledAtMs: now, reason: input.reason.trim()};
@@ -234,6 +238,20 @@ export function disableAppPublication(storage: StorageContext, input: DisableApp
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     return {...current, active: false, authorityRevision: current.authorityRevision + 1, operatorTakedown};
   });
+}
+
+function assertPublishingNotHeld(storage: StorageContext, ownerUserId: string): void {
+  if (storage.db.prepare("SELECT 1 FROM sync_relay_app_publishing_holds WHERE owner_user_id=?").get(ownerUserId)) {
+    throw relayError("conflict", "The server operator stopped your account from publishing apps. Contact the server operator.");
+  }
+}
+
+/** Lifts the hold a takedown of this publication placed on its owner. False when no hold matches. */
+export function liftAppPublishingHold(storage: StorageContext, publicationId: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(publicationId)) throw badRequest("Invalid publication ID.");
+  return storage.tx(() => storage.db.prepare(`DELETE FROM sync_relay_app_publishing_holds WHERE publication_id=?
+    OR owner_user_id=(SELECT p.owner_user_id FROM sync_relay_app_publications p JOIN sync_relay_app_publication_takedowns t USING(publication_id) WHERE p.publication_id=?)`)
+    .run(publicationId, publicationId).changes > 0);
 }
 
 function recordApproval(storage: StorageContext, publicationId: string, authorityRevision: number, owner: PublicationOwner, candidate: AppPublicationCandidate, agent?: ApprovalAgent | null): AppPublicationApproval {
@@ -258,6 +276,7 @@ export function reactivateAppPublication(storage: StorageContext, input: Reactiv
       if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256) throw badRequest("Publication bundle is unavailable.");
     }
     if (current.active) return current;
+    assertPublishingNotHeld(storage, current.owner.ownerUserId);
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=1,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     const approvalProvenance = recordApproval(storage, input.publicationId, current.authorityRevision + 1, current.owner, candidate, input.agent);

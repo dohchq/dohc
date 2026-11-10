@@ -20,6 +20,7 @@ afterEach(async () => {
   for (const close of cleanups.splice(0).reverse()) await close();
   await rm(root, {recursive: true, force: true});
 });
+const unusedLift = vi.fn((): boolean => {throw new Error("Unexpected hold lift");});
 function exchange(path: string, value: unknown) {
   return new Promise<Record<string, unknown>>((resolve, reject) => {
     const socket = createConnection(path);
@@ -34,7 +35,7 @@ function exchange(path: string, value: unknown) {
 it("accepts only one disable request shape and keeps a not-found failure local to that request", async () => {
   const disableAppPublication = vi.fn(() => {throw notFound();});
   const path = operatorSocketPath({SYNC_RELAY_DB_PATH: join(root, "relay.sqlite")});
-  const operator = await startPublicationOperator({disableAppPublication}, path, join(root, "continuity", "operator.secret"));
+  const operator = await startPublicationOperator({disableAppPublication, liftAppPublishingHold: unusedLift}, path, join(root, "continuity", "operator.secret"));
   cleanups.push(() => operator.close());
   expect(operator.address()).toBe(path);
   const secret = await readFile(join(root, "continuity", "operator.secret"), "utf8");
@@ -50,9 +51,27 @@ it("accepts only one disable request shape and keeps a not-found failure local t
   expect(await requestPublicationTakedown(path, valid, secret)).toMatchObject({code: 3, message: expect.stringContaining("was not found")});
   expect(disableAppPublication).toHaveBeenCalledOnce();
   await operator.close();
-  const restarted = await startPublicationOperator({disableAppPublication}, path, join(root, "continuity", "operator.secret"));
+  const restarted = await startPublicationOperator({disableAppPublication, liftAppPublishingHold: unusedLift}, path, join(root, "continuity", "operator.secret"));
   cleanups.push(() => restarted.close());
   expect(restarted.address()).toBe(path);
+});
+
+it("lifts a publishing hold through one exact request shape", async () => {
+  const disableAppPublication = vi.fn(() => {throw notFound();});
+  const liftAppPublishingHold = vi.fn((publicationId: string) => publicationId === "a".repeat(64));
+  const path = operatorSocketPath({SYNC_RELAY_DB_PATH: join(root, "lift.sqlite")});
+  const operator = await startPublicationOperator({disableAppPublication, liftAppPublishingHold}, path, join(root, "lift", "operator.secret"));
+  cleanups.push(() => operator.close());
+  const secret = await readFile(join(root, "lift", "operator.secret"), "utf8");
+  const lift = {type: "lift-publishing-hold" as const, publicationId: "a".repeat(64)};
+  for (const invalid of [{...lift, reason: "Malware"}, {...lift, publicationId: "bad"}, {type: "lift-publishing-hold"}]) {
+    expect(await exchange(path, {...invalid, secret})).toMatchObject({code: 2});
+  }
+  expect(await exchange(path, lift)).toMatchObject({code: 1});
+  expect(liftAppPublishingHold).not.toHaveBeenCalled();
+  expect(await requestPublicationTakedown(path, lift, secret)).toMatchObject({code: 0, publicationId: lift.publicationId, message: expect.stringContaining("The publication stays disabled.")});
+  expect(await requestPublicationTakedown(path, {...lift, publicationId: "b".repeat(64)}, secret)).toMatchObject({code: 3, message: expect.stringContaining("No app publishing hold matches")});
+  expect(disableAppPublication).not.toHaveBeenCalled();
 });
 
 it("times out a client whose connected relay never responds", async () => {
@@ -69,7 +88,7 @@ it("rejects a bare disable-publication request before storage", async () => {
   const secretPath = join(root, "operator.secret"); await writeFile(secretPath, "a".repeat(64), {mode: 0o600});
   const disableAppPublication = vi.fn(() => {throw notFound();});
   const path = operatorSocketPath({SYNC_RELAY_DB_PATH: join(root, "auth.sqlite")});
-  const operator = await startPublicationOperator({disableAppPublication}, path, secretPath); cleanups.push(() => operator.close());
+  const operator = await startPublicationOperator({disableAppPublication, liftAppPublishingHold: unusedLift}, path, secretPath); cleanups.push(() => operator.close());
   expect(await exchange(path, {type: "disable-publication", publicationId: "a".repeat(64), reason: "Malware"})).toMatchObject({code: 1});
   expect(disableAppPublication).not.toHaveBeenCalled();
 });
