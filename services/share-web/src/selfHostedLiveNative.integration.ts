@@ -980,7 +980,7 @@ it("parks a stopped document in its store and resumes it as a successor activati
   const journal = proof.journal(), accepted = await proof.liveEdit("beforeStop", "live");
   const saved = proof.activation()!, before = await proof.hostState(), stores = readdirSync(proof.hostRoot);
   expect([...stores].sort()).toEqual([".recovery", basename(proof.store)].sort());
-  expect(before.markdown).toBe("---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello");
+  expect(before.markdown).toBe("---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello\n");
   const waiting = proof.unpushed();
   expect(waiting.map(row => row.op_kind)).toEqual(["ydoc.update", "live.audit.application"]);
   const unsettled = proof.settlement();
@@ -1161,7 +1161,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
     expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
   }, {timeout: 30000});
   expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
-  expect((await proof.hostState()).markdown).toBe("---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello");
+  expect((await proof.hostState()).markdown).toBe("---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello\n");
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   // The write still waits first, as it was written.
   expect(proof.unpushed().slice(0, waiting.length)).toEqual(waiting);
