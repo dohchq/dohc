@@ -7351,6 +7351,176 @@ mod tests {
         assert!(matches!(result, Err(MaterializeError::FileLocked)));
     }
 
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run icacls");
+        assert!(status.success(), "icacls {args:?} on {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn current_user_sid() -> String {
+        let out = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .expect("run whoami");
+        assert!(out.status.success(), "whoami");
+        let line = String::from_utf8_lossy(&out.stdout);
+        let sid = line.trim().rsplit(',').next().expect("whoami prints a SID");
+        sid.trim_matches('"').to_owned()
+    }
+
+    /// The DACL of `path` in SDDL, as `icacls /save` writes it. Windows keeps
+    /// a replaced file's entries and protection but not the flag that marks
+    /// its DACL auto-inherited, which the next change to its folder sets
+    /// again, so that flag is left out.
+    #[cfg(windows)]
+    fn dacl_sddl(path: &Path) -> String {
+        let saved = ScratchDir::new_named("materialize-unit-dacl").expect("icacls scratch");
+        let file = saved.join("dacl.txt");
+        icacls(path, &["/save", file.to_str().expect("UTF-8 scratch path")]);
+        let bytes = std::fs::read(&file).expect("read the saved DACL");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("icacls saves UTF-16");
+        let dacl = text.lines().nth(1).expect("the DACL follows the name");
+        let (flags, entries) = dacl
+            .trim()
+            .strip_prefix("D:")
+            .and_then(|rest| rest.split_once('('))
+            .expect("a DACL with entries");
+        format!("D:{}({entries}", flags.replace("AI", ""))
+    }
+
+    /// A workspace folder every local user may read, holding `name` with
+    /// `old` in it, which only its owner may open.
+    #[cfg(windows)]
+    fn private_file_in_shared_folder(scratch: &Scratch, name: &str) -> PathBuf {
+        icacls(&scratch.root, &["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"]);
+        let shared = scratch.root.join("shared.txt");
+        std::fs::write(&shared, b"shared").unwrap();
+        assert!(dacl_sddl(&shared).contains(";BU)"), "the folder shares");
+        let target = scratch.root.join(name);
+        std::fs::write(&target, b"old").unwrap();
+        let owner = format!("*{}:F", current_user_sid());
+        icacls(&target, &["/inheritance:r", "/grant:r", &owner]);
+        target
+    }
+
+    #[cfg(windows)]
+    fn write_new_by_job(scratch: &Scratch) {
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        enqueue_write_job(&mut store, "write", "notes.md", b"new", 1);
+        let mut job = store.load_materialization_job("write").unwrap().unwrap();
+        job.preimage = Preimage::Present(store.put_binary_blob(b"old").unwrap());
+        let outcome = materialize_one(&store, &scratch.root, &job, &options_with(&StdReplacer));
+        assert_eq!(outcome.unwrap(), JobOutcome::Completed);
+    }
+
+    #[cfg(windows)]
+    fn write_new_by_secret_job(scratch: &Scratch) {
+        let (store, job) = prepare_secret_job(scratch, "secret-write", ".env");
+        let options = options_with(&StdReplacer);
+        let outcome = materialize_secret_one(&store, &scratch.root, &job, b"new", &options);
+        assert_eq!(outcome.unwrap(), JobOutcome::Completed);
+    }
+
+    #[cfg(windows)]
+    fn write_new_by_replace(scratch: &Scratch) {
+        replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new").unwrap();
+    }
+
+    /// #3570: a file its owner made private stays private when the engine
+    /// replaces it, by a job, a secret job or `files.replace`.
+    #[cfg(windows)]
+    #[test]
+    fn replacing_a_private_file_keeps_its_dacl() {
+        let writes: [(&str, fn(&Scratch)); 3] = [
+            ("notes.md", write_new_by_job),
+            (".env", write_new_by_secret_job),
+            ("notes.md", write_new_by_replace),
+        ];
+        for (name, write) in writes {
+            let scratch = Scratch::new("private-dacl");
+            let target = private_file_in_shared_folder(&scratch, name);
+            let before = dacl_sddl(&target);
+            assert!(before.starts_with("D:P(") && !before.contains(";BU)"));
+            write(&scratch);
+            assert_eq!(std::fs::read(&target).unwrap(), b"new");
+            assert_eq!(dacl_sddl(&target), before, "{name}");
+        }
+    }
+
+    /// #3570: an entry someone added to one file stays with it.
+    #[cfg(windows)]
+    #[test]
+    fn replacing_a_file_keeps_an_entry_of_its_own() {
+        let scratch = Scratch::new("own-entry-dacl");
+        let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"old").unwrap();
+        icacls(&target, &["/deny", "*S-1-5-32-546:(R)"]);
+        let before = dacl_sddl(&target);
+        assert!(before.contains("(D;;FR;;;BG)") && before.contains(";ID;"));
+        write_new_by_job(&scratch);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(dacl_sddl(&target), before);
+    }
+
+    /// #3570: when the file's DACL can't be read, the write is refused
+    /// before a temp exists, and the file stays as it was.
+    #[cfg(windows)]
+    #[test]
+    fn a_dacl_that_cannot_be_read_refuses_the_replace() {
+        let scratch = Scratch::new("unreadable-dacl");
+        let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"old").unwrap();
+        // OWNER RIGHTS replaces what an owner may always do, so this owner
+        // can read, write and delete the file but not read its DACL.
+        icacls(
+            &target,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-3-4:(RD,WD,AD,REA,WEA,X,RA,WA,D,S)",
+            ],
+        );
+        // A plain read asks for READ_CONTROL too, so ask for the data alone.
+        let read = || {
+            use std::io::Read as _;
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_READ_DATA: u32 = 0x1;
+            let mut bytes = Vec::new();
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_DATA)
+                .open(&target)
+                .and_then(|mut file| file.read_to_end(&mut bytes))
+                .expect("read the file's data");
+            bytes
+        };
+        let modified = std::fs::metadata(&target).unwrap().modified().unwrap();
+        let err = replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new")
+            .expect_err("a DACL that can't be read refuses the replace");
+        assert_eq!(err.code(), "permissions-not-kept");
+        assert_eq!(read(), b"old");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().modified().unwrap(),
+            modified
+        );
+        let left: Vec<_> = std::fs::read_dir(&scratch.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != ".dohc" && name != "notes.md")
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        std::fs::remove_file(&target).expect("the owner may still delete the file");
+    }
+
     struct Scratch {
         root: ScratchDir,
     }
