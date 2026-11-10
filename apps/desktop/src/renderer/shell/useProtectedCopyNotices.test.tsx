@@ -98,6 +98,28 @@ describe("useProtectedCopyNotices", () => {
     expect(h.bridge.discardProtectedCopy).toHaveBeenCalledWith({ workspaceId: "ws-a", id: ID });
   });
 
+  it("runs one Restore or Discard at a time for a kept change", async () => {
+    const h = harness([[".env", ID, 10]]);
+    await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));
+    const row = h.errors().shellErrors[0]!;
+    let finish!: () => void;
+    h.bridge.restoreProtectedCopy.mockImplementationOnce(() => new Promise((resolve) => {
+      finish = () => resolve({ path: ".env", status: "restored" as const });
+    }));
+
+    act(() => h.errors().runShellErrorAction(row.id));
+    act(() => h.errors().runShellErrorAction(row.id));
+    act(() => h.errors().runShellErrorAction(row.id, 1));
+    fireEvent.click(await screen.findByTestId("protected-discard-confirm"));
+    expect(h.bridge.restoreProtectedCopy).toHaveBeenCalledTimes(1);
+    expect(h.bridge.discardProtectedCopy).not.toHaveBeenCalled();
+
+    await act(async () => finish());
+    await waitFor(() => expect(h.errors().shellErrors.map((error) => error.message)).toEqual(["Restored your change to .env"]));
+    expect(h.bridge.restoreProtectedCopy).toHaveBeenCalledTimes(1);
+    expect(h.bridge.discardProtectedCopy).not.toHaveBeenCalled();
+  });
+
   it("keeps one row while the copy is listed, and clears it once the copy goes", async () => {
     const h = harness([[".env", ID, 10]]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));
