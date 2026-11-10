@@ -201,10 +201,16 @@ export function VersionsPage(props: {
   const failedCounts = useRef<string[]>([]);
   failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
   const failedKey = failedCounts.current.join("\n");
+  const reportedCounts = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    const before = reportedCounts.current;
+    reportedCounts.current = new Set(failedCounts.current);
     const first = failedCounts.current[0];
     if (first === undefined) notice.worked("counts");
-    else notice.failed("counts", countErrors.current.get(first));
+    // Fewer failed counts, or the same ones in a new order, is not a failure.
+    else if (failedCounts.current.some((versionId) => !before.has(versionId))) {
+      notice.failed("counts", countErrors.current.get(first));
+    }
   }, [failedKey]);
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
