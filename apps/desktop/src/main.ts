@@ -2172,7 +2172,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), stateDir: stateDir(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
-  remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
+  remove: async (binding, cleanup) => { await removePhysicalWorkspace(binding, cleanup, undefined, { keepDrafts: true }); },
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
   closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
