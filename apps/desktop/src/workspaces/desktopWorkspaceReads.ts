@@ -10,7 +10,7 @@ import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFiles
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { listFiles } from "./workspaceFiles";
-import { matchesFileListingScope, type WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import { matchesFileListingScope, type WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;

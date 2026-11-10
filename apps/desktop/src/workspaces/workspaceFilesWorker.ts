@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import type { WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 import type { WorkspaceFileListingEntry } from "./workspaceFiles";
 
 type FileLookupScope = WorkspaceFileListingScope & { paths?: readonly string[] };

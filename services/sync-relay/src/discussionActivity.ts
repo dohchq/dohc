@@ -37,6 +37,11 @@ export function ownerLogWaitGroup(workspaceId: string): string {
   return `owner-log:${workspaceId}`;
 }
 
+/** An account's change feed for one workspace waits apart from both. */
+export function accountFeedWaitGroup(workspaceId: string): string {
+  return `account-feed:${workspaceId}`;
+}
+
 // This hub is only a bounded wake signal. SQLite owns revisions and activity
 // data, so losing this object on restart cannot invalidate a saved watermark.
 export class DiscussionActivityHub {

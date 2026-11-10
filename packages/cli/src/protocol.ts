@@ -233,9 +233,12 @@ const documentReadArgsSchema = z
 
 // The reads a server's copy of a workspace answers, with the CLI's arguments
 // less who is calling: the server knows that from the credential. These
-// reads never mark a thread read, so `show` only peeks.
+// reads never mark a thread read, so `show` only peeks. `listFiles` and
+// `readText` have no CLI verb.
 const callerArgs = { cwd: true, actor: true, agentId: true } as const;
 export const serverOperationArgsSchemas = {
+  listFiles: z.object({ path: documentPathArg.optional(), recursive: z.boolean().optional() }).strict(),
+  readText: z.object({ path: documentPathArg }).strict(),
   groups: groupsArgsSchema.omit(callerArgs).strict(),
   threads: threadsArgsSchema.omit(callerArgs).strict(),
   groupsFull: groupsFullArgsSchema.omit(callerArgs).strict(),

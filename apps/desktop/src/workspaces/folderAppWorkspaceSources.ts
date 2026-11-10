@@ -1,7 +1,7 @@
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { OwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
 import type { ShareViewFiles } from "./shareViewFiles";
-import { matchesFileListingScope, type WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import { matchesFileListingScope, type WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 import { readFolderAppSources } from "./folderAppSources";
 import { sourceForFile } from "./sitePackage";
 

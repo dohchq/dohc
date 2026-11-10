@@ -1,5 +1,5 @@
 import { serverOperationArgsSchemas, type CliResultByVerb, type ServerOperation } from "@dohc/cli/protocol";
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -7,10 +7,13 @@ import {
   failure, listFileChats, listGroups, listGroupsWithThreads, listGroupThreads, OperationError, readChat, readThreadDispatchState,
   showChat, type ChatReadStore, type ChatsHost,
 } from "@dohc/workspace-operations/chats";
-import { readDocument, type DocumentsHost } from "@dohc/workspace-operations/documents";
+import {
+  listFiles, readDocument, readText, type DocumentsHost, type FileListResult, type FilesHost, type TextReadResult,
+} from "@dohc/workspace-operations/documents";
 import { documentMarkdown, settledDocumentMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import * as Y from "yjs";
+import { currentAccountFeedCursor, secretFile } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
@@ -22,7 +25,10 @@ import type { SyncRelayStorage } from "./storage";
 // this runs the read on the copy and keeps the engine's own failures, and
 // every secret file, out of the answer.
 
-export type AccountOperationResult = CliResultByVerb[ServerOperation];
+export type AccountOperationResult =
+  | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText">]
+  | FileListResult
+  | TextReadResult;
 
 export interface AccountOperationInput {
   /** The account that owns the workspace, from the caller's credential. */
@@ -44,18 +50,18 @@ type ParsedOperation = { [Operation in ServerOperation]: {
 
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
-const secret = (path: string | undefined) => path !== undefined && classifyEngineFilePathForRead(path, PLATFORM).kind === "secret";
 
-/** Whether `name` is an operation this server answers. `changes` is not one: it names 2b's change feed. */
+/** Whether `name` is an operation this server answers. `changes` is not one: it names the change feed. */
 export function isAccountOperation(name: string): name is ServerOperation {
   return Object.hasOwn(serverOperationArgsSchemas, name);
 }
 
 /**
  * Runs one read on the server's copy of `workspaceId` and answers its
- * result. An unknown operation, a workspace the owner cannot open, and a
- * copy whose owner changed reject with not-found; a full server rejects
- * with server_busy; arguments outside the operation's schema, and the
+ * result, with the change feed's cursor for what the copy had synced. An
+ * unknown operation, a workspace the owner cannot open, and a copy whose
+ * owner changed reject with not-found; a full server rejects with
+ * server_busy; arguments outside the operation's schema, and the
  * operation's own refusals, reject with bad_request.
  *
  * The caller's duties:
@@ -70,15 +76,17 @@ export function isAccountOperation(name: string): name is ServerOperation {
 export async function runAccountOperation(
   server: { storage: SyncRelayStorage; copies: ServerCopies },
   input: AccountOperationInput,
-): Promise<AccountOperationResult> {
+): Promise<{ result: AccountOperationResult; cursor: string }> {
   const request = parseOperation(input.operation, input.args);
   return await server.copies.withServerCopy(input.owner, input.workspaceId, input.visitor, async (replica) => {
     await input.authorize();
+    // The sync brings the copy at least this far.
+    const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
     await replica.sync(input.visitor.signal);
     await input.authorize();
     const result = await answer(server.storage, replica, input.workspaceId, request);
     await input.authorize();
-    return result;
+    return { result, cursor };
   });
 }
 
@@ -93,6 +101,8 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
   const chats = serverChats(storage, replica, workspaceId);
   try {
     switch (request.operation) {
+      case "listFiles": return await listFiles(serverFiles(replica, workspaceId), request.args, PLATFORM);
+      case "readText": return await readText(serverFiles(replica, workspaceId), request.args.path, PLATFORM);
       case "groups": return await listGroups(chats);
       case "threads": return await listGroupThreads(chats, { group: request.args.group, reader: null });
       case "groupsFull": return await listGroupsWithThreads(chats);
@@ -145,14 +155,14 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
       for (const [index, objectId] of batch.entries()) {
         const found = results[index];
         if (found?.status === "found") {
-          known.set(objectId, secret(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path });
+          known.set(objectId, secretFile(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path });
           continue;
         }
         const last = storage.objectLastKnownPath(workspaceId, objectId);
         const hints = last === undefined
           ? (await chats.listThreadsForFile({ workspaceId, objectId })).map((thread) => thread.linkedFile?.pathHint)
           : [last];
-        known.set(objectId, hints.some(secret) ? { kind: "hidden" } : { kind: "unavailable" });
+        known.set(objectId, hints.some(secretFile) ? { kind: "hidden" } : { kind: "unavailable" });
       }
     }
     return known;
@@ -161,7 +171,7 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
     workspaceId,
     store: withoutSecretFiles(chats, place),
     fileObjectId: async (path) => {
-      if (secret(path)) return null;
+      if (secretFile(path)) return null;
       const [found] = (await files.resolveFiles({ workspaceId, targets: [{ path }], signal: replica.signal })).results;
       return found?.status === "found" ? found.objectId : null;
     },
@@ -179,7 +189,7 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
 /** The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their object. */
 function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
   const hidden = (placed: ReadonlyMap<string, Placement>, objectId: string | undefined, hint: string | undefined) =>
-    secret(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
+    secretFile(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
   const threads = async <Thread extends Pick<ChatThread, "linkedFile">>(rows: Thread[]): Promise<Thread[]> => {
     const placed = await place(rows.flatMap((thread) => thread.linkedFile ? [thread.linkedFile.objectId] : []));
     return rows.filter((thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint));
@@ -222,7 +232,7 @@ function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, 
   return {
     async read(path) {
       const missing = new OperationError(`No document at ${path}.`);
-      if (secret(path)) throw missing;
+      if (secretFile(path)) throw missing;
       if (liveDocumentKindForPath(path) !== "richdoc") throw new OperationError(`${path} is not a Markdown document.`);
       const version = await files.getActiveVersion({ workspaceId });
       const file = version === null ? null : await files.readTextFile({ workspaceId, versionId: version.id, path });
@@ -235,5 +245,33 @@ function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, 
       }
       return { path, markdown: settledDocumentMarkdown(file.text) };
     },
+  };
+}
+
+/**
+ * The files in the copy's active version. A secret file is never listed, and
+ * reads as missing without asking the engine. A text file over the desktop's
+ * editor limit is refused.
+ */
+function serverFiles(replica: AutomationReplica, workspaceId: string): FilesHost {
+  const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
+  return {
+    async list() {
+      const version = await files.getActiveVersion({ workspaceId });
+      if (version === null) return [];
+      return (await files.listTextFileMetadata({ workspaceId, versionId: version.id }))
+        .filter((file) => !secretFile(file.path))
+        .map(({ path, objectId, contentKind, byteLength }) => ({ path, objectId, contentKind, byteLength }));
+    },
+    async readText(path) {
+      if (secretFile(path)) return { kind: "missing" };
+      const version = await files.getActiveVersion({ workspaceId });
+      const file = version === null ? null : await files.readTextFile({ workspaceId, versionId: version.id, path });
+      if (file === null) return { kind: "missing" };
+      if (file.contentKind !== "text" || typeof file.text !== "string") return { kind: "binary" };
+      return { kind: "text", text: file.text, byteLength: file.byteLength };
+    },
+    maxTextBytes: LIVE_MARKDOWN_MAX_BYTES,
+    errorDetail: "operation-only",
   };
 }

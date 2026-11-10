@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport } from "@dohc/workspace-engine-client";
+import { ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
+import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
 import { streamsRequestBody } from "./server";
@@ -40,17 +42,27 @@ function op(workspaceId: string, operation: string, args: unknown = {}, headers:
   });
 }
 
-/** One engine for chats and files, which fails a method on request. */
+/**
+ * One engine for chats and files, which fails a method on request. Its file
+ * listing can also name `listedSecrets`, as an engine that kept a secret file
+ * among the others would.
+ */
 class TestEngine implements EngineTransport {
   readonly chats = new ChatsLoopbackEngine();
   readonly files = new VersionedLoopbackEngine();
   readonly failing = new Map<string, Error>();
+  readonly listedSecrets: string[] = [];
   onEvent() { return () => undefined; }
   close() {}
   async sendRequest(request: Parameters<EngineTransport["sendRequest"]>[0]) {
     const failure = this.failing.get(request.method);
     if (failure) throw failure;
-    return request.method.startsWith("chats.") ? await this.chats.sendRequest(request) : await this.files.sendRequest(request);
+    if (request.method.startsWith("chats.")) return await this.chats.sendRequest(request);
+    const response = await this.files.sendRequest(request);
+    if (request.method !== "versionedText.list" || this.listedSecrets.length === 0) return response;
+    const page = response.result as { files: Array<Record<string, JsonValue>> };
+    const listed = this.listedSecrets.map((path) => ({ ...page.files[0]!, path, objectId: `object-${path}` }));
+    return { ...response, result: { ...page, files: [...page.files, ...listed] } };
   }
   methods(): string[] {
     return [...this.chats.requests, ...this.files.requests].map((request) => request.method);
@@ -97,7 +109,7 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   };
 }
 
-async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter } = {}) {
+async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub } = {}) {
   const storage = await testStorage();
   for (const [workspaceId, ownerUserId] of [["trip", "ana"], ["notes", "ana"], ["budget", "ben"]] as const) {
     storage.claimWorkspace({ workspaceId, ownerUserId, createdAtMs: 1 });
@@ -108,6 +120,7 @@ async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSe
   const h = testHandler(storage, {
     accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession, serverCopies: () => run.copies,
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
+    ...(options.activity ? { discussionActivity: options.activity } : {}),
   });
   return { storage, engine, h, ...run };
 }
@@ -131,6 +144,34 @@ async function seedTrip(engine: TestEngine) {
 async function answer(response: Response) {
   expect(response.status, await response.clone().text()).toBe(200);
   return (await json(response)).result as Record<string, unknown>;
+}
+
+/** Appends one row to a workspace's log as a relay write. A moment also places its object at its path, or deletes it. */
+function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
+  const context = storage as StorageContext;
+  let originSeq = 0;
+  return (opKind: string, payload: Record<string, unknown>) => context.tx(() => {
+    const row = context.db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES (?, 'origin-test', ?, ?, ?, 1) RETURNING relay_seq`).get(workspaceId, ++originSeq, opKind, JSON.stringify(payload))!;
+    const relaySeq = Number(row.relay_seq);
+    if (opKind === "moment.append") {
+      context.db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+        VALUES (?, ?, ?, ?, 'main', ?, 1)`).run(workspaceId, String(payload.objectId), relaySeq, `moment-${relaySeq}`, payload.path ?? null);
+    }
+    return relaySeq;
+  });
+}
+
+function changes(since: string, options: { hold?: number; headers?: Record<string, string>; workspaceId?: string; signal?: AbortSignal } = {}): Request {
+  const query = new URLSearchParams({ since, ...(options.hold === undefined ? {} : { hold: String(options.hold) }) });
+  return new Request(`http://relay.test/sync/${options.workspaceId ?? "trip"}/ops/changes?${query}`, {
+    headers: options.headers ?? signedIn("ana"), ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+async function feed(response: Response) {
+  expect(response.status, await response.clone().text()).toBe(200);
+  return await json(response);
 }
 
 describe("an account's reads through the server's copy", () => {
@@ -525,5 +566,219 @@ describe("pages the relay hosts live", () => {
     const absent = await livePage(() => undefined);
     absent.edit();
     expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md." });
+  });
+});
+
+describe("file reads through the server's copy", () => {
+  function seedFiles(engine: TestEngine) {
+    for (const [path, text] of [["docs/plan.md", "# Plan\n"], ["docs/trips/lisbon.md", "Alfama\n"], ["Docs/old.md", "Old\n"]] as const) {
+      engine.files.seedTextFile({ workspace: "trip", path, text, objectId: `object-${path}` });
+    }
+    engine.listedSecrets.push(".env", "docs/.env.local", "a/.env/b.md");
+    engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
+  }
+  const paths = (result: Record<string, unknown>) => ({
+    files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
+  });
+
+  it("lists the copy's files in lexical order without secret ones, and reads a text file", async () => {
+    const { engine, h, syncs } = await relay();
+    seedFiles(engine);
+    const listed = await answer(await h(op("trip", "listFiles")));
+    expect(paths(listed)).toEqual({ files: ["Docs/old.md", "docs/plan.md", "docs/trips/lisbon.md", "photo.png"], folders: ["Docs", "docs", "docs/trips"] });
+    expect((listed.files as unknown[])[3]).toEqual({ path: "photo.png", objectId: "object-photo", contentKind: "binary", byteLength: 3 });
+    expect(paths(await answer(await h(op("trip", "listFiles", { path: "docs", recursive: false })))))
+      .toEqual({ files: ["docs/plan.md"], folders: ["docs", "docs/trips"] });
+    expect(await answer(await h(op("trip", "readText", { path: "./docs//plan.md" })))).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n" });
+    expect(await answer(await h(op("trip", "readText", { path: "photo.png" }))))
+      .toEqual({ ok: false, reason: "dohc: photo.png is not a text file.", refusal: "binary" });
+    expect(syncs).toEqual(["trip", "trip", "trip", "trip"]);
+  });
+
+  it("reads a secret file exactly as a missing one, without asking the engine", async () => {
+    const { engine, h } = await relay();
+    seedFiles(engine);
+    const missing = (path: string) => ({ ok: false, reason: `dohc: No file at ${path}.` });
+    expect(await answer(await h(op("trip", "readText", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
+    const reads = engine.files.requests.length;
+    for (const [path, normalized] of [[".env", ".env"], ["%2Eenv", ".env"], ["docs/.env.local", "docs/.env.local"], ["a/.env/b.md", "a/.env/b.md"]] as const) {
+      expect(await answer(await h(op("trip", "readText", { path }))), path).toEqual(missing(normalized));
+    }
+    expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
+    expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
+  });
+
+  it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
+    const { engine, h } = await relay();
+    seedFiles(engine);
+    for (const [name, args] of [["listFiles", { cwd: "/" }], ["listFiles", { path: 1 }], ["listFiles", { recursive: "no" }],
+      ["readText", {}], ["readText", { path: "a.md", actor: "human" }]] as const) {
+      const response = await h(op("trip", name, args));
+      expect(response.status, `${name} ${JSON.stringify(args)}`).toBe(400);
+    }
+    engine.failing.set("versionedText.list", new Error("The engine could not open /srv/dohc/engine.db."));
+    expect(await answer(await h(op("trip", "listFiles")))).toEqual({ ok: false, reason: "failed to list files" });
+  });
+});
+
+describe("an account's change feed", () => {
+  it("answers each read with the cursor of what its copy had synced", async () => {
+    const { storage, h } = await relay();
+    expect((await json(await h(op("trip", "groups")))).cursor).toBe("0.0.0");
+    const relaySeq = logWriter(storage)("chat.channel.create", { channelId: "c" });
+    expect((await json(await h(op("trip", "groups")))).cursor).toBe(`0.${relaySeq}.0`);
+  });
+
+  it("delivers a change made between a read and the feed's start, from the log alone", async () => {
+    const { storage, engine, h, syncs } = await relay();
+    await seedTrip(engine);
+    const { cursor } = await json(await h(op("trip", "groups")));
+    const write = logWriter(storage);
+    write("moment.append", { objectId: "object-plan", path: "docs/plan.md", versionId: "main" });
+    write("chat.message.append", { threadId: "thread-stay", messageId: "m" });
+    write("chat.channel.create", { channelId: "c" });
+    write("moment.append", { objectId: "object-photo", path: "photo.png", versionId: "main" });
+    const last = write("moment.append", { objectId: "object-photo", path: null, versionId: "main" });
+    const delivered = await feed(await h(changes(String(cursor))));
+    expect(delivered).toEqual({ ok: true, cursor: `0.${last}.0`,
+      changed: { files: ["object-plan", "object-photo"], pages: ["object-plan"], chats: ["thread-stay"] } });
+    expect(await feed(await h(changes(String(delivered.cursor))))).toEqual({ ok: true, cursor: `0.${last}.0`, changed: {} });
+    expect(syncs).toEqual(["trip"]);
+  });
+
+  it("leaves out changes on secret files, and keeps waiting through them", async () => {
+    let checks = 0;
+    const activity = new DiscussionActivityHub();
+    const { storage, h } = await relay({ activity, resolve: async (request) => { checks += 1; return await resolveAccountSession(request); } });
+    const write = logWriter(storage);
+    write("moment.append", { objectId: "object-keys", path: "docs/keys.md", versionId: "main" });
+    const start = write("chat.thread.create", { threadId: "thread-keys", linkedObjectId: "object-env", linkedPathHint: ".env" });
+    const held = h(changes(`0.${start}.0`, { hold: 30_000 }));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const parked = checks;
+    write("moment.append", { objectId: "object-env", path: ".env", versionId: "main" });
+    write("chat.message.append", { threadId: "thread-keys", messageId: "m" });
+    // The wake checks the sign-in again, finds nothing it may answer, and waits on.
+    await expect.poll(() => checks).toBeGreaterThan(parked);
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const last = write("moment.append", { objectId: "object-keys", path: ".env.local", versionId: "main" });
+    // The page left for a secret path: the phone sees it go.
+    expect(await feed(await held)).toEqual({ ok: true, cursor: `0.${last}.0`, changed: { files: ["object-keys"], pages: ["object-keys"] } });
+  });
+
+  it("brings a page's accepted live edit before it settles", async () => {
+    const f = registered({ deployment: true });
+    cleanup.push(async () => f.close());
+    f.storage.claimWorkspaceIdentity({ workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream" });
+    const engine = new TestEngine();
+    engine.files.seedTextFile({ workspace: "workspace", path: "docs/a.md", text: "Hello\n", objectId: "object" });
+    const run = await serverCopies(f.storage, engine);
+    const h = testHandler(f.storage, { accountApi: true, resolveAccountSession, serverCopies: () => run.copies });
+    const read = await json(await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner"))));
+    const edit = (title: string) => expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", title), `edit-${title}`)).result.kind).toBe("accepted");
+    edit("Lisbon");
+    const delivered = await feed(await h(changes(String(read.cursor), { workspaceId: "workspace", headers: signedIn("owner") })));
+    expect(delivered.changed).toEqual({ pages: ["object"] });
+    const held = h(changes(String(delivered.cursor), { workspaceId: "workspace", headers: signedIn("owner"), hold: 30_000 }));
+    edit("Porto");
+    expect((await feed(await held)).changed).toEqual({ pages: ["object"] });
+  });
+
+  it("answers replace for a cursor from before a restore, or past what the workspace holds", async () => {
+    const { storage, h } = await relay();
+    const relaySeq = logWriter(storage)("chat.channel.create", { channelId: "c" });
+    const current = `0.${relaySeq}.0`;
+    for (const since of ["1.0.0", `0.${relaySeq + 1}.0`, `0.${relaySeq}.1`]) {
+      expect(await feed(await h(changes(since))), since).toEqual({ ok: true, cursor: current, replace: true });
+    }
+    for (const since of ["", "x", "1.2", "01.0.0", "0.0.0.0", "0.-1.0", "0.99999999999999999.0"]) {
+      const response = await h(changes(since));
+      expect(response.status, since).toBe(400);
+      expect(await json(response)).toMatchObject({ code: "bad_request" });
+    }
+    const response = await h(changes(current, { hold: 30_001 }));
+    expect(response.status).toBe(400);
+
+    // A restore set the log floor where the log stood.
+    const context = storage as StorageContext;
+    context.tx(() => context.db.prepare("UPDATE sync_relay_workspaces SET epoch_log_floor = ? WHERE workspace_id = 'trip'").run(relaySeq));
+    const restored = `${relaySeq}.${relaySeq}.0`;
+    for (const since of [current, `${relaySeq}.0.0`]) {
+      expect(await feed(await h(changes(since))), since).toEqual({ ok: true, cursor: restored, replace: true });
+    }
+    expect(await feed(await h(changes(restored)))).toEqual({ ok: true, cursor: restored, changed: {} });
+  });
+
+  it("wakes an account's held feed when its credentials change", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
+    const activity = new DiscussionActivityHub();
+    const waits = createAccountFeedWaits(storage, activity);
+    const held = waits.wait({ workspaceId: "trip", userId: "ana", caller: "phone", holdMs: 30_000, signal: new AbortController().signal, shouldPark: () => true });
+    expect(activity.stats().waiters).toBe(1);
+    waits.wakeAccount("ben");
+    expect(activity.stats().waiters).toBe(1);
+    waits.wakeAccount("ana");
+    await held;
+    expect(activity.stats().waiters).toBe(0);
+  });
+
+  it("checks the owner before the cursor, and answers another account's, a hidden, and a missing workspace alike", async () => {
+    const { storage, h, syncs } = await relay();
+    const missing = await denialBytes(await h(changes("bad", { workspaceId: "nowhere" })));
+    expect(await denialBytes(await h(changes("bad", { workspaceId: "budget" })))).toBe(missing);
+    expect(await denialBytes(await h(changes("bad", { headers: {} })))).toBe(missing);
+    expect(await denialBytes(await h(changes("bad", { headers: { ...signedIn("ana"), cookie: "session=ana" } })))).toBe(missing);
+    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+    expect(await denialBytes(await h(changes("bad")))).toBe(missing);
+    expect(syncs).toEqual([]);
+  });
+
+  it("is not served while the account API is off", async () => {
+    const { h } = await relay({ accountApi: false });
+    await denialBytes(await h(changes("0.0.0")));
+  });
+
+  it("answers as missing when the sign-in, the owner, or \"Show on phone\" changes during a wait", async () => {
+    for (const change of ["sign-in", "show on phone", "owner", "fence"] as const) {
+      let signedOut = false;
+      const activity = new DiscussionActivityHub();
+      const { storage, h } = await relay({ activity, resolve: async (request) => {
+        const session = await resolveAccountSession(request);
+        return signedOut ? { ...session, sessionId: "another" } : session;
+      } });
+      const write = logWriter(storage);
+      const held = h(changes("0.0.0", { hold: 30_000 }));
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      if (change === "sign-in") {
+        signedOut = true;
+        write("chat.channel.create", { channelId: "c" });
+      } else if (change === "show on phone") {
+        storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+      } else if (change === "owner") {
+        (storage as StorageContext).tx(() => (storage as StorageContext).db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run());
+      } else {
+        createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer-test", fenceKey: "fence-test", invalidate() {}, deleteRuntime: async () => {} })
+          .fence("ana", "ana@example.test");
+      }
+      const response = await held;
+      expect(response.status, change).toBe(404);
+      expect(await response.text()).not.toContain("changed");
+    }
+  });
+
+  it("answers server_busy past one sign-in's waits, and keeps no copy open while it waits", async () => {
+    const activity = new DiscussionActivityHub({ maxWaitersPerActor: 1 });
+    const { h, syncs } = await relay({ activity });
+    const stop = new AbortController();
+    const held = h(changes("0.0.0", { hold: 30_000, signal: stop.signal }));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const busy = await h(changes("0.0.0", { hold: 30_000 }));
+    expect(busy.status).toBe(503);
+    expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
+    expect((await h(op("trip", "groups"))).status).toBe(200);
+    stop.abort();
+    expect(await feed(await held)).toEqual({ ok: true, cursor: "0.0.0", changed: {} });
+    expect(syncs).toEqual(["trip"]);
   });
 });

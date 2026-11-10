@@ -1,5 +1,5 @@
 import { parseDohcSiteConfig, type WorkspaceSiteSource } from "@dohc/workspace-core";
-import { matchesFileListingScope, type WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import { matchesFileListingScope, type WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 
 export async function readFolderAppSources(folder: string, input: {
   list(scope: WorkspaceFileListingScope): Promise<readonly string[]>;

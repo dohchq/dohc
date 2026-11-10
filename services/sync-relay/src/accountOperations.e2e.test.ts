@@ -29,7 +29,8 @@ import { closeTestStorages, tempRoot, testStorage } from "./testing";
 // The owner's computer writes a page and chats and syncs. The phone then
 // reads them through the relay's route from the server's copy of the
 // workspace, the real engine in both, and gets what the owner's computer
-// reads. A page read leaves the copy nothing to send.
+// reads, and the change feed names them. A page read leaves the copy nothing
+// to send.
 
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
@@ -218,6 +219,21 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   const thread = await showChat(ownerChats, { target: cliThreadId(post.thread.id), peek: true });
   await same("show", { target: cliThreadId(post.thread.id), peek: true }, "stream" in thread ? thread : thread.thread);
   expect(JSON.stringify(await read("groupsFull"))).toContain("Where do we stay?");
+  const listed = await read("listFiles") as { ok: true; files: Array<{ path: string; objectId: string }>; folders: string[] };
+  expect(listed.files).toContainEqual(expect.objectContaining({ path: "docs/plan.md", objectId: plan, contentKind: "text" }));
+  expect(listed.folders).toContain("docs");
+  expect(await read("readText", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n\nStay in Alfama.\n" });
+
+  // The change feed reads the relay's log: the page, its file, and the chats the owner's computer wrote.
+  const standing = storage.accountFeedStanding(WORKSPACE)!;
+  const feed = await relay(new Request(`${relayUrl}/sync/${WORKSPACE}/ops/changes?since=${standing.floor}.0.0`, {
+    headers: { authorization: "Bearer session:owner" },
+  }));
+  expect(feed.status, await feed.clone().text()).toBe(200);
+  expect(await feed.json()).toMatchObject({
+    ok: true, cursor: `${standing.floor}.${standing.log}.${standing.journal}`,
+    changed: { files: expect.arrayContaining([plan]), pages: expect.arrayContaining([plan]), chats: expect.any(Array) },
+  });
 
   // A page read writes nothing to the copy, so the copy has nothing to send and the relay's log stays as it was.
   const db = (storage as StorageContext).db;

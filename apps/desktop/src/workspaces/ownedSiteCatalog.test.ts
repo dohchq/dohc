@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { createOwnedWorkspaceReadPort } from "./ownedWorkspaceReadPort";
-import { matchesFileListingScope } from "./workspaceFileListingScope";
+import { matchesFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 import { createOwnedSiteCatalog } from "./ownedSiteCatalog";
 import { createTestScratch } from "./testTemp";
 
