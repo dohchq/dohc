@@ -1822,8 +1822,8 @@ impl ActorHandle {
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
-            let unwritten =
-                store.read_with(|conn| unwritten_switch_secrets(conn, &workspace_id, &version_id))?;
+            let unwritten = store
+                .read_with(|conn| unwritten_switch_secrets(conn, &workspace_id, &version_id))?;
             entries.retain(|entry| {
                 entry.sha256 != dohc_engine_domain::SECRET_SEED_SENTINEL_SHA
                     || !unwritten.contains(&entry.path)
