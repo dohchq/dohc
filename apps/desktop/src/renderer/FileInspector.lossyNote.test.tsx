@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -153,6 +153,61 @@ describe("a lossy note", () => {
     const notice = await screen.findByTestId("lossy-note-notice");
     expect(notice.textContent).toContain("dohc held a change, because saving it would rewrite parts it can't show.");
     expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+  });
+
+  it("shows what saving the held change would write against the file, as a diff", async () => {
+    const bridge = Object.assign(bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]), {
+      readHeldChange: vi.fn<DohcDesktopBridge["readHeldChange"]>(async () => ({
+        change: { path: "a.md", file: LOSSY, held: LOSSY.replace("See [the docs][docs].", "See [the setup docs][docs] first.") },
+      })),
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" changeHeld />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    const dialog = await screen.findByTestId("held-change-dialog");
+    expect(bridge.readHeldChange).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", path: "a.md" });
+    const diff = await within(dialog).findByTestId("held-change-diff");
+    const removed = [...diff.querySelectorAll('[data-kind="removed"] code')].map(line => line.textContent);
+    const added = [...diff.querySelectorAll('[data-kind="added"] code')].map(line => line.textContent);
+    // The file's lines are the removed side; the held change's are the added side.
+    expect(removed).toEqual(["Removed: See [the docs][docs]."]);
+    expect(added).toEqual(["Added: See [the setup docs][docs] first."]);
+    // Word marks show the words that changed inside the line.
+    expect([...diff.querySelectorAll("ins")].map(mark => mark.textContent?.trim())).toEqual(["setup", "first"]);
+    expect(within(dialog).getByTestId("held-change-legend").textContent).toBe("− In the file+ Held change, if saved");
+    expect(within(dialog).getByTestId("held-change-counts").textContent).toContain("1 line added, 1 line removed");
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("held-change-dialog")).toBeNull();
+    // Reviewing reads and changes nothing.
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("says a held change is too large to show, and retries a failed read in place", async () => {
+    const bridge = Object.assign(bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]), {
+      readHeldChange: vi.fn<DohcDesktopBridge["readHeldChange"]>()
+        .mockRejectedValueOnce(new Error("engine busy"))
+        .mockResolvedValueOnce({ change: { path: "a.md", tooLarge: true } }),
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" changeHeld />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    const failed = await screen.findByTestId("held-change-failed");
+    expect(failed.textContent).toContain("dohc could not read the held change.");
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    expect((await screen.findByTestId("held-change-too-large")).textContent).toBe("This change is too large to show here.");
+    expect(screen.queryByTestId("held-change-diff")).toBeNull();
+    expect(bridge.readHeldChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Show change only while dohc holds a change", async () => {
+    bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("lossy-note-notice");
+    expect(screen.queryByTestId("lossy-note-show-change")).toBeNull();
   });
 
   it("offers no Edit anyway in a received share, whose session drops the consent", async () => {
