@@ -282,6 +282,7 @@ function ColumnMenu({ label, color, onColor }: { label: string; color: OptionCol
       {open ? (
         <div
           role="dialog"
+          tabIndex={-1}
           aria-label={`${label} options`}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;

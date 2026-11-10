@@ -231,6 +231,9 @@ describe("BoardView", () => {
     render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" onOptionColorChange={() => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "doing options" }));
     const menu = screen.getByRole("dialog", { name: "doing options" });
+    // A click on the menu's own padding keeps focus inside it.
+    fireEvent.blur(within(menu).getAllByRole("radio")[0]!, { relatedTarget: menu });
+    expect(screen.getByRole("dialog", { name: "doing options" })).toBe(menu);
     fireEvent.blur(within(menu).getAllByRole("radio")[0]!, { relatedTarget: document.body });
     expect(screen.queryByRole("dialog", { name: "doing options" })).toBeNull();
   });

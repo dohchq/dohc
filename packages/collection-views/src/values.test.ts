@@ -13,7 +13,6 @@ describe("shortDate", () => {
   });
 });
 
-
 describe("optionColor", () => {
   it("uses the chosen color, and an own key only", () => {
     const field = { name: "s", type: "select" as const, options: ["a", "constructor"], colors: { a: "rose" as const } };
