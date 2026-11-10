@@ -5526,6 +5526,12 @@ mod tests {
             /// ends the transport.
             async fn close(mut self) {
                 if self.attached {
+                    // The writer flushes an answer under its guard after the
+                    // last byte, and a detach during that flush ends the
+                    // connection. An answer written after it means that flush is done.
+                    self.request(999, "liveApplication.hosts", None, json!({}))
+                        .await;
+                    self.response(999).await;
                     let workspace = self.workspace.clone();
                     self.request(
                         1_000,
