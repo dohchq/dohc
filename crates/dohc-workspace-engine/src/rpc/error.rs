@@ -381,8 +381,13 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
                 "relay-workspace-unavailable",
             );
         }
+        // The session still works; only the relay is out of reach. A new
+        // session would meet the same relay, so the caller waits and retries.
         RuntimeError::Relay(RelayError::Partitioned) => {
-            return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
+            return WireError {
+                retry: Retryability::AfterBackoff,
+                ..WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable")
+            };
         }
         // Only the session host's service reads it, and it must find the file.
         RuntimeError::HostedFileUnexpected { .. } => {
@@ -1912,9 +1917,12 @@ mod tests {
         let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
         assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
         assert_eq!(unreachable.message, "relay-unreachable");
+        // Reopening the session cannot reach the relay either (#2708).
+        assert_eq!(unreachable.retry, Retryability::AfterBackoff);
         let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
         assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);
         assert_eq!(missing.message, "relay-workspace-unavailable");
+        assert_eq!(missing.retry, Retryability::AfterReconnect);
         assert_ne!(
             map_runtime(RuntimeError::ActorUnavailable).message,
             missing.message

@@ -2421,7 +2421,7 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method === "sync.push" || request.method === "sync.claim") {
         throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterReconnect" },
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterBackoff" },
           new Error("refused"),
         );
       }
