@@ -206,5 +206,7 @@
   "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-in": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-held-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }
