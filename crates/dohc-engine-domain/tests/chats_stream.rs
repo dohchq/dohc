@@ -3,8 +3,9 @@
 
 use dohc_engine_domain::{
     AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatDecisionState, ChatThreadLane,
-    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, StartChannelThread,
-    StreamAgentRequest, StreamAgentRequestState, StreamPage, StreamPosition,
+    ChatWorkReport, ChatWorkStatus, DomainError, LinkedChatStore, NoFaults, ResolveDecision,
+    SendMessage, StartChannelThread, StreamAgentRequest, StreamAgentRequestState, StreamPage,
+    StreamPosition, ThreadWork,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -52,6 +53,7 @@ fn start_input(
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
         now_ms: at_ms,
         request_id: None,
@@ -94,6 +96,7 @@ fn reply_input(thread_id: &str, message_id: &str, at_ms: i64) -> SendMessage {
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
         now_ms: at_ms,
         request_id: None,
@@ -466,6 +469,180 @@ fn a_post_summarises_its_replies_repliers_agent_reply_and_open_decisions() {
         AGENT_REPLY_EXCERPT_CHARS
     );
     assert_eq!(post.open_decision_count, 1);
+}
+
+/// A thread's Work card is its newest work report, with the newest link any
+/// of its reports carried. The stream and a thread read serve the same card.
+#[test]
+fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
+    let (_scratch, mut store) = store();
+    group(&mut store);
+    let report = |status, url: Option<&str>| {
+        Some(ChatWorkReport {
+            status,
+            url: url.map(str::to_owned),
+        })
+    };
+    let mut opening = start_input("group", "post", "open", ChatThreadLane::Posts, 10);
+    opening.work = report(
+        ChatWorkStatus::Working,
+        Some("https://example.com/threads/1"),
+    );
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(&opening, &NO_FAULTS)
+        .expect("post");
+    start(
+        &mut store,
+        "group",
+        "plain",
+        "plain-open",
+        ChatThreadLane::Posts,
+        11,
+    );
+
+    let card = |store: &mut EngineStore| -> ThreadWork {
+        let stream = page(store, None, 10);
+        assert_eq!(ids(&stream), ["open", "plain-open"]);
+        assert_eq!(stream.items[1].post.as_ref().expect("post").work, None);
+        let chats = LinkedChatStore::new(store);
+        assert_eq!(chats.get_thread(WS, "plain").expect("thread").work, None);
+        let from_stream = stream.items[0]
+            .post
+            .as_ref()
+            .expect("post")
+            .work
+            .clone()
+            .expect("the post's work card");
+        let from_thread = chats.get_thread(WS, "post").expect("thread").work;
+        assert_eq!(from_thread.as_ref(), Some(&from_stream));
+        from_stream
+    };
+    let facts = |work: &ThreadWork| {
+        (
+            work.status,
+            work.url.clone(),
+            work.message_id.clone(),
+            work.reported_at_ms,
+        )
+    };
+
+    let first = card(&mut store);
+    assert_eq!(
+        facts(&first),
+        (
+            ChatWorkStatus::Working,
+            Some("https://example.com/threads/1".to_owned()),
+            "open".to_owned(),
+            10
+        )
+    );
+    assert_eq!(first.author_display_name, "Scout");
+    assert_eq!(first.author_owner_display_name.as_deref(), Some("Ada"));
+
+    // A reply with no report changes nothing. A report with no link keeps the
+    // link an earlier report carried.
+    send(&mut store, reply_input("post", "talk", 20));
+    let mut done = reply_input("post", "done", 30);
+    done.work = report(ChatWorkStatus::Done, None);
+    send(&mut store, done);
+    assert_eq!(
+        facts(&card(&mut store)),
+        (
+            ChatWorkStatus::Done,
+            Some("https://example.com/threads/1".to_owned()),
+            "done".to_owned(),
+            30
+        )
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .get_message(WS, "done")
+            .expect("message")
+            .work,
+        report(ChatWorkStatus::Done, None),
+        "each message keeps its own report"
+    );
+
+    // An older report that arrives late gives its newer link, not its status.
+    let mut late = reply_input("post", "late", 25);
+    late.work = report(ChatWorkStatus::Failed, Some("http://example.com/threads/2"));
+    send(&mut store, late);
+    assert_eq!(
+        facts(&card(&mut store)),
+        (
+            ChatWorkStatus::Done,
+            Some("http://example.com/threads/2".to_owned()),
+            "done".to_owned(),
+            30
+        )
+    );
+}
+
+/// Only an agent's message reports work, and a report's link is a web
+/// address within the length JavaScript counts.
+#[test]
+fn a_work_report_from_a_person_or_with_a_bad_link_is_refused() {
+    let (_scratch, mut store) = store();
+    group(&mut store);
+    start(
+        &mut store,
+        "group",
+        "post",
+        "open",
+        ChatThreadLane::Posts,
+        10,
+    );
+    let report = |url: Option<String>| {
+        Some(ChatWorkReport {
+            status: ChatWorkStatus::Working,
+            url,
+        })
+    };
+    let longest = format!("https://example.com/{}", "a".repeat(2048 - 20));
+    assert_eq!(longest.len(), 2048);
+
+    let mut person = reply_input("post", "person", 20);
+    person.author_kind = ChatActorKind::Human;
+    person.author_owner_display_name = None;
+    person.work = report(None);
+    let mut refused = vec![person];
+    for (index, url) in [
+        "ftp://example.com/file",
+        "javascript:alert(1)",
+        "https://",
+        "HTTPS://example.com",
+        " https://example.com",
+        "https://example.com/a b",
+        "https://example.com/\u{7}",
+        &format!("{longest}a"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bad = reply_input("post", &format!("bad-{index}"), 30);
+        bad.work = report(Some(url.to_owned()));
+        refused.push(bad);
+    }
+    for message in refused {
+        assert!(
+            matches!(
+                LinkedChatStore::new(&mut store).send_message(&message, &NO_FAULTS),
+                Err(DomainError::InvalidInput { .. })
+            ),
+            "{} is refused",
+            message.message_id
+        );
+    }
+    let mut opening = start_input("group", "bad-post", "bad-open", ChatThreadLane::Posts, 40);
+    opening.work = report(Some("mailto:ada@example.com".to_owned()));
+    assert!(matches!(
+        LinkedChatStore::new(&mut store).start_channel_thread(&opening, &NO_FAULTS),
+        Err(DomainError::InvalidInput { .. })
+    ));
+
+    let mut fits = reply_input("post", "fits", 50);
+    fits.work = report(Some(longest));
+    send(&mut store, fits);
 }
 
 #[test]

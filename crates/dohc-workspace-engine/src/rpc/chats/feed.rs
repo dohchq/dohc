@@ -214,6 +214,7 @@ mod tests {
                 link_author: None,
                 author_agent_id: None,
                 author_reported: None,
+                work: None,
                 attachments: Vec::new(),
             },
             thread: ChatThread {

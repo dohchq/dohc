@@ -66,6 +66,8 @@ struct ChatThreadStartParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    work: Option<dohc_engine_domain::ChatWorkReport>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     wake_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
@@ -346,6 +348,7 @@ impl EngineService {
                     automation: params.automation.map(Into::into),
                     author_agent_id: params.author_agent_id,
                     author_reported: params.author_reported,
+                    work: params.work,
                     wake_agent_ids: params.wake_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,

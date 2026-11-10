@@ -57,6 +57,7 @@ fn start_thread(
         request_id: None,
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
     }
 }
@@ -87,6 +88,7 @@ fn send_msg(
         request_id: None,
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
     }
 }

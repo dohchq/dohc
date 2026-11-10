@@ -3,9 +3,10 @@
 
 use super::{
     ChatActorKind, ChatChannel, ChatDecision, ChatMessage, ChatMessageLinkAuthor, ChatReaction,
-    ChatThread, ChatThreadLane, FEED_LIMIT_MAX, LinkedChatStore, active_reactions_for_messages,
-    collect, hydrate_attachments_for_messages, map_decision_row, map_message_row,
-    message_count_for_thread, persisted_nonnegative_safe, require_channel, require_thread,
+    ChatThread, ChatThreadLane, ChatWorkStatus, FEED_LIMIT_MAX, LinkedChatStore,
+    active_reactions_for_messages, collect, hydrate_attachments_for_messages, map_decision_row,
+    map_message_row, message_count_for_thread, persisted_nonnegative_safe, require_channel,
+    require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, params};
@@ -78,6 +79,21 @@ pub struct StreamAgentReply {
     pub body_excerpt: String,
 }
 
+/// A thread's Work card: its newest work report, and the newest link any of
+/// its reports carried. All of it is what an agent reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadWork {
+    pub status: ChatWorkStatus,
+    pub url: Option<String>,
+    /// The newest report, and the agent that wrote it.
+    pub message_id: String,
+    pub author_display_name: String,
+    pub author_owner_display_name: Option<String>,
+    pub author_user_id: Option<String>,
+    pub author_agent_id: Option<String>,
+    pub reported_at_ms: i64,
+}
+
 /// What a post's thread holds beyond its first message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamPost {
@@ -87,6 +103,7 @@ pub struct StreamPost {
     pub last_reply_at_ms: Option<i64>,
     pub latest_agent_reply: Option<StreamAgentReply>,
     pub open_decision_count: i64,
+    pub work: Option<ThreadWork>,
 }
 
 /// Where an agent request for a message stands. A request whose run finished
@@ -151,12 +168,13 @@ pub struct ThreadWithChannel {
     pub thread: ChatThread,
     pub channel: Option<ChatChannel>,
     pub message_count: i64,
+    pub work: Option<ThreadWork>,
 }
 
 const MESSAGE_COLUMNS: &str = "workspace_id, thread_id, message_order, message_id, author_kind, \
      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
      author_owner_display_name, automation_id, chain_depth, author_actor_key, link_grant_id, \
-     link_principal_id, author_agent_id, author_reported, agent_connection_id";
+     link_principal_id, author_agent_id, author_reported, agent_connection_id, work";
 
 fn corrupt(reason: &'static str) -> DomainError {
     DomainError::StateCorrupt { reason }
@@ -299,6 +317,7 @@ impl<'a> LinkedChatStore<'a> {
             let opening_ids: Vec<String> =
                 facts.values().map(|fact| fact.opening_id.clone()).collect();
             let mut repliers = post_repliers(conn, workspace_id, &post_thread_ids, &opening_ids)?;
+            let mut work = thread_work(conn, workspace_id, &post_thread_ids)?;
 
             let item_ids: Vec<String> = keys
                 .iter()
@@ -342,6 +361,7 @@ impl<'a> LinkedChatStore<'a> {
                             last_reply_at_ms: fact.last_reply_at_ms,
                             latest_agent_reply,
                             open_decision_count: fact.open_decision_count,
+                            work: work.remove(&thread_id),
                         };
                         (fact.opening_id, Some(post))
                     }
@@ -384,10 +404,12 @@ impl<'a> LinkedChatStore<'a> {
                 message_count_for_thread(conn, workspace_id, thread_id)?,
                 "thread message count is corrupt",
             )?;
+            let work = thread_work(conn, workspace_id, &[thread_id.to_owned()])?.remove(thread_id);
             Ok(ThreadWithChannel {
                 thread,
                 channel,
                 message_count,
+                work,
             })
         })
     }
@@ -692,6 +714,72 @@ pub(super) fn agent_requests_for_messages(
         grouped.entry(message_id).or_default().push(request);
     }
     Ok(grouped)
+}
+
+/// Each thread's Work card, for the threads that have a work report. The
+/// newest report by (created_at_ms, message_id) gives the status, so every
+/// device shows the same one.
+fn thread_work(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_ids: &[String],
+) -> Result<HashMap<String, ThreadWork>, DomainError> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT ids.value, \
+                    (SELECT m.message_id FROM chat_messages m \
+                     WHERE m.workspace_id = ?1 AND m.thread_id = ids.value AND m.work IS NOT NULL \
+                     ORDER BY m.created_at_ms DESC, m.message_id DESC LIMIT 1), \
+                    (SELECT json_extract(m.work, '$.url') FROM chat_messages m \
+                     WHERE m.workspace_id = ?1 AND m.thread_id = ids.value AND m.work IS NOT NULL \
+                       AND json_extract(m.work, '$.url') IS NOT NULL \
+                     ORDER BY m.created_at_ms DESC, m.message_id DESC LIMIT 1) \
+             FROM json_each(?2) ids",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(params![workspace_id, json_ids(thread_ids)?], |row| {
+            Ok(Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            )))
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    let newest: Vec<(String, String, Option<String>)> = collect(rows)?
+        .into_iter()
+        .filter_map(|(thread_id, message_id, url)| Some((thread_id, message_id?, url)))
+        .collect();
+    let report_ids: Vec<String> = newest.iter().map(|(_, id, _)| id.clone()).collect();
+    let mut reports = messages_by_id(conn, workspace_id, &report_ids)?;
+    newest
+        .into_iter()
+        .map(|(thread_id, message_id, url)| {
+            let message = reports
+                .remove(&message_id)
+                .ok_or_else(|| corrupt("thread work report is missing"))?;
+            let status = message
+                .work
+                .ok_or_else(|| corrupt("thread work report lost its status"))?
+                .status;
+            Ok((
+                thread_id,
+                ThreadWork {
+                    status,
+                    url,
+                    message_id: message.message_id,
+                    author_display_name: message.author_display_name,
+                    author_owner_display_name: message.author_owner_display_name,
+                    author_user_id: message.author_user_id,
+                    author_agent_id: message.author_agent_id,
+                    reported_at_ms: message.created_at_ms,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn agent_reply(message: ChatMessage) -> StreamAgentReply {
