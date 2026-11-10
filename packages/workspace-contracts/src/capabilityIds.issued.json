@@ -280,5 +280,6 @@
   "crash.mark",
   "chat.archive.set",
   "agent.personal.read",
-  "agent.personal.change"
+  "agent.personal.change",
+  "dataset.operation.cancel"
 ]
