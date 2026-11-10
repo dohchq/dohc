@@ -162,11 +162,15 @@ function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<numbe
 // number to later processes. A row that started before the process now holding
 // its parent's pid belongs to another program, so it leaves the table, and a
 // stop never reaches it. The root counts as started when dohc spawned it,
-// because a read can land after the root exits. Times are in whole seconds.
+// because a read can land after the root exits. Times are local, in whole
+// seconds, with no offset, so an hour that repeats when clocks go back reads as
+// its first occurrence. The root's time is read the same way.
 export function withoutReusedParents(table: string, rootPid: number, rootSpawnedAt: number): string {
   const rows = parseProcessTable(table);
   const started = new Map(rows.map((row) => [row.pid, Date.parse(row.startedAt)]));
-  started.set(rootPid, Math.floor(rootSpawnedAt / 1000) * 1000);
+  const spawned = new Date(rootSpawnedAt);
+  started.set(rootPid, new Date(spawned.getFullYear(), spawned.getMonth(), spawned.getDate(),
+    spawned.getHours(), spawned.getMinutes(), spawned.getSeconds()).getTime());
   return rows
     .filter((row) => !((started.get(row.ppid) ?? -Infinity) > Date.parse(row.startedAt)))
     .map((row) => `${row.pid} ${row.ppid} ${row.startedAt}`)

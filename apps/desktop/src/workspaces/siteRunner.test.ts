@@ -1358,6 +1358,20 @@ describe("withoutReusedParents", () => {
     const descendants = await posixSpawn.processDescendants(100, async () => withoutReusedParents(table, 100, spawnedAt));
     expect(descendants.sort()).toEqual([300, 400]);
   });
+  it("keeps a child started in the hour that repeats when clocks go back", async () => {
+    // Removing TZ again would leave Node in this zone, so the old zone goes back by name.
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      // The second 01:10 that morning, after clocks went back.
+      const spawnedAt = Date.parse("2026-11-01T01:10:00.600-08:00");
+      const descendants = await posixSpawn.processDescendants(100, async () =>
+        withoutReusedParents("300 100 11/01/2026 01:10:01", 100, spawnedAt));
+      expect(descendants).toEqual([300]);
+    } finally {
+      process.env.TZ = zone;
+    }
+  });
 });
 
 // On Windows buildSite snapshots descendants with PowerShell. Beside other
