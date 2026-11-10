@@ -292,7 +292,7 @@ describe("Explorer Home", () => {
     const lines = {
       pages: "No pages yet.",
       collections: "No Collections yet.",
-      apps: "No apps yet. Any folder with a web app in it shows up here.",
+      apps: "No apps yet.",
     };
     for (const [id, words] of Object.entries(lines)) {
       const line = screen.getByTestId(`explorer-${id}-empty`);

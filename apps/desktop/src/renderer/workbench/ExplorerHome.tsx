@@ -269,7 +269,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
       ...(appsStatus === "loading" ? { body: holdRow } : {}),
       ...(appsStatus === "ready" && appList.length === 0
-        ? { empty: "No apps yet. Any folder with a web app in it shows up here." }
+        ? { empty: "No apps yet." }
         : {}),
     });
   }
