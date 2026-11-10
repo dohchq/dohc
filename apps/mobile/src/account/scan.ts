@@ -28,23 +28,6 @@ export function scanReader(options: { readonly developmentServer: boolean }): (t
   };
 }
 
-/**
- * Holds a scanned origin until the scanner's sheet has gone. iOS can't present the approval page's browser from a
- * sheet still sliding away, so Connect starts only once the sheet is dismissed. A sheet closed without a scan holds
- * nothing, and each origin is taken once.
- */
-export function pendingScan(): { hold(origin: string): void; take(): string | null } {
-  let held: string | null = null;
-  return {
-    hold: origin => { held = origin; },
-    take: () => {
-      const origin = held;
-      held = null;
-      return origin;
-    },
-  };
-}
-
 /** What the camera's permission currently is, as expo-camera reports it. */
 export interface CameraPermission {
   readonly granted: boolean;

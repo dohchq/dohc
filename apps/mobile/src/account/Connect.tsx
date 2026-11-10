@@ -12,7 +12,6 @@ import { useTheme } from "../theme";
 import { useAccount } from "./AccountProvider";
 import { Button } from "./Button";
 import { ProblemLine } from "./ProblemLine";
-import { pendingScan } from "./scan";
 import { ScanSheet } from "./ScanSheet";
 
 type Phase =
@@ -43,7 +42,6 @@ export function Connect() {
   const field = useRef<TextInputInstance>(null);
   // The scanner's sheet. Each opening is a new session, so it asks for the camera again and forgets earlier scans.
   const [scan, setScan] = useState({ open: false, session: 0 });
-  const [pending] = useState(pendingScan);
 
   // Leaving this screen ends a sign-in still in progress. Once signed in, it has nothing to end.
   useEffect(() => () => account.cancelSignIn(), [account]);
@@ -79,16 +77,13 @@ export function Connect() {
     }
   }
 
-  // A scanned address goes in the field at once, and connects, as Connect server would, once the sheet has gone.
+  // A scanned address only fills the field, as typing it does. The person still chooses Connect server, so a code
+  // someone swapped onto a poster or into a message can't open a server's sign-in page by itself. Focus isn't moved:
+  // as on the desktop, it belongs back on the control that opened the sheet, and Connect server follows it.
   function scanFound(origin: string) {
-    pending.hold(origin);
     setScan(current => ({ ...current, open: false }));
     setAddress(origin);
-  }
-
-  function scannerGone() {
-    const origin = pending.take();
-    if (origin !== null) void connect(origin);
+    setAddressProblem(null);
   }
 
   function cancel() {
@@ -155,7 +150,7 @@ export function Connect() {
           </View>
         )}
       </ScrollView>
-      <ScanSheet open={scan.open} session={scan.session} onClose={() => setScan(current => ({ ...current, open: false }))} onScanned={scanFound} onGone={scannerGone} />
+      <ScanSheet open={scan.open} session={scan.session} onClose={() => setScan(current => ({ ...current, open: false }))} onScanned={scanFound} />
     </View>
   );
 }
