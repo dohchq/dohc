@@ -243,7 +243,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     closes.push(() => validation.close());
     const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = validation.validator(profile.validation);
     const resolveActor = createSessionActorResolver(relayAuth);
-    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    const serviceReplication = createServiceHostReplication({activity: {wakeLog() {}}, storage, prefix: "dohc-service-v1.", hostedFeed: true,
       authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
@@ -715,7 +715,7 @@ async function openSelfHostProof(name: string) {
       deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
       ({storage, history} = deployment);
       frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners);
-      serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      serviceReplication = createServiceHostReplication({activity: {wakeLog() {}}, storage, prefix: "dohc-service-v1.", hostedFeed: true,
         authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
       relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor,
         namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => supervisor?.current()});

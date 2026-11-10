@@ -181,7 +181,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
     // The service host replicates through its scoped feed, with the credential this relay derives for it.
     const serviceKey = {key: Buffer.from(ticketKey), namespace: deployment.history.namespace};
-    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    const serviceReplication = createServiceHostReplication({activity: {wakeLog() {}}, storage, prefix: "dohc-service-v1.", hostedFeed: true,
       authorize: input => authorizeServiceHostReplication(storage, {...serviceKey, ...input})});
     const relayHttp = serveFetchHandler({handler: async request => {
       const path = new URL(request.url).pathname;

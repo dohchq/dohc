@@ -190,7 +190,7 @@ it("resumes a real configured service activation after a lost native adoption re
       namedBrowserSessionLimits: {...browserLimits, maxSessions: 4, retentionMs: 120000}, ownerRestoreHost: () => active});
     // The service host replicates through its scoped feed, with the credential this relay derives for it.
     const serviceKey = {key: Buffer.from(ticketKey), namespace: history.namespace};
-    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    const serviceReplication = createServiceHostReplication({activity: {wakeLog() {}}, storage, prefix: "dohc-service-v1.", hostedFeed: true,
       authorize: input => authorizeServiceHostReplication(storage, {...serviceKey, ...input})});
     const relayHttp = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReplication(request)
       : new URL(request.url).pathname === "/sync/live/named-tickets" ? routes!.handle(request) : relayApp(request),

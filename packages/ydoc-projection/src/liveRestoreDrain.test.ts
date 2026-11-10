@@ -1816,7 +1816,7 @@ it.each(["revoked during the restore", "kept by the owner's restore"] as const)(
 it("publishes a restore's settlement moment for a retirement once the restore resumes", async () => {
   const f = (await admittedRestoreFixture("owner", false, "service", revokeOtherGrantDuringRestore));
   try {
-    const receipt = f.admitted.admitted.accepted.receipt, feed = createServiceHostFeed(f.storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
+    const receipt = f.admitted.admitted.accepted.receipt, feed = createServiceHostFeed(f.storage, {wakeLog() {}}), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
     const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
       {method, ...(body === undefined ? {} : {body})}), {workspaceId: "workspace", route, actor: {userId: "owner"}, guard() {}});
     expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({activationId: hostedActivationId, restoreFenceGeneration: 2, acceptedThrough: receipt.journalCursor});
@@ -1847,7 +1847,7 @@ it("publishes a restore's settlement moment for a retirement once the restore re
 type HostedStorage = Parameters<typeof createServiceHostFeed>[0];
 // Uploads a restore publication's blobs and pushes its settlement moment through the host's feed, retiring unless `retiring` is false.
 async function pushRestoreSettlement(storage: HostedStorage, {payload, record}: Pick<ReturnType<typeof restorePublication>, "payload" | "record">, retiring = true) {
-  const feed = createServiceHostFeed(storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
+  const feed = createServiceHostFeed(storage, {wakeLog() {}}), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
   const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
     {method, ...(body === undefined ? {} : {body})}), {workspaceId: "workspace", route, actor: {userId: "owner"}, guard() {}});
   for (const sha256 of [payload.payloadBeforeBlobSha256, payload.payloadAfterBlobSha256, record.acceptedStateBlobSha256])
