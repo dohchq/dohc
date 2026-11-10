@@ -6989,7 +6989,7 @@ mod attribution_tests {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     use std::time::{Duration, Instant};
 
     use rusqlite::Connection;
