@@ -12,6 +12,7 @@ import { focusedElementIn } from "./ui/focusedElement";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
+import { isComposingKey } from "./ui/keys";
 import { menuClosingPresses } from "./ui/useDismiss";
 
 // A field marks itself data-unsaved while it holds what it can't save yet:
@@ -119,6 +120,8 @@ export function Overlay(props: {
       if (!isTopOverlay(idRef.current)) return;
       if (switchModalRegion(event, panelRef.current)) return;
       if (event.key === "Escape") {
+        // An IME's Escape cancels its composition, not the dialog.
+        if (isComposingKey(event)) return;
         // One Escape closes one surface: a menu, an open combobox list, a
         // control's tooltip or an edit in place inside the dialog takes this
         // one, and the next reaches the dialog.

@@ -1,4 +1,4 @@
-import { Check, CircleAlert, MoreHorizontal } from "lucide-react";
+import { Check, MoreHorizontal } from "lucide-react";
 import {
   useId,
   useLayoutEffect,
@@ -11,7 +11,6 @@ import {
   type RefObject,
 } from "react";
 import { IconButton } from "./controls";
-import { isComposingKey } from "./keys";
 import { focusedElementIn } from "./focusedElement";
 import { useDismiss } from "./useDismiss";
 
@@ -36,35 +35,9 @@ export type MenuItem = {
   data?: Readonly<Record<`data-${string}`, string>>;
 };
 
-/** A text field in a row's place, such as a name being typed. The owner holds the value. */
-export type MenuField = {
-  id: string;
-  field: {
-    /** The field's accessible name. */
-    label: string;
-    value: string;
-    onChange: (value: string) => void;
-    /** Enter. Not called while `busy`. */
-    onSubmit: () => void;
-    /** Escape. The owner puts the row back, and focus returns to it. */
-    onCancel: () => void;
-    placeholder?: string;
-    maxLength?: number;
-    /** The owner is acting on the value: it holds, and the field keeps focus. */
-    busy?: boolean;
-    /** A line under the field that describes it. */
-    hint?: ReactNode;
-    /** Why the owner refused the value, in the hint's place. It marks the field invalid. */
-    error?: ReactNode;
-    errorTestId?: string;
-    testId?: string;
-  };
-};
-
 /** A line between two groups of rows. */
 export const MENU_SEPARATOR = "separator";
-export type MenuEntry = MenuItem | MenuField | typeof MENU_SEPARATOR;
-type MenuRow = MenuItem | MenuField;
+export type MenuEntry = MenuItem | typeof MENU_SEPARATOR;
 
 /** What the menu needs on its trigger. Spread it onto the owner's button. */
 export type MenuTriggerProps = {
@@ -218,10 +191,6 @@ const ROW_TONE = {
   danger: { base: MENU_ROW_TONE.danger, marked: "", hover: "hover:bg-hover" },
 };
 
-function isField(row: MenuRow): row is MenuField {
-  return "field" in row;
-}
-
 /**
  * A trigger and the list it opens. The owner holds `open`; the menu reports
  * every way it closes through `onOpenChange`: Escape, a press outside, focus
@@ -236,16 +205,12 @@ function isField(row: MenuRow): row is MenuField {
  * when the window has more room there, so a scrolling list or a panel's edge
  * cannot clip it. It scrolls when the window is shorter than it. Rows carry
  * only their label; what a pick does belongs to the owner's `onSelect`. An
- * owner that answers inside the menu (a copied label, a refusal, a field)
- * passes `closeOnPick={false}` and closes when it is done.
+ * owner that answers inside the menu (a copied label, a refusal) passes
+ * `closeOnPick={false}` and closes when it is done.
  *
  * A context menu passes `at` instead of a trigger: the list opens at that
  * point, below it or over it as the room allows, and focus goes back to what
  * had it when the list opened, such as the row that was right-clicked.
- *
- * A field takes the typed keys: letters, Space, Home and End stay in it, and
- * the arrows move to the rows around it. Its Escape ends the typing, and the
- * next one closes the menu.
  */
 export function Menu(props: {
   /** The list's accessible name, and the default trigger's. */
@@ -280,8 +245,6 @@ export function Menu(props: {
   const trigger = useRef<HTMLButtonElement | null>(null);
   const list = useRef<HTMLDivElement | null>(null);
   const rowElements = useRef<Array<HTMLElement | null>>([]);
-  // The row a cancelled field gives focus back to, once it renders again.
-  const refocus = useRef<string | null>(null);
   const width = props.width ?? MENU_WIDTH_PX;
   const [place, setPlace] = useState<Place | null>(null);
   const [pointerMoved, setPointerMoved] = useState(false);
@@ -289,16 +252,16 @@ export function Menu(props: {
   const [marked, setMarked] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
-  const rows = props.items.filter((entry): entry is MenuRow => entry !== MENU_SEPARATOR);
+  const rows = props.items.filter((entry): entry is MenuItem => entry !== MENU_SEPARATOR);
   const count = rows.length;
   // The row focus starts on: the checked one, where Enter keeps things as they are.
-  const checkedRow = rows.findIndex((row) => !isField(row) && row.checked === true);
+  const checkedRow = rows.findIndex((row) => row.checked === true);
   const openRow = useRef(0);
   openRow.current = Math.max(0, checkedRow);
   const descriptionId = useId();
   // One leading column for every row when any row needs it, so labels line up.
-  const lead = rows.some((row) => !isField(row) && (row.icon !== undefined || row.checked !== undefined));
-  const rowFocus = rows.some((row) => !isField(row) && (row.current || row.checked)) ? ROW_FOCUS.besideCurrent : ROW_FOCUS.alone;
+  const lead = rows.some((row) => row.icon !== undefined || row.checked !== undefined);
+  const rowFocus = rows.some((row) => row.current || row.checked) ? ROW_FOCUS.besideCurrent : ROW_FOCUS.alone;
 
   // Measured before the first paint, at its full height, so the side with
   // room is known before anything shows. A context menu's point is a trigger
@@ -327,8 +290,7 @@ export function Menu(props: {
           : { left, top: edge.bottom + gap, maxHeight: below, above: false },
       );
     }
-    // A field that took focus as it mounted keeps it.
-    if (!list.current?.contains(document.activeElement)) rowElements.current[openRow.current]?.focus({ preventScroll: true });
+    rowElements.current[openRow.current]?.focus({ preventScroll: true });
     return () => {
       setPlace(null);
       setPointerMoved(false);
@@ -343,13 +305,6 @@ export function Menu(props: {
     if (place && list.current && row === document.activeElement) revealMenuRow(list.current, row);
   }, [place]);
 
-  useLayoutEffect(() => {
-    const id = refocus.current;
-    if (id === null) return;
-    refocus.current = null;
-    rowElements.current[rows.findIndex((row) => row.id === id)]?.focus();
-  });
-
   const close = () => {
     onOpenChange(false);
     trigger.current?.focus();
@@ -359,18 +314,12 @@ export function Menu(props: {
     if (props.closeOnPick !== false) close();
     item.onSelect();
   };
-  const typing = () => {
-    const focused = focusedElementIn(list.current);
-    return focused instanceof HTMLInputElement && !!list.current?.contains(focused);
-  };
   const current = () => rowElements.current.findIndex((row) => row === focusedElementIn(row));
   const onKeyDown = (event: KeyboardEvent) => {
-    const inField = typing();
-    if (inField && isComposingKey(event)) return;
     // A key runs only a row a person can see marked. Until one is, Enter and
     // Space mark the row the menu opened on: the checked one, or else the
     // first. Space clicks on keyup, which the prevented keydown also stops.
-    if (!marked && !inField && (event.key === "Enter" || event.key === " ")) {
+    if (!marked && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       setMarked(true);
       rowElements.current[openRow.current]?.focus();
@@ -378,14 +327,13 @@ export function Menu(props: {
     }
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-    // A field keeps Home, End and the typed letters; the arrows leave it. The
-    // first key in a list with no marked row moves from outside it, so Down
+    // The first key in a list with no marked row moves from outside it, so Down
     // marks the first row and Up the last. A list that opened on its checked
     // row moves from there.
-    const from = marked || inField || checkedRow >= 0 ? current() : event.key === "ArrowUp" ? count : -1;
-    const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
+    const from = marked || checkedRow >= 0 ? current() : event.key === "ArrowUp" ? count : -1;
+    const next = arrow || letter || event.key === "Home" || event.key === "End"
       ? moveInMenu(event, from, rows.map((row, index) =>
-        "label" in row && typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
+        typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
@@ -441,7 +389,7 @@ export function Menu(props: {
           onKeyDown={onKeyDown}
           // A press on the padding or on what the owner adds under the rows
           // must not send focus to the page, where the keys stop working. A
-          // field still takes the press that puts its caret.
+          // field the owner adds still takes the press that puts its caret.
           onMouseDown={(event) => {
             if (!(event.target instanceof HTMLInputElement)) event.preventDefault();
           }}
@@ -472,55 +420,6 @@ export function Menu(props: {
             const setElement = (element: HTMLElement | null) => {
               rowElements.current[index] = element;
             };
-            if (isField(entry)) {
-              const { field } = entry;
-              const invalid = field.error !== undefined && field.error !== null;
-              const hintId = invalid || field.hint ? `${descriptionId}-${index}` : undefined;
-              return (
-                <div key={entry.id} className="relative py-0.5">
-                  <input
-                    ref={setElement}
-                    autoFocus
-                    aria-label={field.label}
-                    aria-describedby={hintId}
-                    aria-invalid={invalid || undefined}
-                    data-testid={field.testId}
-                    value={field.value}
-                    placeholder={field.placeholder}
-                    maxLength={field.maxLength}
-                    readOnly={field.busy}
-                    onChange={(event) => field.onChange(event.target.value)}
-                    // Taken while the key is still on its way down, before the
-                    // menu's own Escape closes the whole menu. Escape that
-                    // ends a composition, or comes while the owner acts on
-                    // the value, leaves the field and the menu as they are.
-                    onKeyDownCapture={(event) => {
-                      if (event.key !== "Escape") return;
-                      event.stopPropagation();
-                      if (isComposingKey(event) || field.busy) return;
-                      refocus.current = entry.id;
-                      field.onCancel();
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" || isComposingKey(event)) return;
-                      event.preventDefault();
-                      if (!field.busy) field.onSubmit();
-                    }}
-                    className="h-7 w-full rounded-md border border-line bg-bg pl-2 pr-7 text-[13px] text-ink placeholder:text-subtle"
-                  />
-                  {/* Enter submits every field; the key says so at its end. */}
-                  <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-sans text-[10px] leading-[14px] text-subtle">↵</kbd>
-                  {invalid ? (
-                    <p id={hintId} data-testid={field.errorTestId} role="alert" className="m-0 mt-1 flex gap-1 px-2 text-[11px] leading-4 text-danger">
-                      <CircleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
-                      <span>{field.error}</span>
-                    </p>
-                  ) : field.hint ? (
-                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-muted">{field.hint}</p>
-                  ) : null}
-                </div>
-              );
-            }
             const tone = entry.danger ? ROW_TONE.danger : entry.current || entry.checked ? ROW_TONE.current : ROW_TONE.rest;
             const hover = pointerMoved ? tone.hover : "";
             const dim = entry.disabled ? "opacity-50" : "";
@@ -542,10 +441,9 @@ export function Menu(props: {
                 tabIndex={-1}
                 // Hover and the keyboard share one active row, but only a
                 // pointer that moves takes focus. A row that opens under a
-                // still pointer leaves focus where the menu opened, and a field
-                // keeps focus while the pointer crosses the rows.
+                // still pointer leaves focus where the menu opened.
                 onMouseMove={(event) => {
-                  if (movedPointer(event) && !typing() && document.activeElement !== event.currentTarget) {
+                  if (movedPointer(event) && document.activeElement !== event.currentTarget) {
                     event.currentTarget.focus();
                   }
                 }}

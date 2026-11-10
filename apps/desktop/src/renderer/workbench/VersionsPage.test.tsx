@@ -216,23 +216,19 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", versionId: "main" }));
   });
 
-  it("creates nothing on Enter while a switch runs, and the switch still finishes", async () => {
+  it("turns off New version while a switch runs, and turns it back on when the switch finishes", async () => {
     const switching = deferred<{ activeVersionId: string; changedFileCount: number }>();
     bridgeMock.switchWorkspaceVersion.mockReturnValue(switching.promise);
     const user = userEvent.setup();
     render(<Page />);
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.keyboard("Idea");
     await user.click(within(row("main")).getByTestId("versions-page-switch"));
     await waitFor(() => expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledOnce());
-    await user.click(screen.getByTestId("versions-page-new-input"));
-    await user.keyboard("{Enter}");
-    expect(bridgeMock.createWorkspaceVersion).not.toHaveBeenCalled();
+    expect(screen.getByTestId<HTMLButtonElement>("versions-page-new").disabled).toBe(true);
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, NESTED, FRESH], activeVersionId: "main" });
     switching.resolve({ activeVersionId: "main", changedFileCount: 1 });
     await waitFor(() => expect(row("main").getAttribute("aria-current")).toBe("true"));
-    await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-switch").getAttribute("aria-disabled")).toBeNull());
+    await waitFor(() => expect(screen.getByTestId<HTMLButtonElement>("versions-page-new").disabled).toBe(false));
   });
 
   it("counts again only the version you're in when its history grows", async () => {
@@ -856,41 +852,35 @@ describe("VersionsPage", () => {
     expect(right.onSettled).not.toHaveBeenCalled();
   });
 
-  it("shows the versions picture and New version when only Main exists, and names what stays the same in its field", async () => {
+  it("shows the versions picture and New version when only Main exists, and its dialog names what stays the same", async () => {
     const user = userEvent.setup();
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     render(<Page />);
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
     expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
-    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version");
+    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version…");
     // One New version, the empty state's. The header's shows once a version exists.
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     await user.click(within(empty).getByTestId("versions-page-new"));
-    expect(within(empty).getByTestId("version-new-same").textContent)
+    expect(screen.getByTestId("version-new-same").textContent)
       .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
   });
 
-  it("opens the name field in the header, and Escape or leaving it empty puts the button back", async () => {
+  it("opens the New version dialog from the header, starting from the version you're in, and Escape gives focus back", async () => {
     const user = userEvent.setup();
     render(<Page />);
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
     await user.click(screen.getByTestId("versions-page-new"));
-    const input = screen.getByTestId("versions-page-new-input");
-    expect(document.activeElement).toBe(input);
-    // You're in Draft, so the new version starts there.
-    expect(screen.getByText(/so it can't merge into Main/).textContent).toBe("Starts from Draft, so it can't merge into Main.");
+    expect(document.activeElement).toBe(screen.getByTestId("version-new-input"));
+    // You're in Draft, so the new version starts there, with Draft's last change.
+    expect(screen.getByTestId("version-new-start").textContent).toBe("DraftChanged 1h ago by Ice");
+    expect(screen.getByTestId("version-new-no-merge").textContent).toBe("It can't merge into Main, because it starts from Draft.");
     await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("versions-page-new"));
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.tab();
-    expect(screen.queryByTestId("versions-page-new-input")).toBeNull();
-    await user.click(screen.getByTestId("versions-page-new"));
-    await user.keyboard("Idea");
-    await user.tab();
-    expect((screen.getByTestId("versions-page-new-input") as HTMLInputElement).value).toBe("Idea");
   });
 
-  it("creates the version on Enter, and keeps a refused name in the field with why", async () => {
+  it("creates the version on Enter, and keeps a refused name in the dialog with why", async () => {
     bridgeMock.createWorkspaceVersion.mockRejectedValueOnce(new Error(
       "Error invoking remote method 'desktop:create-workspace-version': VersionedTextStoreError [version-name-conflict]: version-name-conflict",
     ));
@@ -899,12 +889,12 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
     await user.click(screen.getByTestId("versions-page-new"));
     await user.keyboard("Draft{Enter}");
-    const error = await waitFor(() => screen.getByTestId("versions-page-new-error"));
+    const error = await waitFor(() => screen.getByTestId("version-menu-error"));
     expect(error.textContent).toBe("Another version is called Draft. Choose another name.");
     bridgeMock.createWorkspaceVersion.mockResolvedValueOnce({ versions: [MAIN, DRAFT, NESTED, FRESH, { ...FRESH, id: "idea", name: "Idea" }], activeVersionId: "idea" });
-    await user.clear(screen.getByTestId("versions-page-new-input"));
+    await user.clear(screen.getByTestId("version-new-input"));
     await user.keyboard("Idea{Enter}");
-    await waitFor(() => expect(screen.queryByTestId("versions-page-new-input")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("version-new-dialog")).toBeNull());
     expect(bridgeMock.createWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", name: "Idea" });
     expect(document.activeElement).toBe(screen.getByTestId("versions-page-new"));
   });
