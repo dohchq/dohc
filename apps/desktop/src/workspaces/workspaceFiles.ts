@@ -1070,12 +1070,17 @@ export async function importDroppedPaths(
   return copyIntoWorkspace(rootPath, screened.usable, targetDir, screened.skips);
 }
 
+// Whether a real path is inside any `.dohc` folder, registered or not. What
+// such a folder holds, such as a protected file's kept change, is workspace
+// data and never lands as an ordinary file.
+function inDohcFolder(realPath: string): boolean {
+  return realPath.split(/[\\/]/).some((part) => part.toLowerCase() === ".dohc");
+}
+
 // The import dialog's picks are the person's own choice, so they copy as the
-// dialog names them, with one exception: a pick inside any `.dohc` folder,
-// such as a protected file's kept change, is workspace data and never lands
-// as an ordinary file. The check reads the real path, so a link above the
-// pick cannot hide it. A pick that cannot be resolved stays, and the copy
-// reports its own failure.
+// dialog names them, except a pick inside a `.dohc` folder. The check reads
+// the real path, so a link above the pick cannot hide it. A pick that cannot
+// be resolved stays, and the copy reports its own failure.
 export async function screenPickedPaths(
   absolutePaths: readonly string[],
 ): Promise<{ usable: string[]; skips: ImportSkips }> {
@@ -1083,7 +1088,7 @@ export async function screenPickedPaths(
   const skips = new ImportSkips();
   for (const source of absolutePaths) {
     const real = await realpath(source).catch(() => source);
-    if (real.split(/[\\/]/).some((part) => part.toLowerCase() === ".dohc")) {
+    if (inDohcFolder(real)) {
       skips.add(basename(source) || source, "workspace-data");
       continue;
     }
@@ -1116,9 +1121,10 @@ export async function screenPickedPaths(
 //     folder's walk never follows a link inside it;
 //   - every entry keeps the identity lstat gave it, so a file or folder
 //     another process swaps for a link after the screen is never copied;
-//   - a source whose CANONICAL path is inside any registered workspace's.dohc
-//     is refused (the check runs on realpath(source), so an ancestor symlink
-//     cannot smuggle a metadata source past it);
+//   - a source whose CANONICAL path is inside any `.dohc` folder, or inside a
+//     registered workspace's `.dohc` wherever a link puts it, is refused (the
+//     check runs on realpath(source), so an ancestor symlink cannot smuggle a
+//     metadata source past it);
 //   - a link on the way to a dropped item decides where the item really is,
 //     so it must belong to root or to this user. Another user's link, such as
 //     `/Users/Shared/evil/proj -> /Users/victim`, could otherwise turn a drop
@@ -1221,6 +1227,9 @@ async function screenDroppedSource(
     const real = await realpath(source);
     if (!(await linksAreOwnedHere(source))) throw new ForeignDropLinkError(source);
     if ((await realpath(source)) !== real) throw new ImportPathChangedError(source);
+    if (inDohcFolder(real)) return "workspace-data";
+    // A registered workspace's `.dohc` may be a link to a folder with another
+    // name, which only its own real path shows.
     for (const root of realMetadataRoots) {
       if (await isInsideOrUnknown(root, real)) return "workspace-data";
     }
