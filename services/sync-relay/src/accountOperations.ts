@@ -4,8 +4,8 @@ import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import {
-  failure, listFileChats, listGroups, listGroupsWithThreads, listGroupThreads, OperationError, readChat, readThreadDispatchState,
-  showChat, type ChatReadStore, type ChatsHost,
+  failure, groupForCli, listFileChats, listGroups, listGroupsWithThreads, listGroupThreads, OperationError, readChat, readThreadDispatchState,
+  resolveChannel, showChat, type ChatReadStore, type ChatsHost,
 } from "@dohc/workspace-operations/chats";
 import {
   listFiles, readDocument, readText, type DocumentsHost, type FileListResult, type FilesHost, type TextReadResult,
@@ -30,16 +30,17 @@ export type AccountOperationResult =
   | FileListResult
   | TextReadResult
   | PageTooLargeResult
-  | PageMissingResult;
+  | MissingResult;
 
 /** A page whose file is over the desktop's editor limit, refused before the server fetches its body. */
 export type PageTooLargeResult = { ok: false; reason: string; refusal: "too-large" };
 
 /**
- * A page the copy doesn't hold at its path. A secret file's page answers exactly this, word for word, so the code
- * says nothing a missing page wouldn't.
+ * A page, chat or thread the copy doesn't hold. A secret file's page, and a thread on one, answer exactly this, word for
+ * word, so the code says nothing a missing one wouldn't. Only this route adds it: the CLI's and the desktop's results
+ * stay as the operations word them.
  */
-export type PageMissingResult = { ok: false; reason: string; refusal: "missing" };
+export type MissingResult = { ok: false; reason: string; refusal: "missing" };
 
 class PageTooLarge extends OperationError {
   constructor() { super("This page is too large to open here."); }
@@ -126,7 +127,10 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
       case "threads": return await listGroupThreads(chats, { group: request.args.group, reader: null });
       case "groupsFull": return await listGroupsWithThreads(chats);
       case "fileChats": return await listFileChats(chats, request.args.path, PLATFORM);
-      case "chat": return await readChat(chats, request.args);
+      case "chat": {
+        const read = await readChat(chats, request.args);
+        return read.ok || !(await chatMissing(chats, request.args)) ? read : { ...read, refusal: "missing" };
+      }
       case "show": {
         const shown = await showChat(chats, request.args);
         return "stream" in shown ? shown : shown.thread;
@@ -143,6 +147,27 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
     throw error;
   }
 }
+
+/**
+ * Whether a chat read that failed found no such chat: a thread the store doesn't list, which takes in a thread on a
+ * secret file, or a group no name or ID resolves to. An engine that fails on the way says nothing about the chat.
+ */
+async function chatMissing(host: ChatsHost, args: ParsedChatArgs): Promise<boolean> {
+  try {
+    if ("threadId" in args) return !(await host.store.listThreads({ workspaceId: host.workspaceId })).some((thread) => thread.id === args.threadId);
+    const channels = (await host.store.listChannels({ workspaceId: host.workspaceId })).map((engine) => ({ engine, cli: groupForCli(engine) }));
+    try {
+      resolveChannel(args.group, channels);
+      return false;
+    } catch (error) {
+      return error instanceof OperationError;
+    }
+  } catch {
+    return false;
+  }
+}
+
+type ParsedChatArgs = Extract<ParsedOperation, { operation: "chat" }>["args"];
 
 // files.resolve answers at most this many targets at once.
 const RESOLVE_BATCH = 128;

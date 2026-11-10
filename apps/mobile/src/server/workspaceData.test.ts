@@ -103,8 +103,80 @@ describe("a workspace's reads", () => {
     await vi.waitFor(() => expect(data.state(views.page("restoring.md")).problem).toBe("restoring"));
     await vi.waitFor(() => expect(data.state(views.page("big.md")).value).toEqual({ kind: "too-large" }));
     expect(data.state(views.page("gone.md")).value).toEqual({ kind: "missing" });
-    // Only the server's code says a page is gone: the words of its reason don't.
-    expect(data.state(views.page("odd.md")).value).toEqual({ kind: "unreadable" });
+    // Only the server's code says a page is gone: any other refusal is a read that failed, which Try again repeats.
+    expect(data.state(views.page("odd.md"))).toMatchObject({ value: null, problem: "refused" });
+  });
+});
+
+describe("what a read answers", () => {
+  it("reads a page over 1 MiB, up to the editor's limit", async () => {
+    const server = testServer();
+    const markdown = "a".repeat(1.5 * 1024 * 1024);
+    server.on("POST", "/sync/ws-a/ops/documentRead", ops({ ok: true, path: "big.md", markdown }, "0.1.1"));
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.subscribe(views.page("big.md"), () => {});
+    await vi.waitFor(() => expect(data.state(views.page("big.md")).value).toEqual({ kind: "page", markdown }));
+  });
+
+  it("keeps a gone page's last text in its own workspace's store, never another's", async () => {
+    const server = testServer();
+    const cache = createReadCache();
+    const gone = ops({ ok: false, reason: "dohc: No document at a.md.", refusal: "missing" }, "0.1.1");
+    server.on("POST", "/sync/ws-a/ops/documentRead", ops({ ok: true, path: "a.md", markdown: "Text from A" }, "0.1.1"), gone);
+    server.on("POST", "/sync/ws-b/ops/documentRead", gone);
+    for (const workspaceId of ["ws-a", "ws-b"]) server.on("GET", feedPath(workspaceId, "0.1.1"), held);
+    const a = open(server, "ws-a", cache).data;
+    a.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(a.state(views.page("a.md")).value).toMatchObject({ kind: "page" }));
+    a.retry(views.page("a.md"));
+    await vi.waitFor(() => expect(a.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Text from A" }));
+
+    // The person switches to B with the page open: B has no a.md, and nothing of A's comes with it.
+    a.stop();
+    const b = open(server, "ws-b", cache).data;
+    b.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(b.state(views.page("a.md")).value).toEqual({ kind: "missing" }));
+    expect(JSON.stringify(cache.entries(cacheScope(signInTo(server), "ws-b")))).not.toContain("Text from A");
+  });
+
+  it("keeps a conversation when a refresh fails, and reads it as missing only by the server's code", async () => {
+    const server = testServer();
+    const answers: Answer[] = [
+      ops(thread("thread-1", "hello"), "0.1.1"),
+      ops({ ok: false, reason: "failed to read chat: thread-1" }, "0.1.1"),
+      ops({ ok: false, reason: "chat thread not found: thread-1", refusal: "missing" }, "0.1.1"),
+    ];
+    server.on("POST", "/sync/ws-a/ops/chat", ...answers);
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.subscribe(views.thread("thread-1"), () => {});
+    await vi.waitFor(() => expect(data.state(views.thread("thread-1")).value).toMatchObject({ kind: "thread" }));
+    data.retry(views.thread("thread-1"));
+    await vi.waitFor(() => expect(data.state(views.thread("thread-1")).problem).toBe("refused"));
+    expect(data.state(views.thread("thread-1")).value).toMatchObject({ kind: "thread", messages: [{ body: "hello" }] });
+    data.retry(views.thread("thread-1"));
+    await vi.waitFor(() => expect(data.state(views.thread("thread-1")).value).toEqual({ kind: "missing" }));
+  });
+
+  it("drops everything of a workspace the server answers 404 for, and stops", async () => {
+    const server = testServer();
+    const cache = createReadCache();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["a.md", "object-a"]), "0.5.2"));
+    server.on("GET", feedPath("ws-a", "0.5.2"), held);
+    server.on("POST", "/sync/ws-a/ops/documentRead", { status: 404, body: { ok: false, error: "not found", code: "not_found" } });
+    const onGone = vi.fn();
+    const data = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache, onGone });
+    data.resume();
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(onGone).toHaveBeenCalledTimes(1));
+    expect(data.state(views.files).value).toBeNull();
+    expect(cache.entries(cacheScope(signInTo(server), "ws-a"))).toEqual([]);
+    expect(server.calls.find(call => call.path === feedPath("ws-a", "0.5.2"))?.signal.aborted).toBe(true);
+    data.retry(views.files);
+    expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
   });
 });
 

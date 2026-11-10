@@ -413,6 +413,16 @@ describe("failures through the server's copy", () => {
     expect(await response.text()).not.toContain("/srv/");
   });
 
+  it("answers a chat read the engine failed as a failure, not as a missing chat", async () => {
+    const { engine, h } = await relay();
+    const { planning, thread } = await seedTrip(engine);
+    engine.failing.set("chats.messages.list", engineFailure());
+    const read = await answer(await h(op("trip", "chat", { threadId: thread.id })));
+    expect(read).toEqual({ ok: false, reason: `failed to read chat: ${thread.id}` });
+    engine.failing.set("chats.channels.list", engineFailure());
+    expect(await answer(await h(op("trip", "chat", { group: planning.channelId })))).not.toHaveProperty("refusal");
+  });
+
   it("words a rejected document read without the engine's detail, and keeps an operation's own refusal", async () => {
     const { engine, h } = await relay();
     await seedTrip(engine);
@@ -464,9 +474,9 @@ describe("secret files through the server's copy", () => {
       .toEqual({ ok: true, path: "docs/missing.md", fileObjectId: null, threads: [] });
     // The thread's file is nowhere in the copy, as a secret file never is.
     expect(await answer(await h(op("trip", "chat", { threadId: onSecret.id }))))
-      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}` });
+      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}`, refusal: "missing" });
     expect(await answer(await h(op("trip", "chat", { threadId: "thread-nowhere" }))))
-      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere" });
+      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere", refusal: "missing" });
     for (const target of [onSecret.id, cliThreadId(onSecret.id)]) {
       expect(await json(await h(op("trip", "show", { target, peek: true })))).toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${target}` });
     }
@@ -479,6 +489,19 @@ describe("secret files through the server's copy", () => {
     expect(shown.messages).toMatchObject([{ attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }] }]);
     const stream = await answer(await h(op("trip", "chat", { group: "planning" })));
     expect(JSON.stringify(stream)).not.toContain("object-env");
+  });
+
+  it("answers a thread on a secret file with the same bytes as a missing one's, its ID aside, and a missing group as missing", async () => {
+    const { engine, h } = await relay();
+    const { onSecret } = await seedTrip(engine);
+    const bytes = async (threadId: string) => {
+      const response = await h(op("trip", "chat", { threadId }));
+      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(threadId, "<id>") };
+    };
+    const missing = await bytes("thread-nowhere");
+    expect(missing.body).toContain('"refusal":"missing"');
+    expect(await bytes(onSecret.id)).toEqual(missing);
+    expect(await answer(await h(op("trip", "chat", { group: "channel-nowhere" })))).toMatchObject({ ok: false, refusal: "missing" });
   });
 
   it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
@@ -513,7 +536,7 @@ describe("secret files through the server's copy", () => {
       .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
     for (const hidden of [dotenv, renamed]) {
       expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
-        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}` });
+        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
       expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
         .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
     }

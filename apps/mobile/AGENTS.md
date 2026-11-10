@@ -41,7 +41,9 @@ The server client (`src/server`) gives each sign-in a generation, which changes 
 another sign-in starts. A change aborts that sign-in's requests. Check `SignIn.isCurrent()` before applying anything
 a request answered, and use `requestGenerations()` for results that replace each other. The open workspace's reads
 live in one store per sign-in and workspace, which stops when either changes, so a late answer can't reach another
-workspace's screen. Its read cache is in memory and empties when the sign-in changes or ends. Ending a token deletes it from
+workspace's screen. A 404 for the workspace, as when another device hides it from the phone, clears and stops its
+store, and the phone opens the next workspace it shows (`src/server/openWorkspace.ts`). The read cache is in memory
+and empties when the sign-in changes or ends, and loses a workspace when the phone hides it. Ending a token deletes it from
 the keychain first, then revokes its session, so a phone closed between the two keeps no token.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to

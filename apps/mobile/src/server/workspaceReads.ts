@@ -1,11 +1,14 @@
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { each, isFields, okAnswer, segment, text, type Fields } from "./api";
-import { REQUEST_TIMEOUT_MS, type ServerClient } from "./client";
+import { REQUEST_TIMEOUT_MS, ServerError, type ServerClient } from "./client";
 
 // The reads a signed-in phone makes of one workspace, through the server's copy of it
 // (services/sync-relay/src/accountOperationRoutes.ts), and the workspace's change feed. Every read answers
 // `{ ok, result, cursor }`: the cursor says how far the copy had synced, and the feed starts from it. Each answer is
-// checked for the fields the phone shows; one that lacks any of them fails as a whole.
+// checked for the fields the phone shows; one that lacks any of them fails as a whole. A result that names a refusal
+// the phone knows, `missing` or `too-large`, is a value; any other unsuccessful result is a failed read, which the
+// screen offers to try again.
 
 /** A read's value, and the feed's cursor for what the server's copy had synced when it answered. */
 export interface Read<T> {
@@ -25,6 +28,8 @@ function operation<T>(client: ServerClient, workspaceId: string, name: string, a
     const answer = okAnswer(body);
     if (!answer || !isCursor(answer.cursor)) return null;
     const value = read(answer.result);
+    // The server's copy couldn't do the read, as when its engine failed: the answer is fine, the read isn't.
+    if (value === null && isFields(answer.result) && answer.result.ok === false) throw new ServerError("refused", 200);
     return value === null ? null : { value, cursor: answer.cursor };
   }, args, { signal });
 }
@@ -95,12 +100,13 @@ export interface StreamItem {
   readonly lastReplyAtMs: number | null;
 }
 
-/** A chat or thread the server no longer has, or this account can't reach. */
+/** A chat or thread the server no longer has, or this account can't reach, as the server's `missing` refusal says. */
 export interface MissingChat {
   readonly kind: "missing";
 }
 
-const missingChat = (result: unknown): MissingChat | null => isFields(result) && result.ok === false ? { kind: "missing" } : null;
+const missingChat = (result: unknown): MissingChat | null =>
+  isFields(result) && result.ok === false && result.refusal === "missing" ? { kind: "missing" } : null;
 
 export interface GroupStream {
   readonly kind: "stream";
@@ -155,22 +161,22 @@ export function readThread(client: ServerClient, workspaceId: string, threadId: 
 
 /**
  * A page as the server's copy holds it: its Markdown, or why there is none, by the refusal the server names. `missing`
- * is a page not at its path, and the server answers a secret file's page the same way; `too-large` a file over the
- * desktop's editor limit, which the server refuses before reading it; `unreadable` any other refusal.
+ * is a page not at its path, and the server answers a secret file's page the same way. Its `last` is the text this
+ * workspace's store read before the page went, which it keeps showing. `too-large` is a file over the desktop's
+ * editor limit, which the server refuses before reading it.
  */
 export type PageRead =
   | { readonly kind: "page"; readonly markdown: string }
-  | { readonly kind: "missing" }
-  | { readonly kind: "too-large" }
-  | { readonly kind: "unreadable" };
+  | { readonly kind: "missing"; readonly last?: string }
+  | { readonly kind: "too-large" };
 
 export function readPage(client: ServerClient, workspaceId: string, path: string, signal: AbortSignal): Promise<Read<PageRead>> {
   return operation<PageRead>(client, workspaceId, "documentRead", { path }, result => {
     if (!isFields(result)) return null;
-    if (result.ok === true) return string(result.markdown) ? { kind: "page", markdown: result.markdown } : null;
-    if (result.ok !== false || !string(result.reason)) return null;
+    // A page is at most the editor's limit in UTF-8 bytes, so in UTF-16 units too.
+    if (result.ok === true) return string(result.markdown, LIVE_MARKDOWN_MAX_BYTES) ? { kind: "page", markdown: result.markdown } : null;
     if (result.refusal === "too-large") return { kind: "too-large" };
-    return result.refusal === "missing" ? { kind: "missing" } : { kind: "unreadable" };
+    return result.refusal === "missing" ? { kind: "missing" } : null;
   }, signal);
 }
 

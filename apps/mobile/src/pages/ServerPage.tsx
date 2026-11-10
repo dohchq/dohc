@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
+import { useAccount } from "../account/AccountProvider";
 import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
 import { views } from "../server/workspaceData";
@@ -18,9 +19,17 @@ import { explanationOf, labelOf, LoadingLines, Mark, pageStyles as styles, Strip
 // while open keeps its last text, marked Deleted. A page the server can't send shows why in its place: it's gone, it's
 // too large for the phone, it's being restored, or the read failed. Its header has no "Chat about" yet: the phone
 // lists no file's chats.
+//
+// The screen starts afresh for each workspace store and path, so nothing it holds, the editor or the text it shows,
+// outlives the workspace it was read from.
 export function ServerPage() {
-  const theme = useTheme();
+  const { data } = useAccount();
   const { path = "" } = useLocalSearchParams<{ path?: string }>();
+  return <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} />;
+}
+
+function PageScreen({ path }: { path: string }) {
+  const theme = useTheme();
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
   const { state, retry } = useView(view);
@@ -28,11 +37,9 @@ export function ServerPage() {
   const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
 
-  // The last text read, kept for a page deleted while open.
-  const last = useRef<string | null>(null);
-  if (state.value?.kind === "page") last.current = state.value.markdown;
-  const deleted = state.value?.kind === "missing" && last.current !== null;
-  const markdown = state.value?.kind === "page" ? state.value.markdown : deleted ? last.current : null;
+  // A page deleted while open keeps the last text its workspace's store read of it.
+  const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
+  const markdown = state.value?.kind === "page" ? state.value.markdown : state.value?.kind === "missing" ? state.value.last ?? null : null;
 
   // The web view's page, prepared once; Try again after a lost page prepares it again.
   const [uri, setUri] = useState<string | null>(null);
@@ -76,7 +83,6 @@ export function ServerPage() {
 
   const failure = state.value?.kind === "missing" && !deleted ? <ScreenFailure text={documentWords.noLongerAvailable} />
     : state.value?.kind === "too-large" ? <ScreenFailure text={documentWords.tooLargeToOpen} />
-    : state.value?.kind === "unreadable" ? <ScreenFailure text={documentWords.couldntRead} onRetry={retry} />
     : markdown === null && state.problem === "restoring" ? <ScreenFailure text={documentWords.restoring} onRetry={retry} />
     : markdown === null && state.problem ? <ScreenFailure text={documentWords.couldntRead} cause={problemText(state.problem)} onRetry={retry} />
     : lostPage ? <ScreenFailure text={documentWords.couldntOpen} cause={lostPage === "noSpace" ? documentWords.notEnoughStorage : undefined} onRetry={reopen} />

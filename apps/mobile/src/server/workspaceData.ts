@@ -23,6 +23,10 @@ import {
 // to FEED_RETRY_MAX_MS. After FEED_FAILURES_SHOWN failures in a row, or once its wait reaches that cap, the store shows
 // the feed's failure, so what's on screen never goes stale without a sign. A feed answer takes it back. Try again, and
 // a return from the background, start the feed again at once, counting failures from none.
+//
+// A 404 from the feed or any read means the workspace is gone from this phone: hidden from it on another device, or
+// no longer the account's. The store then drops its cache, clears every view, stops, and says so through `onGone`, so
+// the account reads its workspace list again and opens another.
 
 export type ReadProblem = ServerProblemKind | "restoring";
 
@@ -53,6 +57,8 @@ export interface View<T> {
   read(client: ServerClient, workspaceId: string, signal: AbortSignal): Promise<Read<T>>;
   /** Whether `changes` can touch what the view shows now, `value`. */
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
+  /** What the view shows after a read, from what it showed before and what the read answered. */
+  carry?(previous: T | null, next: T): T;
 }
 
 export const views = {
@@ -81,11 +87,19 @@ export const views = {
     };
   },
 
-  /** A page: a change to the object at its path, or to any file while the store doesn't know which object that is. */
+  /**
+   * A page: a change to the object at its path, or to any file while the store doesn't know which object that is. A
+   * page that goes keeps the last text this store read of it.
+   */
   page(path: string): View<PageRead> {
     return {
       id: `page:${path}`,
       read: (client, workspaceId, signal) => readPage(client, workspaceId, path, signal),
+      carry(previous, next) {
+        if (next.kind !== "missing") return next;
+        const last = previous?.kind === "page" ? previous.markdown : previous?.kind === "missing" ? previous.last : undefined;
+        return last === undefined ? next : { kind: "missing", last };
+      },
       affectedBy(changes, known) {
         if (changes.pages === undefined && changes.files === undefined) return false;
         const objectId = known.files?.find(file => file.path === path)?.objectId;
@@ -149,6 +163,8 @@ export function createReadCache(): ReadCache {
 
 export interface WorkspaceData {
   readonly workspaceId: string;
+  /** This store's number, different for each one made, so a screen can start afresh with a new store. */
+  readonly instance: number;
   state<T>(view: View<T>): ViewState<T>;
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
@@ -169,6 +185,8 @@ export const FEED_RETRY_MS = 1000;
 export const FEED_RETRY_MAX_MS = 30_000;
 export const FEED_FAILURES_SHOWN = 3;
 
+let instances = 0;
+
 interface Entry {
   readonly view: View<unknown>;
   state: ViewState<unknown>;
@@ -187,6 +205,8 @@ export function createWorkspaceData(options: {
   readonly cache: ReadCache;
   readonly holdMs?: number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The server answered 404 for the workspace: the store has stopped and cleared. */
+  readonly onGone?: () => void;
 }): WorkspaceData {
   const { signIn, workspaceId, cache } = options;
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
@@ -214,6 +234,16 @@ export function createWorkspaceData(options: {
   }
 
   const live = () => !stopped && signIn.isCurrent();
+  const isGone = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
+
+  /** The workspace no longer reaches this phone: nothing of it stays, in the cache or on screen. */
+  function gone() {
+    if (!live()) return;
+    cache.drop(scope);
+    store.stop();
+    for (const target of entries.values()) set(target, { value: null, loading: false, problem: null, failures: target.state.failures });
+    options.onGone?.();
+  }
 
   function entry(view: View<unknown>): Entry {
     let found = entries.get(view.id);
@@ -237,11 +267,13 @@ export function createWorkspaceData(options: {
       answer => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        cache.set(scope, { view: target.view, value: answer.value, cursor: answer.cursor, stale: false });
-        set(target, { value: answer.value, loading: false, problem: null, failures: target.state.failures });
+        const value = target.view.carry ? target.view.carry(target.state.value, answer.value) : answer.value;
+        cache.set(scope, { view: target.view, value, cursor: answer.cursor, stale: false });
+        set(target, { value, loading: false, problem: null, failures: target.state.failures });
         follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
       },
       (error: unknown) => {
+        if (isGone(error)) return gone();
         const problem = readProblem(error);
         if (!live() || !target.reads.isLatest(request) || problem === null) return;
         set(target, { ...target.state, loading: false, problem, failures: target.state.failures + 1 });
@@ -288,6 +320,7 @@ export function createWorkspaceData(options: {
       } catch (error) {
         // A 401 has ended the sign-in, and a cancelled request belongs to a feed that has stopped.
         if (signal.aborted || !live() || (error instanceof ServerError && (error.problem === "signed-out" || error.problem === "cancelled"))) return;
+        if (isGone(error)) return gone();
         failures += 1;
         const delay = Math.min(FEED_RETRY_MS * 2 ** (failures - 1), FEED_RETRY_MAX_MS);
         const problem = readProblem(error);
@@ -347,8 +380,9 @@ export function createWorkspaceData(options: {
     }
   }
 
-  return {
+  const store: WorkspaceData = {
     workspaceId,
+    instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
     subscribe(view, listener) {
       const target = entry(view);
@@ -384,4 +418,5 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
   };
+  return store;
 }
