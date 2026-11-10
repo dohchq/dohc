@@ -125,7 +125,7 @@ async function fixture() {
   const configPath = join(root,"deployment.json"), relayPath = join(root,"volume","relay.sqlite");
   initializeRelayDeployment({configPath,relayPath,continuityDirectory:join(root,"continuity")});
   let deployment = openRelayDeployment(configPath), storage = deployment.storage as StorageContext;
-  let host = await createRelayDatasetHost({storage,directory:deployment.datasetDirectory,limits:{maxFiles:20,maxMetadataBytes:65536,maxBundleBytes:65536},startupExclusive:true,onShutdownError:error=>{throw error;}});
+  let host = await createRelayDatasetHost({publicEditRelease:undefined,storage,directory:deployment.datasetDirectory,limits:{maxFiles:20,maxMetadataBytes:65536,maxBundleBytes:65536},startupExclusive:true,onShutdownError:error=>{throw error;}});
   cleanups.push(async()=>{await host.close();storage.close();await rm(root,{recursive:true,force:true});});
   const presence = new PresenceHub({nowMs:()=>2000});
   cleanups.push(async()=>presence.dispose());
@@ -197,7 +197,7 @@ async function fixture() {
     deleteRuntime:async(_user,manifest)=>host.deleteWorkspaces(manifest.datasets),afterPhase});
   return {root,relayPath,ownedShare,capability,secret,serviceAccess,get storage(){return storage;},get host(){return host;},get h(){return h;},manager,
     async restart(){await host.close();storage.close();deployment=openRelayDeployment(configPath);storage=deployment.storage as StorageContext;
-      host=await createRelayDatasetHost({storage,directory:deployment.datasetDirectory,limits:{maxFiles:20,maxMetadataBytes:65536,maxBundleBytes:65536},startupExclusive:true,onShutdownError:error=>{throw error;}});
+      host=await createRelayDatasetHost({publicEditRelease:undefined,storage,directory:deployment.datasetDirectory,limits:{maxFiles:20,maxMetadataBytes:65536,maxBundleBytes:65536},startupExclusive:true,onShutdownError:error=>{throw error;}});
       h=testHandler(storage);},
     async assertPurged(){
       expect(presence.snapshot(presenceScopeKey(workspace,"general"),2000).peers).toEqual([]);

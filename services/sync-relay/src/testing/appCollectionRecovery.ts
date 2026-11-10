@@ -82,7 +82,7 @@ if (phase === "prepare") {
       expectedAuthorityRevision: 1, capability});
     storage.mintLinkSession({session: {sessionId: "session", capabilityHash: "session-hash", grantId: "g", generation: 1,
       mintedAtMs: 2, expiresAtMs: 10_000}});
-    const input: AcceptAppCollectionInput = {publicationId: publication.publicationId, capabilityHash: "session-hash",
+    const input: AcceptAppCollectionInput = {publicEditRelease: undefined, publicationId: publication.publicationId, capabilityHash: "session-hash",
       profileTokenHash: "profile-hash", nowMs: 20, limits, expectedAuthorityRevision: 2, idempotencyKey: "vote-1",
       fields: {destination: "Tokyo", name: "Sam"}};
     await snapshot("before-acceptance.sqlite");

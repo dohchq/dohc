@@ -79,7 +79,7 @@ async function httpFixture(maxParticipantsPerGrant?: number) {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
   pushFile(f.storage, "dataset-file", null, {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})});
   let now = 10;
-  const host = await f.storage.createDatasetHost({directory, limits, maxParticipantsPerGrant, nowMs: () => now, onShutdownError(error) {throw error;}});
+  const host = await f.storage.createDatasetHost({publicEditRelease: undefined, directory, limits, maxParticipantsPerGrant, nowMs: () => now, onShutdownError(error) {throw error;}});
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
   const linkKey = "dataset-http-test-key", token = "T".repeat(43);
   f.storage.mintLinkSession({session: {sessionId: "dataset-http", capabilityHash: hashLinkBearer(token, linkKey), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});

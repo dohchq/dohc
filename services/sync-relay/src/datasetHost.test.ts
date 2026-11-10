@@ -12,6 +12,7 @@ import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-aut
 import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
 import { collectionFilePresent } from "./storage/collectionFilePresence";
 import type { AppBackendAuth } from "./appBackendAuthority";
+import type { PublicEditRelease } from "@dohc/security-contract";
 import {createDatasetAppRoutes} from "./datasetRoutes";
 import { createRelayDatasetHost, datasetReferenceReadContainsRecord, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
@@ -122,13 +123,13 @@ it("acknowledges 200 unavailable record bindings from a deleted dataset", async 
   expect(await f.storage.resolveWorkReference({reference: "0".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
 });
 
-async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {
+async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }, publicEditRelease?: PublicEditRelease) {
   const { revision, schemaSql, operationSource } = prepared;
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
   let now = 10;
-  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => now, onShutdownError(error) {shutdownErrors.push(error);}});
+  const create = () => createRelayDatasetHost({publicEditRelease, storage: base.storage, directory, limits, startupExclusive, nowMs: () => now, onShutdownError(error) {shutdownErrors.push(error);}});
   host = await create();
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25}); expect(shutdownErrors).toEqual([]);});
   const activate = () => host.activate(owner, {...scope, revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
@@ -156,6 +157,17 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
   return {...base, link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER), get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
     async reopen() {await host.close(); host = await create();}, advance(ms: number) {now += ms;}};
 }
+
+it.each(["view", "comment", "edit"] as const)("lets %s links use an app's approved data whenever they may open its files", async access => {
+  for (const publicEditRelease of [undefined, {version: 1} as const]) {
+    const f = await fixture(false, undefined, publicEditRelease); await f.activate(); const publicationId = f.publish();
+    f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='g'").run(access));
+    const added = f.invoke(f.link("friend"), id(5), {name: `Added by ${access}`}, publicationId);
+    // Edit links open files only once they are released, and so reach an app's data only then.
+    if (access === "edit" && !publicEditRelease) await expect(added).rejects.toMatchObject({code: "not_found"});
+    else await expect(added).resolves.toBeDefined();
+  }
+});
 
 it("keeps its workers and recovery staging in the folder it was given", async () => {
   const f = await fixture(); await f.activate(); const publicationId = f.publish();

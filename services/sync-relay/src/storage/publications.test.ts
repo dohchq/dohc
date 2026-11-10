@@ -11,7 +11,8 @@ import type { StorageContext } from "./context";
 import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { MAX_PAYLOAD_JSON_BYTES } from "../wireLimits";
-import { hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
+import { authorizeLinkSession, hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
+import { chatChannelCreate, sequenced } from "../testing";
 import { startPublicationOperator } from "../appPublicationOperator";
 import { operatorSocketPath } from "../appPublicationOperatorProtocol";
 import { requestPublicationTakedown } from "../appPublicationOperatorClient";
@@ -95,13 +96,52 @@ it("authorizes link publication descriptors from the server session and exact bu
   const published = f.storage.publishAppPublication(request());
   const token = "A".repeat(43), key = "test-key";
   f.storage.mintLinkSession({session: {sessionId: "session", capabilityHash: hashLinkBearer(token, key), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 100}, guard: () => undefined});
-  const descriptor = f.storage.authorizeLinkAppPublication({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits});
+  const descriptor = f.storage.authorizeLinkAppPublication({publicEditRelease: undefined, publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits});
   expect(descriptor.descriptor.files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
   expect(descriptor.descriptor).not.toHaveProperty("owner");
-  expect(() => f.storage.readLinkAppPublicationBlob({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: "f".repeat(64)})).toThrow();
-  expect(f.storage.readLinkAppPublicationBlob({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: digest(script)}).bytes).toEqual(script);
+  expect(() => f.storage.readLinkAppPublicationBlob({publicEditRelease: undefined, publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: "f".repeat(64)})).toThrow();
+  expect(f.storage.readLinkAppPublicationBlob({publicEditRelease: undefined, publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: digest(script)}).bytes).toEqual(script);
   f.storage.withdrawAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
-  expect(() => f.storage.authorizeLinkAppPublication({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits})).toThrow();
+  expect(() => f.storage.authorizeLinkAppPublication({publicEditRelease: undefined, publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits})).toThrow();
+});
+
+it.each(["view", "comment", "edit"] as const)("admits %s links to their app exactly when they may read its files", access => {
+  const f = fixture(), published = f.storage.publishAppPublication(request());
+  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL, principal_email=NULL, access=? WHERE grant_id='g'").run(access);
+  const capabilityHash = hashLinkBearer("A".repeat(43), "test-key");
+  f.storage.mintLinkSession({session: {sessionId: "session", capabilityHash, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 100}, guard: () => undefined});
+  for (const publicEditRelease of [undefined, {version: 1} as const]) {
+    const input = {publicEditRelease, capabilityHash, profileTokenHash: "profile", nowMs: 3, limits};
+    const admit = () => f.storage.authorizeLinkAppPublication({...input, publicationId: published.publicationId});
+    const list = () => f.storage.listLinkAppPublications(input).page.publications.map(value => value.publicationId);
+    if (access === "edit" && !publicEditRelease) {
+      expect(admit).toThrow(expect.objectContaining({code: "not_found"}));
+      expect(list).toThrow(expect.objectContaining({code: "not_found"}));
+    } else {
+      expect(admit().descriptor.publicationId).toBe(published.publicationId);
+      expect(list()).toEqual([published.publicationId]);
+    }
+  }
+});
+
+it("refuses a Group link's app requests, though the link may read the Group folder", () => {
+  const f = fixture();
+  f.storage.appendLogBatch({workspaceId: "w", originId: "channels", ops: sequenced([chatChannelCreate("wire-group")])
+    .map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  f.storage.createShare({share: {shareId: "group", workspaceId: "w", granterUserId: "owner",
+    selectorJson: JSON.stringify({kind: "group", channelWireId: "wire-group", paths: ["app"], versionId: null}), createdAtMs: 1},
+  grant: {grantId: "group-link", shareId: "group", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "read-only",
+    generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
+  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='group-link'").run();
+  const capabilityHash = hashLinkBearer("G".repeat(43), "test-key");
+  f.storage.mintLinkSession({session: {sessionId: "group-session", capabilityHash, grantId: "group-link", generation: 1, mintedAtMs: 2, expiresAtMs: 100},
+    guard: () => undefined});
+  const session = f.storage.findLinkSessionByCapabilityHash(capabilityHash)!;
+  for (const publicEditRelease of [undefined, {version: 1} as const]) {
+    expect(authorizeLinkSession(f.storage, session, 3, publicEditRelease)?.effectiveSelector).toEqual({paths: ["app"], versionId: null, access: "view"});
+    expect(() => f.storage.listLinkAppPublications({publicEditRelease, capabilityHash, profileTokenHash: "profile", nowMs: 3, limits}))
+      .toThrow(expect.objectContaining({code: "not_found"}));
+  }
 });
 
 it.each(["owner", "workspace", "generation", "grant", "version", "selector", "revoked"])("rechecks %s authority before committing", kind => {
@@ -422,7 +462,7 @@ it("keeps unexpected storage failures distinct from a damaged manifest", async (
   const original = f.storage.getBlob;
   f.storage.getBlob = () => {throw new Error("test storage failure");};
   expect(() => f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits})).toThrow("test storage failure");
-  expect(() => f.storage.authorizeLinkAppPublication({publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
+  expect(() => f.storage.authorizeLinkAppPublication({publicEditRelease: undefined, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
     profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20})).toThrow("test storage failure");
   f.storage.getBlob = original;
 });
@@ -459,7 +499,7 @@ it.each(["owner", "generation", "grant", "selector", "manifest", "bundle"])("ref
 
 it("does not revive a cached launch guard when its publication is explicitly reapproved", () => {
   const f = linkFixture();
-  const guard = f.storage.createLinkAppPublicationGuard({publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
+  const guard = f.storage.createLinkAppPublicationGuard({publicEditRelease: undefined, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
     profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20});
   const state = {publicationId: f.published.publicationId, workspaceId: "w", ownerUserId: "owner"};
   f.storage.withdrawAppPublication({...state, expectedAuthorityRevision: 1});
@@ -550,7 +590,7 @@ it("rejects person claims and preserves unknown CLI attribution", async () => {
 
 it("operator takedown stops serving and cached launch authority without disclosing the reason to recipients", async () => {
   const f = linkFixture({large: true});
-  const guard = f.storage.createLinkAppPublicationGuard({...f.input, publicationId: f.published.publicationId,
+  const guard = f.storage.createLinkAppPublicationGuard({publicEditRelease: undefined, ...f.input, publicationId: f.published.publicationId,
     capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20});
   const stream = await f.http(f.blobPath), reader = stream.body!.getReader();
   expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
@@ -628,7 +668,7 @@ it("avoids takedown reads while serving and retains them for owner reads", () =>
   let takedownReads = 0;
   prepare.mockImplementation(sql => {if (sql.includes("sync_relay_app_publication_takedowns")) takedownReads++; return original(sql);});
   try {
-    const input = {...f.input, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20};
+    const input = {publicEditRelease: undefined, ...f.input, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20};
     const guard = f.storage.createLinkAppPublicationGuard(input);
     guard(21);
     f.storage.authorizeLinkAppPublication(input);
