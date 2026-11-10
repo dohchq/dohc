@@ -17,6 +17,7 @@ import { editorFolderUri, editorFontFiles, editorHtmlUri, isOutOfSpace } from ".
 import { editAnywayMessage, pageFailureAction, pageNotices, type PageHandlers } from "../src/pages/pageNotices";
 import { samplePages } from "../src/pages/sample";
 import { useTheme, type Theme } from "../src/theme";
+import { sampleOnly } from "../src/sampleOnly";
 
 type Failure = "couldntRead" | "couldntOpen" | "noLongerAvailable";
 type MarkKey = keyof typeof documentWords.mark | "opening";
@@ -33,7 +34,7 @@ const demo = {
 
 // A page, as on the desktop: its name in the header, then icon, title, properties and body in one scroll.
 // Calm states (saved, saving) draw nothing; anything else shows a mark beside the menu, and a tap explains it.
-export default function Page() {
+function Page() {
   const theme = useTheme();
   const router = useRouter();
   const { path = "trip/packing-list.md", t0, run = "1" } = useLocalSearchParams<{ path?: string; t0?: string; run?: string }>();
@@ -328,3 +329,5 @@ const styles = StyleSheet.create({
   stripText: { fontSize: 15, lineHeight: 20 },
   stripActions: { flexDirection: "row" },
 });
+
+export default sampleOnly(Page);

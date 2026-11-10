@@ -1,18 +1,11 @@
-import type { ServerProblemKind } from "@dohc/interface-words/account";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { fetch } from "expo/fetch";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { View } from "react-native";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
-import { listWorkspaces, setShowOnPhone as patchShowOnPhone, type AccountWorkspace } from "../server/api";
-import { requestGenerations, shownProblem } from "../server/client";
+import { createWorkspaceList, type WorkspaceList, type WorkspaceListStore } from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
 import { secureSignInStore } from "./secureSignInStore";
-
-/** The signed-in account's workspaces, as the server lists them. */
-export type WorkspaceList =
-  | { readonly status: "loading" }
-  | { readonly status: "ready"; readonly workspaces: readonly AccountWorkspace[]; readonly problem: ServerProblemKind | null }
-  | { readonly status: "failed"; readonly problem: ServerProblemKind };
 
 interface AccountValue {
   readonly account: Account;
@@ -27,70 +20,31 @@ interface AccountValue {
 
 const Context = createContext<AccountValue | null>(null);
 
-// A build without sample data: the phone's sign-in, and the account's workspaces, for every screen.
+const LOADING: WorkspaceList = { status: "loading" };
+const noList = { subscribe: () => () => undefined, state: () => LOADING };
+
+// A build without sample data: the phone's sign-in, and the account's workspaces, for every screen. Requests go
+// through expo/fetch, which honours the client's `credentials: "omit"` and `redirect: "error"` whatever the global
+// fetch is.
 export function AccountProvider({ children }: { children: ReactNode }) {
-  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch: (url, init) => fetch(url, init) }));
+  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => void account.restore(), [account]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
-  const [workspaces, setWorkspaces] = useState<WorkspaceList>({ status: "loading" });
+  const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn), [signIn]);
+  const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   const [chosenWorkspaceId, chooseWorkspace] = useState<string | null>(null);
-  const lists = useRef(requestGenerations());
-  // One generation per workspace, so only the latest toggle of each lands.
-  const toggles = useRef(new Map<string, number>());
-
-  const load = useCallback((current: SignIn) => {
-    const request = lists.current.next();
-    setWorkspaces(previous => previous.status === "ready" ? previous : { status: "loading" });
-    listWorkspaces(current.client).then(
-      list => {
-        if (!current.isCurrent() || !lists.current.isLatest(request)) return;
-        setWorkspaces({ status: "ready", workspaces: list, problem: null });
-      },
-      (error: unknown) => {
-        const problem = shownProblem(error);
-        if (!current.isCurrent() || !lists.current.isLatest(request) || problem === null) return;
-        setWorkspaces(previous => previous.status === "ready" ? { ...previous, problem } : { status: "failed", problem });
-      },
-    );
-  }, []);
-
   useEffect(() => {
-    lists.current.next();
-    toggles.current.clear();
-    setWorkspaces({ status: "loading" });
     chooseWorkspace(null);
-    if (signIn) load(signIn);
-  }, [signIn, load]);
+    list?.reload();
+  }, [list]);
 
-  const reloadWorkspaces = useCallback(() => {
-    if (signIn) load(signIn);
-  }, [signIn, load]);
-
-  const setShowOnPhone = useCallback((workspaceId: string, showOnPhone: boolean) => {
-    if (!signIn) return;
-    const request = (toggles.current.get(workspaceId) ?? 0) + 1;
-    toggles.current.set(workspaceId, request);
-    const apply = (value: boolean, problem: ServerProblemKind | null) => setWorkspaces(previous => previous.status !== "ready" ? previous : {
-      status: "ready", problem,
-      workspaces: previous.workspaces.map(entry => entry.workspaceId === workspaceId ? { ...entry, showOnPhone: value } : entry),
-    });
-    apply(showOnPhone, null);
-    patchShowOnPhone(signIn.client, workspaceId, showOnPhone).then(
-      stored => {
-        if (signIn.isCurrent() && toggles.current.get(workspaceId) === request) apply(stored, null);
-      },
-      (error: unknown) => {
-        if (!signIn.isCurrent() || toggles.current.get(workspaceId) !== request) return;
-        const problem = shownProblem(error);
-        if (problem !== null) apply(!showOnPhone, problem);
-      },
-    );
-  }, [signIn]);
-
-  const value = useMemo(() => ({ account, state, workspaces, chosenWorkspaceId, chooseWorkspace, reloadWorkspaces, setShowOnPhone }),
-    [account, state, workspaces, chosenWorkspaceId, reloadWorkspaces, setShowOnPhone]);
+  const value = useMemo<AccountValue>(() => ({
+    account, state, workspaces, chosenWorkspaceId, chooseWorkspace,
+    reloadWorkspaces: () => list?.reload(),
+    setShowOnPhone: (workspaceId, showOnPhone) => list?.setShowOnPhone(workspaceId, showOnPhone),
+  }), [account, state, workspaces, chosenWorkspaceId, list]);
   return <Context value={value}>{children}</Context>;
 }
 

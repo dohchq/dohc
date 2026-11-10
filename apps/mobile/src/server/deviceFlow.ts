@@ -8,7 +8,8 @@ export const DEVICE_CLIENT_ID = "dohc-phone";
 const GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 /** RFC 8628: each slow_down adds 5 seconds to the interval. */
 const SLOW_DOWN_MS = 5000;
-const DEFAULT_INTERVAL_S = 5;
+/** RFC 8628's default, and the shortest interval the phone polls at, whatever the server asks. */
+const MIN_INTERVAL_S = 5;
 
 export interface DeviceSignIn {
   readonly deviceCode: string;
@@ -51,12 +52,15 @@ export async function startDeviceSignIn(origin: string, runtime: Pick<Runtime, "
     deviceCode: body.device_code,
     userCode: body.user_code,
     approvalUrl: approval.href,
-    intervalMs: (body.interval ?? DEFAULT_INTERVAL_S) * 1000,
+    intervalMs: Math.max(MIN_INTERVAL_S, body.interval ?? MIN_INTERVAL_S) * 1000,
     expiresAtMs: runtime.now() + body.expires_in * 1000,
   };
 }
 
-/** Polls until the person approves or denies the code, or it expires. */
+/**
+ * Polls until the person approves or denies the code, or it expires. A token that arrives is returned even when the
+ * sign-in was cancelled while it was on its way, so the caller can end the session the server just made.
+ */
 export async function waitForDeviceToken(origin: string, start: DeviceSignIn, runtime: Runtime): Promise<DeviceOutcome> {
   let intervalMs = start.intervalMs;
   for (;;) {
@@ -64,6 +68,7 @@ export async function waitForDeviceToken(origin: string, start: DeviceSignIn, ru
     if (runtime.now() >= start.expiresAtMs) return { kind: "expired" };
     const { status, body } = await exchange(runtime.fetch, `${origin}/api/auth/device/token`, {
       method: "POST", body: { grant_type: GRANT_TYPE, device_code: start.deviceCode, client_id: DEVICE_CLIENT_ID }, signal: runtime.signal,
+      keepAnswer: true,
     });
     if (status === 200) {
       if (!isFields(body) || typeof body.access_token !== "string" || !body.access_token || body.access_token.length > 4096) {
@@ -71,6 +76,7 @@ export async function waitForDeviceToken(origin: string, start: DeviceSignIn, ru
       }
       return { kind: "token", token: body.access_token };
     }
+    if (runtime.signal.aborted) throw new ServerError("cancelled");
     switch (isFields(body) ? body.error : undefined) {
       case "authorization_pending":
         continue;

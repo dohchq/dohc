@@ -5,10 +5,11 @@ import { Check } from "lucide-react-native";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useShownWorkspaces } from "../src/chats/Workspaces";
 import { useTheme } from "../src/theme";
+import { signedInOnly } from "../src/sampleOnly";
 
 // The workspace switcher, a small sheet from the workspace in the Chats and Home headers. It lists the workspaces that
 // show on this phone; Settings chooses which those are. Choosing one opens it and closes the sheet.
-export default function WorkspacesSheet() {
+function WorkspacesSheet() {
   const theme = useTheme();
   const router = useRouter();
   const { current, workspaces, choose } = useShownWorkspaces();
@@ -47,3 +48,5 @@ const styles = StyleSheet.create({
   initial: { color: "#fff", fontSize: 15, fontWeight: "700" },
   name: { flex: 1, fontSize: 17 },
 });
+
+export default signedInOnly(WorkspacesSheet);

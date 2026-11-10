@@ -10,7 +10,9 @@ import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
 // that would update state, the screen, the token store or a cache, checks its generation first, and gives up once it
 // has moved on.
 //
-// Writes to the token store run one at a time, in order, so a sign-out's delete always lands after a save it raced.
+// Ending a token deletes it from the store first, then revokes its session with the copy held in memory, so a phone
+// closed mid-way never keeps a token it signed out of. Writes to the store run one at a time, in order, so a delete
+// always lands after a save it raced.
 
 /** What the token store keeps for this phone: the server, the session token, and whose it is. */
 export interface StoredSignIn {
@@ -37,8 +39,11 @@ export interface SignIn {
 
 export type AccountState =
   | { readonly status: "loading" }
-  /** `ended` when the server ended the session; `origin` is the last server, to sign in to again. */
-  | { readonly status: "signed-out"; readonly origin: string | null; readonly ended: boolean }
+  /**
+   * `origin` is the last server, to sign in to again; `ended` when the server ended the session. `forgetFailed` while
+   * a token this phone signed out of is still in the store, because deleting it failed.
+   */
+  | { readonly status: "signed-out"; readonly origin: string | null; readonly ended: boolean; readonly forgetFailed: boolean }
   | { readonly status: "signed-in"; readonly signIn: SignIn };
 
 export type SignInOutcome = "signed-in" | "denied" | "expired" | "cancelled";
@@ -56,8 +61,13 @@ export interface Account {
   signIn(origin: string, onCode: (code: { readonly userCode: string; readonly approvalUrl: string }) => void): Promise<SignInOutcome>;
   /** Ends a sign-in in progress. A completed sign-in stays. */
   cancelSignIn(): void;
-  /** Ends this phone's session on the server, then deletes the token. The token goes even when the server can't be reached. */
+  /**
+   * Signs the phone out at once, ending everything the sign-in started. Then it deletes the token, and revokes its
+   * session on the server, which may fail. It never rejects: a failed delete shows as `forgetFailed`.
+   */
   signOut(): Promise<void>;
+  /** Tries again to delete the tokens whose delete failed. */
+  retryForget(): Promise<void>;
 }
 
 const REVOKE_TIMEOUT_MS = 5000;
@@ -76,10 +86,21 @@ export function createAccount(options: {
   let saved: StoredSignIn | null = null;
   const listeners = new Set<() => void>();
   let writes: Promise<unknown> = Promise.resolve();
+  /** Tokens this phone ended whose delete failed, with their servers. */
+  const unforgotten = new Map<string, string>();
 
   function setState(next: AccountState) {
     state = next;
     for (const listener of listeners) listener();
+  }
+
+  function signedOut(origin: string | null, ended: boolean): AccountState {
+    return { status: "signed-out", origin, ended, forgetFailed: unforgotten.size > 0 };
+  }
+
+  /** Shows a delete that failed, or one that has now worked, on a signed-out phone. */
+  function showForgetState() {
+    if (state.status === "signed-out" && state.forgetFailed !== unforgotten.size > 0) setState(signedOut(state.origin, state.ended));
   }
 
   /** The next generation. The one before it ends, and its requests abort. */
@@ -96,27 +117,31 @@ export function createAccount(options: {
     return next;
   }
 
-  /** Deletes the stored token, unless a newer sign-in has replaced it. */
-  async function forget(token: string): Promise<void> {
-    const stored = await store.load().catch(() => null);
-    if (stored === null || stored.token === token) await store.clear();
+  /** Deletes the stored token, unless a newer sign-in has replaced it. Records a failed delete. */
+  async function forget(origin: string, token: string): Promise<void> {
+    try {
+      await write(async () => {
+        const stored = await store.load().catch(() => null);
+        if (stored === null || stored.token === token) await store.clear();
+      });
+      unforgotten.delete(token);
+    } catch {
+      unforgotten.set(token, origin);
+    }
+    showForgetState();
   }
 
-  /**
-   * Revokes this token's own session through the sessions route. Failing is fine: the caller deletes it anyway. Each
-   * request waits at most REVOKE_TIMEOUT_MS, since the token stays on the phone until this ends.
-   */
+  /** Revokes this token's own session through the sessions route. Each request waits at most REVOKE_TIMEOUT_MS. */
   async function revoke(origin: string, token: string): Promise<void> {
     const client = createServerClient({ origin, token, fetch, signal: new AbortController().signal, timeoutMs: REVOKE_TIMEOUT_MS });
     const mine = (await listSessions(client)).find(session => session.current);
     if (mine) await endSession(client, mine.sessionId);
   }
 
-  function endToken(origin: string, token: string): Promise<void> {
-    return write(async () => {
-      await revoke(origin, token).catch(() => undefined);
-      await forget(token);
-    });
+  /** Deletes the token, then ends its session on the server. Never rejects. */
+  async function endToken(origin: string, token: string): Promise<void> {
+    await forget(origin, token);
+    await revoke(origin, token).catch(() => undefined);
   }
 
   function signedIn(stored: StoredSignIn, current: { readonly id: number; readonly signal: AbortSignal }): SignIn {
@@ -131,11 +156,20 @@ export function createAccount(options: {
           if (current.id !== generation) return;
           advance();
           saved = null;
-          setState({ status: "signed-out", origin: stored.origin, ended: true });
-          void write(() => forget(stored.token)).catch(() => undefined);
+          setState(signedOut(stored.origin, true));
+          void forget(stored.origin, stored.token);
         },
       }),
     };
+  }
+
+  function signOut(): Promise<void> {
+    const ending = saved;
+    const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
+    advance();
+    saved = null;
+    setState(signedOut(origin, false));
+    return ending ? endToken(ending.origin, ending.token) : Promise.resolve();
   }
 
   return {
@@ -147,27 +181,33 @@ export function createAccount(options: {
 
     async restore() {
       const current = { id: generation, signal: controller.signal };
-      const stored = await write(() => store.load()).catch(() => null);
-      if (current.id !== generation) return;
-      setState(stored ? { status: "signed-in", signIn: signedIn(stored, current) } : { status: "signed-out", origin: null, ended: false });
+      const loaded = await write(() => store.load()).catch(() => null);
+      // A token this phone already signed out of is never signed in with again.
+      const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
+      if (current.id !== generation) {
+        // Signed out while the store was read: the token it held goes too.
+        if (stored) void endToken(stored.origin, stored.token);
+        return;
+      }
+      setState(stored ? { status: "signed-in", signIn: signedIn(stored, current) } : signedOut(null, false));
     },
 
     async signIn(origin, onCode) {
-      const ended = signOut();
+      if (state.status === "signed-in") void signOut();
       const attempt = advance();
       const isCurrent = () => attempt.id === generation;
-      await ended;
       let token: string | null = null;
       try {
         const start = await startDeviceSignIn(origin, { fetch, signal: attempt.signal, now });
-        if (!isCurrent()) return "cancelled";
+        if (!isCurrent()) throw new ServerError("cancelled");
         onCode({ userCode: start.userCode, approvalUrl: start.approvalUrl });
         const outcome = await waitForDeviceToken(origin, start, { fetch, signal: attempt.signal, now, sleep: options.sleep ?? sleep });
-        if (!isCurrent()) return "cancelled";
+        // Held before the check, so a token that arrived for a superseded sign-in still has its session ended.
+        if (outcome.kind === "token") token = outcome.token;
+        if (!isCurrent()) throw new ServerError("cancelled");
         if (outcome.kind !== "token") return outcome.kind;
-        token = outcome.token;
-        const account = await readAccount(createServerClient({ origin, token, fetch, signal: attempt.signal }));
-        const stored: StoredSignIn = { origin, token, userId: account.userId, email: account.email };
+        const account = await readAccount(createServerClient({ origin, token: outcome.token, fetch, signal: attempt.signal }));
+        const stored: StoredSignIn = { origin, token: outcome.token, userId: account.userId, email: account.email };
         await write(async () => {
           if (isCurrent()) await store.save(stored);
         });
@@ -176,7 +216,7 @@ export function createAccount(options: {
         return "signed-in";
       } catch (error) {
         // A session the server made for a superseded sign-in, or one whose account the phone couldn't read, ends here.
-        if (token !== null) void endToken(origin, token).catch(() => undefined);
+        if (token !== null) void endToken(origin, token);
         if (!isCurrent() || (error instanceof ServerError && error.problem === "cancelled")) return "cancelled";
         throw error;
       }
@@ -187,14 +227,9 @@ export function createAccount(options: {
     },
 
     signOut,
-  };
 
-  function signOut(): Promise<void> {
-    const ending = saved;
-    if (state.status !== "signed-in" || ending === null) return Promise.resolve();
-    advance();
-    saved = null;
-    setState({ status: "signed-out", origin: ending.origin, ended: false });
-    return endToken(ending.origin, ending.token);
-  }
+    async retryForget() {
+      await Promise.all([...unforgotten].map(([token, origin]) => forget(origin, token)));
+    },
+  };
 }

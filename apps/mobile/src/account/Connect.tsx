@@ -9,11 +9,15 @@ import { ServerError } from "../server/client";
 import { checkServerAddress, serverName } from "../server/origin";
 import { useTheme } from "../theme";
 import { useAccount } from "./AccountProvider";
+import { ProblemLine } from "./ProblemLine";
 
 type Phase =
   | { readonly kind: "form" }
   | { readonly kind: "starting" }
-  | { readonly kind: "code"; readonly userCode: string; readonly approvalUrl: string };
+  | { readonly kind: "code"; readonly server: string; readonly userCode: string; readonly approvalUrl: string };
+
+// Plain HTTP to the development server only in a development build.
+const check = (address: string) => checkServerAddress(address, { developmentServer: __DEV__ });
 
 const ADDRESS_PROBLEM = { empty: accountWords.enterAddress, insecure: accountWords.enterHttps, invalid: accountWords.enterAddressLike } as const;
 
@@ -37,7 +41,7 @@ export function Connect() {
   useEffect(() => () => account.cancelSignIn(), [account]);
 
   async function connect() {
-    const checked = checkServerAddress(address);
+    const checked = check(address);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
       field.current?.focus();
@@ -50,7 +54,7 @@ export function Connect() {
     setPhase({ kind: "starting" });
     try {
       const result = await account.signIn(origin, code => {
-        setPhase({ kind: "code", ...code });
+        setPhase({ kind: "code", server: serverName(origin), ...code });
         void openApproval(code.approvalUrl);
       });
       if (result === "cancelled") return;
@@ -81,6 +85,7 @@ export function Connect() {
         <DohcMark size={40} color={theme.ink} />
         {phase.kind === "code" ? (
           <View style={styles.block}>
+            <Text style={[styles.title, { color: theme.ink }]}>{accountWords.signingInTo(phase.server)}</Text>
             <Text style={[styles.body, { color: theme.ink }]}>{accountWords.approveInBrowser}</Text>
             <Text style={[styles.code, { color: theme.ink }]} selectable accessibilityLabel={phase.userCode.split("").join(" ")}>{phase.userCode}</Text>
             <Button label={accountWords.openBrowser} onPress={() => void openApproval(phase.approvalUrl)} />
@@ -92,6 +97,8 @@ export function Connect() {
           </View>
         ) : (
           <View style={styles.block}>
+            {/* The last sign-out could not delete its token, so it is still on this phone. */}
+            {last?.forgetFailed ? <ProblemLine text={accountWords.forgetFailed} onRetry={() => void account.retryForget()} /> : null}
             <Text style={[styles.label, { color: theme.muted }]}>{accountWords.serverAddress}</Text>
             <TextInput
               ref={field}
@@ -99,7 +106,7 @@ export function Connect() {
               onChangeText={text => { setAddress(text); setAddressProblem(null); }}
               onBlur={() => {
                 if (busy || !address.trim()) return;
-                const checked = checkServerAddress(address);
+                const checked = check(address);
                 setAddressProblem("problem" in checked ? ADDRESS_PROBLEM[checked.problem] : null);
               }}
               onSubmitEditing={() => void connect()}
@@ -154,6 +161,7 @@ const styles = StyleSheet.create({
   block: { gap: 12 },
   label: { fontSize: 15 },
   input: { minHeight: 44, borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, fontSize: 17 },
+  title: { fontSize: 20, fontWeight: "600" },
   body: { fontSize: 17, lineHeight: 22 },
   note: { fontSize: 15, lineHeight: 20 },
   code: { fontSize: 32, fontWeight: "600", letterSpacing: 6, textAlign: "center", marginVertical: 8, fontVariant: ["tabular-nums"] },

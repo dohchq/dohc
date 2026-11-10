@@ -42,13 +42,24 @@ export function shownProblem(error: unknown): ServerProblemKind | null {
   }
 }
 
-export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
+/** What the client needs of fetch: the app passes expo/fetch, which honours `credentials` and `redirect`. */
+export interface FetchInit {
+  readonly method: "GET" | "POST" | "PATCH";
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body?: string;
+  readonly credentials: "omit";
+  readonly redirect: "error";
+  readonly signal: AbortSignal;
+}
+export type Fetch = (url: string, init: FetchInit) => Promise<{ readonly status: number; json(): Promise<unknown> }>;
 
 export const REQUEST_TIMEOUT_MS = 15_000;
 
 /**
- * Sends one JSON request and reads its JSON answer. It rejects with `cancelled` once `signal` aborts, even when
- * the answer has already arrived, and with `offline` when nothing answers within the timeout.
+ * Sends one JSON request and reads its JSON answer, and rejects with `offline` when nothing answers within the
+ * timeout. Once `signal` aborts it rejects with `cancelled`, even when the answer has already arrived, unless
+ * `keepAnswer` is set. Then a request already sent is never aborted, only timed out, and its answer is returned for
+ * the caller to act on: an answer that made something on the server, such as a session, is never lost.
  */
 export async function exchange(fetch: Fetch, url: string, request: {
   readonly method: "GET" | "POST" | "PATCH";
@@ -56,15 +67,16 @@ export async function exchange(fetch: Fetch, url: string, request: {
   readonly body?: unknown;
   readonly signal: AbortSignal;
   readonly timeoutMs?: number;
+  readonly keepAnswer?: boolean;
 }): Promise<{ readonly status: number; readonly body: unknown }> {
   const { signal } = request;
   if (signal.aborted) throw new ServerError("cancelled");
   const own = new AbortController();
   const abort = () => own.abort();
-  signal.addEventListener("abort", abort);
+  if (!request.keepAnswer) signal.addEventListener("abort", abort);
   const timer = setTimeout(abort, request.timeoutMs ?? REQUEST_TIMEOUT_MS);
   try {
-    let response: Response;
+    let response: Awaited<ReturnType<Fetch>>;
     try {
       response = await fetch(url, {
         method: request.method,
@@ -89,7 +101,7 @@ export async function exchange(fetch: Fetch, url: string, request: {
       body = undefined;
       if (own.signal.aborted && !signal.aborted) throw new ServerError("offline");
     }
-    if (signal.aborted) throw new ServerError("cancelled");
+    if (signal.aborted && !request.keepAnswer) throw new ServerError("cancelled");
     return { status: response.status, body };
   } finally {
     clearTimeout(timer);

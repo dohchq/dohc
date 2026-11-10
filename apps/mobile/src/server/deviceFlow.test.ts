@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ServerError } from "./client";
 import { DEVICE_CLIENT_ID, startDeviceSignIn, waitForDeviceToken, type DeviceSignIn } from "./deviceFlow";
-import { testServer, type Answer } from "./testServer";
+import { deferred, testServer, type Answer } from "./testServer";
 
 const CODE = { device_code: "dev-1", user_code: "ABCD2345", verification_uri: "https://elsewhere.example/device",
   verification_uri_complete: "https://elsewhere.example/device?user_code=ABCD2345", expires_in: 600, interval: 3 };
@@ -27,11 +27,19 @@ describe("starting a device sign-in", () => {
     server.on("POST", "/api/auth/device/code", { status: 200, body: CODE });
     const started = await startDeviceSignIn(server.origin, runtime(server));
     expect(started).toEqual({ deviceCode: "dev-1", userCode: "ABCD2345", approvalUrl: "https://dohc.example.com/device?user_code=ABCD2345",
-      intervalMs: 3000, expiresAtMs: 600_000 });
+      intervalMs: 5000, expiresAtMs: 600_000 });
     expect(server.calls[0]!.body).toEqual({ client_id: DEVICE_CLIENT_ID });
   });
 
-  it("refuses an answer it can't use", async () => {
+  it("polls no faster than every 5 seconds, whatever the server asks", async () => {
+    for (const [interval, ms] of [[1, 5000], [3, 5000], [10, 10_000]] as const) {
+      const server = testServer();
+      server.on("POST", "/api/auth/device/code", { status: 200, body: { ...CODE, interval } });
+      expect((await startDeviceSignIn(server.origin, runtime(server))).intervalMs).toBe(ms);
+    }
+  });
+
+    it("refuses an answer it can't use", async () => {
     const server = testServer();
     server.on("POST", "/api/auth/device/code", { status: 200, body: { ...CODE, user_code: "<script>" } });
     await expect(startDeviceSignIn(server.origin, runtime(server))).rejects.toEqual(new ServerError("invalid", 200));
@@ -78,7 +86,33 @@ describe("polling for the token", () => {
     expect(server.calls).toHaveLength(3);
   });
 
-  it("rejects when the server can't be reached or answers something else", async () => {
+  it("returns a token that arrives after a cancel, and never aborts that request", async () => {
+    const server = testServer();
+    const held = deferred<Answer>();
+    server.on("POST", "/api/auth/device/token", () => held.promise);
+    const cancel = new AbortController();
+    const run = { ...runtime(server), signal: cancel.signal };
+    const outcome = waitForDeviceToken(server.origin, start, run);
+    await vi.waitFor(() => expect(server.calls).toHaveLength(1));
+    cancel.abort();
+    expect(server.calls[0]!.signal.aborted).toBe(false);
+    held.resolve({ status: 200, body: { access_token: "late" } });
+    expect(await outcome).toEqual({ kind: "token", token: "late" });
+  });
+
+  it("stops at a cancel when the answer isn't a token", async () => {
+    const server = testServer();
+    const held = deferred<Answer>();
+    server.on("POST", "/api/auth/device/token", () => held.promise);
+    const cancel = new AbortController();
+    const outcome = waitForDeviceToken(server.origin, start, { ...runtime(server), signal: cancel.signal });
+    await vi.waitFor(() => expect(server.calls).toHaveLength(1));
+    cancel.abort();
+    held.resolve(pending);
+    await expect(outcome).rejects.toEqual(new ServerError("cancelled"));
+  });
+
+    it("rejects when the server can't be reached or answers something else", async () => {
     await expect(poll("offline").outcome).rejects.toEqual(new ServerError("offline"));
     await expect(poll({ status: 503 }).outcome).rejects.toEqual(new ServerError("server-busy", 503));
     await expect(poll({ status: 200, body: {} }).outcome).rejects.toEqual(new ServerError("invalid", 200));

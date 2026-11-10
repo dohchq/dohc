@@ -60,10 +60,23 @@ export function memoryStore(initial: StoredSignIn | null = null) {
   const log: string[] = [];
   let value = initial;
   let saving: Promise<void> | null = null;
+  let loading: Promise<void> | null = null;
+  let failingClears = 0;
   const store: SignInStore = {
-    async load() { return value; },
+    async load() { if (loading) await loading; return value; },
     async save(next) { log.push("save"); if (saving) await saving; value = next; },
-    async clear() { log.push("clear"); value = null; },
+    async clear() {
+      log.push("clear");
+      if (failingClears > 0) {
+        failingClears -= 1;
+        throw new Error("keychain refused the delete");
+      }
+      value = null;
+    },
+  };
+  const hold = () => {
+    const held = deferred<void>();
+    return { promise: held.promise, release: () => held.resolve() };
   };
   return {
     store,
@@ -71,9 +84,19 @@ export function memoryStore(initial: StoredSignIn | null = null) {
     current: () => value,
     /** Holds every save until the returned function runs. */
     holdSaves() {
-      const held = deferred<void>();
+      const held = hold();
       saving = held.promise;
-      return () => held.resolve();
+      return held.release;
+    },
+    /** Holds every load until the returned function runs. */
+    holdLoads() {
+      const held = hold();
+      loading = held.promise;
+      return () => { loading = null; held.release(); };
+    },
+    /** The next `count` clears fail. */
+    failClears(count: number) {
+      failingClears = count;
     },
   };
 }

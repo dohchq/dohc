@@ -22,6 +22,8 @@ export const accountWords = {
   expired: "The code expired. Start again.",
 
   // The phone's.
+  signingInTo: (server: string) => `Signing in to ${server}`,
+  forgetFailed: "dohc could not delete the sign-in saved on this phone.",
   couldNotSignIn: (server: string) => `${server} could not sign this phone in. Try again or contact its administrator.`,
   sessionEnded: (server: string) => `${server} ended this phone's session. Connect again to continue.`,
   problem: (kind: ServerProblemKind, server: string): string => {

@@ -1,5 +1,5 @@
 import { isAgentHue, type AgentHue } from "@dohc/workspace-contracts/agent-hues";
-import type { ServerClient } from "./client";
+import { ServerError, type ServerClient } from "./client";
 
 // The account routes the phone calls, each answer checked before the app uses it. An answer missing a field the
 // phone reads fails as a whole, so no screen shows half of one.
@@ -22,7 +22,11 @@ function each<T>(value: unknown, read: (item: unknown) => T | null): T[] | null 
   return items;
 }
 
-const path = (segment: string) => encodeURIComponent(segment);
+/** One path segment. An ID that would be empty, or would step out of its path, is never sent. */
+function path(segment: string): string {
+  if (segment === "" || segment === "." || segment === "..") throw new ServerError("invalid");
+  return encodeURIComponent(segment);
+}
 
 // --- who is signed in ---------------------------------------------------------------------------------------------
 
@@ -57,7 +61,7 @@ export function listWorkspaces(client: ServerClient): Promise<AccountWorkspace[]
 }
 
 /** Resolves the setting as the server stored it. */
-export function setShowOnPhone(client: ServerClient, workspaceId: string, showOnPhone: boolean): Promise<boolean> {
+export async function setShowOnPhone(client: ServerClient, workspaceId: string, showOnPhone: boolean): Promise<boolean> {
   return client.send("PATCH", `/sync/account/workspaces/${path(workspaceId)}`, body => {
     const answer = okAnswer(body);
     return answer && typeof answer.showOnPhone === "boolean" ? answer.showOnPhone : null;
@@ -83,7 +87,7 @@ export function listSessions(client: ServerClient): Promise<AccountSession[]> {
       : null));
 }
 
-export function endSession(client: ServerClient, sessionId: string): Promise<true> {
+export async function endSession(client: ServerClient, sessionId: string): Promise<true> {
   return client.send("POST", `/sync/account/sessions/${path(sessionId)}/revoke`, body => okAnswer(body) ? true : null);
 }
 
@@ -111,7 +115,7 @@ export interface PersonalRoster {
 const isStatus = (value: unknown): value is PersonalAgentStatus => value === "active" || value === "signed_out" || value === "removed";
 
 function readAgent(item: unknown): PersonalAgent | null {
-  if (!isFields(item) || !text(item.agentId, 128) || typeof item.name !== "string" || !isAgentHue(item.hue) || !isStatus(item.status)) return null;
+  if (!isFields(item) || !text(item.agentId, 128) || typeof item.name !== "string" || item.name.length > 256 || !isAgentHue(item.hue) || !isStatus(item.status)) return null;
   const reach = each(item.reach, entry => isFields(entry) && text(entry.workspaceId, 256) ? entry.workspaceId : null);
   return reach && { agentId: item.agentId, name: item.name, hue: item.hue, status: item.status, reach };
 }
@@ -127,7 +131,7 @@ export function listAgents(client: ServerClient): Promise<PersonalRoster> {
 }
 
 /** Signs an agent out, removes a signed-out one, or restores a removed one. Resolves its status after. */
-export function changeAgent(client: ServerClient, agentId: string, change: "sign-out" | "remove" | "restore"): Promise<PersonalAgentStatus> {
+export async function changeAgent(client: ServerClient, agentId: string, change: "sign-out" | "remove" | "restore"): Promise<PersonalAgentStatus> {
   return client.send("POST", `/sync/personal-agents/${path(agentId)}/${change}`, body => {
     const agent = okAnswer(body)?.agent;
     return isFields(agent) && isStatus(agent.status) ? agent.status : null;

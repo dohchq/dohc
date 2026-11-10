@@ -12,6 +12,7 @@ import { changeAgent, endSession, listAgents, listSessions, type AccountSession,
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "../src/server/client";
 import { serverName } from "../src/server/origin";
 import { useTheme } from "../src/theme";
+import { signedInOnly } from "../src/sampleOnly";
 
 type Load<T> =
   | { readonly status: "loading" }
@@ -57,7 +58,7 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
 
 // A signed-in build's Settings, from your mark in the Chats header: the account and its server, which workspaces show
 // on this phone, the account's sessions and agents, and Sign out.
-export default function SettingsScreen() {
+function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
   const { account, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
@@ -120,7 +121,9 @@ export default function SettingsScreen() {
               const name = workspaceName(workspace);
               return (
                 <Row key={workspace.workspaceId} title={name}>
-                  <Switch value={workspace.showOnPhone} onValueChange={value => setShowOnPhone(workspace.workspaceId, value)}
+                  {/* Busy until the server answers its change. */}
+                  <Switch value={workspace.showOnPhone} disabled={workspaces.pending.has(workspace.workspaceId)}
+                    onValueChange={value => setShowOnPhone(workspace.workspaceId, value)}
                     accessibilityLabel={accountWords.showOnPhoneLabel(name)} />
                 </Row>
               );
@@ -233,3 +236,5 @@ const styles = StyleSheet.create({
   signOut: { minHeight: 50, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   signOutLabel: { fontSize: 17, fontWeight: "600" },
 });
+
+export default signedInOnly(SettingsScreen);
