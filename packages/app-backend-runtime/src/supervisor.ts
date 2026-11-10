@@ -171,7 +171,6 @@ const sameCursor = (left: DatasetCursor, right: DatasetCursor) => left.workspace
 const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.workspaceId === right.workspaceId && left.datasetId === right.datasetId &&
   left.hostEpoch === right.hostEpoch && left.approvedRevisionHash === right.approvedRevisionHash;
 
-/** Coordinates one authority journal and recoverable workers. This is not a public request handler. */
 /**
  * Version 7 UUIDs from one clock, each sorting after the one before even when the clock repeats or steps back.
  * Generated Collection rules use the request id as a new record's id and list by id when no sort is set,
@@ -194,6 +193,7 @@ function orderedRequestIds(now: () => number): () => string {
   };
 }
 
+/** Coordinates one authority journal and recoverable workers. This is not a public request handler. */
 export async function createDatasetSupervisor(options: DatasetSupervisorOptions) {
   const maxWorkers = options.maxWorkers ?? 4, idleMs = options.idleMs ?? 30_000, queueMs = options.queueMs ?? 30_000;
   const materializationEvents = options.materializationEvents ?? 128, replayCacheMs = options.replayCacheMs ?? 1000;
