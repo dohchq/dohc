@@ -421,7 +421,7 @@ it("writes a Collection's files in the workspace it names, and answers as the li
 it("takes a write only in a request of its own, and a large one only with a body slot and a workspace at Edit", async () => {
   const atEdit = {...REACH, workspaces: [{...REACH.workspaces[0]!, level: "edit"}, REACH.workspaces[1]!]};
   const calls: PersonalAgentAction[] = [];
-  const serve = (body: unknown, reach: unknown, admitLargeBody: () => (() => void) | null) => servePersonalMcp(
+  const serve = (body: unknown, reach: unknown, admitLargeBody: (agentId: string) => (() => void) | null) => servePersonalMcp(
     new Request(`${origin}/mcp/agent/w/trip`, {method: "POST",
       headers: {"content-type": "application/json", accept: "application/json, text/event-stream"}, body: JSON.stringify(body)}),
     {client: {call: async (action) => {calls.push(action); return action === "workspaces" ? Response.json(reach) : Response.json({ok: true, submitId: "write-1"});}},
@@ -434,13 +434,14 @@ it("takes a write only in a request of its own, and a large one only with a body
     error: {code: -32600, message: "Send dohc_write_collection_files in a request of its own, not in a batch."}});
   expect(calls).toEqual(["workspaces"]);
 
-  // A body past an ordinary request's size waits for a free slot.
-  let asked = 0, released = 0;
-  expect((await serve(write("x".repeat(64 * 1024)), atEdit, () => {asked++; return null;}))?.status).toBe(429);
-  expect(asked).toBe(1);
+  // A body past an ordinary request's size waits for a free slot, which the agent holds whichever token it sends.
+  const asked: string[] = [];
+  let released = 0;
+  expect((await serve(write("x".repeat(64 * 1024)), atEdit, agentId => {asked.push(agentId); return null;}))?.status).toBe(429);
+  expect(asked).toEqual([REACH.agent.agentId]);
   // With no workspace at Edit it asks for none.
-  await expect(serve(write("x".repeat(64 * 1024)), REACH, () => {asked++; return () => {};})).rejects.toThrow(RangeError);
-  expect(asked).toBe(1);
+  await expect(serve(write("x".repeat(64 * 1024)), REACH, agentId => {asked.push(agentId); return () => {};})).rejects.toThrow(RangeError);
+  expect(asked).toEqual([REACH.agent.agentId]);
   // A slot it takes is released once the request is answered.
   await serve(write("x".repeat(64 * 1024)), atEdit, () => () => {released++;});
   expect(released).toBe(1);

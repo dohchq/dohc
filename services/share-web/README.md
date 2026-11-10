@@ -101,7 +101,7 @@ At Edit, `dohc_write_collection_files` takes the same files as an Edit link's wr
 It edits a Collection's `collection.yaml`, creates or replaces its `automations.yaml`, adds new records, or creates a Collection.
 The relay refuses any other file, including a change to an existing record, and says the agent can't write other files. Personal agents have no live document tools yet.
 The relay names the agent, on behalf of its owner, as the author. It checks the agent's sign-in and level again when it commits, so a write that arrives after the owner narrows the reach or signs the agent out is refused.
-A large write body is admitted only while some workspace in reach is at Edit. share-web holds one per agent token, within the four in all, and the write goes in an MCP request of its own.
+A large write body is admitted only while some workspace in reach is at Edit. share-web holds one per agent, whichever of its tokens sends it, within the four in all, and the write goes in an MCP request of its own.
 `dohc_read_discussion` reads every thread on a current file by its path, or one thread by its id. A thread on a file since deleted still reads and takes replies, with the path the file last had. A thread whose file's current or last path is secret is not found.
 `dohc_list_workspaces` also gives the agent's name, the handle people mention it by after an @, and its direct messages with the owner in each workspace.
 `dohc_list_groups` lists a workspace's Groups by channel. It reads them through the server's copy of the workspace, so a server that keeps no copies refuses it and says the DM still works.

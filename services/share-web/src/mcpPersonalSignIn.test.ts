@@ -427,6 +427,35 @@ it("keeps a personal agent working after share-web restarts: it waits, replies, 
     .toMatchObject({ ok: true, agent: { name: "Trip helper", handle: "Triphelper" }, workspaces: [{ workspace: TRIP, level: "comment", dmChannel: dm }] });
 });
 
+it("holds one large body per personal agent, whichever of its tokens sends it", async () => {
+  const s = await stack();
+  const agent = await signInPersonalAgent({ send: s.send, origin: ORIGIN, workspaceId: TRIP, account: ADA, choices: { [`w:${TRIP}`]: "edit" } });
+  // A refresh leaves the first access token working, so the agent has two.
+  const refreshed = await tokenRequest(s.send, { grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken,
+    resource: agent.resource });
+  expect(refreshed.status).toBe(200);
+  const { access_token: second } = await refreshed.json() as { access_token: string };
+  const path = new URL(agent.resource).pathname;
+  const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" });
+  let finish!: () => void;
+  // A body past an ordinary request's size takes the agent's one large slot while it arrives.
+  const held = s.send(path, { method: "POST", headers: headers(agent.accessToken), duplex: "half", body: new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
+      finish = () => {
+        controller.enqueue(new TextEncoder().encode(`"jsonrpc":"2.0","id":1,"method":"tools/list"}`));
+        controller.close();
+      };
+    },
+  }) } as RequestInit);
+  const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
+  // The agent's other token waits its turn too.
+  await expect.poll(async () => (await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(429);
+  finish();
+  expect((await held).status).toBe(200);
+  expect((await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(200);
+});
+
 it("keeps the personal address, its tokens and the password out of the logs", async () => {
   const logged: string[] = [];
   for (const method of ["log", "info", "warn", "error", "debug"] as const) {

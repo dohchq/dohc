@@ -20,8 +20,8 @@ type McpAnswer = { body: BodyInit | null; status: number; headers: Headers };
 
 export interface PersonalMcpOptions {
   client: PersonalAgentClient;
-  /** Admits a body larger than an ordinary request, for a Collection write: a release, or null when full. */
-  admitLargeBody(): (() => void) | null;
+  /** Admits a body larger than an ordinary request, for a Collection write by `agentId`: a release, or null when full. */
+  admitLargeBody(agentId: string): (() => void) | null;
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
@@ -68,7 +68,7 @@ class Refusal extends Error {
 
 const reachSchema = z.object({
   ok: z.literal(true),
-  agent: z.object({name: z.string(), handle: z.string()}),
+  agent: z.object({agentId: z.string(), name: z.string(), handle: z.string()}),
   workspaces: z.array(z.object({
     workspaceId: z.string(), name: z.string().nullable(), level: z.enum(["view", "comment", "edit"]), dmChannelWireId: z.string(),
   })),
@@ -140,7 +140,8 @@ export async function servePersonalMcp(request: Request, options: PersonalMcpOpt
   }
   // Only a write needs a large body, and only a workspace at Edit takes one.
   const writes = reach.workspaces.some(entry => entry.level === "edit");
-  const body = request.method === "POST" ? await readRequestJson(request, options.signal, writes ? options.admitLargeBody : null)
+  const admitLarge = writes ? () => options.admitLargeBody(reach.agent.agentId) : null;
+  const body = request.method === "POST" ? await readRequestJson(request, options.signal, admitLarge)
     : {value: undefined, release: () => {}};
   if (!body) return {body: null, status: 429, headers: new Headers()};
   try {
