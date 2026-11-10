@@ -4,8 +4,8 @@ import { act, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { rendererMarks } from "../performance/rendererMarks";
 import { editorTabTestId } from "../testPins";
-import { WORKSPACE, STORED_STATE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
-import { WHATS_NEW_TAB_PATH } from "./workbench/workbenchState";
+import { WORKSPACE, STORED_STATE, makeBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
+import { MAX_OPEN_TABS, WHATS_NEW_TAB_PATH } from "./workbench/workbenchState";
 
 const SEEN_KEY = "dohc.whatsNew.seen";
 const tab = () => screen.findByTestId(editorTabTestId(WHATS_NEW_TAB_PATH));
@@ -39,6 +39,18 @@ describe("What's new after an update", () => {
       const timeline = rendererMarks.readSwitchTimeline().find((entry) => entry.ordinal > previousOrdinal);
       expect(timeline?.phases["restored-active-surface-ready"]).toEqual(expect.any(Number));
     });
+  });
+
+  it("waits for room when the saved tabs are at the limit", async () => {
+    const tabs = Array.from({ length: MAX_OPEN_TABS }, (_, index) => `note-${index}.md`);
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)));
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(await screen.findByTestId("tab-note-0.md")).toBeTruthy();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId("whats-new-page")).toBeNull();
+    expect(screen.queryByTestId(editorTabTestId(WHATS_NEW_TAB_PATH))).toBeNull();
+    expect(localStorage.getItem(SEEN_KEY)).toBe("an-older-release");
   });
 
   it("opens once the saved tabs come back after a failed read", async () => {

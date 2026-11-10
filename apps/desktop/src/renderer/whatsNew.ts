@@ -76,10 +76,10 @@ export function takeUnseenWhatsNew(storage: Pick<Storage, "getItem" | "setItem">
 }
 
 // Windows open together after a restart; the lock lets only one of them
-// take the new release.
-export async function claimUnseenWhatsNew(): Promise<boolean> {
+// take the new release. A window that cannot open the tab leaves it unseen.
+export async function claimUnseenWhatsNew(canOpen: () => boolean): Promise<boolean> {
   try {
-    return await navigator.locks.request(SEEN_KEY, () => takeUnseenWhatsNew());
+    return await navigator.locks.request(SEEN_KEY, () => canOpen() && takeUnseenWhatsNew());
   } catch {
     return false;
   }

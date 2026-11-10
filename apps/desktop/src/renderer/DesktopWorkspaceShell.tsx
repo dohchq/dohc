@@ -1753,9 +1753,12 @@ export function DesktopWorkspaceShell(props: {
   // After the saved tabs return, What's new opens over them once per release.
   // It shows at once, so a restored file it covers no longer holds back the
   // restored-surface phase.
+  // At the tab limit, opening it would close one of the person's tabs, so it
+  // waits for a launch with room.
   const openUnseenWhatsNew = async () => {
     const id = workspaceIdRef.current;
-    if (!(await claimUnseenWhatsNew()) || workspaceIdRef.current !== id) return;
+    const hasRoom = () => allTabs(wbRef.current).length < MAX_OPEN_TABS;
+    if (!(await claimUnseenWhatsNew(hasRoom)) || workspaceIdRef.current !== id) return;
     openVirtualTab(WHATS_NEW_TAB_PATH);
     // At the tab limit it does not open, and the restored file still shows.
     if (activeTabPath(wbRef.current) !== WHATS_NEW_TAB_PATH) return;
