@@ -60,6 +60,11 @@ vi.mock("node:fs/promises", async original => {
           await write(...input);
           faults.exposed = existsSync(faults.copyTarget);
         };
+        const writeAt = file.write.bind(file);
+        file.write = (async (...input: Parameters<typeof writeAt>) => {
+          if (faults.failCopy === "tag" && String(args[0]) === faults.copyTarget) throw new Error("disk full");
+          return writeAt(...input);
+        }) as typeof file.write;
         file.chmod = async mode => { faults.copyModes.push(Number(mode)); return changeMode(mode); };
         file.close = async () => { await close(); if (faults.failCopy === "close") throw new Error("close failed"); };
       }
@@ -345,6 +350,18 @@ describe("delete recovery placement and receipts", () => {
         reason: expect.stringMatching(/folder\/rowless.txt may be incomplete\. Undo again to retry, or restore it from \.dohc\/local\/trash\//),
       }] });
       expect(await copyBytes()).toEqual({ text: "not ", tagged: true });
+      faults.failCopy = "";
+      expect(await f.undo(id)).toMatchObject({ remaining: [] });
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; }
+  });
+  it("starts a copy again when its tag never got in", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "tag";
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt", retry: true }] });
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("");
       faults.failCopy = "";
       expect(await f.undo(id)).toMatchObject({ remaining: [] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");

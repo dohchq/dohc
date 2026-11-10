@@ -262,16 +262,18 @@ type PendingCopy = NonNullable<RecoveryRecord["copies"]>[number];
 // A copy under way holds a random tag just past the deleted file's end, and
 // cuts it off once all the bytes are in. Linux can give a new file the copy's
 // freed inode and creation time, so only the tag tells a half-finished copy
-// from a file someone saved there. A whole copy matches the deleted file.
+// from a file someone saved there. A whole copy matches the deleted file. A
+// copy left empty, because its tag never got in, starts again.
 const COPY_TAG_BYTES = 16;
-async function copyState(file: FileHandle, entry: Stats, pending: PendingCopy, source: string): Promise<"partial" | "complete" | undefined> {
+async function copyState(file: FileHandle, entry: Stats, pending: PendingCopy, source: string): Promise<"empty" | "partial" | "complete" | undefined> {
   if (!entry.isFile() || pending.ino === 0 || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs) return undefined;
   if (entry.size === pending.size + COPY_TAG_BYTES) {
     const tail = Buffer.alloc(COPY_TAG_BYTES);
     const { bytesRead } = await file.read(tail, 0, COPY_TAG_BYTES, pending.size);
     return bytesRead === COPY_TAG_BYTES && tail.toString("hex") === pending.tag ? "partial" : undefined;
   }
-  return entry.size === pending.size && await fingerprint(file, entry.size) === await fingerprint(source, entry.size) ? "complete" : undefined;
+  if (entry.size === pending.size && await fingerprint(file, entry.size) === await fingerprint(source, entry.size)) return "complete";
+  return entry.size === 0 ? "empty" : undefined;
 }
 
 // Retrying through a verified handle cannot remove or overwrite a replacement at the path.
@@ -288,7 +290,7 @@ async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRec
       return open(target, "r");
     })
     : await open(target, "wx", mode);
-  let state: "partial" | "complete" | undefined;
+  let state: Awaited<ReturnType<typeof copyState>>;
   try {
     const entry = await file.stat();
     if (pending && occupant) {
@@ -306,7 +308,7 @@ async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRec
     }
     // Full bytes may have survived a crash before the receipt. Flush them before acknowledging the copy.
     if (state !== "complete") {
-      if (!state) {
+      if (state !== "partial") {
         const tag = randomBytes(COPY_TAG_BYTES);
         record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
           { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size, tag: tag.toString("hex") }];
