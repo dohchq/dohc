@@ -259,7 +259,7 @@ import {
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
 import { WhatsNewPage } from "./workbench/WhatsNewPage";
-import { claimUnseenWhatsNew } from "./whatsNew";
+import { openUnseenWhatsNewOnce } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -1750,21 +1750,28 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
-  // After the saved tabs return, What's new opens over them once per release.
-  // It shows at once, so a restored file it covers no longer holds back the
-  // restored-surface phase.
-  // At the tab limit, opening it would close one of the person's tabs, so it
-  // waits for a launch with room.
+  // After the saved tabs return, What's new opens over them once per release,
+  // reusing a restored What's new tab in any group. At the tab limit, a new
+  // tab would close one of the person's tabs, so it waits for a launch with
+  // room.
   const openUnseenWhatsNew = async () => {
     const id = workspaceIdRef.current;
-    const hasRoom = () =>
-      allTabs(wbRef.current).length < MAX_OPEN_TABS ||
-      activeGroup(wbRef.current).tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
-    if (!(await claimUnseenWhatsNew(hasRoom)) || workspaceIdRef.current !== id) return;
-    openVirtualTab(WHATS_NEW_TAB_PATH);
-    // At the tab limit it does not open, and the restored file still shows.
-    if (activeTabPath(wbRef.current) !== WHATS_NEW_TAB_PATH) return;
-    if (restoredActiveFileSurface.current !== null && markCurrentSwitchPhase("restored-active-surface-ready")) {
+    const canOpen = () => {
+      if (workspaceIdRef.current !== id) return false;
+      const tabs = allTabs(wbRef.current);
+      return tabs.length < MAX_OPEN_TABS || tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
+    };
+    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, true);
+    if (!(await openUnseenWhatsNewOnce(canOpen, open)) || workspaceIdRef.current !== id) return;
+    // A restored file it covers no longer holds back the restored-surface
+    // phase. A file in another group still shows and reports itself.
+    const surface = restoredActiveFileSurface.current;
+    if (
+      surface !== null &&
+      surface.groupId === activeGroup(wbRef.current).id &&
+      activeTabPath(wbRef.current) === WHATS_NEW_TAB_PATH &&
+      markCurrentSwitchPhase("restored-active-surface-ready")
+    ) {
       restoredActiveFileSurface.current = null;
     }
   };

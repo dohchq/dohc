@@ -8,6 +8,16 @@ import { WORKSPACE, STORED_STATE, makeBridge, renderShell, storedStateWithTabs }
 import { MAX_OPEN_TABS, WHATS_NEW_TAB_PATH } from "./workbench/workbenchState";
 
 const SEEN_KEY = "dohc.whatsNew.seen";
+// A full restored layout whose files all exist, so none of its tabs closes.
+function bridgeAtLimit(tabs: string[], activeTab = tabs[0]) {
+  const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs, activeTab)));
+  bridge.listWorkspaceFiles.mockResolvedValue({
+    visibility: { status: "ready", rules: [] },
+    files: tabs.filter((path) => path.endsWith(".md")).map((path) => ({ path, kind: "file" as const })),
+    folders: [],
+  });
+  return bridge;
+}
 const tab = () => screen.findByTestId(editorTabTestId(WHATS_NEW_TAB_PATH));
 
 describe("What's new after an update", () => {
@@ -43,8 +53,7 @@ describe("What's new after an update", () => {
 
   it("waits for room when the saved tabs are at the limit", async () => {
     const tabs = Array.from({ length: MAX_OPEN_TABS }, (_, index) => `note-${index}.md`);
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)));
-    renderShell(bridge);
+    renderShell(bridgeAtLimit(tabs));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     expect(await screen.findByTestId("tab-note-0.md")).toBeTruthy();
     await act(async () => { await Promise.resolve(); });
@@ -55,9 +64,23 @@ describe("What's new after an update", () => {
 
   it("shows a saved What's new tab at the limit and takes the release", async () => {
     const tabs = [WHATS_NEW_TAB_PATH, ...Array.from({ length: MAX_OPEN_TABS - 1 }, (_, index) => `note-${index}.md`)];
-    renderShell(makeBridge(Promise.resolve(storedStateWithTabs(tabs, "note-0.md"))));
+    renderShell(bridgeAtLimit(tabs, "note-0.md"));
     expect(await screen.findByTestId("whats-new-page")).toBeTruthy();
     expect(localStorage.getItem(SEEN_KEY)).not.toBe("an-older-release");
+  });
+
+  it("shows a What's new tab restored in another group instead of adding one", async () => {
+    renderShell(makeBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [
+        { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        { id: "second", tabs: [WHATS_NEW_TAB_PATH], activeTab: WHATS_NEW_TAB_PATH, size: 0.5 },
+      ],
+      activeEditorGroup: "primary",
+    })));
+    expect(await screen.findByTestId("whats-new-page")).toBeTruthy();
+    await waitFor(() => expect(localStorage.getItem(SEEN_KEY)).not.toBe("an-older-release"));
+    expect(screen.getAllByTestId(editorTabTestId(WHATS_NEW_TAB_PATH))).toHaveLength(1);
   });
 
   it("opens once the saved tabs come back after a failed read", async () => {
