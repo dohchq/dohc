@@ -2,18 +2,40 @@ import * as Y from 'yjs';
 import {canPreserveMarkdownSource} from '@dohc/ydoc-projection/artifact-markdown-guard';
 
 let worker: Worker | null = null;
-let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
+// Documents that asked for a proof and are not yet destroyed. The worker
+// stays while any is open, so a pause between edits does not restart it.
+let openDocuments = 0;
 const documents = new WeakMap<Y.Doc, {projection?: Promise<string>}>();
-type Request = {snapshot: Uint8Array; resolve: (text: string) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout>};
+type Request = {doc: Y.Doc; snapshot: Uint8Array; resolve: (text: string) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout>};
 const requests = new Map<number, Request>();
 
 function stop(error: Error): void {
-  clearTimeout(idleTimer);
   worker?.terminate();
   worker = null;
   for (const request of requests.values()) {clearTimeout(request.timer); request.reject(error);}
   requests.clear();
+}
+
+/** Drops the worker's current work and sends what still waits to a new one. */
+function restart(): void {
+  worker?.terminate(); worker = null;
+  if (!requests.size) return;
+  try {worker = startWorker(); for (const [id, request] of requests) send(id, request);}
+  catch (error) {stop(error instanceof Error ? error : new Error(String(error)));}
+}
+
+/** A destroyed document's proof answers nobody, so no other document waits behind it. */
+function closed(doc: Y.Doc): void {
+  openDocuments--;
+  let dropped = false;
+  for (const [id, request] of requests) {
+    if (request.doc !== doc) continue;
+    requests.delete(id); clearTimeout(request.timer);
+    request.reject(new Error('The document closed.'));
+    dropped = true;
+  }
+  if (dropped || !openDocuments) restart();
 }
 
 /** Only the worker may decide whether a retained witness is fresh and verified. */
@@ -46,22 +68,16 @@ function startWorker(): Worker {
     if (!request) return;
     requests.delete(data.id); clearTimeout(request.timer);
     if (data.error) request.reject(new Error(data.error)); else request.resolve(data.markdown);
-    if (!requests.size) idleTimer = setTimeout(() => {worker?.terminate(); worker = null;}, 1000);
   };
   return started;
 }
 
 function send(id: number, request: Request): void {
-  clearTimeout(idleTimer);
   clearTimeout(request.timer);
   request.timer = setTimeout(() => {
     requests.delete(id);
     request.reject(new Error('Source projection timed out.'));
-    worker?.terminate(); worker = null;
-    if (requests.size) {
-      try {worker = startWorker(); for (const [otherId, other] of requests) send(otherId, other);}
-      catch (error) {stop(error instanceof Error ? error : new Error(String(error)));}
-    }
+    restart();
   }, 15_000);
   // Keep the original bytes until completion so another request's timeout can retry this one.
   const snapshot = request.snapshot.slice();
@@ -75,6 +91,7 @@ export function projectArtifactSource(doc: Y.Doc): Promise<string> {
     || !['dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'].every(key => typeof meta.get(key) === 'string')) {
     return import('./import-export').then(({yDocToMarkdown}) => yDocToMarkdown(doc));
   }
+  if (doc.isDestroyed) return Promise.reject(new Error('The document closed.'));
   let document = documents.get(doc);
   if (document?.projection) return document.projection;
   worker ??= startWorker();
@@ -83,13 +100,14 @@ export function projectArtifactSource(doc: Y.Doc): Promise<string> {
     const entry = document;
     const invalidate = () => {entry.projection = undefined;};
     doc.on('update', invalidate);
-    doc.once('destroy', () => {doc.off('update', invalidate);});
+    openDocuments++;
+    doc.once('destroy', () => {doc.off('update', invalidate); closed(doc);});
   }
   const id = ++nextId;
   const snapshot = Y.encodeStateAsUpdate(doc);
   const entry = document;
   const projection = new Promise<string>((resolve, reject) => {
-    const request: Request = {snapshot, resolve, reject};
+    const request: Request = {doc, snapshot, resolve, reject};
     requests.set(id, request);
     try {send(id, request);}
     catch (error) {stop(error instanceof Error ? error : new Error(String(error)));}

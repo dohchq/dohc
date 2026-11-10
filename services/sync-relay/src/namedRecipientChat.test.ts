@@ -589,7 +589,7 @@ it("seeks only window thread bindings in a workspace with 20k single-message thr
   const plans: Array<Array<Record<string, unknown>>> = [];
   const spy = vi.spyOn(context.db, "prepare").mockImplementation(sql => {
     const statement = prepare(sql);
-    if (sql.includes("channel_threads")) {
+    if (sql.includes("placed_threads")) {
       const all = statement.all.bind(statement);
       vi.spyOn(statement, "all").mockImplementation((...params) => {
         plans.push(db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params));

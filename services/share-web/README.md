@@ -78,6 +78,34 @@ Each edit opens a fresh live connection and adds a Yjs client clock to the docum
 This implementation is for bounded edits, not high-frequency automated rewriting.
 The existing state-vector and update limits also apply to agents.
 
+## Remote MCP for personal agents
+
+A personal agent signs in as an account's own agent at `/mcp/agent/w/<workspaceId>`, where `<workspaceId>` names one of the account's workspaces on this server.
+The address holds no secret. It works only on the origin share-web serves the account sign-in from, and only with the relay exchange key set.
+Each workspace id has one spelling in the address. Another spelling answers 404.
+
+The sign-in follows the steps above, with its own metadata at `/.well-known/oauth-protected-resource/mcp/agent/w/<workspaceId>`.
+If the browser is signed out, `/oauth/authorize` first asks for the account's email and password, then returns to the same request.
+The consent page shows the signed-in account with **Not you?**, which signs the browser out.
+The person names a new agent, or chooses one of their agents to sign in again.
+They choose View, Comment, or None for each workspace the account owns. The address's workspace starts at Comment and the rest at None. Signing in again starts from the agent's current reach.
+**Allow** asks for no password. If the account's password changed after this browser signed in, the page asks the browser to sign in again first.
+The page runs no script, so choosing who the agent is posts the form and draws the page again.
+The relay keeps the agent, its reach, and its tokens, as it does for a link. Restarting share-web does not sign it out.
+Settings › Agents shows when the agent last signed in, and the `client_name` and `software_version` it registered with, marked as reported. Each sign-in replaces them.
+
+A share link agent's token never works at a personal address, nor the reverse. A personal token works only at the address it signed in at.
+Every tool but `dohc_list_workspaces` and `dohc_wait_for_messages` names a workspace, and the relay checks the agent's reach and level there on every call.
+View reads files, channels, and file discussions. Comment also posts in channels and on files.
+`dohc_read_discussion` reads every thread on a current file by its path, or one thread by its id. A thread on a file since deleted still reads and takes replies, with the path the file last had. A thread whose file's current or last path is secret is not found.
+`dohc_list_workspaces` also gives the agent's name, the handle people mention it by after an @, and its direct messages with the owner in each workspace.
+`dohc_list_groups` lists a workspace's Groups by channel. It reads them through the server's copy of the workspace, so a server that keeps no copies refuses it and says the DM still works.
+`dohc_wait_for_messages` answers the owner's posts in the agent's direct messages, mentions of it, and replies in threads it posted in, across every workspace in reach.
+While the relay cannot check the agent's sign-in, an MCP request gets 503.
+
+The body posted to `/oauth/authorize/sign-in` carries the account's email and password. Do not log it.
+Do not log paths under `/mcp/agent/w/` either. They name the account's workspaces.
+
 ## App publication storage
 
 Set `DOHC_RELAY_APP_PUBLICATIONS=1` on the relay to enable immutable app publications.
@@ -594,7 +622,8 @@ Run `pnpm qa:prepare` from the repository root. Set these environment variables:
 Run `pnpm --filter @dohc/share-web exec vitest run --config vitest.mcp-native.config.ts`.
 The test starts its own loopback HTTP listeners, relay store, workspace, and native service host.
 It checks file reads, discussion, durable live edits, View restrictions, revoked access, and reads while the host is offline.
-The owner identity is a test fixture. This does not verify account login, a desktop-host connection, ordinary file replication, TLS deployment, or production capacity.
+A second case signs a personal agent in through the consent page over HTTP. The agent then posts, waits, and refreshes its token across a share-web restart.
+The owner identity and the personal agent's account server are test fixtures. This does not verify account login, a desktop-host connection, ordinary file replication, TLS deployment, or production capacity.
 The test stops its processes and retains its stores and result under the output directory for inspection.
 
 ### Run the viewer

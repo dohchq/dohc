@@ -22,6 +22,7 @@ import {
 } from "./agentConnections";
 import type { StorageContext } from "./context";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import { noticePersonalAgentSignedIn } from "./notices";
 import { nullableText } from "./rows";
 import type { SqliteDb } from "./types";
 import { workspaceIsOwnedBy } from "./workspaces";
@@ -61,10 +62,14 @@ export interface PersonalAgentRow {
   ownerUserId: string;
   name: string;
   hue: AgentHue;
+  /** The product and version the agent's client reported when it last signed in. dohc can't check them. */
   reportedProduct: string | null;
+  reportedVersion: string | null;
   status: PersonalAgentStatus;
   epoch: number;
   createdAtMs: number;
+  /** When the agent last signed in. Null for an agent whose last sign-in the relay didn't record. */
+  signedInAtMs: number | null;
   lastActionAtMs: number | null;
   reach: PersonalReach[];
 }
@@ -217,7 +222,8 @@ export function initializePersonalAgentSchema(db: SqliteDb): void {
   `);
 }
 
-const AGENT_COLUMNS = `agent_id, owner_user_id, name, hue, reported_product, status, epoch, created_at_ms, last_action_at_ms`;
+const AGENT_COLUMNS = `agent_id, owner_user_id, name, hue, reported_product, status, epoch, created_at_ms, last_action_at_ms,
+  reported_version, signed_in_at_ms`;
 
 function reachOf(storage: StorageContext, agentId: string): PersonalReach[] {
   return storage.db.prepare(`SELECT workspace_id, level, start_seq FROM sync_relay_personal_agent_reach
@@ -236,9 +242,11 @@ function rowToAgent(storage: StorageContext, row: Record<string, unknown>): Pers
     name: String(row.name),
     hue: String(row.hue) as AgentHue,
     reportedProduct: nullableText(row.reported_product),
+    reportedVersion: nullableText(row.reported_version),
     status: String(row.status) as PersonalAgentStatus,
     epoch: Number(row.epoch),
     createdAtMs: Number(row.created_at_ms),
+    signedInAtMs: row.signed_in_at_ms === null ? null : Number(row.signed_in_at_ms),
     lastActionAtMs: row.last_action_at_ms === null ? null : Number(row.last_action_at_ms),
     reach: reachOf(storage, agentId),
   };
@@ -505,7 +513,7 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
 }): PersonalTokenGrant {
   const nowMs = Math.trunc(input.nowMs);
   return storage.tx(() => {
-    const row = storage.db.prepare(`SELECT a.*, client.reported_name
+    const row = storage.db.prepare(`SELECT a.*, client.reported_name, client.reported_version
       FROM sync_relay_personal_agent_authorizations AS a
       JOIN sync_relay_agent_clients AS client ON client.client_id = a.client_id
       WHERE a.code_hash = ?`).get(input.codeHash);
@@ -513,7 +521,7 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
     if (row.status === "redeemed") {
       const endedConnectionId = String(row.connection_id);
       deleteConnection(storage, endedConnectionId);
-      signOutAgentsWithoutCredentials(storage, String(row.owner_user_id));
+      signOutAgentsWithoutConnections(storage, String(row.owner_user_id));
       return { ok: false, endedConnectionId };
     }
     const spend = (): { ok: false } => {
@@ -538,8 +546,8 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
       if (agents.length >= PERSONAL_AGENTS_PER_ACCOUNT_LIMIT || !PERSONAL_AGENT_ID.test(input.newAgentId)) return spend();
       const hue = AGENT_HUE_ASSIGNMENT_ORDER.find(candidate => !agents.includes(candidate)) ?? AGENT_HUE_ASSIGNMENT_ORDER[0];
       storage.db.prepare(`INSERT INTO sync_relay_personal_agents (${AGENT_COLUMNS})
-        VALUES (?, ?, ?, ?, ?, 'signed_out', 1, ?, NULL)`)
-        .run(input.newAgentId, ownerUserId, String(row.agent_name), hue, nullableText(row.reported_name), nowMs);
+        VALUES (?, ?, ?, ?, NULL, 'signed_out', 1, ?, NULL, NULL, NULL)`)
+        .run(input.newAgentId, ownerUserId, String(row.agent_name), hue, nowMs);
       agentId = input.newAgentId;
     }
 
@@ -548,8 +556,11 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
     // Signing in again ends what the agent held, under the epoch it had.
     endAgentCredentials(storage, agentId);
     const agentEpoch = row.agent_id === null ? 1 : Number(row.agent_epoch) + 1;
-    storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'active', epoch = ?, last_action_at_ms = ?
-      WHERE agent_id = ?`).run(agentEpoch, nowMs, agentId);
+    // What the client reported replaces what an earlier sign-in reported, so the product and version stay a pair.
+    storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'active', epoch = ?, reported_product = ?,
+        reported_version = ?, signed_in_at_ms = ?, last_action_at_ms = ?
+      WHERE agent_id = ?`)
+      .run(agentEpoch, nullableText(row.reported_name), nullableText(row.reported_version), nowMs, nowMs, agentId);
     const newlyReached = writeReach(storage, agentId, reach);
     appendPersonalDms(storage, agentId, newlyReached, nowMs);
     storage.db.prepare(`INSERT INTO sync_relay_personal_agent_connections (
@@ -558,6 +569,16 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
       .run(input.connectionId, agentId, ownerUserId, input.clientId, input.resourceHash, agentEpoch, input.fenceEpoch, nowMs);
     insertAgentTokens(storage, "sync_relay_personal_agent_tokens", input.connectionId, input, nowMs);
     bumpRoster(storage, ownerUserId);
+    const address = String(row.workspace_id);
+    noticePersonalAgentSignedIn(storage, {
+      ownerUserId,
+      // The address the agent signed in at, or a workspace in reach once the account no longer owns it.
+      workspaceId: ownsWorkspace(storage, ownerUserId, address) ? address : reach[0]!.workspaceId,
+      connectionId: input.connectionId,
+      agentId,
+      agentName: String(storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(agentId)?.name),
+      nowMs,
+    });
     return {
       ok: true,
       connection: {
@@ -626,7 +647,7 @@ export function refreshPersonalTokens(storage: StorageContext, input: {
     if (row.used_at_ms !== null) {
       if (!usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) return { ok: false };
       deleteConnection(storage, connection.connectionId);
-      signOutAgentsWithoutCredentials(storage, connection.ownerUserId);
+      signOutAgentsWithoutConnections(storage, connection.ownerUserId);
       return { ok: false, endedConnectionId: connection.connectionId };
     }
     if (connection.clientId !== input.clientId || !constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) ||
@@ -769,26 +790,25 @@ export function changePersonalAgent(storage: StorageContext, input: {
 // --- revocation ----------------------------------------------------------------
 
 /**
- * Signs out the account's active agents left with no connection and no
- * unredeemed code, at a new epoch. Bumps the roster once if any changed.
+ * Signs out the account's active agents left with no connection. Each keeps
+ * its epoch, so a sign-in the owner approved for it still redeems until its
+ * code expires. Bumps the roster once if any changed.
  */
-function signOutAgentsWithoutCredentials(storage: StorageContext, ownerUserId: string): void {
-  const signedOut = storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out', epoch = epoch + 1
+function signOutAgentsWithoutConnections(storage: StorageContext, ownerUserId: string): void {
+  const signedOut = storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out'
     WHERE owner_user_id = ? AND status = 'active'
       AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_connections AS c
-        WHERE c.agent_id = sync_relay_personal_agents.agent_id)
-      AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_authorizations AS a
-        WHERE a.agent_id = sync_relay_personal_agents.agent_id AND a.status != 'redeemed')`).run(ownerUserId);
+        WHERE c.agent_id = sync_relay_personal_agents.agent_id)`).run(ownerUserId);
   if (signedOut.changes > 0) bumpRoster(storage, ownerUserId);
 }
 
 /**
  * After a password change commits at `epoch`: deletes the account's
  * connections, tokens, and unredeemed authorizations from an earlier fence,
- * then signs out each active agent left with none. Credentials at `epoch` or
- * later stay, and so does their agent's status, so a late notice can't remove
- * an agent that signed in after the change. Returns the reach of the agents
- * that held the deleted credentials.
+ * then signs out each active agent left with no connection. Connections at
+ * `epoch` or later stay, and so does their agent's status, so a late notice
+ * can't sign out an agent that signed in after the change. Returns the reach
+ * of the agents that held the deleted credentials.
  */
 export function revokePersonalCredentialsBelowFence(storage: StorageContext, ownerUserId: string, epoch: number): string[] {
   return storage.tx(() => {
@@ -803,7 +823,7 @@ export function revokePersonalCredentialsBelowFence(storage: StorageContext, own
     storage.db.prepare("DELETE FROM sync_relay_personal_agent_connections WHERE owner_user_id = ? AND fence_epoch < ?").run(ownerUserId, epoch);
     storage.db.prepare(`DELETE FROM sync_relay_personal_agent_authorizations
       WHERE owner_user_id = ? AND fence_epoch < ? AND status != 'redeemed'`).run(ownerUserId, epoch);
-    signOutAgentsWithoutCredentials(storage, ownerUserId);
+    signOutAgentsWithoutConnections(storage, ownerUserId);
     return reachWorkspaces(storage, agentIds);
   });
 }
@@ -815,7 +835,7 @@ export function signOutAccountPersonalAgents(storage: StorageContext, ownerUserI
       .all(ownerUserId).map(row => String(row.agent_id));
     for (const agentId of agentIds) endAgentCredentials(storage, agentId);
     storage.db.prepare("DELETE FROM sync_relay_personal_agent_authorizations WHERE owner_user_id = ? AND status != 'redeemed'").run(ownerUserId);
-    signOutAgentsWithoutCredentials(storage, ownerUserId);
+    signOutAgentsWithoutConnections(storage, ownerUserId);
     return reachWorkspaces(storage, agentIds);
   });
 }
@@ -843,6 +863,27 @@ export function initializeWorkspaceDisplayName(db: SqliteDb): void {
     db.exec(`ALTER TABLE sync_relay_workspaces ADD COLUMN display_name TEXT
       CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND ${WORKSPACE_DISPLAY_NAME_LIMIT})`);
   }
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
+}
+
+// --- activity --------------------------------------------------------------------
+
+/**
+ * The version a client reports at registration, and the agent's last sign-in
+ * with the version it reported then. An agent from before these columns has
+ * none until it signs in again.
+ */
+export function initializePersonalAgentActivity(db: SqliteDb): void {
+  const marker = "personal-agent-activity-v1";
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) return;
+  const columnsOf = (table: string) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name)));
+  const version = `TEXT CHECK (reported_version IS NULL OR length(reported_version) BETWEEN 1 AND ${AGENT_CLIENT_NAME_LIMIT})`;
+  if (!columnsOf("sync_relay_agent_clients").has("reported_version")) {
+    db.exec(`ALTER TABLE sync_relay_agent_clients ADD COLUMN reported_version ${version}`);
+  }
+  const agents = columnsOf("sync_relay_personal_agents");
+  if (!agents.has("reported_version")) db.exec(`ALTER TABLE sync_relay_personal_agents ADD COLUMN reported_version ${version}`);
+  if (!agents.has("signed_in_at_ms")) db.exec("ALTER TABLE sync_relay_personal_agents ADD COLUMN signed_in_at_ms INTEGER");
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
 }
 

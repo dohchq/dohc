@@ -345,6 +345,52 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
   }
 }
 
+export interface NoticePersonalAgentSignedInInput {
+  ownerUserId: string;
+  /** A workspace the account owns, where the notice sits. */
+  workspaceId: string;
+  connectionId: string;
+  /** The agent that signed in, whose page Open shows. */
+  agentId: string;
+  agentName: string;
+  nowMs: number;
+}
+
+const SIGNED_IN_TITLE_SUFFIX = " signed in as your agent";
+
+/**
+ * Tells the owner that an agent signed in as theirs. The redemption that
+ * makes the connection writes it in its own transaction, once per
+ * connection, so each sign-in again writes a new notice. A list with no room
+ * leaves the notice out, and the sign-in still completes.
+ */
+export function noticePersonalAgentSignedIn(storage: StorageContext, input: NoticePersonalAgentSignedInInput): void {
+  const noticeId = `personal-agent-signed-in:${input.connectionId}`;
+  if (storage.db.prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+    .get(input.ownerUserId, noticeId)) return;
+  sweepExpiredNotices(storage, input.ownerUserId, input.nowMs);
+  try {
+    makeRoom(storage, input.ownerUserId, null, input.nowMs);
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "notice_list_full") return;
+    throw error;
+  }
+  const room = NOTICE_TITLE_MAX_CHARS - [...SIGNED_IN_TITLE_SUFFIX].length;
+  insertNotice(storage, {
+    recipientUserId: input.ownerUserId,
+    noticeId,
+    placement: { workspaceId: input.workspaceId, recipientShareId: null },
+    kind: "personal-agent-signed-in",
+    senderUserId: input.ownerUserId,
+    senderLabel: cutText(input.agentName, NOTICE_SENDER_LABEL_MAX_CHARS),
+    title: `${cutText(input.agentName, room)}${SIGNED_IN_TITLE_SUFFIX}`,
+    body: "",
+    target: { settings: "agents", agent: input.agentId },
+    originInstallId: "relay",
+    nowMs: input.nowMs,
+  });
+}
+
 function shareNoticeSender(full: string, email: string | null): string {
   const name = email && full.endsWith(` (${email})`) ? full.slice(0, -email.length - 3) : full === email ? "" : full;
   if (email && [...email].length <= NOTICE_SENDER_LABEL_MAX_CHARS) {
@@ -486,7 +532,10 @@ export function readNoticeChanges(
     const nextCursor = hasMore
       ? formatNoticeCursor({ seq: notices.at(-1)!.changeSeq, snapshotHead })
       : formatNoticeCursor({ seq: head, snapshotHead: null });
-    return { notices, nextCursor, hasMore, replace };
+    return {
+      notices, nextCursor, hasMore, replace,
+      personalAgentsRevision: storage.personalRosterRevision(input.recipientUserId),
+    };
   });
 }
 

@@ -1261,7 +1261,7 @@ fn worker_main(
         return;
     }
     drop(startup_tx);
-    // Reports each live document whose history needs attention, one bounded
+    // Reports each live document whose history needs attention, one short
     // batch per idle slot.
     let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
@@ -1310,7 +1310,11 @@ fn worker_main(
                     }
                 }
                 if let Some(after) = history {
-                    history = match dohc_engine_sync::history_report(&store, after) {
+                    history = match dohc_engine_sync::history_report(
+                        &store,
+                        after,
+                        crate::links::ACTOR_SLICE_BUDGET,
+                    ) {
                         Ok((lines, next)) => {
                             for line in lines {
                                 eprintln!("{line}");

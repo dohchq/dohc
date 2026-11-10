@@ -960,6 +960,12 @@ export interface SyncRelayStorage {
   fetchChatMessages(input: {
     workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
   }): FetchLogPageResult & {latestCursor: number};
+  fetchCommentMessages(input: {
+    workspaceId: string; objectId: string; path: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+  }): FetchLogPageResult & {latestCursor: number};
+  fetchThreadMessages(input: {
+    workspaceId: string; threadId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+  }): FetchLogPageResult & {latestCursor: number};
   fetchChatMessage(input: {
     workspaceId: string; originId: string; messageId: string;
   }): SyncRelayLogRow | null;
@@ -991,6 +997,8 @@ export interface SyncRelayStorage {
   refreshPersonalTokens(input: Parameters<typeof import("./personalAgents").refreshPersonalTokens>[1]): import("./personalAgents").PersonalTokenGrant;
   authenticatePersonalAuthority(check: import("./agentConnections").AgentAccessCheck, fenceEpoch: number, nowMs: number): import("./personalAgents").PersonalConnectionRow | null;
   listPersonalAgents(ownerUserId: string): import("./personalAgents").PersonalRoster;
+  // Opens no transaction, so a read inside another read uses its snapshot.
+  personalRosterRevision(ownerUserId: string): number;
   changePersonalAgent(input: Parameters<typeof import("./personalAgents").changePersonalAgent>[1]): import("./personalAgents").PersonalAgentChangeResult;
   revokePersonalCredentialsBelowFence(ownerUserId: string, epoch: number): string[];
   signOutAccountPersonalAgents(ownerUserId: string): string[];
@@ -999,6 +1007,7 @@ export interface SyncRelayStorage {
   setWorkspaceDisplayName(input: Parameters<typeof import("./personalAgents").setWorkspaceDisplayName>[1]): boolean;
   readPersonalScope(credential: import("./personalAgentChat").PersonalCredential, nowMs: number): import("./personalAgentChat").PersonalScope | null;
   readPersonalReach(credential: import("./personalAgentChat").PersonalCredential, workspaceId: string, nowMs: number): import("./personalAgents").PersonalReach | null;
+  readPersonalWorkspaces(credential: import("./personalAgentChat").PersonalCredential, nowMs: number): import("./personalAgentChat").PersonalWorkspaces | null;
   appendPersonalChatPost(input: Parameters<typeof import("./personalAgentChat").appendPersonalChatPost>[1]): import("./personalAgentChat").AppendPersonalChatPostResult;
   personalAgentPostedIn(input: Parameters<typeof import("./personalAgentChat").personalAgentPostedIn>[1]): boolean;
   readPersonalWaitWindow(input: Parameters<typeof import("./personalAgentChat").readPersonalWaitWindow>[1]): import("./personalAgentChat").PersonalWaitWindow;
@@ -1050,10 +1059,11 @@ export interface SyncRelayStorage {
     afterRelaySeq: number;
     limit: number;
   }): Array<string | null>;
+  /** False, with nothing written, when the recipient account is being deleted. */
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): void;
+  }): boolean;
   readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
     operation?: { operationId: string; requestJson: string };

@@ -19,7 +19,7 @@ import {
   shareWebRefusalBody,
   streamsRequestBody,
 } from "./server";
-import { isMcpCorsPath, MCP_CORS_HEADERS } from "./mcpSignIn";
+import { isMcpCorsPath, MCP_CORS_HEADERS, signInBodyLimit } from "./mcpSignIn";
 
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
@@ -59,8 +59,8 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => ["/oauth/register", "/oauth/token", "/oauth/authorize/decision"].includes(url.pathname) ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
-    ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
+  maxBodyBytes: url => signInBodyLimit(url.pathname) ?? (["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
+    ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
   oversized: url => url.pathname === "/api/named-chat/messages"
     ? Response.json({ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: {"cache-control": "private, no-store"}})

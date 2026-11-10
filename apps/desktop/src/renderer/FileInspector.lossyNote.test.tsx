@@ -518,6 +518,24 @@ describe("Edit anyway", () => {
     expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
   });
 
+  it("reads the file again when a converted note's head isn't its last save, and keeps editing a clean file", async () => {
+    const { bridge, engineDoc } = await editAnyway(WRITTEN);
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
+    deliver(bridge, change(engineDoc, () => clearWitness(engineDoc)));
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED });
+    const reads = bridge.readWorkspaceText.mock.calls.length;
+    // A later save committed, but its receipt was lost. The next state comes
+    // with that save's head, which this session never saw saved.
+    bridge.openEngineYDocSession.mockResolvedValue({
+      available: true, initialUpdate: Y.encodeStateAsUpdate(engineDoc), lineageGeneration: 1, headSha256: sha("second save"),
+    });
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha("second save") });
+
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  });
+
   it("asks again when a restore lands after the converting save's receipt, before one render", async () => {
     const { bridge } = await editAnyway(LOSSY);
     deliverAll(bridge, [

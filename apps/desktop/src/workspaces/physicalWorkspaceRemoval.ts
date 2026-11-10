@@ -16,8 +16,11 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
     beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
     // Runs once the person has agreed, before the workspace closes.
     confirmed: () => void | Promise<void> = () => undefined,
+    // A join that failed takes its unfinished entry out of the list without
+    // asking, because its typing waiting to recover stays on disk.
+    { keepDrafts = false } = {},
   ): Promise<boolean> {
-    if (dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) return false;
+    if (!keepDrafts && dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) return false;
     await confirmed();
     await dependencies.retireBinding(binding, {
       finalize: beforeRegistryRemoval,
@@ -29,6 +32,7 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
         dependencies.removeWorkspace(binding.workspaceId);
       },
     });
+    if (keepDrafts) return true;
     try {
       await dependencies.removeDrafts(binding.workspaceId);
     } catch (error) {

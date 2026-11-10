@@ -8,7 +8,7 @@ import { readCollectionReopenWait } from "../ipc/errorWords";
 import { EmptyState, FieldError, IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { isComposingKey } from "./ui/keys";
-import { FieldTypeIcon } from "./collections/FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 import { AutomationFieldMark, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";

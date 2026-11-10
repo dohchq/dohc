@@ -14,6 +14,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
+import { RelayBusyError } from "./engineRelayClient";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
 import { startRelayWatch } from "./relayWatch";
@@ -94,12 +95,14 @@ export interface CloudSyncEngineOptions {
 }
 
 // Why the last pass failed, as far as dohc knows. "server-unreachable" means
-// no connection reached the server; "claim-refused" names a refused setup.
-// Other failures are "unknown"; their detail is the only account of them. One failure runs from the first failed
+// no connection reached the server; "server-busy" means the server answered
+// that it is busy, which a later pass fixes by itself; "claim-refused" names a
+// refused setup. Other failures are "unknown"; their detail is the only
+// account of them. One failure runs from the first failed
 // pass (`sinceMs`) until a pass succeeds, and `attempts` counts its failed
 // passes, so a surface can tell a blip from an outage.
 export interface CloudSyncFailure {
-  cause: "server-unreachable" | "claim-refused" | "unknown";
+  cause: "server-unreachable" | "server-busy" | "claim-refused" | "unknown";
   detail: string;
   sinceMs: number;
   attempts: number;
@@ -430,7 +433,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       claimRefusal = error;
     }
     setSyncFailure({
-      cause: claimRefused ? "claim-refused" : error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
+      cause: claimRefused ? "claim-refused"
+        : error instanceof RelayUnreachableError ? "server-unreachable"
+        : error instanceof RelayBusyError ? "server-busy"
+        : "unknown",
       detail: claimRefused ? error.message
         : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       sinceMs: syncFailure?.sinceMs ?? nowMs(),

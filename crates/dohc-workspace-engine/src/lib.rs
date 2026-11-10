@@ -14,6 +14,7 @@ mod events;
 mod file_observation;
 #[doc(hidden)]
 pub mod live_application_ingress;
+mod read_methods;
 #[cfg(test)]
 mod reader_runtime_tests;
 pub mod root_binding;
@@ -145,6 +146,9 @@ impl ProtocolEngineService for EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         Box::pin(self.dispatch(ctx, request)).await
+    }
+    fn reads_only(&self, request: &Request) -> bool {
+        read_methods::reads_only(&request.method)
     }
 }
 

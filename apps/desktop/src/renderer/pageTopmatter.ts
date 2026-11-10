@@ -1,6 +1,7 @@
 // The rows above a document's body (title, properties, the frontmatter as
-// written) sit in the editor's 720px reading measure inside its 56px gutters.
-export const TOPMATTER_ROW = "box-border w-full bg-bg px-14";
+// written) sit in the editor's 720px reading measure inside its side margins
+// (--dohc-editor-gutter in styles.css).
+export const TOPMATTER_ROW = "box-border w-full bg-bg px-[var(--dohc-editor-gutter)]";
 export const TOPMATTER_MEASURE = "mx-auto max-w-[720px]";
 
 // The properties' pills, 14px under the title, as the drawing spaces them.

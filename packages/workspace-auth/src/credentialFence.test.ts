@@ -29,14 +29,12 @@ try {
 describe.skipIf(!pgAvailable)("the credential fence", () => {
   const schema = `fence_test_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   let pool: pg.Pool;
-  const fence = () => createPostgresCredentialFence(pool, {
-    verifyPassword: async ({ hash, password }) => hash === `hash:${password}`,
-  });
+  const fence = () => createPostgresCredentialFence(pool);
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: POSTGRES_URL, options: `-c search_path=${schema}` });
     await pool.query(`create schema "${schema}"`);
-    for (const migration of ["0001_better_auth.sql", "0005_credential_fences.sql"]) {
+    for (const migration of ["0001_better_auth.sql", "0005_credential_fences.sql", "0006_session_created_on_database_clock.sql"]) {
       await pool.query(await readFile(new URL(migration, MIGRATIONS), "utf8"));
     }
   });
@@ -80,7 +78,7 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
   });
 
   it("keeps the session sign-up starts current", async () => {
-    // A session stamped at its transaction's start, before the password row is written.
+    // Sign-up writes the first password and the session in one transaction, with no fence.
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -95,7 +93,15 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
       client.release();
     }
     expect(await fence().readConsentCredentials("fence-sign-up", "fence-sign-up"))
-      .toEqual({ passwordHash: "hash:first", epoch: 0, sessionCurrent: true });
+      .toEqual({ epoch: 0, sessionCurrent: true });
+  });
+
+  it("keeps the session of an account with no password current", async () => {
+    await pool.query(`insert into "user" (id, name, email, "emailVerified")
+      values ('fence-no-password', 'fence-no-password', 'fence-no-password@example.test', true)`);
+    await session("fence-no-password", "fence-no-password");
+    expect(await fence().readConsentCredentials("fence-no-password", "fence-no-password"))
+      .toEqual({ epoch: 0, sessionCurrent: true });
   });
 
   it("fences deleting the password, so adding one again can't bring back an older session", async () => {
@@ -109,7 +115,7 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     expect(await fence().readEpoch("fence-delete")).toBe(1);
     await session("fence-delete", "fence-delete-new");
     expect(await fence().readConsentCredentials("fence-delete", "fence-delete-old"))
-      .toEqual({ passwordHash: "hash:second", epoch: 1, sessionCurrent: false });
+      .toEqual({ epoch: 1, sessionCurrent: false });
     expect((await fence().readConsentCredentials("fence-delete", "fence-delete-new"))?.sessionCurrent).toBe(true);
 
     // Deleting the user deletes its password and its fence, with or without an earlier fence.
@@ -139,27 +145,63 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     }
   });
 
-  it("reads the hash, epoch, and session for consent from one statement", async () => {
+  it("reads the epoch and the session for consent from one statement", async () => {
     await account("fence-consent", "first");
     await session("fence-consent", "fence-consent-old");
     await pool.query(`update "account" set password = 'hash:second' where "userId" = 'fence-consent'`);
     await session("fence-consent", "fence-consent-new");
-    // A session stamped at the fence's own instant began with it.
-    await pool.query(`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
-      select 'fence-consent-same', now() + interval '1 day', 'fence-consent-same', changed_at, now(), user_id
-      from dohc_credential_fences where user_id = 'fence-consent'`);
 
     const old = await fence().readConsentCredentials("fence-consent", "fence-consent-old");
-    expect(old).toEqual({ passwordHash: "hash:second", epoch: 1, sessionCurrent: false });
+    expect(old).toEqual({ epoch: 1, sessionCurrent: false });
     const current = await fence().readConsentCredentials("fence-consent", "fence-consent-new");
-    expect(current).toEqual({ passwordHash: "hash:second", epoch: 1, sessionCurrent: true });
-    expect((await fence().readConsentCredentials("fence-consent", "fence-consent-same"))?.sessionCurrent).toBe(true);
-    expect(await fence().verifyPassword(current!.passwordHash!, "first")).toBe(false);
-    expect(await fence().verifyPassword(current!.passwordHash!, "second")).toBe(true);
+    expect(current).toEqual({ epoch: 1, sessionCurrent: true });
+    // A session that began at the moment of the change is current.
+    await pool.query(`update "session" set dohc_created_at = (select changed_at from dohc_credential_fences where user_id = 'fence-consent')
+      where id = 'fence-consent-old'`);
+    expect((await fence().readConsentCredentials("fence-consent", "fence-consent-old"))?.sessionCurrent).toBe(true);
     // Another account's session is not this account's.
     await account("fence-consent-other", "other");
     expect((await fence().readConsentCredentials("fence-consent-other", "fence-consent-new"))?.sessionCurrent).toBe(false);
     expect(await fence().readConsentCredentials("no-such-account", "fence-consent-new")).toBeNull();
+  });
+
+  it("dates a session by this database's clock, whatever time the auth server sends", async () => {
+    await account("fence-skew", "first");
+    // An auth server whose clock runs ahead stamps a session from before the change as later.
+    await pool.query(`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
+      values ('fence-skew-old', now() + interval '1 day', 'fence-skew-old', clock_timestamp() + interval '1 hour', now(), 'fence-skew')`);
+    await pool.query(`update "account" set password = 'hash:second' where "userId" = 'fence-skew'`);
+    // One whose clock runs behind stamps a session from after the change as earlier.
+    await pool.query(`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
+      values ('fence-skew-new', now() + interval '1 day', 'fence-skew-new', clock_timestamp() - interval '1 hour', now(), 'fence-skew')`);
+    expect(await fence().readConsentCredentials("fence-skew", "fence-skew-old")).toEqual({ epoch: 1, sessionCurrent: false });
+    expect(await fence().readConsentCredentials("fence-skew", "fence-skew-new")).toEqual({ epoch: 1, sessionCurrent: true });
+    // Better Auth keeps the time it sent.
+    const sent = await pool.query(`select "createdAt" > clock_timestamp() as ahead from "session" where id = 'fence-skew-old'`);
+    expect(sent.rows[0]?.ahead).toBe(true);
+  });
+
+  it("counts a session from before the migration as older than any password change", async () => {
+    await account("fence-legacy-before", "first");
+    await session("fence-legacy-before", "fence-legacy-before");
+    await account("fence-legacy-after", "first");
+    await session("fence-legacy-after", "fence-legacy-after");
+    await account("fence-legacy-none", "first");
+    await session("fence-legacy-none", "fence-legacy-none");
+    // A change the fence recorded before the migration ran.
+    await pool.query(`update "account" set password = 'hash:second' where "userId" = 'fence-legacy-before'`);
+    // As if the sessions predate the column: drop it and run the migration again.
+    await pool.query(`alter table "session" drop column dohc_created_at`);
+    await pool.query(`update "session" set "createdAt" = clock_timestamp() + interval '1 hour' where id like 'fence-legacy-%'`);
+    await pool.query(await readFile(new URL("0006_session_created_on_database_clock.sql", MIGRATIONS), "utf8"));
+    // A change after it.
+    await pool.query(`update "account" set password = 'hash:second' where "userId" = 'fence-legacy-after'`);
+    expect(await fence().readConsentCredentials("fence-legacy-before", "fence-legacy-before")).toEqual({ epoch: 1, sessionCurrent: false });
+    expect(await fence().readConsentCredentials("fence-legacy-after", "fence-legacy-after")).toEqual({ epoch: 1, sessionCurrent: false });
+    // An account with no fence keeps its session, and a new session is current.
+    expect(await fence().readConsentCredentials("fence-legacy-none", "fence-legacy-none")).toEqual({ epoch: 0, sessionCurrent: true });
+    await session("fence-legacy-before", "fence-legacy-before-new");
+    expect((await fence().readConsentCredentials("fence-legacy-before", "fence-legacy-before-new"))?.sessionCurrent).toBe(true);
   });
 
   it("lists the fences changed at or after a position", async () => {
@@ -203,7 +245,7 @@ describe("the credential fence listener", () => {
     });
     const onDown = vi.fn();
     const onUp = vi.fn();
-    const listening = createPostgresCredentialFence(pool, { verifyPassword: async () => false })
+    const listening = createPostgresCredentialFence(pool)
       .listen({ onChange, onDown, onUp });
     try {
       await vi.waitFor(() => expect(onUp).toHaveBeenCalledTimes(1));
@@ -247,7 +289,7 @@ describe("the credential fence listener", () => {
     } as unknown as pg.Pool;
     const onDown = vi.fn();
     const onUp = vi.fn();
-    const listening = createPostgresCredentialFence(pool, { verifyPassword: async () => false })
+    const listening = createPostgresCredentialFence(pool)
       .listen({ onChange: vi.fn(), onDown, onUp });
     try {
       await vi.waitFor(() => expect(onDown).toHaveBeenCalledTimes(1));

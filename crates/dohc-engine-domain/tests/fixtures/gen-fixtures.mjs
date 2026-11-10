@@ -556,6 +556,14 @@ views:
       ],
     },
   },
+  {
+    name: "select-option-colors",
+    yaml: "version: 1\nfields:\n  Status:\n    type: select\n    options: [Backlog, Blocked, Done]\n    colors:\n      Blocked: rust\n      Done: teal\n  Tags:\n    type: multi-select\n    options: [ui]\n",
+  },
+  {
+    name: "select-option-colors-degrade-per-entry",
+    yaml: "version: 1\nfields:\n  Status:\n    type: select\n    options: [Backlog, Blocked]\n    colors:\n      Blocked: red\n      Backlog: 3\n      Gone: teal\n      Blocked: rust\n      [x]: blue\n  Tags:\n    type: multi-select\n    options: [ui]\n    colors: [ui]\n",
+  },
 ];
 
 const relationSingle = {
