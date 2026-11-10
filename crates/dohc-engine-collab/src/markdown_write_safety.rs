@@ -96,7 +96,10 @@ impl MarkdownConversionConsent {
 
     /// Revoke in-flight clones and retain the same session's unconsumed consent for a refused reset.
     pub fn revoke_with_replacement(&self) -> Option<Self> {
-        if self.consumed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if self
+            .consumed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             return None;
         }
         Some(Self::new(

@@ -1,6 +1,8 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use dohc_engine_collab::{CollabError, ContentKind, DocKey, Ydoc, markdown_write_obligations as obligations};
+use dohc_engine_collab::{
+    CollabError, ContentKind, DocKey, Ydoc, markdown_write_obligations as obligations,
+};
 use dohc_engine_domain::{DomainError, VersionedTextStore};
 use dohc_engine_files::{ProjectionTargetKind, ProjectionTargetState, probe_projection_target};
 use dohc_engine_storage::{NoFaults, TxnOutcome, hex_sha256};

@@ -640,8 +640,12 @@ fn map_domain(error: &DomainError) -> WireError {
             return WireError::new(InvalidParams, format!("invalid-input: {reason}"));
         }
         DomainError::InvalidInput {
-            reason: reason @ ("held-change-stale" | "held-change-missing" | "held-change-conflict"
-                | "held-change-undo-stale" | "held-change-shared-owner"),
+            reason:
+                reason @ ("held-change-stale"
+                | "held-change-missing"
+                | "held-change-conflict"
+                | "held-change-undo-stale"
+                | "held-change-shared-owner"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
@@ -820,7 +824,8 @@ mod tests {
             "held-change-conflict",
             "held-change-undo-stale",
         ] {
-            let wire = super::map_runtime(dohc_engine_domain::DomainError::InvalidInput { reason }.into());
+            let wire =
+                super::map_runtime(dohc_engine_domain::DomainError::InvalidInput { reason }.into());
             assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::InvalidParams);
             assert_eq!(wire.message, reason);
             assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
