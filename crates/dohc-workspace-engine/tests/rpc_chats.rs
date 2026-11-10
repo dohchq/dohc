@@ -6140,6 +6140,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         automation: None,
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
@@ -6161,6 +6162,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         automation: None,
         author_agent_id: None,
         author_reported: None,
+        work: None,
         wake_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),
@@ -6441,6 +6443,89 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     assert_eq!(found["thread"]["lane"], json!("chat"));
     assert_eq!(found["channel"]["channelId"], json!("group"));
     assert_eq!(found["messageCount"], json!(2));
+    assert_eq!(found.get("work"), None);
+
+    // An agent's work report rides on its message, and the post and its
+    // thread serve the same Work card.
+    let report = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "post-2", "messageId": "p-2-work", "authorKind": "agent",
+            "authorDisplayName": "Scout", "authorOwnerDisplayName": "Ada", "body": "Opened a pull request",
+            "work": { "status": "waiting", "url": "https://example.com/pull/7" }, "nowMs": 60,
+        }),
+    )
+    .await;
+    assert_eq!(
+        report["work"],
+        json!({ "status": "waiting", "url": "https://example.com/pull/7" })
+    );
+    let card = json!({
+        "status": "waiting", "url": "https://example.com/pull/7", "messageId": "p-2-work",
+        "author": { "kind": "agent", "displayName": "Scout" }, "authorOwnerDisplayName": "Ada",
+        "reportedAtMs": 60,
+    });
+    let worked = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.get",
+        json!({ "threadId": "post-2" }),
+    )
+    .await;
+    assert_eq!(worked["work"], card);
+    let stream = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group" }),
+    )
+    .await;
+    let posts: Vec<&serde_json::Value> = stream["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item.get("post").is_some())
+        .collect();
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0]["post"].get("work"), None);
+    assert_eq!(posts[1]["post"]["work"], card);
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "group" }),
+    )
+    .await;
+    let listed_work = |thread_id: &str| {
+        listed["threads"]
+            .as_array()
+            .expect("threads")
+            .iter()
+            .find(|summary| summary["thread"]["id"] == json!(thread_id))
+            .expect("listed thread")
+            .get("work")
+            .cloned()
+    };
+    assert_eq!(listed_work("post-1"), None);
+    assert_eq!(listed_work("post-2"), Some(card.clone()));
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "post-2", "messageId": "p-2-person", "authorKind": "human",
+            "authorDisplayName": "Ada", "body": "Mine", "work": { "status": "done" }, "nowMs": 70,
+        }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
 
     let refused = call_error(
         &transport,

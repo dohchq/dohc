@@ -15,6 +15,7 @@ use crate::rpc::chats::messages::ReactionWire;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
 use crate::rpc::chats::messages::validate_actor_key;
+use crate::rpc::chats::stream::ThreadWorkWire;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -65,6 +66,8 @@ struct ChatThreadStartParams {
     author_agent_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    work: Option<dohc_engine_domain::ChatWorkReport>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     wake_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
@@ -269,10 +272,13 @@ struct ChannelThreadSummaryWire<'a> {
     open_decision_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     opening_message: Option<OpeningMessageWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<ThreadWorkWire<'a>>,
 }
 
 fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
     json!(ChannelThreadSummaryWire {
+        work: summary.work.as_ref().map(ThreadWorkWire::from),
         thread: ThreadB2Wire::from(&summary.thread),
         message_count: summary.message_count,
         last_read_sequence: summary.last_read_sequence,
@@ -346,6 +352,7 @@ impl EngineService {
                     automation: params.automation.map(Into::into),
                     author_agent_id: params.author_agent_id,
                     author_reported: params.author_reported,
+                    work: params.work,
                     wake_agent_ids: params.wake_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
@@ -724,6 +731,7 @@ mod tests {
     #[test]
     fn channel_thread_summary_omits_absent_opening_fields_and_chain_depth() {
         let summary = ChannelThreadSummary {
+            work: None,
             thread: thread(),
             message_count: 3,
             last_read_sequence: 1,
@@ -756,6 +764,7 @@ mod tests {
             reactions: Vec::new(),
         };
         let summary = ChannelThreadSummary {
+            work: None,
             opening_message: Some(opening),
             ..summary
         };
@@ -780,6 +789,7 @@ mod tests {
             ..summary.opening_message.clone().expect("opening message")
         };
         let summary = ChannelThreadSummary {
+            work: None,
             opening_message: Some(agent),
             ..summary
         };

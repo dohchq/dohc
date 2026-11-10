@@ -52,7 +52,7 @@ function linkProvenanceHolds(p: Record<string, unknown>, originId: string): bool
     return p.authorKind === "agent" && linkId(p.authorUserId) && linkId(p.agentConnectionId) &&
       typeof p.authorAgentId === "string" && p.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX) &&
       originId === personalAgentOrigin(p.authorAgentId) && String(p.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX) &&
-      !["linkGrantId", "linkPrincipalId", "authorOwnerDisplayName", "chainDepth", "authorReported", "origin"].some(key => Object.hasOwn(p, key));
+      !["linkGrantId", "linkPrincipalId", "authorOwnerDisplayName", "chainDepth", "authorReported", "work", "origin"].some(key => Object.hasOwn(p, key));
   }
   if (p.authorKind !== "link") {
     return !["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(p, key)) &&

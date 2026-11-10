@@ -3661,6 +3661,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("ydoc_native_authors.sql"),
         sets_user_version: None,
     },
+    // An agent's message reports work it does outside dohc.
+    Migration {
+        ordinal: 92,
+        id: "v2-chat-work-report",
+        sql: include_str!("chat_work_report.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5681,6 +5688,10 @@ mod tests {
                 "v2-ydoc-native-authors",
                 "4dbc6be1c4f387be4941020723fc9c47de528cd262c7071dd544f39909d11e86",
             ),
+            (
+                "v2-chat-work-report",
+                "90b7a240622af011c5d7a9a9ab24feb41db0acc2089fddfd74bbae19c4f3eea4",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6031,6 +6042,95 @@ mod tests {
             )
             .unwrap(),
             report
+        );
+        assert_eq!(messages(&conn), old_messages);
+    }
+
+    /// An existing message gains no work report, and only an agent's message
+    /// can hold one.
+    #[test]
+    fn chat_work_report_upgrade_preserves_existing_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-work-report");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 91);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 92);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread', 'Existing conversation', 10, 30); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, parent_message_id, origin, body, created_at_ms, \
+                  author_owner_display_name, author_actor_key) \
+                 VALUES ('ws', 'thread', 0, 'person', 'human', 'Ada', 'user-ada', NULL, \
+                         'desktop', 'Please check the plan.', 20, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread', 1, 'agent', 'agent', 'Nova', 'agent-nova', 'person', \
+                         'cli', 'The plan is ready.', 30, 'Ada', '{\"kind\":\"unknown\"}');",
+        )
+        .unwrap();
+        let messages = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT json_array(workspace_id, thread_id, message_order, message_id, author_kind, \
+                 author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
+                 author_owner_display_name, automation_id, chain_depth, author_actor_key, \
+                 link_grant_id, link_principal_id, author_agent_id, author_reported) \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let old_messages = messages(&conn);
+        assert_eq!(old_messages.len(), 2);
+        assert!(conn.prepare("SELECT work FROM chat_messages").is_err());
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(messages(&conn), old_messages);
+        let reports: Vec<Option<String>> = conn
+            .prepare("SELECT work FROM chat_messages ORDER BY message_order")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(reports, vec![None, None]);
+
+        let report = r#"{"status":"working","url":"https://example.com/thread/1"}"#;
+        for (message_id, value) in [("person", report), ("agent", "not json")] {
+            let error = conn
+                .execute(
+                    "UPDATE chat_messages SET work=?1 WHERE message_id=?2",
+                    [value, message_id],
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        assert_eq!(
+            conn.execute(
+                "UPDATE chat_messages SET work=?1 WHERE message_id='agent'",
+                [report],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT message_id FROM chat_messages INDEXED BY idx_chat_messages_thread_work \
+                 WHERE workspace_id='ws' AND thread_id='thread' AND work IS NOT NULL",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "agent"
         );
         assert_eq!(messages(&conn), old_messages);
     }

@@ -19,6 +19,37 @@ import {
 // The words of a composer bar, without its cancel button.
 const barWords = (testId: string) => screen.getByTestId(testId).firstElementChild?.textContent;
 
+describe("ChatsView work reports", () => {
+  it("shows each report on its own message, the opening post's included", async () => {
+    const user = userEvent.setup();
+    const opening = message({
+      authorKind: "agent", authorDisplayName: "Nova", body: "Fix the login redirect",
+      work: { status: "working", url: "https://example.com/threads/7" },
+    });
+    const working = message({
+      id: "message-working", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Nova",
+      body: "On it", createdAtMs: NOW + 1, work: { status: "waiting" },
+    });
+    const done = message({
+      id: "message-done", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Nova",
+      body: "Merged", createdAtMs: NOW + 2, work: { status: "done" },
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, working, done] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    // A later report never replaces the opening post's own, and no report
+    // takes another's link.
+    const own = await screen.findByTestId("chats-message-work");
+    expect(own.getAttribute("data-status")).toBe("working");
+    expect(screen.getByTestId("chats-message-work-open").getAttribute("title")).toBe("https://example.com/threads/7");
+    expect(screen.getAllByTestId("chats-comment-work").map((report) => report.getAttribute("data-status"))).toEqual(["waiting", "done"]);
+    expect(screen.queryByTestId("chats-comment-work-open")).toBeNull();
+  });
+});
+
 describe("ChatsView decisions", () => {
   it("resolves from composer mode and uses the literal fallback for an empty reply", async () => {
     const user = userEvent.setup();

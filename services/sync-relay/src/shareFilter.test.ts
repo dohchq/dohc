@@ -898,6 +898,18 @@ describe("chat share op filter", () => {
     expect(result.payload).toMatchObject({ authorReported });
   });
 
+  it("serves what an agent reported about its work", () => {
+    const work = { status: "waiting", url: "https://example.com/pull/7" };
+    const result = decide("chat.message.append", {
+      messageId: "m-work", threadId: "thread-in", authorKind: "agent",
+      authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Opened a PR", createdAtMs: 2, work,
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ work });
+  });
+
   it("shares the agent owner while stripping local runner configuration", () => {
     const result = decide("chat.message.append", {
       messageId: "m-agent", threadId: "thread-in", authorKind: "agent",

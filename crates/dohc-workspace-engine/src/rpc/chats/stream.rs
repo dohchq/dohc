@@ -16,6 +16,7 @@ use dohc_engine_domain::STREAM_LIMIT_DEFAULT;
 use dohc_engine_domain::StreamAgentRequest;
 use dohc_engine_domain::StreamItem;
 use dohc_engine_domain::StreamPosition;
+use dohc_engine_domain::ThreadWork;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -87,6 +88,39 @@ struct StreamAgentReplyWire<'a> {
     body_excerpt: &'a str,
 }
 
+/// A thread's Work card, as the stream and a thread read serve it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadWorkWire<'a> {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+    message_id: &'a str,
+    author: AuthorWire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_owner_display_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_user_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<&'a str>,
+    reported_at_ms: i64,
+}
+
+impl<'a> From<&'a ThreadWork> for ThreadWorkWire<'a> {
+    fn from(work: &'a ThreadWork) -> Self {
+        Self {
+            status: work.status.as_str(),
+            url: work.url.as_deref(),
+            message_id: &work.message_id,
+            author: AuthorWire::new(ChatActorKind::Agent, &work.author_display_name, None),
+            author_owner_display_name: work.author_owner_display_name.as_deref(),
+            author_user_id: work.author_user_id.as_deref(),
+            author_agent_id: work.author_agent_id.as_deref(),
+            reported_at_ms: work.reported_at_ms,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StreamPostWire<'a> {
@@ -97,6 +131,8 @@ struct StreamPostWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     latest_agent_reply: Option<StreamAgentReplyWire<'a>>,
     open_decision_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<ThreadWorkWire<'a>>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +224,7 @@ fn stream_item_json(item: &StreamItem) -> Value {
                 }
             }),
             open_decision_count: post.open_decision_count,
+            work: post.work.as_ref().map(ThreadWorkWire::from),
         }),
     });
     if let Some(message) = value.get_mut("message") {
@@ -264,10 +301,14 @@ impl EngineService {
                 .chat_thread_get(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
-        Ok(json!({
+        let mut value = json!({
             "thread": ThreadB2Wire::from(&found.thread),
             "channel": found.channel.as_ref().map(ChannelWire::from),
             "messageCount": found.message_count,
-        }))
+        });
+        if let Some(work) = &found.work {
+            value["work"] = json!(ThreadWorkWire::from(work));
+        }
+        Ok(value)
     }
 }

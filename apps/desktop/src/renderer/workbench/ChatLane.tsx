@@ -26,6 +26,7 @@ import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./Ch
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
+import { WorkStatus } from "./WorkCard";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -577,6 +578,7 @@ export function ChatLane(props: {
         testIdPrefix="chats-lane"
         {...(resolve ? { onResolve: resolve } : {})}
       /> : null}
+      {message.work ? <WorkStatus testIdPrefix="chats-lane" work={message.work} /> : null}
       {failedRun && message.id === failedEnd ? <FailedRunLine
         testIdPrefix="chats-lane"
         failed={failedRun}

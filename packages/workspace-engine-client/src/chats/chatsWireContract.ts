@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
 import type { ChatChannelType, ChatReportedAgent, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import { CHAT_WORK_STATUSES, type ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -168,6 +169,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
   authorReported?: ChatReportedAgent;
+  work?: ChatWorkReport;
   wakeAgentIds?: string[];
   nowMs?: number;
 };
@@ -219,6 +221,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
   authorReported?: ChatReportedAgent;
+  work?: ChatWorkReport;
   wakeAgentIds?: string[];
   nowMs?: number;
 };
@@ -559,6 +562,11 @@ const ChatReportedAgentSchema = mutableStruct({
   version: Schema.optionalKey(Schema.String),
   model: Schema.optionalKey(Schema.String),
 });
+const ChatWorkStatusSchema = Schema.Literals(CHAT_WORK_STATUSES);
+const ChatWorkReportSchema = mutableStruct({
+  status: ChatWorkStatusSchema,
+  url: Schema.optionalKey(Schema.String),
+});
 const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
   objectId: Schema.String,
@@ -612,6 +620,7 @@ const ChatMessageSchema = mutableStruct({
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorAgentId: Schema.optionalKey(Schema.String),
   authorReported: Schema.optionalKey(ChatReportedAgentSchema),
+  work: Schema.optionalKey(ChatWorkReportSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   // Thread and stream reads name each open agent request. Absent when none.
   agentRequests: Schema.optionalKey(Schema.mutable(Schema.Array(ChatStreamAgentRequestSchema))),
@@ -815,6 +824,16 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   authorAgentId: Schema.optionalKey(Schema.String),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 }).check(noAccountOnLinkMessage);
+const ChatThreadWorkSchema = mutableStruct({
+  status: ChatWorkStatusSchema,
+  url: Schema.optionalKey(Schema.String),
+  messageId: Schema.String,
+  author: ChatActorSchema,
+  authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+  authorUserId: Schema.optionalKey(Schema.String),
+  authorAgentId: Schema.optionalKey(Schema.String),
+  reportedAtMs: AnyInt,
+});
 const ChatChannelThreadSummarySchema = mutableStruct({
   thread: ChatThreadSchema,
   messageCount: NonnegativeInt,
@@ -822,6 +841,7 @@ const ChatChannelThreadSummarySchema = mutableStruct({
   unreadCount: NonnegativeInt,
   openDecisionCount: NonnegativeInt,
   openingMessage: Schema.optionalKey(ChatChannelOpeningMessageSchema),
+  work: Schema.optionalKey(ChatThreadWorkSchema),
 });
 const ChatFeedChannelSchema = mutableStruct({
   id: Schema.String,
@@ -887,6 +907,7 @@ const ChatStreamPostSchema = mutableStruct({
     }),
   ),
   openDecisionCount: NonnegativeInt,
+  work: Schema.optionalKey(ChatThreadWorkSchema),
 });
 const ChatStreamPageSchema = mutableStruct({
   items: Schema.mutable(
@@ -945,6 +966,7 @@ const ChatsResultSchemas = {
     thread: ChatThreadSchema,
     channel: Schema.NullOr(ChatChannelSchema),
     messageCount: NonnegativeInt,
+    work: Schema.optionalKey(ChatThreadWorkSchema),
   }),
   [CHATS_METHOD.threadGetProjection]: ChatProjectionSchema,
   [CHATS_METHOD.threadRevision]: mutableStruct({ revision: NonnegativeInt }),

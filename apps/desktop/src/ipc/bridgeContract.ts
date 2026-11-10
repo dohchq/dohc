@@ -31,6 +31,7 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-work";
 import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
@@ -2099,6 +2100,21 @@ export const ChatReportedAgentRecord = z.object({
 });
 export type ChatReportedAgentRecord = z.infer<typeof ChatReportedAgentRecord>;
 
+// What an agent reported about work it does outside dohc: where the work
+// stands, and a web link to it. dohc shows both only as reported.
+const ChatWorkReportRecord = z.object({
+  status: z.enum(CHAT_WORK_STATUSES),
+  url: z.string().refine(isWorkUrl).optional(),
+});
+// A thread's Work card: its newest work report, and the agent that wrote it.
+export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
+  messageId: OPAQUE_ID,
+  authorDisplayName: z.string().min(1).max(200),
+  authorOwnerDisplayName: z.string().min(1).max(200).optional(),
+  reportedAtMs: z.number(),
+});
+export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
@@ -2110,6 +2126,7 @@ export const ChatMessageRecord = z.object({
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   authorReported: ChatReportedAgentRecord.optional(),
+  work: ChatWorkReportRecord.optional(),
   // The agent in Settings that wrote it, which only main records.
   authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
@@ -2447,6 +2464,8 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   // Main always supplies the engine-derived count. Optionality keeps older
   // renderer fixtures and pre-phase-4 bridge consumers source-compatible.
   openDecisionCount: z.number().int().min(0).optional(),
+  // The thread's Work card. Absent when no agent reported work in it.
+  work: ChatThreadWorkRecord.optional(),
   // Feed-only opening-message data. Optional + nullable keeps older bridge
   // fixtures compatible while allowing an empty/corrupt legacy thread to be
   // represented without fabricating a message.

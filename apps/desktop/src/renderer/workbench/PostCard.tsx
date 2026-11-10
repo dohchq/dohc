@@ -7,10 +7,11 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
+import { WorkStatus } from "./WorkCard";
 
 // A post in a group's feed, drawn as a row: who and when on one line, the
-// title or the text, then a meta line with reactions, an open poll, and the
-// comment count when there are any. Add reaction, Comment, and Save as file
+// title or the text, then a meta line with the thread's Work card,
+// reactions, an open poll, and the comment count when there are any. Add reaction, Comment, and Save as file
 // sit in a toolbar shown on hover and focus. The whole row opens the post.
 // Controls inside stop the click so a reaction never also opens it.
 //
@@ -19,6 +20,8 @@ import { UnreadPill } from "./ChatsControls";
 // chats-post-title, chats-post-excerpt, chats-post-footer,
 // chats-post-reaction-pill, chats-post-decision-open,
 // chats-post-comment-count, chats-post-bookmark, chats-thread-unread.
+// The Work card adds chats-post-work, chats-post-work-reporter and
+// chats-post-work-open.
 
 export type PostOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
@@ -196,6 +199,7 @@ export function PostCard(props: {
     : { heading: props.thread.title, excerpt: "" };
   const plain = message !== null && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
+  const work = props.thread.work;
 
   const reactions = message
     ? props.data.reactions.filter((reaction) => reaction.messageId === message.id)
@@ -300,8 +304,18 @@ export function PostCard(props: {
               {excerpt}
             </span>
           ) : null}
-          {byEmoji.size > 0 || openDecision || commentCount > 0 ? (
+          {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (
             <div data-testid="chats-post-footer" className={FEED_META}>
+              {work ? (
+                <WorkStatus
+                  testIdPrefix="chats-post"
+                  work={work}
+                  reportedBy={{ name: work.authorDisplayName, owner: work.authorOwnerDisplayName, atMs: work.reportedAtMs }}
+                  // The row names the post's author. A report on a later
+                  // message names its own.
+                  showReporter={work.messageId !== message?.id}
+                />
+              ) : null}
               {[...byEmoji.entries()].map(([emoji, records]) => {
                 const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
                 return (

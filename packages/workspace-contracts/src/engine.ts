@@ -1,6 +1,7 @@
 import type { ChatLinksEngineInput, ChatLinksEnginePage } from "./chatLinks";
 import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "./chatFileMentions";
 import type { AutomationRunAttribution } from "./collection";
+import type { ChatWorkReport, ChatWorkStatus } from "./chatWork";
 
 type WorkspaceObjectId = string;
 export type VersionId = string;
@@ -445,6 +446,8 @@ export interface ChatMessageAppendPayload {
   authorAgentId?: string;
   // What an agent reported about itself.
   authorReported?: ChatReportedAgent;
+  // What an agent reported about its work.
+  work?: ChatWorkReport;
   body: string;
   createdAtMs: number;
 }
@@ -458,6 +461,18 @@ export type ChatReportedAgent = {
   version?: string;
   model?: string;
 };
+
+// A thread's Work card: its newest work report, and the agent that wrote it.
+export interface ChatThreadWork {
+  status: ChatWorkStatus;
+  url?: string;
+  messageId: ChatMessageId;
+  author: ChatActor;
+  authorOwnerDisplayName?: string;
+  authorUserId?: string;
+  authorAgentId?: string;
+  reportedAtMs: number;
+}
 
 type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 type ChatFollowState = "following" | "unfollowed";
@@ -862,6 +877,8 @@ export interface ChannelThreadSummary {
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
+  // The thread's Work card. Absent when no agent reported work in it.
+  work?: ChatThreadWork;
 }
 
 // Where an item sits in a group's stream. Items sort by time, then lane (a
@@ -890,6 +907,8 @@ interface ChatStreamPost {
     bodyExcerpt: string;
   };
   openDecisionCount: number;
+  // The thread's Work card. Absent when no agent reported work in it.
+  work?: ChatThreadWork;
 }
 
 // One top-level item: a post's first message, or a conversation message.
@@ -964,6 +983,8 @@ export interface ChatMessage {
   authorAgentId?: string;
   // What the agent reported about itself. Only an agent message has one.
   authorReported?: ChatReportedAgent;
+  // What the agent reported about its work. Only an agent message has one.
+  work?: ChatWorkReport;
   attachments: ChatAttachment[];
   // Thread and stream reads name each open agent request: one per agent that
   // was asked to answer this message and has not finished. Absent when none.
@@ -1222,6 +1243,8 @@ export interface LinkedChatStore {
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
+    // What the agent reports about its work. Only an agent author has one.
+    work?: ChatWorkReport;
     // Every agent this message wakes, resolved from this computer's settings:
     // its DM's agent and each agent dohc starts that it names. Never journaled.
     wakeAgentIds?: string[];
@@ -1280,7 +1303,7 @@ export interface LinkedChatStore {
   getThread(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
-  }): Promise<{ thread: ChatThread; channel: ChatChannel | null; messageCount: number }>;
+  }): Promise<{ thread: ChatThread; channel: ChatChannel | null; messageCount: number; work?: ChatThreadWork }>;
   listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
@@ -1300,6 +1323,8 @@ export interface LinkedChatStore {
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
+    // What the agent reports about its work. Only an agent author has one.
+    work?: ChatWorkReport;
     // Every agent this message wakes, resolved from this computer's settings:
     // its DM's agent and each agent dohc starts that it names. Never journaled.
     wakeAgentIds?: string[];
