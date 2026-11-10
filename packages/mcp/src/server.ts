@@ -19,7 +19,7 @@ import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/works
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { chatWatchInputSchema, cliAgentIdSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWorkReportSchema, chatWatchInputSchema, cliAgentIdSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -618,7 +618,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.",
+        "Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. A message an agent reported work with has `work`, and a post whose thread has such a report has its Work card in `post.work`. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.",
       inputSchema: {
         threadId: z.string().min(1).max(200).optional(),
         group: z.string().min(1).max(500).optional(),
@@ -665,13 +665,14 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     options: z.array(z.string().min(1).max(200)).max(12).optional(),
     runId: z.string().min(1).max(200).optional(),
     model: reportedAgentPartSchema.optional(),
+    work: chatWorkReportSchema.optional(),
   };
 
   register(
     "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is a web link to the work. The chat then shows a Work card with your newest status and link, marked as reported. Reply with `work` again to change it. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
         group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),
@@ -702,7 +703,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),

@@ -7,6 +7,7 @@ import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
 import type { ChatReportedAgent } from "@dohc/workspace-contracts/engine";
+import { isChatWorkStatus, isWorkUrl, type ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -149,6 +150,37 @@ function messageReported(params: ChatsJsonObject): ChatReportedAgent | undefined
     throw new Error("invalid-input");
   }
   return parts;
+}
+
+// The daemon's rule: only an agent's message reports work, with a known
+// status and, when it gives a link, a web address.
+function messageWork(params: ChatsJsonObject): ChatWorkReport | undefined {
+  if (params.work === undefined) return undefined;
+  const work = strictObject(params.work, "work", ["status", "url"]);
+  const url = optionalString(work, "url");
+  if (params.authorKind !== "agent" || !isChatWorkStatus(work.status) || (url !== undefined && !isWorkUrl(url))) {
+    throw new Error("invalid-input");
+  }
+  return { status: work.status, ...(url !== undefined ? { url } : {}) };
+}
+
+// The daemon's rule: a thread's Work card is its newest work report, with the
+// newest link any of its reports carried.
+function threadWork(state: WorkspaceState, threadId: string) {
+  const reports = threadMessages(state, threadId).filter((message) => message.work !== undefined);
+  const newest = reports.at(-1);
+  if (!newest?.work) return undefined;
+  const url = reports.filter((message) => message.work?.url !== undefined).at(-1)?.work?.url;
+  return {
+    status: newest.work.status,
+    ...(url !== undefined ? { url } : {}),
+    messageId: newest.id,
+    author: newest.author,
+    ...(newest.authorOwnerDisplayName ? { authorOwnerDisplayName: newest.authorOwnerDisplayName } : {}),
+    ...(newest.authorUserId ? { authorUserId: newest.authorUserId } : {}),
+    ...(newest.authorAgentId ? { authorAgentId: newest.authorAgentId } : {}),
+    reportedAtMs: newest.createdAtMs,
+  };
 }
 
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
@@ -557,6 +589,7 @@ function streamItems(state: WorkspaceState, channelId: string) {
 
 function streamPost(state: WorkspaceState, threadId: string) {
   const replies = threadMessages(state, threadId).slice(1);
+  const work = threadWork(state, threadId);
   const repliers = new Map<string, { author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>();
   for (const reply of replies) {
     const key = JSON.stringify([reply.author.kind, reply.author.displayName, reply.authorUserId ?? null, reply.authorAgentId ?? null]);
@@ -595,6 +628,7 @@ function streamPost(state: WorkspaceState, threadId: string) {
       (decision) => decision.threadId === threadId && decision.state === "open" &&
         state.messages.has(decision.messageId),
     ).length,
+    ...(work ? { work } : {}),
   };
 }
 
@@ -842,7 +876,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -860,7 +894,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -1079,10 +1113,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
         const stored = thread.channelId ? state.channels.get(thread.channelId) : undefined;
         if (thread.channelId && !stored) throw new Error("channel-not-found");
         const { wireId: _wireId, ...channel } = stored ?? { wireId: null };
+        const work = threadWork(state, thread.id);
         return jsonResult({
           thread,
           channel: stored ? channel : null,
           messageCount: threadMessages(state, thread.id).length,
+          ...(work ? { work } : {}),
         });
       }
       case CHATS_METHOD.streamList:
@@ -1375,10 +1411,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
   private agentsFingerprint(params: ChatsJsonObject): [string, string, string] {
     const { authorAgentId, wakeAgentIds } = messageAgents(params);
     const reported = messageReported(params);
+    const work = messageWork(params);
     return [
       authorAgentId ?? "",
       wakeAgentIds.join(","),
-      reported === undefined ? "" : JSON.stringify(reported),
+      (reported === undefined ? "" : JSON.stringify(reported)) + (work === undefined ? "" : JSON.stringify(work)),
     ];
   }
 
@@ -1871,6 +1908,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const automation = messageAutomation(authorKind, params.automation);
     const { authorAgentId, wakeAgentIds } = messageAgents(params);
     const authorReported = messageReported(params);
+    const work = messageWork(params);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1891,6 +1929,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ...(automation ? { automation } : {}),
       ...(authorAgentId !== undefined ? { authorAgentId } : {}),
       ...(authorReported !== undefined ? { authorReported } : {}),
+      ...(work !== undefined ? { work } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
@@ -2036,8 +2075,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
           messages.length,
         );
         const opening = messages[0];
+        const work = threadWork(state, thread.id);
         return {
           thread,
+          ...(work ? { work } : {}),
           messageCount: messages.length,
           lastReadSequence,
           unreadCount: messages.length - lastReadSequence,

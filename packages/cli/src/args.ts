@@ -2,7 +2,8 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -60,6 +61,7 @@ type CliCommandBody =
       attachments: string[];
       needsDecision: boolean;
       options?: string[];
+      work?: CliWorkReport;
       body: string;
       agent?: string;
     }
@@ -70,6 +72,7 @@ type CliCommandBody =
       attachments: string[];
       needsDecision: boolean;
       options?: string[];
+      work?: CliWorkReport;
       resolve?: string;
       choose?: string;
       body: string;
@@ -451,6 +454,28 @@ const DOCUMENT_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const workFlags: readonly CliFlag[] = [
+  {
+    name: "--work",
+    value: "status",
+    text: `Report where your work outside dohc stands: ${CHAT_WORK_STATUSES.join(", ")}. Only an agent reports work.`,
+  },
+  { name: "--link", value: "url", text: "Link to that work, such as its thread or pull request. Needs --work." },
+];
+const workNote = "With --work, the thread shows a Work card: your newest status and link, marked as reported. Reply with --work again to change it.";
+function workFields(input: VerbInput): { work?: CliWorkReport } {
+  const status = lastValue(input, "--work");
+  const url = lastValue(input, "--link");
+  if (status === undefined) {
+    if (url !== undefined) fail("--link needs --work <status>");
+    return {};
+  }
+  if (!isChatWorkStatus(status)) fail(`--work requires one of: ${CHAT_WORK_STATUSES.join(", ")}`);
+  const work = chatWorkReportSchema.safeParse({ status, ...(url === undefined ? {} : { url }) });
+  if (!work.success) fail("--link requires an http or https address with no spaces");
+  return { work: work.data };
+}
+
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
   const options = allValues(input, "--option");
   return {
@@ -557,9 +582,9 @@ const CHAT_VERBS = {
     capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
-    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags, chatAgentFlag],
+    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags, ...workFlags, chatAgentFlag],
     freeText: true,
-    notes: [stdinNote, "In a direct message, use reply instead."],
+    notes: [stdinNote, "In a direct message, use reply instead.", workNote],
     parse: (input) => {
       const [group, ...bodyParts] = input.operands;
       if (!group) fail("post requires a group");
@@ -572,6 +597,7 @@ const CHAT_VERBS = {
         ...(title ? { title } : {}),
         attachments: allValues(input, "--attach"),
         ...decisionFields(input),
+        ...workFields(input),
         body,
         ...chatAgent(input),
       };
@@ -587,10 +613,11 @@ const CHAT_VERBS = {
       ...decisionFlags,
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
+      ...workFlags,
       chatAgentFlag,
     ],
     freeText: true,
-    notes: [stdinNote],
+    notes: [stdinNote, workNote],
     parse: (input) => {
       const [thread, ...bodyParts] = input.operands;
       if (!thread) fail("reply requires a thread id");
@@ -606,6 +633,7 @@ const CHAT_VERBS = {
         ...(to ? { to } : {}),
         attachments: allValues(input, "--attach"),
         ...decisionFields(input),
+        ...workFields(input),
         ...(resolve ? { resolve } : {}),
         ...(choose ? { choose } : {}),
         body,

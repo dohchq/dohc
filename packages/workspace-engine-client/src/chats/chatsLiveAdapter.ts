@@ -14,6 +14,7 @@ import type {
   ChatReportedAgent,
   ChatThreadLane,
 } from "@dohc/workspace-contracts/engine";
+import type { ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -247,6 +248,7 @@ export class ChatsLiveAdapter {
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
+    work?: ChatWorkReport;
     wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
@@ -296,6 +298,7 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.work !== undefined ? { work: input.work } : {}),
         ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
           ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
@@ -391,6 +394,7 @@ export class ChatsLiveAdapter {
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
+    work?: ChatWorkReport;
     wakeAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
@@ -436,6 +440,7 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.work !== undefined ? { work: input.work } : {}),
         ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
           ? { wakeAgentIds: input.wakeAgentIds }
           : {}),

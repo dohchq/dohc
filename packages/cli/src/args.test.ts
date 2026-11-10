@@ -50,6 +50,32 @@ describe("parseCliArguments", () => {
     });
   });
 
+  it("parses an agent's work report and refuses a bad status or link", () => {
+    expect(
+      parseCliArguments(
+        ["chat", "post", "general", "--as-agent", "--work", "working", "--link", "https://example.com/threads/7", "Fixing the login redirect"],
+        {},
+      ),
+    ).toMatchObject({
+      actor: "agent",
+      verb: "post",
+      work: { status: "working", url: "https://example.com/threads/7" },
+      body: "Fixing the login redirect",
+    });
+    const reply = parseCliArguments(["chat", "reply", "th_a", "--as-agent", "--work", "done", "Merged"], {});
+    expect(reply).toMatchObject({ verb: "reply", work: { status: "done" } });
+    expect(parseCliArguments(["chat", "reply", "th_a", "Merged"], {})).not.toHaveProperty("work");
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "--work", "paused", "Merged"], {})).toThrow(
+      "--work requires one of: working, waiting, done, failed, stopped",
+    );
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "--link", "https://example.com", "Merged"], {})).toThrow(
+      "--link needs --work <status>",
+    );
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "--work", "done", "--link", "file:///etc/passwd", "Merged"], {})).toThrow(
+      "--link requires an http or https address with no spaces",
+    );
+  });
+
   it("parses a poll's choices and the answer that picks one", () => {
     expect(
       parseCliArguments(

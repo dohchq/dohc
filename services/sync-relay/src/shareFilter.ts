@@ -910,6 +910,8 @@ const SERVED_CHAT_FIELDS = {
     "chainDepth",
     // What an agent reported about itself: its product, version, and model.
     "authorReported",
+    // What an agent reported about its work: a status and a web link.
+    "work",
     // A link post's link grant and link principal, which name the link and
     // no account. Every desktop refuses a link post without them. An agent's
     // link post also names its agent connection.

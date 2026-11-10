@@ -124,6 +124,21 @@ describe("markdown renderers", () => {
     );
   });
 
+  it("shows an agent's work report on its message, marked as reported", () => {
+    const reply = showResult.messages[1]!;
+    const worked: ShowResult = {
+      ...showResult,
+      messages: [
+        { ...reply, work: { status: "waiting", url: "https://example.com/pull/7" } },
+        { ...reply, id: "msg_done", work: { status: "done" } },
+      ],
+    };
+    const markdown = renderThreadMarkdown(worked);
+    const at = new Date(reply.createdAtMs).toISOString();
+    expect(markdown).toContain(`**Sam** · work waiting https://example.com/pull/7 (as reported) · ${at} · msg_reply`);
+    expect(markdown).toContain(`**Sam** · work done (as reported) · ${at} · msg_done`);
+  });
+
   it("shows what an agent reported beside its name, and nothing when it reported nothing", () => {
     const reply = showResult.messages[1]!;
     const reported: ShowResult = {

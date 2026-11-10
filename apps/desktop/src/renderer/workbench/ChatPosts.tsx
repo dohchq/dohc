@@ -40,6 +40,7 @@ import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentT
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 import { AS_REPORTED, reportedProduct } from "./reportedAgent";
 import { CopyMessageLink } from "./messageLinks";
+import { threadWork, WorkStatus } from "./WorkCard";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -557,6 +558,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = isAgentAuthor(openingMessage);
+  // The opening post carries the thread's Work card; each later report shows
+  // on its own message.
+  const card = threadWork(messages);
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
   const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
@@ -725,6 +729,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   onOpenPath={props.onOpenPath}
                 />
               ))}
+            </div>
+          ) : null}
+          {comment.work ? (
+            <div className="mt-2">
+              <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
             </div>
           ) : null}
           {commentDecision ? (
@@ -910,8 +919,16 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ))}
             </div>
           ) : null}
-          {openingDecision || runRecords[openingMessage.id] ? (
+          {card || openingDecision || runRecords[openingMessage.id] ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">
+              {card ? (
+                <WorkStatus
+                  testIdPrefix="chats-thread"
+                  work={card}
+                  reportedBy={{ name: card.authorDisplayName, atMs: card.reportedAtMs }}
+                  showReporter={card.authorDisplayName !== openingMessage.authorDisplayName}
+                />
+              ) : null}
               {openingDecision ? (
                 <DecisionStatus
                   decision={openingDecision}
