@@ -1014,6 +1014,11 @@ function ownerSays(messageId: string, threadId: string, body: string, extra: Rec
   return chatMessageAppend(messageId, threadId, body, { authorUserId: OWNER, authorDisplayName: "Ada", ...extra });
 }
 
+/** A thread on a file, bound by the file's object id or by its path. */
+function fileThread(threadId: string, binding: Record<string, string>): ChatOp {
+  return { opKind: "chat.thread.create", payload: { threadId, title: "", createdAtMs: 2, linkedAtMs: 2, ...binding } };
+}
+
 /** A team channel with two threads, and a thread in the agent's DM. */
 function chats(f: Fixture, workspaceId: string, agentId: string): void {
   fromComputer(f, workspaceId, [
@@ -1385,6 +1390,65 @@ describe("a personal agent's wait", () => {
     expect(ids(await waitOnce(f, agent, { cursor: answer.cursor }))).toEqual([]);
   });
 
+  it("leaves out a comment on a file whose current path is secret, however the path is spelled", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/kept.md", "plan", { originSeq: 0, objectId: "object-kept" }),
+      moment("config/.env", "plan", { originSeq: 1, objectId: "object-env" }),
+      moment("config/.ENV", "plan", { originSeq: 2, objectId: "object-upper" }),
+      moment("config/%2eenv.local", "plan", { originSeq: 3, objectId: "object-encoded" }),
+      moment("notes/plan.md", "plan", { originSeq: 4, objectId: "object-moved" }),
+      moment("config/prod.env", "plan", {
+        originSeq: 5, objectId: "object-moved", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
+      }),
+    ]);
+    fromComputer(f, WS_A, [
+      fileThread("thread-kept", { linkedObjectId: "object-kept" }),
+      fileThread("thread-env", { linkedObjectId: "object-env" }),
+      fileThread("thread-upper", { linkedObjectId: "object-upper" }),
+      fileThread("thread-encoded", { linkedObjectId: "object-encoded" }),
+      fileThread("thread-moved", { linkedObjectId: "object-moved" }),
+      fileThread("thread-by-path", { linkedPath: "config/.env" }),
+      ...["kept", "env", "upper", "encoded", "moved", "by-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
+    ]);
+
+    const answer = await waitOnce(f, agent);
+    expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([["kept", "notes/kept.md"]]);
+    expect(JSON.stringify(answer)).not.toContain("config/");
+  });
+
+  it("names a file's path after a rename, and no path once the file is gone or the relay never saw it", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-moved" }),
+      moment("notes/gone.md", "plan", { originSeq: 1, objectId: "object-gone" }),
+      moment("notes/moved.md", "plan", {
+        originSeq: 2, objectId: "object-moved", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
+      }),
+      moment("notes/gone.md", "", {
+        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
+        afterPath: null, afterContent: null,
+      }),
+    ]);
+    fromComputer(f, WS_A, [
+      fileThread("thread-moved", { linkedObjectId: "object-moved", linkedPathHint: "notes/plan.md" }),
+      fileThread("thread-gone", { linkedObjectId: "object-gone", linkedPathHint: "notes/gone.md" }),
+      fileThread("thread-unknown", { linkedObjectId: "object-unknown", linkedPathHint: "notes/unknown.md" }),
+      // Bound by the path the file left.
+      fileThread("thread-old-path", { linkedPath: "notes/plan.md" }),
+      ...["moved", "gone", "unknown", "old-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
+    ]);
+
+    const answer = await waitOnce(f, agent);
+    expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([
+      ["moved", "notes/moved.md"], ["gone", null], ["unknown", null], ["old-path", null],
+    ]);
+  });
+
   it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {
     const f = await fixture();
     fromComputer(f, WS_A, [
@@ -1639,6 +1703,25 @@ describe("a personal agent's reads", () => {
     expect((await read({ limit: 101 })).status).toBe(400);
   });
 
+  it("leaves out a thread whose first create names the channel and also binds a file", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await putBlob(f.h, OWNER, WS_A, "key");
+    await appendLog(f.h, OWNER, WS_A, [moment("config/.env", "key", { originSeq: 0, objectId: "object-env" })]);
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-team"),
+      chatThreadCreate("thread-team", "wire-team"),
+      chatThreadCreate("thread-both", "wire-team", { linkedObjectId: "object-env", linkedAtMs: 2 }),
+      ownerSays("in-channel", "thread-team", "in the channel"),
+      ownerSays("on-file", "thread-both", "about the file"),
+      ownerSays("in-channel-again", "thread-team", "in the channel again"),
+    ]);
+
+    const page = await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-team" })) as ChatPage;
+    expect(ids(page)).toEqual(["in-channel-again", "in-channel"]);
+    expect(JSON.stringify(page)).not.toContain("about the file");
+  });
+
   it("lists the workspace's current files and reads a current file's bytes, only through that workspace", async () => {
     const f = await fixture();
     const agent = await signIn(f);
@@ -1658,6 +1741,30 @@ describe("a personal agent's reads", () => {
     await expectRefused(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: inB }));
     await expectCode(await tool(f, agent, "blob", { workspaceId: WS_B, sha256: inB }), 403, "personal_agent_out_of_reach");
     expect((await tool(f, agent, "blob", { workspaceId: WS_A, sha256: "not-a-sha" })).status).toBe(400);
+  });
+
+  it("keeps a secret file out of the file list, and its bytes out of reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
+    const ciphertext = await putBlob(f.h, OWNER, WS_A, "ciphertext");
+    const plaintext = await putBlob(f.h, OWNER, WS_A, "KEY=value");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/a.md", "hello", { originSeq: 0 }),
+      moment("config/.env.local", "KEY=value", { originSeq: 1 }),
+      {
+        originSeq: 2, opKind: "secret.file.put", recordedAtMs: 1_002, payload: {
+          versionId: "main", path: "config/.env", metadata: { origin: "user" },
+          ivBase64: "AA==", authTagBase64: "AA==", ciphertextSha256: ciphertext, byteLength: 10,
+        },
+      },
+    ]);
+
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: WS_A }));
+    expect(listed.files).toEqual([expect.objectContaining({ path: "notes/a.md", blobSha256: sha })]);
+    expect(JSON.stringify(listed)).not.toContain("config/");
+    await expectRefused(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: ciphertext }));
+    await expectRefused(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: plaintext }));
   });
 
   it("ends a file's stream at the next chunk once the agent's access ends", async () => {

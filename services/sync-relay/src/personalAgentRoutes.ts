@@ -1,5 +1,6 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
   AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES,
@@ -41,6 +42,8 @@ const CHAT_READ_DEFAULT_LIMIT = 50;
 const CHAT_READ_MAX_LIMIT = 100;
 const CHAT_ID_CHARS = 256;
 const SHA256 = /^[0-9a-f]{64}$/u;
+// Every tracked path on main, as a file share reads it. No secret path is tracked.
+const MAIN_FILES = { paths: [], versionId: MAIN_VERSION_ID } as const;
 
 type PersonalToolStorage = Pick<SyncRelayStorage,
   | "appendPersonalChatPost" | "currentFileBlobByteLength" | "fetchChatMessages" | "findChannelCreateKind"
@@ -210,9 +213,17 @@ export function createPersonalAgentToolRoutes(input: {
     let room = maxResponseBytes - Buffer.byteLength(JSON.stringify({
       ok: true, workspaceId, channelWireId, messages: [], olderCursor: Number.MAX_SAFE_INTEGER,
     }));
+    // A thread is the channel's only when its first create names the channel
+    // and no file, as a share link reads it. One lookup per thread on the page.
+    const inChannel = new Map<string, boolean>();
     for (const row of page.rows) {
       const read = chatMessage(row);
       if (!read) continue;
+      const { threadId } = read.message;
+      if (!inChannel.has(threadId)) {
+        inChannel.set(threadId, storage.findThreadCreateChannelWireId(workspaceId, threadId) === channelWireId);
+      }
+      if (!inChannel.get(threadId)) continue;
       const next = fitted(linkChatMessage(read.message), room, messages.length === 0);
       if (!next) {
         olderCursor = messages[messages.length - 1]!.relaySeq;
@@ -456,10 +467,12 @@ export function createPersonalAgentToolRoutes(input: {
     // a message counts by a mention or a thread the agent posted in.
     if (channelWireId !== dm && !mentions(read.message.body, mention) &&
         !storage.personalAgentPostedIn({ agentId: scope.connection.agentId, workspaceId, threadId })) return null;
-    return {
-      ...linkChatMessage(read.message), workspaceId, channelWireId,
-      filePath: channelWireId === null ? filePathOf(workspaceId, threadId) : null,
-    };
+    const path = channelWireId === null ? filePathOf(workspaceId, threadId) : null;
+    const filePath = path === null ? null : visibleSharePath(MAIN_FILES, path);
+    // A thread on a file no share can serve, a secret file included, stays
+    // out, as it does through a share link.
+    if (path !== null && filePath === null) return null;
+    return { ...linkChatMessage(read.message), workspaceId, channelWireId, filePath };
   }
 
   return async function respondToPersonalAgentTools(request: Request, route: PersonalAgentToolRoute): Promise<Response> {
