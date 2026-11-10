@@ -196,8 +196,21 @@ describe("chat writes", () => {
     test.store.getMessage.mockResolvedValue(retained);
     const thread = { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1 };
     test.store.listChannelThreads.mockResolvedValue([{ thread } as Awaited<ReturnType<ChatWriteStore["listChannelThreads"]>>[number]]);
+    const onSaved = vi.fn();
     await expect(test.writes.startThread(test.place, { writer: automationWriter, channelId: "channel", body: "Hello", messageId: retained.id,
-      threadId: "thread", idempotencyKey: "effect", resolveAttachments: async () => [] })).resolves.toEqual({ thread, message: retained });
+      threadId: "thread", idempotencyKey: "effect", resolveAttachments: async () => [], onSaved })).resolves.toEqual({ thread, message: retained });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ message: retained });
+  });
+
+  it("tells the caller a replayed automation post saved before the lookup of its thread fails", async () => {
+    const test = fixture();
+    test.store.startChannelThread.mockRejectedValue(new Error("payload mismatch"));
+    test.store.getMessage.mockResolvedValue(retained);
+    test.store.listChannelThreads.mockRejectedValue(new Error("The workspace engine stopped."));
+    const onSaved = vi.fn();
+    await expect(test.writes.startThread(test.place, { writer: automationWriter, channelId: "channel", body: "Hello", messageId: retained.id,
+      threadId: "thread", idempotencyKey: "effect", resolveAttachments: async () => [], onSaved })).rejects.toThrow("The workspace engine stopped.");
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ message: retained });
   });
 
   it.each(["missing", "author", "automation", "body", "target"])("refuses a failed automation send whose stored receipt has the wrong %s", async mismatch => {

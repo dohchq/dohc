@@ -478,7 +478,7 @@ export function navigatorView(readRevision: number, extra: ExtraProps = {}) {
 }
 
 export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsViewProps["onError"]>(), extra: ExtraProps = {}) {
-  render(
+  const { unmount } = render(
     <ChatsView
       workspaceId="workspace-a"
       workspaces={[
@@ -490,7 +490,7 @@ export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsVi
       {...extra}
     />,
   );
-  return { onOpenFileChat, onError };
+  return { onOpenFileChat, onError, unmount };
 }
 
 export const mentionRoster = [

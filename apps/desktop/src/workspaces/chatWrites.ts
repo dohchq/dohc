@@ -429,9 +429,12 @@ export function createChatWrites(dependencies: {
     } catch (error) {
       const sent = await replayedMessage(place, input, target);
       if (!sent) throw error;
+      // The post saved, so the caller hears so before the lookup of its thread, which can fail.
+      input.onSaved?.({ message: sent });
       const thread = (await place.store.listChannelThreads({ workspaceId: place.workspaceId, channelId: input.channelId, ...(input.lane ? { lane: input.lane } : {}) })).find(entry => entry.thread.id === sent.threadId)?.thread;
       if (!thread) throw error;
-      started = { thread, message: sent };
+      afterWrite(place.workspaceId, target, true, input.writer);
+      return { thread, message: sent };
     }
     input.onSaved?.({ message: started.message });
     afterWrite(place.workspaceId, target, true, input.writer);

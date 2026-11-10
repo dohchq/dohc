@@ -329,6 +329,45 @@ describe("ChatsView sends that saved before a later step failed", () => {
     expect(onNavCommand).not.toHaveBeenCalled();
   });
 
+  it("gives a post that saved a Try again that reloads only its own Group, and nothing once the view closes", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel(), channel({ id: "channel-2", name: "random", slug: "random" })],
+      fileThreads: [],
+    });
+    bridgeMock.startChannelThread.mockResolvedValue({ message: { id: "message-1", threadId: "thread-1" }, failure });
+    const { onError, unmount } = renderView();
+    const openChannel = async (name: string) => {
+      const row = (await screen.findAllByTestId("chats-channel")).find((node) => node.textContent?.includes(name))!;
+      await user.click(row);
+      await screen.findByTestId("chats-channel-empty");
+    };
+    const reads = (channelId: string) => bridgeMock.listChannelThreads.mock.calls
+      .filter(([input]) => input.lane === undefined && input.channelId === channelId).length;
+    await openChannel("general");
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "Lunch?");
+    fireEvent.click(screen.getByTestId("chats-new-thread-send"));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const again = onError.mock.lastCall?.[2] as () => void;
+
+    // Another Group is not reloaded as if it were the post's.
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await openChannel("random");
+    const before = [reads("channel-1"), reads("channel-2")];
+    act(() => again());
+    expect([reads("channel-1"), reads("channel-2")]).toEqual(before);
+
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await openChannel("general");
+    const shown = reads("channel-1");
+    act(() => again());
+    expect(reads("channel-1")).toBe(shown + 1);
+
+    unmount();
+    again();
+    expect(reads("channel-1")).toBe(shown + 1);
+  });
+
   // Leaving and reopening the Group keeps the same send context, so only the
   // navigation token tells this answer is stale.
   it("leaves the reopened Group alone when a post saved after the person left it", async () => {

@@ -864,9 +864,11 @@ export function ChatsView(props: {
   const sendContextKey =
     nav.level === "thread"
       ? `${workspaceId}:thread:${nav.thread.id}`
-      : nav.level === "dm"
-        ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
-        : `${workspaceId}:${nav.level}`;
+      : nav.level === "channel"
+        ? `${workspaceId}:channel:${nav.channel.id}`
+        : nav.level === "dm"
+          ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
+          : `${workspaceId}:${nav.level}`;
   const activeSendContext = useRef(sendContextKey);
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
@@ -2182,11 +2184,17 @@ export function ChatsView(props: {
   ]);
   const latestRefresh = useRef(refreshForActivity);
   latestRefresh.current = refreshForActivity;
+  // False once this view unmounts, so its notices' Try again reloads nothing.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   // A message that saved while a later step failed. What the window shows
   // reloads to list it, and the notice's Try again reloads it again while the
   // window still shows the conversation it saved in, in this workspace.
   const reportUnshown = useCallback((words: string, failure: string, context: string) => {
-    const reload = () => { if (activeSendContext.current === context) latestRefresh.current(); };
+    const reload = () => { if (mounted.current && activeSendContext.current === context) latestRefresh.current(); };
     reload();
     props.onError(words, failure, reload);
   }, [props.onError]);

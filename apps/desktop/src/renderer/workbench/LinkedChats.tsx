@@ -304,11 +304,20 @@ export function LinkedChatsPanel(props: {
     [props.onError, props.onThreadRead, reactions, workspaceId],
   );
 
+  // The chat this panel shows, and none once it unmounts.
+  const shownThreadId = useRef<string | null>(null);
+  useEffect(() => {
+    shownThreadId.current = activeThread?.id ?? null;
+    return () => { shownThreadId.current = null; };
+  }, [activeThread]);
   // A message that saved while a later step failed. The notice's Try again
-  // opens its chat again while About still shows this workspace's file.
+  // opens its chat again while About still shows that chat on this
+  // workspace's file.
   const reportUnshown = useCallback((words: string, failure: string, thread: ChatThreadRecord) => {
     const key = threadsKey;
-    props.onError(words, failure, () => { if (currentThreadsKey.current === key) void openThread(thread); });
+    props.onError(words, failure, () => {
+      if (currentThreadsKey.current === key && shownThreadId.current === thread.id) void openThread(thread);
+    });
   }, [openThread, props.onError, threadsKey]);
 
   // A loaded response is not a React commit. Wait until the message list has

@@ -846,6 +846,51 @@ describe("LinkedChatsPanel thread and file reads", () => {
     await userEvent.click(screen.getByTestId("linked-chat-back"));
     expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
   });
+
+  it("opens a saved message's chat again from Try again only while About shows that chat", async () => {
+    const other = { ...searchThread, id: "thread-2", title: "Other" };
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [searchThread, other] });
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
+      messages: [{ ...message, id: `${threadId}-message`, threadId, body: `In ${threadId}` }],
+    }));
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: { id: "m1", threadId: "thread-1" }, failure: "Error: The bookmark projection stopped.",
+    });
+    const onError = vi.fn();
+    const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />);
+    const reads = (threadId: string) =>
+      bridgeMock.listChatMessages.mock.calls.filter(([input]) => input.threadId === threadId).length;
+    const openThread = async (threadId: string) => {
+      const open = await screen.findAllByTestId("linked-chat-open");
+      await userEvent.click(open.find((button) => button.dataset.threadId === threadId)!);
+      await screen.findByText(`In ${threadId}`);
+    };
+    await openThread("thread-1");
+    fireEvent.change(screen.getByTestId("linked-chat-composer"), { target: { value: "Ship it" } });
+    fireEvent.click(screen.getByTestId("linked-chat-send"));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const again = onError.mock.lastCall?.[2] as () => void;
+    // The send's own reload opens the chat a second time.
+    await waitFor(() => expect(reads("thread-1")).toBe(2));
+
+    // Another chat on the same file stays open.
+    await userEvent.click(screen.getByTestId("linked-chat-back"));
+    await openThread("thread-2");
+    await act(async () => again());
+    expect(reads("thread-1")).toBe(2);
+    expect(screen.getByTestId("linked-chat-title").textContent).toBe("Other");
+    expect(screen.getByText("In thread-2")).toBeTruthy();
+
+    await userEvent.click(screen.getByTestId("linked-chat-back"));
+    await openThread("thread-1");
+    await act(async () => again());
+    expect(reads("thread-1")).toBe(4);
+
+    // A closed panel opens nothing.
+    view.unmount();
+    again();
+    expect(reads("thread-1")).toBe(4);
+  });
 });
 
 // #337 item 3, second path: the Chats navigator lists FILE-linked threads
