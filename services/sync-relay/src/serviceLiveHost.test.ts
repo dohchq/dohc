@@ -5625,12 +5625,14 @@ async function neverOpenedHost(options: {passDeadlineMs?: number; pollIntervalMs
   const o = await emptyServiceHost({passDeadlineMs: options.passDeadlineMs, pollIntervalMs: options.pollIntervalMs, maxDocumentsPerPass: options.maxDocumentsPerPass,
     firstOpen: {fetch: fetcher, nowMs: options.nowMs, random: options.random, schedule: options.schedule}});
   let writes = 0;
-  const rewrite = (id: string, markdown: string) => {
+  // Without `length`, the write names no byte length, which the relay then stores as null.
+  const rewrite = (id: string, markdown: string, {length = true} = {}) => {
     const text = new TextEncoder().encode(markdown), digest = sha256(text);
     o.f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: text, createdAtMs: 1});
     o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "agent", ops: [{originSeq: writes++, opKind: "moment.append", recordedAtMs: 1,
       payloadJson: JSON.stringify({momentId: id, objectId: neverOpened.objectId, versionId: "main", operation: "write", path: neverOpened.path,
-        payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
+        payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, ...(length ? {payloadAfterByteLength: text.byteLength} : {}),
+        payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
   };
   rewrite("plain-moment", "# Plan\n\nBring snacks.\n");
   const enrollment = o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: neverOpened.path,
@@ -6183,6 +6185,30 @@ it("runs a bounded number of passes for a burst of wakes, then waits for its int
   expect(passes).toBe(woken + 1);
   expect(o.requests).toHaveLength(2);
   expect(clock.armed()).toEqual([]);
+});
+
+// Review of round 2: the relay answers a text head with no stored byte length as stale every time, and each
+// stale answer woke a pass that captured the note and asked again, as fast as the relay replied.
+// Proves: with periodic passes held, the host asks nothing about such a head, the note waits as blocked, and
+// the loop stays paused with no wake pending.
+it("asks nothing about a text head with no stored byte length, and stays idle", async () => {
+  const polls = heldPolls();
+  // A loop of stale answers runs on promises alone and would starve the timers this test waits with, so a
+  // third request gets a held refusal, which ends it.
+  let asked = 0;
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2,
+    answer: (request, relay) => ++asked > 2 ? answerWith(request, {kind: "refused", reason: "deletion"}) : relay(request)});
+  o.rewrite("plain-unmeasured", "# Plan\n\nBring snacks.\n", {length: false});
+  await polls.until(o.f, () => o.captures() > 0);
+  // A loop shows as a third answer; an idle host as a held pause with nothing asked.
+  await vi.waitFor(() => expect(o.statuses.length >= 3 || (polls.paused() && o.requests.length === 0)).toBe(true), {timeout: 10_000});
+  console.info(`First-open answers for a head with no byte length, before the host went idle: ${o.statuses.length}`);
+  expect(o.requests).toHaveLength(0);
+  await polls.run(o.f);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  expect(o.requests).toHaveLength(0);
+  expect(polls.early()).toBe(0);
+  expect(o.host.blocked(plainNote)).toBe("without-lineage");
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,
