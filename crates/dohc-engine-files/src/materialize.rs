@@ -7459,9 +7459,17 @@ mod tests {
         assert_eq!(outcome.unwrap(), JobOutcome::Completed);
     }
 
+    /// `files.replace` of `notes.md`, given the canonical root the engine
+    /// opens a workspace with, as Windows needs for a file that exists.
+    #[cfg(windows)]
+    fn replace_notes(scratch: &Scratch) -> Result<(), MaterializeError> {
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        replace_file_whole(&root, "notes.md", ".dohc-write-1.tmp", b"new")
+    }
+
     #[cfg(windows)]
     fn write_new_by_replace(scratch: &Scratch) {
-        replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new").unwrap();
+        replace_notes(scratch).unwrap();
     }
 
     /// #3570: a file its owner made private stays private when the engine
@@ -7501,7 +7509,10 @@ mod tests {
             let target = scratch.root.join(name);
             std::fs::write(&target, b"old").unwrap();
             let before = dacl_sddl(&target);
-            assert!(!before.starts_with("D:P(") && before.contains(";BU)"), "{before}");
+            assert!(
+                !before.starts_with("D:P(") && before.contains(";BU)"),
+                "{before}"
+            );
             write(&scratch);
             assert_eq!(std::fs::read(&target).unwrap(), b"new");
             assert_eq!(dacl_sddl(&target), before, "{name}");
@@ -7555,8 +7566,8 @@ mod tests {
             bytes
         };
         let modified = std::fs::metadata(&target).unwrap().modified().unwrap();
-        let err = replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new")
-            .expect_err("a DACL that can't be read refuses the replace");
+        let err =
+            replace_notes(&scratch).expect_err("a DACL that can't be read refuses the replace");
         assert_eq!(err.code(), "permissions-not-kept");
         assert_eq!(read(), b"old");
         assert_eq!(
@@ -7589,8 +7600,7 @@ mod tests {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .open(&target)
             .unwrap();
-        let err = replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new")
-            .expect_err("a held file can't be replaced");
+        let err = replace_notes(&scratch).expect_err("a held file can't be replaced");
         assert_eq!(err.code(), "file-locked");
         drop(held);
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
