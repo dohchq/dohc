@@ -3,7 +3,8 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
+import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
+import { readWorkspacePackages } from "./selection.mjs";
 import { aggregateJavascript, aggregateRust, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
@@ -69,6 +70,25 @@ test("shards cover every task once, including uneven and small workloads", () =>
     assert.throws(() => assertTaskCoverage(tasks, [...records, records.find(row => row.completed.length)]), /repeated/u);
     assert.throws(() => assertTaskCoverage(tasks, records.map(row => ({ ...row, verdict: "FAIL" }))), /did not pass/u);
   }
+});
+
+test("package typechecks stay complete when changed files select no package tests", async () => {
+  const packages = readWorkspacePackages(process.cwd()).filter(pkg => pkg.manifest.scripts?.typecheck);
+  const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: false });
+  const typechecks = tasks.filter(task => task.id.startsWith("typecheck:"));
+  assert.deepEqual(typechecks.map(task => task.id).sort(), packages.map(pkg => `typecheck:${pkg.name}`).sort());
+  assert.ok(!tasks.some(task => task.id === "typecheck"));
+  for (const pkg of packages) {
+    const task = typechecks.find(task => task.id === `typecheck:${pkg.name}`);
+    assert.equal(task.cwd, pkg.path);
+    assert.equal(task.command, "pnpm");
+    assert.deepEqual(task.args, ["run", "typecheck"]);
+    assert.ok(!task.native);
+  }
+  const mobile = typechecks.find(task => task.id === "typecheck:@dohc/mobile");
+  const groups = javascriptGroups([mobile, { id: "mobile-test", kind: "vitest", package: "@dohc/mobile", weight: 1 }]);
+  assert.ok(groups[0].resource);
+  assert.equal(groups[0].resource, groups[1].resource);
 });
 
 test("native fixture dependencies propagate through helpers and cycles", () => {

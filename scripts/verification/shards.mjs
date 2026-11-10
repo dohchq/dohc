@@ -24,10 +24,10 @@ export function javascriptGroups(tasks) {
       else chunks.push({ tasks: [task], weight });
     }
     groups.push(...chunks.map((chunk, index) => ({ ...chunk, id: `vitest-group:${key}:${index}`, kind: "vitest", pkg: files[0].package,
-      native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : null,
+      native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : files[0].package === "@dohc/mobile" ? "mobile-editor" : null,
       weight: Math.max(...chunk.tasks.map(task => task.weight), chunk.weight / (files[0].package === "@dohc/app-backend-runtime" ? 1 : 2)) + 4 })));
   }
-  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), weight: task.weight })));
+  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), resource: task.resource, weight: task.weight })));
   return groups;
 }
 
@@ -149,8 +149,10 @@ export async function javascriptTasks({ changed = null, repositoryTests = "test:
   }
   const native = nativeTestFiles(tasks.map(task => resolve(repoRoot, task.file)));
   for (const task of tasks) task.native = native.has(resolve(repoRoot, task.file));
-  tasks.push(...manifestTasks(repoRoot, repositoryTests),
-    { id: "typecheck", kind: "command", command: "pnpm", cwd: "", args: ["run", "typecheck"], weight: 40 });
+  tasks.push(...manifestTasks(repoRoot, repositoryTests), ...packages.filter(pkg => pkg.manifest.scripts?.typecheck).map(pkg => ({
+    id: `typecheck:${pkg.name}`, kind: "command", command: "pnpm", cwd: pkg.path, args: ["run", "typecheck"], weight: 10,
+    ...(pkg.name === "@dohc/mobile" ? { resource: "mobile-editor" } : {}),
+  })));
   if (!selected || selected.includes("@dohc/desktop")) tasks.push(
     ...manifestTasks(join(repoRoot, "apps/desktop"), "test:scripts:isolated", { prefix: "desktop" }),
     ...manifestTasks(join(repoRoot, "apps/desktop"), "test:scripts:runtime", { prefix: "desktop" }));
