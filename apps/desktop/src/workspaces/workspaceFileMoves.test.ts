@@ -1004,7 +1004,35 @@ describe("agent moves and deletes", () => {
     const record = { operationId: `dohc-operation:${randomUUID()}`, from: "a.txt", to: "b.txt", place: "b.txt", staged: `${Date.now()}-${randomUUID()}-` };
     await saveRecoveryRecord(workspace, record, "replace");
     await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "b.txt"), record.staged);
-    await resumeWorkspaceLinkRewrites(workspace, { workspaceId: workspace.workspaceId, history: { rewriteHistoryLinks: vi.fn() } });
+    const open = () => resumeWorkspaceLinkRewrites(workspace, { workspaceId: workspace.workspaceId, history: { rewriteHistoryLinks: vi.fn() } });
+    // A disk that refuses the first open leaves the record for the next one.
+    faults.mutate = syscall => { if (syscall === "link" || syscall === "copyFile") throw new Error("The disk is busy"); };
+    try { await open(); } finally { delete faults.mutate; }
+    expect(existsSync(join(f.rootPath, "b.txt"))).toBe(false);
+    expect((await f.workspaceTrash()).filter(name => name.startsWith("replace-"))).toHaveLength(1);
+    await open();
+    expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("theirs");
+    expect(await f.workspaceTrash()).toEqual([]);
+  });
+
+  it("finishes at the next open when a stop interrupts putting a moved file back, hiding neither file", async () => {
+    const f = await fixture();
+    const workspace = f.operation.workspace;
+    const staged = `${Date.now()}-${randomUUID()}-`;
+    await write(f.rootPath, "b.txt", "theirs");
+    await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "b.txt"), staged);
+    await write(f.rootPath, "b.txt", "mine");
+    const at = await lstat(join(f.rootPath, "b.txt"), { bigint: true });
+    const record = { operationId: `dohc-operation:${randomUUID()}`, from: "a.txt", to: "b.txt", place: "b.txt", staged, moved: `${at.dev}:${at.ino}` };
+    await saveRecoveryRecord(workspace, record, "replace");
+    // The stop lands after the moved file has its old name back and before it leaves the new one.
+    faults.unlink = path => path === join(f.rootPath, "b.txt");
+    try { await putBackStoppedMoves(workspace, () => undefined); } finally { delete faults.unlink; }
+    expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("mine");
+    expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("mine");
+    expect((await f.workspaceTrash()).filter(name => name.startsWith("replace-"))).toHaveLength(1);
+    await putBackStoppedMoves(workspace, () => undefined);
+    expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("mine");
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("theirs");
     expect(await f.workspaceTrash()).toEqual([]);
   });

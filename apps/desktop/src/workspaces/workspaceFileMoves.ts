@@ -653,24 +653,34 @@ async function undoMove(workspace: PathChangeWorkspace, engine: AuthoredPathChan
 // move puts itself back: the moved entry, while it is still where the move put
 // it, then the replaced entry. Nothing that appeared since is replaced, and what
 // cannot go back stays in the workspace trash. History records what changes as
-// local file edits. A record stays for the next open only when its pass throws.
+// local file edits. A record stays for the next open while that open could
+// still finish: the replaced entry waits and its place is free, or the moved
+// entry still holds it.
 export async function putBackStoppedMoves(workspace: PathChangeWorkspace, markChanged: () => void): Promise<void> {
   const root = workspace.rootPath;
   for (const record of await listStoppedMoves(root)) {
     try {
       const trash = await workspaceTrashForWrite(workspace, `put back the replaced ${record.to}`);
-      const staged = (await readdir(trash)).find(name => name.startsWith(record.staged));
-      if (staged !== undefined) {
-        const at = await lstat(join(root, record.to), { bigint: true }).catch(() => undefined);
-        if (at && `${at.dev}:${at.ino}` === record.moved && !await exists(join(root, record.from))) {
-          const moved = await moveIntoWorkspaceTrash(workspace, join(root, record.to));
+      const name = (await readdir(trash)).find(entry => entry.startsWith(record.staged));
+      const from = join(root, record.from), to = join(root, record.to), place = join(root, record.place);
+      const identity = (path: string) => lstat(path, { bigint: true }).then(at => `${at.dev}:${at.ino}`, () => undefined);
+      // A stop between its link and unlink leaves the moved file at both names.
+      const movedStays = async () => record.moved !== undefined && await identity(to) === record.moved &&
+        [undefined, record.moved].includes(await identity(from));
+      if (name !== undefined) {
+        // The moved entry keeps a visible name throughout, so a stop here hides nothing.
+        if (await movedStays()) {
+          await placeBack(root, to, from, "", true);
           markChanged();
-          if ((await placeBack(root, moved, join(root, record.from))).length) await placeBack(root, moved, join(root, record.to));
         }
-        await placeBack(root, join(trash, staged), join(root, record.place));
-        markChanged();
+        if (!await exists(place)) {
+          await placeBack(root, join(trash, name), place);
+          markChanged();
+        }
       }
-      await removeRecoveryRecord(workspace, record.operationId, "replace");
+      if (name === undefined || !await exists(join(trash, name)) || (await exists(place) && !await movedStays())) {
+        await removeRecoveryRecord(workspace, record.operationId, "replace");
+      }
     } catch { /* The next open tries again. */ }
   }
 }
