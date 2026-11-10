@@ -1,11 +1,14 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import type { AccountState, SignIn } from "./account";
+import { accountWorkspace, each } from "./api";
+import type { CacheFiles, SavedView } from "./cacheFiles";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
 import {
-  earlierCursor, FEED_HOLD_MS, laterCursor, readChanges, readChats, readFiles, readPage, readStream, readThread,
+  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, readChanges, readChats, readFiles, readPage, readStream, readThread,
   type ChatGroup, type ChatThread, type FeedAnswer, type FeedChanges, type GroupStream, type MissingChat, type PageRead, type Read, type WorkspaceFile,
 } from "./workspaceReads";
+import type { SavedList } from "./workspaceList";
 
 // What the phone shows of one workspace, read from the server and kept fresh by the workspace's change feed.
 //
@@ -115,6 +118,19 @@ export const views = {
   },
 };
 
+/** The view a saved view's id names, or null for an id this build doesn't know. */
+export function viewOf(id: string): View<unknown> | null {
+  if (id === views.files.id) return views.files;
+  if (id === views.chats.id) return views.chats;
+  const [kind, ...rest] = id.split(":");
+  const key = rest.join(":");
+  if (key === "") return null;
+  if (kind === "stream") return views.stream(key);
+  if (kind === "thread") return views.thread(key);
+  if (kind === "page") return views.page(key);
+  return null;
+}
+
 // --- the cache ----------------------------------------------------------------------------------------------------
 
 export interface Cached {
@@ -125,45 +141,134 @@ export interface Cached {
   readonly stale: boolean;
 }
 
-/** Views read for each server, account and workspace, in memory. It empties whenever the sign-in changes or ends. */
+/**
+ * Views read for each server, account and workspace, in memory and, given `files`, on disk (cacheFiles.ts), with each
+ * account's workspace list on disk. It empties whenever the sign-in changes or ends, on disk too. Each change is saved
+ * soon after; dropping a scope deletes its file.
+ */
 export interface ReadCache {
   entries(scope: string): readonly Cached[];
   get(scope: string, viewId: string): Cached | undefined;
   set(scope: string, cached: Cached): void;
   drop(scope: string): void;
   clear(): void;
-  /** Empties the cache each time the account's sign-in changes: sign-out, a 401, or a new sign-in. */
+  /**
+   * Reads the scope's saved views into memory, unless a drop or clear overtakes the read. Null when there is nothing
+   * to read: the scope already has views in memory, which are newer, or the cache keeps nothing on disk.
+   */
+  restore(scope: string): Promise<void> | null;
+  /** The sign-in's saved workspace list, or null when the cache keeps nothing on disk. */
+  savedList(signIn: Pick<SignIn, "origin" | "userId">): SavedList | null;
+  /** Saves now what waits to be saved, as when the app goes to the background. */
+  flush(): void;
+  /**
+   * Empties the cache each time the account's sign-in changes: sign-out, a 401, or a new sign-in. The saved sign-in
+   * read at launch keeps it, and a launch with none empties it.
+   */
   follow(account: { state(): AccountState; subscribe(listener: () => void): () => void }): () => void;
 }
 
 export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceId: string) =>
   JSON.stringify([signIn.origin, signIn.userId, workspaceId]);
 
-export function createReadCache(): ReadCache {
+/** The scope of an account's workspace list. */
+const listScope = (signIn: Pick<SignIn, "origin" | "userId">) => JSON.stringify([signIn.origin, signIn.userId]);
+
+export function createReadCache(files?: CacheFiles): ReadCache {
   const scopes = new Map<string, Map<string, Cached>>();
+  // A drop moves its scope's generation on, and a clear every scope's, so a restore that a delete overtakes adds nothing.
+  let epoch = 0;
+  const drops = new Map<string, number>();
+  const generation = (scope: string) => `${epoch}.${drops.get(scope) ?? 0}`;
+  // One restore per scope at a time: a second store for the scope waits on the first, so the scope stays tracked until
+  // the only read of its file settles, and a list that drops it meanwhile moves its generation on.
+  const restoring = new Map<string, Promise<void>>();
+  function forget(scope: string) {
+    drops.set(scope, (drops.get(scope) ?? 0) + 1);
+    scopes.delete(scope);
+  }
+
+  // Listings first, so a scope over its cap keeps Home and Chats, then the views set most recently.
+  const saved = (scope: string): readonly SavedView[] => [...scopes.get(scope)?.values() ?? []]
+    .reverse()
+    .sort((a, b) => Number(isListing(b.view)) - Number(isListing(a.view)))
+    .map(cached => ({ id: cached.view.id, value: cached.value, cursor: cached.cursor, stale: cached.stale }));
   const cache: ReadCache = {
     entries: scope => [...scopes.get(scope)?.values() ?? []],
     get: (scope, viewId) => scopes.get(scope)?.get(viewId),
     set(scope, cached) {
       const views = scopes.get(scope) ?? new Map<string, Cached>();
       scopes.set(scope, views);
+      views.delete(cached.view.id);
       views.set(cached.view.id, cached);
+      files?.write(scope, () => saved(scope));
     },
-    drop: scope => void scopes.delete(scope),
-    clear: () => scopes.clear(),
+    drop(scope) {
+      forget(scope);
+      void files?.remove(scope);
+    },
+    clear() {
+      epoch += 1;
+      scopes.clear();
+      void files?.removeAll();
+    },
+    restore(scope) {
+      if (!files || scopes.has(scope)) return null;
+      const pending = restoring.get(scope);
+      if (pending) return pending;
+      const expected = generation(scope);
+      const done = files.read(scope).catch(() => []).then(found => {
+        restoring.delete(scope);
+        // A delete since the read began wins, and views read into memory meanwhile are newer.
+        if (generation(scope) !== expected || scopes.has(scope)) return;
+        const views = new Map<string, Cached>();
+        for (const item of found) {
+          const view = viewOf(item.id);
+          if (view && isCursor(item.cursor)) views.set(view.id, { view, value: item.value, cursor: item.cursor, stale: item.stale });
+        }
+        if (views.size > 0) scopes.set(scope, views);
+      });
+      restoring.set(scope, done);
+      return done;
+    },
+    savedList(signIn) {
+      if (!files) return null;
+      const scope = listScope(signIn);
+      return {
+        load() {
+          const expected = epoch;
+          return files.readList(scope).then(found => epoch === expected ? each(found, accountWorkspace) : null);
+        },
+        // The list from the server, or one this phone changed, decides which workspaces the cache keeps: only those the
+        // phone can open.
+        listed(workspaces) {
+          void files.writeList(scope, workspaces);
+          const kept = new Set(workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => cacheScope(signIn, entry.workspaceId)));
+          for (const known of new Set([...scopes.keys(), ...restoring.keys()])) if (!kept.has(known)) forget(known);
+          void files.keep([...kept]);
+        },
+      };
+    },
+    flush: () => void files?.flush(),
     follow(account) {
       const signInOf = (state: AccountState) => state.status === "signed-in" ? state.signIn : null;
-      let serving = signInOf(account.state());
+      let serving = account.state();
       return account.subscribe(() => {
-        const next = signInOf(account.state());
-        if (next === serving) return;
+        const last = serving;
+        const next = account.state();
         serving = next;
-        cache.clear();
+        if (last.status === "loading") {
+          if (next.status === "signed-out") cache.clear();
+          return;
+        }
+        if (signInOf(next) !== signInOf(last)) cache.clear();
       });
     },
   };
   return cache;
 }
+
+const isListing = (view: View<unknown>) => view.id === views.files.id || view.id === views.chats.id;
 
 // --- one workspace ------------------------------------------------------------------------------------------------
 
@@ -233,12 +338,41 @@ export function createWorkspaceData(options: {
     feedState = next;
     for (const listener of feedListeners) listener();
   }
-  for (const cached of cache.entries(scope)) {
-    entries.set(cached.view.id, {
-      view: cached.view, state: { value: cached.value, loading: false, problem: null, failures: 0 },
-      listeners: new Set(), stale: cached.stale, reads: requestGenerations(),
+  function seed(found: readonly Cached[]) {
+    for (const cached of found) {
+      const target = entries.get(cached.view.id);
+      if (target) {
+        target.state = { ...target.state, value: cached.value };
+        target.stale = cached.stale;
+      } else {
+        entries.set(cached.view.id, {
+          view: cached.view, state: { value: cached.value, loading: false, problem: null, failures: 0 },
+          listeners: new Set(), stale: cached.stale, reads: requestGenerations(),
+        });
+      }
+      cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
+    }
+  }
+  seed(cache.entries(scope));
+
+  // A scope with nothing in memory, as at launch, reads its file first. Until it has, every view shows as loading and
+  // nothing reads from the server; then each open view without a fresh value reads, and the feed starts from the
+  // cursors of what the file held.
+  let restoring = false;
+  const restored = cache.restore(scope);
+  if (restored) {
+    restoring = true;
+    void restored.then(() => {
+      restoring = false;
+      if (stopped) return;
+      // What the cache holds now, so a drop or clear since the file was read wins here too.
+      seed(cache.entries(scope));
+      for (const target of entries.values()) {
+        if (target.listeners.size > 0 && live() && (target.state.value === null || target.stale)) read(target);
+        else if (target.state.loading) set(target, { ...target.state, loading: false });
+      }
+      startFeed();
     });
-    cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
   }
 
   const live = () => !stopped && signIn.isCurrent();
@@ -263,7 +397,7 @@ export function createWorkspaceData(options: {
       // A view first opened after the workspace has gone can't read, so it shows the same failed read and Try again.
       const state: ViewState<unknown> = hasGone
         ? { value: null, loading: false, problem: "refused", failures: 1 }
-        : { value: null, loading: false, problem: null, failures: 0 };
+        : { value: null, loading: restoring, problem: null, failures: 0 };
       found = { view, state, listeners: new Set(), stale: false, reads: requestGenerations() };
       entries.set(view.id, found);
     }

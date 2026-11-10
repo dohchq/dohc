@@ -455,7 +455,7 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: true });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
-    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1");
+    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1", []);
     h.events.length = 0;
     h.writable.mockImplementationOnce(() => { throw new Error("read-only"); });
     await expect(h.invoke(CHANNELS.resumeThreadDispatch, threadPayload)).rejects.toThrow("read-only");
