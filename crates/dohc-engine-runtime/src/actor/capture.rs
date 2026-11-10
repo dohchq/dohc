@@ -1845,6 +1845,12 @@ impl ActorHandle {
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
+            let unwritten = store
+                .read_with(|conn| unwritten_switch_secrets(conn, &workspace_id, &version_id))?;
+            entries.retain(|entry| {
+                entry.sha256 != dohc_engine_domain::SECRET_SEED_SENTINEL_SHA
+                    || !unwritten.contains(&entry.path)
+            });
             let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
             let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
             entries.retain(|entry| !held_paths.blocks(&entry.path));
@@ -2988,6 +2994,45 @@ pub(super) fn ensure_no_pending_undo_placement(
         ));
     }
     Ok(())
+}
+
+/// The secrets that `version`'s switch has yet to write where no file was
+/// (dohc#3112). Until replay writes one, its missing file is not a deletion,
+/// as the domain seed rules for plain files.
+fn unwritten_switch_secrets(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+) -> Result<std::collections::BTreeSet<String>, RuntimeError> {
+    let mut jobs = conn
+        .prepare_cached(
+            "SELECT job_id, target_path, content_sha256 FROM materialization_jobs
+             WHERE workspace_id IN (?1,'') AND status='pending' AND operation='write'
+                 AND preimage_present=0 AND job_id GLOB 'version-switch-secret-mat_*'",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let mut rows = jobs
+        .query(params![workspace])
+        .map_err(StorageError::corrupt_public)?;
+    let mut paths = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let path: String = row.get(1).map_err(StorageError::corrupt_public)?;
+        let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        if job
+            == super::versions::switch_projection_job_id(
+                workspace,
+                version,
+                &path,
+                dohc_engine_storage::MaterializationOperation::Write,
+                &sha,
+                true,
+            )
+        {
+            paths.insert(path);
+        }
+    }
+    Ok(paths)
 }
 
 /// A write that failed to place the active head stays pending, so its file is

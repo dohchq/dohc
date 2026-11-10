@@ -941,6 +941,116 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     supervisor.close(&database).expect("close");
 }
 
+// dohc#3112. A crash before a switch writes a captured secret leaves the write
+// pending with no file. The capture seed at the next start leaves the secret
+// out, so the first scan doesn't record it as deleted, and replay writes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let env = scratch.path().join(".env");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
+    actor
+        .capture_secret(
+            dohc_engine_domain::CaptureSecret {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "feature".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=feature\n".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 3,
+                claim_foreign_head: true,
+            },
+            key,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("captured secret");
+    let seeded = |actor: dohc_engine_runtime::ActorHandle| async move {
+        actor
+            .capture_manifest_seed(WORKSPACE.to_owned(), "feature".to_owned())
+            .await
+            .expect("seed")
+            .iter()
+            .any(|entry| entry.path == ".env")
+    };
+    assert!(seeded(actor.clone()).await, "a captured secret is seeded");
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 4,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the crash fails the switch");
+    assert!(faults.fired(), "the secret write starts");
+    supervisor.close(&database).expect("close");
+    assert!(!env.exists());
+    let pending: i64 = Connection::open(&database)
+        .expect("sqlite")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE target_path = '.env' AND status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending jobs");
+    assert_eq!(pending, 1, "the secret write waits for replay");
+
+    let actor = supervisor.open(&database, 5).expect("reopen").actor;
+    assert!(
+        !seeded(actor.clone()).await,
+        "an unwritten secret stays out of the seed"
+    );
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 6)
+        .await
+        .expect("replay");
+    assert_eq!(
+        std::fs::read_to_string(&env).expect("written secret"),
+        "TOKEN=feature\n"
+    );
+    assert!(seeded(actor).await, "a written secret is seeded again");
+    supervisor.close(&database).expect("close");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_leaves_the_same_bytes_alone_when_only_their_kind_differs() {
     const WS: &str = "ws-switch-kind-only";
