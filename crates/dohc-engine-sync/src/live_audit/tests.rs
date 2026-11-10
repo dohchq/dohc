@@ -2157,6 +2157,171 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
         .unwrap();
 }
 
+/// Only the relay writes a personal agent's work. An owner device's audit
+/// record that names one, with every digest recomputed, is refused, so
+/// History never shows a personal agent editing a document.
+#[test]
+fn an_audit_record_naming_a_personal_agent_is_refused() {
+    use dohc_engine_collab::live_update_application::{
+        LiveAuthorEntry, LiveCheckpointAuthorCoverage, validate_checkpoint_coverage,
+    };
+    let ordinary = format!("q-{}", "a".repeat(26));
+    let personal = format!("p-{}", "a".repeat(26));
+    assert!(!audit_record_refused(&ordinary));
+    assert!(audit_record_refused(&personal));
+    let coverage = |agent_id: &str| LiveCheckpointAuthorCoverage {
+        author: LiveAuthorEntry::Agent {
+            agent_id: agent_id.into(),
+            agent_name: None,
+            on_behalf_of: Some("owner".into()),
+            depth: None,
+        },
+        struct_ranges: Vec::new(),
+        deletion_ranges: Vec::new(),
+    };
+    assert!(validate_checkpoint_coverage(&[coverage(&ordinary)]).is_ok());
+    assert!(validate_checkpoint_coverage(&[coverage(&personal)]).is_err());
+}
+
+/// Publishes an owner's audit record that declares an agent, renames the agent
+/// to `agent_id` with the record's digests recomputed, and says whether a peer
+/// refuses it.
+fn audit_record_refused(agent_id: &str) -> bool {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
+        LiveUpdateReceipt, RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority,
+        apply_committed,
+    };
+    use std::io::{Read, Write};
+    fn agent(agent_id: &str) -> LiveAuthorEntry {
+        LiveAuthorEntry::Agent {
+            agent_id: agent_id.into(),
+            agent_name: None,
+            on_behalf_of: Some("owner".into()),
+            depth: Some(1),
+        }
+    }
+    fn evidence(previous: &str, metadata: &AdmittedLiveUpdateMetadata) -> String {
+        hex_sha256(&serde_json::to_vec(&("accepted-event-v2", previous, 1, metadata)).unwrap())
+    }
+    let declared = format!("q-{}", "a".repeat(26));
+    assert_eq!(agent_id.len(), declared.len());
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "declared-delivery".into(),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![agent(&declared)]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |tx, namespace, binding, count| journal_live_event_in_tx(
+                tx, namespace, binding, count, 200
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                    dohc_engine_storage::StorageError::persist_public(error),
+                )
+            })
+        )
+        .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let mut ops = operations(&f.store);
+    let at = ops
+        .iter()
+        .position(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap();
+    let manifest: chunks::Manifest =
+        serde_json::from_value(ops[at].payload["manifest"].clone()).unwrap();
+    let text = f
+        .store
+        .read_with(|conn| {
+            let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+            let mut text = String::new();
+            reader.read_to_string(&mut text).unwrap();
+            reader.finish().unwrap();
+            Ok::<_, SyncError>(text)
+        })
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut metadata: AdmittedLiveUpdateMetadata =
+        serde_json::from_value(record["metadata"].clone()).unwrap();
+    let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
+    let previous = &base.record.checkpoint.evidence_digest;
+    let original = evidence(previous, &metadata);
+    assert_eq!(record["evidenceDigest"].as_str(), Some(original.as_str()));
+    metadata.author_snapshot = Some(vec![agent(agent_id)]);
+    let renamed = evidence(previous, &metadata);
+    assert_eq!(text.matches(declared.as_str()).count(), 1);
+    assert_eq!(text.matches(original.as_str()).count(), 1);
+    let forged = text
+        .replacen(&declared, agent_id, 1)
+        .replacen(&original, &renamed, 1);
+    let (_scratch, _path, mut receiver) = open_store();
+    copy_audit_blobs(&f.store, &mut receiver);
+    let dohc_engine_storage::TxnOutcome::Committed(forged_manifest) = receiver
+        .write_with(&NoFaults, |tx| {
+            let mut writer = chunks::ChunkWriter::new(tx);
+            writer.write_all(forged.as_bytes()).unwrap();
+            writer.finish()
+        })
+        .unwrap()
+    else {
+        panic!("record write rolled back")
+    };
+    ops[at].payload["manifest"] = serde_json::to_value(forged_manifest).unwrap();
+    let mut refused = false;
+    for (index, mut op) in ops.into_iter().enumerate() {
+        op.relay_seq = Some(op.origin_seq + 1);
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        if index == at && matches!(result.primary, ApplyDisposition::Refused(_)) {
+            refused = true;
+        } else {
+            assert!(
+                matches!(result.primary, ApplyDisposition::Applied(_)),
+                "{}: {:?}",
+                op.op_kind,
+                result.primary
+            );
+        }
+    }
+    assert_eq!(count(&receiver, "live_audit_events"), i64::from(!refused));
+    refused
+}
+
 #[test]
 fn admitted_link_history_roundtrips_without_creating_native_authority() {
     use dohc_engine_collab::live_update_application::{
