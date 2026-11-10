@@ -144,19 +144,23 @@ impl ActorHandle {
                 Err(DomainError::WorkspaceNotFound) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
-            let Some(owed) = store
-                .read_with(|conn| obligations::held_at_in(conn, &workspace, &version, &path))?
-            else {
-                return Ok(None);
-            };
-            let Some(marker) = dohc_engine_collab::read_marker(store, &owed.key)? else {
-                return Ok(None);
-            };
             // Recovery retires a row whose lineage was replaced without
-            // writing it, so nothing of that row is held.
-            if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id {
-                return Ok(None);
+            // writing it, so the held save is the first of the current lineage.
+            let mut current = None;
+            for owed in store
+                .read_with(|conn| obligations::held_at_in(conn, &workspace, &version, &path))?
+            {
+                let Some(marker) = dohc_engine_collab::read_marker(store, &owed.key)? else {
+                    continue;
+                };
+                if marker.lineage_claim_id.as_deref().unwrap_or("") == owed.lineage_claim_id {
+                    current = Some((owed, marker));
+                    break;
+                }
             }
+            let Some((owed, marker)) = current else {
+                return Ok(None);
+            };
             let unavailable = |unavailable| {
                 Ok(Some(HeldMarkdownChange::Unavailable {
                     path: path.clone(),

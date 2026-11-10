@@ -205,27 +205,27 @@ pub fn pending_in(conn: &Connection, workspace_id: &str) -> Result<Vec<Obligatio
         .collect()
 }
 
-/// The earliest held save at one path, read without decoding the
-/// workspace's other pending rows.
+/// The held saves at one path in order, read without decoding the
+/// workspace's other pending rows. A replaced lineage's row can wait here
+/// beside the current lineage's until recovery retires it.
 pub fn held_at_in(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     path: &str,
-) -> Result<Option<Obligation>, CollabError> {
-    let row = conn
-        .query_row(
-            &format!(
-                "SELECT {COLUMNS} FROM markdown_write_obligations WHERE workspace_id=?1 \
-                 AND completed=0 AND version_id=?2 AND path=?3 \
-                 AND held_checkpoint_sha256 IS NOT NULL ORDER BY obligation_order LIMIT 1"
-            ),
-            params![workspace_id, version_id, path],
-            read_row,
-        )
-        .optional()
+) -> Result<Vec<Obligation>, CollabError> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {COLUMNS} FROM markdown_write_obligations WHERE workspace_id=?1 \
+             AND completed=0 AND version_id=?2 AND path=?3 \
+             AND held_checkpoint_sha256 IS NOT NULL ORDER BY obligation_order"
+        ))
         .map_err(crate::durable::map_sql)?;
-    row.map(|row| decode(workspace_id, row)).transpose()
+    let rows = statement
+        .query_map(params![workspace_id, version_id, path], read_row)
+        .map_err(crate::durable::map_sql)?;
+    rows.map(|row| decode(workspace_id, row.map_err(crate::durable::map_sql)?))
+        .collect()
 }
 
 type Row = (
