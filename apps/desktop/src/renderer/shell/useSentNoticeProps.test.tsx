@@ -25,7 +25,7 @@ import {
   type NoticeTarget,
 } from "../../notices/noticeTarget";
 import { findNoticeChat } from "./findNoticeChat";
-import type { SentNotices } from "./useSentNotices";
+import { useSentNotices, type SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
 import { showChat } from "../workbench/chatsOnScreen";
@@ -918,5 +918,60 @@ describe("an agent run's notice while its chat is on screen", () => {
     const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
     expect(result.current.sentNoticeToast?.notice).toBe(reply);
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+});
+
+// Being in a share reads its "Shared … with you" row, wherever it opened from.
+describe("a share this workspace holds", () => {
+  const shared = (noticeId: string, recipientShareId: string, readAtMs: number | null = null) => notice({
+    noticeId, kind: "share-received", recipientShareId, senderKind: "person", title: "Ana shared Trip with you",
+    body: "Edit access · From Ana", target: { share: recipientShareId }, readAtMs,
+  });
+  const rows = [shared("s1", "share-1"), shared("s2", "share-2"), notice({ noticeId: "report" }), shared("old", "share-1", 5)];
+
+  it.each([
+    ["its own view", workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })],
+    ["shared-with-me", workspace("trip", { shareMounts: [{ shareId: "share-1", label: "ana", granterEmail: null }] })],
+  ])("reads only that share's unread row while this workspace holds it as %s", (_where, trip) => {
+    const { sentNotices } = setup(rows, [trip], "trip");
+    expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([{ store: "account", noticeId: "s1" }]);
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("reads no row in a workspace that holds no share", () => {
+    const trip = workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } });
+    const { sentNotices } = setup(rows, [workspace("notes"), trip], "notes");
+    expect(sentNotices.read).not.toHaveBeenCalled();
+  });
+
+  it("asks once for a row whose read fails, which the list then shows unread", async () => {
+    const listNotices = vi.fn(async () => ({ account: "ana@example.com", notices: [shared("s1", "share-1")] }));
+    const marks: ReturnType<typeof deferred<void>>[] = [];
+    const markNotices = vi.fn(() => {
+      const mark = deferred<void>();
+      marks.push(mark);
+      return mark.promise;
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...(Reflect.get(globalThis, "dohcDesktop") as object), listNotices, markNotices, onNoticesChanged: () => () => undefined,
+    });
+    const { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError } =
+      setup([], [workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })], "trip");
+    const input = { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError };
+    const { result } = renderHook(() => {
+      const sentNotices = useSentNotices(true);
+      useSentNoticeProps({ ...input, sentNotices });
+      return sentNotices;
+    });
+    await waitFor(() => expect(markNotices).toHaveBeenCalledTimes(1));
+    // The row shows read while main has the mark, then main refuses it.
+    await waitFor(() => expect(result.current.notices[0]?.readAtMs).not.toBeNull());
+    await act(async () => {
+      marks[0]!.reject(new Error("offline"));
+      await marks[0]!.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(listNotices).toHaveBeenCalledTimes(2));
+    expect(result.current.notices.map((row) => row.readAtMs)).toEqual([null]);
+    expect(markNotices).toHaveBeenCalledTimes(1);
   });
 });

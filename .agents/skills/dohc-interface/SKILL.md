@@ -275,7 +275,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- A row in Notices stays unread until the pointer or keyboard focus reaches it, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A row in Notices stays unread until the pointer or keyboard focus reaches it, the person presses **Mark all read**, or the person opens what the row is about. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
 - A Notices row opens what it is about. A click, Enter or Space on the row goes where its Open or Review action goes, and reads the row. A row whose actions only change state, such as **Try again**, opens where the problem is, or nowhere. Opening a row never retries, sends, installs or deletes.
 - A row with nowhere to go has no pointer, hover fill, role or Tab stop. Arrow keys still reach it, so the keyboard can read and dismiss it.
 - A row's own actions and icon controls do only what they name, and never also open the row.
