@@ -125,11 +125,12 @@ describe("registered workspace version handlers", () => {
     });
   });
 
-  it("explains the adopted shared-note refusal without an engine code", async () => {
+  it("preserves the engine refusal for the shared error presenter", async () => {
     const h = harness();
-    h.operations.heldNoteChange.mockRejectedValue(new Error("owner-outbox-frozen"));
+    const refusal = new Error("held-change-shared-owner");
+    h.operations.heldNoteChange.mockRejectedValue(refusal);
     await expect(h.invoke(ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action: "review"}))
-      .rejects.toThrow("Drop is not available for shared notes yet. Keep the waiting edits or save a copy.");
+      .rejects.toBe(refusal);
   });
   it.each(requests)("refuses %s from a window showing another workspace", async (channel, payload) => {
     const h = harness();

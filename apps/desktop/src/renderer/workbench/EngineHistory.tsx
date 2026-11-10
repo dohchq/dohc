@@ -152,7 +152,7 @@ function personalAuthorId(moment: Pick<EngineMomentRecord, "authors" | "authorPr
 
 function isHeldChangeMoment(moment: SourcedMoment): boolean {
   return moment.origin === "capture-recovery-cleared"
-    && (moment.correlationId === "held-change:drop" || moment.correlationId === "held-change:undo");
+    && (moment.correlationId?.startsWith("held-change:drop:") === true || moment.correlationId?.startsWith("held-change:undo:") === true);
 }
 
 function sourceName(moment: SourcedMoment): string | undefined {

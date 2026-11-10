@@ -1,6 +1,6 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use dohc_engine_collab::{ContentKind, DocKey, Ydoc, markdown_write_obligations as obligations};
+use dohc_engine_collab::{CollabError, ContentKind, DocKey, Ydoc, markdown_write_obligations as obligations};
 use dohc_engine_domain::{DomainError, VersionedTextStore};
 use dohc_engine_files::{ProjectionTargetKind, ProjectionTargetState, probe_projection_target};
 use dohc_engine_storage::{NoFaults, TxnOutcome, hex_sha256};
@@ -81,6 +81,9 @@ impl ActorHandle {
             let restore = store.read_with(|conn| {
                 dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, &key)?;
                 dohc_engine_collab::live_update_application::restore_generation(conn, &key)
+            }).map_err(|error| match error {
+                CollabError::OwnerOutboxFrozen => refusal("held-change-shared-owner"),
+                error => error.into(),
             })?;
             if store.read_with(|conn| conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2 AND path=?3 AND status='open')",
@@ -121,8 +124,8 @@ impl ActorHandle {
                         if owed.iter().any(|row| row.kind == obligations::Kind::AuditedSettle) {
                             return Err(refusal("held-change-conflict"));
                         }
-                        let session = owed.iter().find(|row| row.kind == obligations::Kind::Session
-                            && row.held_checkpoint_sha256.is_some()).ok_or_else(|| refusal("held-change-missing"))?;
+                        let held_row = owed.iter().find(|row| row.held_checkpoint_sha256.is_some())
+                            .ok_or_else(|| refusal("held-change-missing"))?;
                         if token != &current_token || !owed.iter().any(|row| row.held_checkpoint_sha256.is_some())
                             || owed.iter().filter(|row| row.held_checkpoint_sha256.is_some()).any(|row| row.held_head_sha256.as_deref() != Some(head.blob_sha256.as_str())) {
                             return Err(refusal("held-change-stale"));
@@ -133,8 +136,8 @@ impl ActorHandle {
                         dohc_engine_domain::store::record_keyed_capture_recovery_in_tx(tx, &key.workspace_id, &head,
                             &text, &moment, author_json.as_deref(), now_ms)?;
                         dohc_engine_domain::clear_capture_recovery_in(tx, &key.workspace_id, &moment)?;
-                        tx.execute("UPDATE moments SET metadata_summary='Dropped held change',metadata_correlation_id='held-change:drop' WHERE workspace_id=?1 AND moment_id=?2",
-                            params![key.workspace_id,moment]).map_err(StorageError::persist_public)?;
+                        tx.execute("UPDATE moments SET metadata_summary='Dropped held change',metadata_correlation_id=?3 WHERE workspace_id=?1 AND moment_id=?2",
+                            params![key.workspace_id,moment,format!("held-change:drop:{current_token}")]).map_err(StorageError::persist_public)?;
                         let delta = doc.reset_held_content_to_file(ContentKind::Richdoc, &head.text)?;
                         let after_sha = document_fingerprint(&doc);
                         let saved = serde_json::json!({"heldDrop": {
@@ -143,13 +146,14 @@ impl ActorHandle {
                             "restoreGeneration": restore, "authors": authors, "historyMomentId": moment,
                         }});
                         for row in &owed { obligations::complete_in(tx, row, now_ms)?; }
+                        dohc_engine_sync::clear_markdown_hold_refusals_in_tx(tx, &key, &held_row.lineage_claim_id)?;
                         tx.execute("UPDATE markdown_write_obligations SET retry_inputs_json=?2 WHERE obligation_order=?1",
-                            params![session.order, saved.to_string()]).map_err(StorageError::persist_public)?;
+                            params![held_row.order, saved.to_string()]).map_err(StorageError::persist_public)?;
                         (delta, current_token.clone(), Some(moment), false, authors.clone())
                     }
                     HeldChangeAction::Undo { token } => {
                         let saved: Option<String> = tx.query_row("SELECT retry_inputs_json FROM markdown_write_obligations \
-                            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND kind='session' AND completed=1 \
+                            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND kind!='audited-settle' AND completed=1 \
                             AND json_extract(retry_inputs_json,'$.heldDrop.token')=?5 ORDER BY obligation_order DESC LIMIT 1",
                             params![key.workspace_id,key.version_id,key.object_id,marker.lineage_claim_id,token], |row| row.get(0))
                             .optional().map_err(StorageError::corrupt_public)?;
@@ -170,8 +174,8 @@ impl ActorHandle {
                         dohc_engine_domain::store::record_keyed_capture_recovery_in_tx(tx, &key.workspace_id, &head,
                             &text, &moment, author_json.as_deref(), now_ms)?;
                         dohc_engine_domain::clear_capture_recovery_in(tx, &key.workspace_id, &moment)?;
-                        tx.execute("UPDATE moments SET metadata_summary='Restored held change',metadata_correlation_id='held-change:undo' WHERE workspace_id=?1 AND moment_id=?2",
-                            params![key.workspace_id,moment]).map_err(StorageError::persist_public)?;
+                        tx.execute("UPDATE moments SET metadata_summary='Restored held change',metadata_correlation_id=?3 WHERE workspace_id=?1 AND moment_id=?2",
+                            params![key.workspace_id,moment,format!("held-change:undo:{token}")]).map_err(StorageError::persist_public)?;
                         (delta, token.clone(), Some(moment), true, drop["authors"].clone())
                     }
                     HeldChangeAction::Review => unreachable!(),

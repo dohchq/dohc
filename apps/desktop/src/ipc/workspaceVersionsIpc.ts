@@ -70,12 +70,7 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
       const {workspaceId, ...params} = input;
       const request = params.action === "review" ? params : {...params, author: await dependencies.localPerson()};
       const capture = await requireVersionOperations(workspaceId);
-      const result = await capture.heldNoteChange(request).catch(error => {
-        if (error instanceof Error && error.message.includes("owner-outbox-frozen")) {
-          throw new Error("Drop is not available for shared notes yet. Keep the waiting edits or save a copy.");
-        }
-        throw error;
-      });
+      const result = await capture.heldNoteChange(request);
       if (input.action !== "review") {
         notifyRenderer({workspaceId: input.workspaceId});
         dependencies.onRefusalsChanged?.();

@@ -640,29 +640,9 @@ fn map_domain(error: &DomainError) -> WireError {
             return WireError::new(InvalidParams, format!("invalid-input: {reason}"));
         }
         DomainError::InvalidInput {
-            reason: "held-change-stale",
-        } => (
-            InvalidParams,
-            "The note or its file changed. Review the held change again before dropping it.",
-        ),
-        DomainError::InvalidInput {
-            reason: "held-change-missing",
-        } => (
-            InvalidParams,
-            "There is no held change to drop. Open the note again.",
-        ),
-        DomainError::InvalidInput {
-            reason: "held-change-conflict",
-        } => (
-            InvalidParams,
-            "The note has a conflict. Resolve it before dropping the held change.",
-        ),
-        DomainError::InvalidInput {
-            reason: "held-change-undo-stale",
-        } => (
-            InvalidParams,
-            "The note changed after Drop. Find the waiting text in History.",
-        ),
+            reason: reason @ ("held-change-stale" | "held-change-missing" | "held-change-conflict"
+                | "held-change-undo-stale" | "held-change-shared-owner"),
+        } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
         DomainError::Storage(_) => (Internal, "persist-failed"),
@@ -831,6 +811,22 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn held_change_refusals_preserve_stable_reasons() {
+        for reason in [
+            "held-change-shared-owner",
+            "held-change-stale",
+            "held-change-missing",
+            "held-change-conflict",
+            "held-change-undo-stale",
+        ] {
+            let wire = super::map_runtime(dohc_engine_domain::DomainError::InvalidInput { reason }.into());
+            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::InvalidParams);
+            assert_eq!(wire.message, reason);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
+        }
+    }
+
     #[test]
     fn undo_refusal_wire_text_keeps_the_domain_prefix() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(

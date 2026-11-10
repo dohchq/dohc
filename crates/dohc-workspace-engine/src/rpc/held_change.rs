@@ -66,7 +66,7 @@ impl EngineService {
                 .ok_or_else(|| {
                     WireError::new(
                         ErrorCode::InvalidParams,
-                        "The note moved or changed. Open it again.",
+                        "held-change-stale",
                     )
                 })?;
             let key = DocKey::new(&open.workspace_id, version, object)
@@ -107,11 +107,7 @@ impl EngineService {
                             session.conversion_consent = Some(consent);
                         }
                     }
-                    return Err(match error {
-                        dohc_engine_runtime::RuntimeError::Collab(dohc_engine_collab::CollabError::OwnerOutboxFrozen) =>
-                            WireError::new(ErrorCode::InvalidParams, "Drop is not available for shared notes yet. Keep the waiting edits or save a copy."),
-                        error => map_runtime(error),
-                    });
+                    return Err(map_runtime(error));
                 }
             };
             if changes {

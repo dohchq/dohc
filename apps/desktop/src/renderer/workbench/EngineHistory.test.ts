@@ -74,7 +74,7 @@ describe("engineOriginLabel", () => {
 describe("momentDescription", () => {
   it.each(["drop", "undo"])("names the local person who performed held-change %s", action => {
     const change = moment({id: `held-${action}`, origin: "capture-recovery-cleared", personAuthorName: "Ice",
-      correlationId: `held-change:${action}`, summary: action === "drop" ? "Dropped held change" : "Restored held change"});
+      correlationId: `held-change:${action}:token`, summary: action === "drop" ? "Dropped held change" : "Restored held change"});
     expect(engineMomentAuthorName(change)).toBe("Ice");
     expect(engineMomentSourceLabel(change)).toBe("Ice");
     expect(momentDescription(change)).toContain(", Ice,");
@@ -244,6 +244,13 @@ function groupEngineMoments(moments: EngineMomentRecord[]) {
 }
 
 describe("groupTimeline", () => {
+  it("keeps Drops on different notes as separate History items", () => {
+    const groups = groupEngineMoments([
+      moment({id: "drop-b", path: "b.md", momentOrder: 2, correlationId: "held-change:drop:token-b"}),
+      moment({id: "drop-a", path: "a.md", momentOrder: 1, correlationId: "held-change:drop:token-a"}),
+    ]);
+    expect(groups.map(group => group.moments.map(entry => entry.path))).toEqual([["b.md"], ["a.md"]]);
+  });
   it("keeps every entry kind in the order main merged them", () => {
     const items = groupTimeline([
       { kind: "file", moment: moment({ id: "m2", momentOrder: 2, correlationId: "pass" }) },

@@ -23,6 +23,13 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
+const HELD_CHANGE_WORDS: Readonly<Record<string, string>> = {
+  "held-change-shared-owner": "Drop is not available for shared notes yet. Use Edit anyway to save the waiting edits.",
+  "held-change-stale": "The note or its file changed. Choose Drop again to review the waiting edits.",
+  "held-change-missing": "There is no held change to drop. Open the note again.",
+  "held-change-conflict": "The note has a conflict. Resolve it before using Drop.",
+  "held-change-undo-stale": "The note changed after Drop. Open History to find the waiting text.",
+};
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
@@ -356,6 +363,9 @@ const NOT_A_WORKSPACE = { canRetry: false, refusal: "not-a-workspace" } as const
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "DaemonRefusalError" && Object.hasOwn(HELD_CHANGE_WORDS, message)) {
+    return {words: HELD_CHANGE_WORDS[message]!, mapped: true, cause: text, canRetry: false};
+  }
   if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
     const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
     // dohc's own refusal carries an instruction or the Reason as its message,

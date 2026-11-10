@@ -99,6 +99,18 @@ function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
 
+it.each([
+  ["held-change-shared-owner", "Drop is not available for shared notes yet. Use Edit anyway to save the waiting edits."],
+  ["held-change-stale", "The note or its file changed. Choose Drop again to review the waiting edits."],
+  ["held-change-missing", "There is no held change to drop. Open the note again."],
+  ["held-change-conflict", "The note has a conflict. Resolve it before using Drop."],
+  ["held-change-undo-stale", "The note changed after Drop. Open History to find the waiting text."],
+])("shows %s across Electron without offering a futile retry", (reason, words) => {
+  const received = acrossIpc(refusal("INVALID_PARAMS", reason), "desktop:held-note-change");
+  expect(readError(received)).toMatchObject({words, canRetry: false});
+  expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
+});
+
 it("keeps the taken group name signal across IPC without matching its words", () => {
   const error = new Error("A group with that name already exists.");
   error.name = GROUP_NAME_TAKEN_ERROR;

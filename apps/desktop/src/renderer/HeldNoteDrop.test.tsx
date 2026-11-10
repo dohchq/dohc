@@ -4,6 +4,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { HeldNoteChangeResult } from "../ipc/bridgeContract";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "../ipc/errorWords";
 import { HeldNoteDrop, waitingAuthors } from "./HeldNoteDrop";
 import { useShellError } from "./shell/useShellError";
 import { NoticeCenter, WorkspaceErrorToast } from "./workbench/NoticeCenter";
@@ -103,4 +105,31 @@ it("keeps a refused Drop in Notices after its toast closes and retries with a ne
   await user.click(screen.getByRole("button", {name: "Try again"}));
   expect(await screen.findByRole("dialog", {name: "Drop the held change?"})).toBeTruthy();
   expect(heldNoteChange.mock.calls.map(([input]) => input.action)).toEqual(["review", "drop", "review"]);
+});
+
+it("shows the engine's shared-note refusal in the toast and Notices without Try again", async () => {
+  function FailureHarness() {
+    const notices = useShellError("workspace");
+    return <>
+      <HeldNoteDrop workspaceId="workspace" path="note.md" onError={notices.reportButtonError} />
+      <NoticeCenter workspaceId="workspace" syncStatus={null} agentActive={false} conflictSummaries={[]}
+        onOpenHistory={() => {}} onOpenSettings={() => {}} onOpenConflicts={() => {}}
+        onRefreshShareView={() => {}} onRebuildEngineStore={() => {}}
+        workspaceErrors={notices.shellErrors.map(error => ({...error, canRetry: error.retry !== null}))}
+        onHideWorkspaceError={notices.hideShellError} onRetryWorkspaceError={notices.retryShellError} />
+    </>;
+  }
+  const error = new DaemonRefusalError({code: "INVALID_PARAMS", message: "held-change-shared-owner", retry: "no"}, null);
+  heldNoteChange.mockRejectedValue(new Error(`Error invoking remote method 'desktop:held-note-change': ${String(ipcWireError(error))}`));
+  const user = userEvent.setup();
+  render(<FailureHarness />);
+  await user.click(screen.getByRole("button", {name: "Drop"}));
+  const toast = await screen.findByRole("alert");
+  const words = "Drop is not available for shared notes yet. Use Edit anyway to save the waiting edits.";
+  expect(toast.textContent).toContain(words);
+  expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+  await user.click(within(toast).getByRole("button", {name: "Dismiss workspace error"}));
+  await user.click(screen.getByRole("button", {name: /Notices/u}));
+  expect(screen.getByText(new RegExp(words.replaceAll(".", "\\."), "u"))).toBeTruthy();
+  expect(screen.queryByRole("button", {name: "Try again"})).toBeNull();
 });
