@@ -1963,64 +1963,6 @@ fn imported_recipient_creation_claims_both_creation_triggers_with_its_actual_aut
 }
 
 #[test]
-fn a_personal_agent_creation_claims_both_creation_triggers_on_its_owners_behalf() {
-    const AGENT: &str = "p-abcdefghijklmnopqrstuvwxyz";
-    let (_scratch, _db, mut engine) = imported_creation_fixture();
-    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: Ready\n---\n";
-    let mut payload = create_moment(
-        "moment-agent-created",
-        "object-record",
-        "shared/docs/tasks/Ready.md",
-        text,
-    );
-    payload["authors"] = json!([{
-        "kind": "agent",
-        "agentId": AGENT,
-        "agentName": "Helper",
-        "onBehalfOf": "owner"
-    }]);
-    let origin = format!("relay:personal-collection:{AGENT}");
-    let creation = envelope(&origin, 0, "moment.append", payload);
-    let imported = apply_replication_envelope(
-        &mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &creation,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("import personal agent creation");
-    assert!(
-        matches!(imported.primary, ApplyDisposition::Applied(_)),
-        "{imported:?}"
-    );
-    let claims = reconcile_imported_creation(&mut engine);
-    assert_eq!(
-        claims
-            .iter()
-            .map(|claim| claim.automation_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "collection:object-tasks#record-added",
-            "collection:object-tasks#starts-matching"
-        ]
-    );
-    for claim in &claims {
-        assert_eq!(claim.change.author_origin_id.as_deref(), Some(AGENT));
-        assert_eq!(
-            claim.change.actor_kind,
-            Some(dohc_engine_domain::ChangeActorKind::Agent)
-        );
-        assert_eq!(claim.change.on_behalf_of.as_deref(), Some("owner"));
-        assert_eq!(claim.change.shared_author, None);
-        assert_eq!(claim.depth, 0);
-    }
-    assert!(
-        reconcile_imported_creation(&mut engine).is_empty(),
-        "reconcile does not claim a creation twice"
-    );
-}
-
-#[test]
 fn an_ordinary_imported_creation_does_not_claim_either_creation_trigger() {
     let (_scratch, _db, mut engine) = imported_creation_fixture();
     let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: Ready\n---\n";

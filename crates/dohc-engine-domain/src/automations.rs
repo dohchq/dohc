@@ -2244,31 +2244,19 @@ fn moment_is_local(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// Whether a moment is a Collection record the relay created for a share's
-/// recipient or link holder, or for a personal agent. No computer committed
-/// it, so the owner's computer claims it.
 fn moment_is_direct_creation(
     conn: &Connection,
     workspace_id: &str,
     moment_order: i64,
-    change: &AutomationChange,
+    author: Option<&SharedChangeAuthor>,
 ) -> Result<bool, DomainError> {
-    let origin_id = match (&change.shared_author, change.author_origin_id.as_deref()) {
-        (Some(SharedChangeAuthor::Named { grant_id, .. }), _)
-        | (Some(SharedChangeAuthor::Link { grant_id, .. }), _) => {
-            format!("relay:collection-file:{grant_id}")
-        }
-        (None, Some(agent_id))
-            if change.actor_kind == Some(ChangeActorKind::Agent)
-                && agent_id.starts_with(crate::chats::PERSONAL_AGENT_ID_PREFIX) =>
-        {
-            format!("relay:personal-collection:{agent_id}")
-        }
-        _ => return Ok(false),
+    let grant_id = match author {
+        Some(SharedChangeAuthor::Named { grant_id, .. })
+        | Some(SharedChangeAuthor::Link { grant_id, .. }) => grant_id,
+        None => return Ok(false),
     };
-    // Sync accepts each of these origins only with its matching relay-derived
-    // author, writing a Collection's own files. Other imported moments stay
-    // remote.
+    // Sync accepts this origin only with its matching relay-derived author
+    // and a Collection record creation. Other imported moments stay remote.
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM moments m JOIN replication_log r \
            ON r.workspace_id = m.workspace_id AND r.op_kind = 'moment.append' \
@@ -2276,7 +2264,11 @@ fn moment_is_direct_creation(
          WHERE m.workspace_id = ?1 AND m.moment_order = ?2 \
            AND m.operation = 'write' AND m.before_present <> 2 \
            AND r.imported = 1 AND r.origin_id = ?3)",
-        params![workspace_id, moment_order, origin_id],
+        params![
+            workspace_id,
+            moment_order,
+            format!("relay:collection-file:{grant_id}")
+        ],
         |row| row.get(0),
     )
     .map_err(DomainError::sql_corrupt)
@@ -2405,7 +2397,7 @@ pub fn claim_record_lifecycle_in_tx(
                         conn,
                         workspace_id,
                         moment.moment_order,
-                        &change,
+                        change.shared_author.as_ref(),
                     )?);
             if !claims_here || moment_is_merged(conn, workspace_id, moment.moment_order)? {
                 continue;
