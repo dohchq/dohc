@@ -148,6 +148,7 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
         for source in [
             "Changed beside list\n\n- parent\n  - child\n",
             "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n",
+            "Changed\r\n\r\n- parent\r\n  - child\r\n",
         ] {
             let (scratch, mut store, key) = fixture(joined);
             std::fs::write(scratch.path().join("note.md"), source).unwrap();
@@ -189,6 +190,13 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 ("Before\n\n- parent\n  - child\n".into(), source.into())
             );
             assert_ne!(before.encode_state_vector(), doc.encode_state_vector());
+            // Capture left the file as it is, so a dohc edit gives settlement a write.
+            let edit = doc.richdoc_append_paragraph("Added in dohc");
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::record_update_in_tx(tx, &key, &edit, None, None, 6)
+                })
+                .unwrap();
             let marker = dohc_engine_collab::read_marker(&store, &key)
                 .unwrap()
                 .unwrap();
@@ -205,7 +213,7 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 None,
                 "test-session",
                 &(),
-                6,
+                7,
                 &NoFaults,
                 &CancellationToken::new(),
                 None,
@@ -216,9 +224,11 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 None,
             )
             .unwrap();
+            // The edit keeps the note's line endings and its final newline.
+            let newline = if source.contains('\r') { "\r\n" } else { "\n" };
             assert_eq!(
-                std::fs::read(scratch.path().join("note.md")).unwrap(),
-                source.as_bytes()
+                std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+                format!("{source}{newline}Added in dohc{newline}")
             );
         }
     }
@@ -227,14 +237,17 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_noncanonical_and_native_match_existing_capture() {
+    // The first source doesn't need the reader. For the rest, the reader's
+    // result can't be used: four differ in Markdown form from the engine's
+    // output, and the last two lack its final newline.
     for source in [
         "Plain native paragraph",
-        "* parent\n  * child",
-        "- parent\n    - child",
-        "__bold__",
-        "- first\ncontinuation",
+        "* parent\n  * child\n",
+        "- parent\n    - child\n",
+        "__bold__\n",
+        "- first\ncontinuation\n",
         "Changed\n\n- parent\n  - child",
-        "Changed\r\n\r\n- parent\r\n  - child\r\n",
+        "Changed\r\n\r\n- parent\r\n  - child",
     ] {
         let mut outcomes = Vec::new();
         for configured in [false, true] {
@@ -677,7 +690,9 @@ fn round1_batch(
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author() {
-    let (scratch, store, _) = fixture(false);
+    let (scratch, store, key) = fixture(false);
+    // The reader folds the receipt, so the file change after preparation makes that fold stale.
+    fold(&store, &key, "**Receipt A**\n").await;
     let db = store.database_path().to_owned();
     drop(store);
     let supervisor = crate::WorkspaceSupervisor::new();
@@ -691,13 +706,13 @@ async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author()
         )))
         .await
         .unwrap();
-    let mut captured = input("**Receipt A**");
+    let mut captured = input("**Receipt A**\n");
     captured.author_json = Some(r#"[{"name":"capture-sink-author"}]"#.into());
     let author = captured.author_json.clone();
     std::fs::write(scratch.path().join("note.md"), &captured.text).unwrap();
     hooks().lock().unwrap().insert(
         scratch.path().to_owned(),
-        VecDeque::from([Change::File("**Later B**".into())]),
+        VecDeque::from([Change::File("**Later B**\n".into())]),
     );
     let results = round1_batch(
         actor.clone(),
@@ -731,11 +746,11 @@ async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author()
     let later = round1_batch(
         actor,
         scratch.path().to_owned(),
-        vec![input("**Later B**")],
+        vec![input("**Later B**\n")],
         Arc::new(Round1Root),
     )
     .unwrap();
-    assert_eq!(later[0].as_ref().unwrap().snapshot.text, "**Later B**");
+    assert_eq!(later[0].as_ref().unwrap().snapshot.text, "**Later B**\n");
     assert_eq!(reader.dispatch_count(), 2);
     supervisor.close(&db).unwrap();
 }

@@ -592,7 +592,10 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
     drop(lease);
     f.close().await;
     assert!(result.unwrap().not_restored.is_empty());
-    assert_eq!(text, "typing [[old#part|label]] [[./old.md]] [old](old.md)\n");
+    assert_eq!(
+        text,
+        "typing [[old#part|label]] [[./old.md]] [old](old.md)\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

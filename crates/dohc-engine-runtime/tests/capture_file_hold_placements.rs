@@ -471,8 +471,9 @@ async fn a_held_outside_edit_survives_a_dohc_edit_and_restart() {
         capture_outside(&actor, &scratch, &outside, 6).await,
         Err("capture-file-held")
     );
-    // A dohc-side edit to the same note settles without placing over the file.
-    let recorded = actor
+    // Opening the note is refused, so a person can't make this edit in dohc.
+    // Forced in the store, its settle is refused as stale, keeping the file.
+    actor
         .ydoc_record_update(
             key.clone(),
             FILE.into(),
@@ -490,7 +491,8 @@ async fn a_held_outside_edit_survives_a_dohc_edit_and_restart() {
             CancellationToken::new(),
             None,
         )
-        .await;
+        .await
+        .unwrap();
     let settled = actor
         .ydoc_settle(
             scratch.path().into(),
@@ -508,9 +510,9 @@ async fn a_held_outside_edit_survives_a_dohc_edit_and_restart() {
             None,
         )
         .await;
-    let errors = (recorded.as_ref().err(), settled.as_ref().err());
-    assert_eq!(file(&scratch), outside, "{errors:?}");
-    assert!(settled.is_err(), "{errors:?}");
+    let refused = settled.err().map(|error| error.code());
+    assert_eq!(refused, Some("conflict-stale-target"));
+    assert_eq!(file(&scratch), outside);
     supervisor.close(&db).unwrap();
     let actor = supervisor.open(&db, 9).unwrap().actor;
     actor
@@ -542,17 +544,20 @@ async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
     let first = &holds[0];
     assert_eq!((first.attempt_count, first.retry_requested), (2, false));
     assert_eq!(file(&scratch), outside);
+    // A final newline on the edited file doesn't help: its body no longer
+    // matches the body the desktop seeded, which had no final newline.
+    let ended = format!("{outside}\n");
+    assert_eq!(capture_outside(&actor, &scratch, &ended, 7).await, held);
     // The earlier bytes lack the final newline too, so they are held as well.
-    assert_eq!(capture_outside(&actor, &scratch, &initial, 7).await, held);
+    assert_eq!(capture_outside(&actor, &scratch, &initial, 8).await, held);
     // The earlier bytes as dohc writes them release the file.
     let before = format!("{initial}\n");
-    assert_eq!(capture_outside(&actor, &scratch, &before, 8).await, Ok(()));
+    assert_eq!(capture_outside(&actor, &scratch, &before, 9).await, Ok(()));
     let holds = actor.capture_file_holds(WS.into()).await.unwrap();
     assert!(holds.is_empty(), "{holds:?}");
     assert_eq!(open_error(&actor).await, None);
     // The same outside edit, with the final newline kept, is then taken in.
-    let edit = format!("{outside}\n");
-    assert_eq!(capture_outside(&actor, &scratch, &edit, 10).await, Ok(()));
-    assert_eq!(file(&scratch), edit);
+    assert_eq!(capture_outside(&actor, &scratch, &ended, 10).await, Ok(()));
+    assert_eq!(file(&scratch), ended);
     supervisor.close(&db).unwrap();
 }

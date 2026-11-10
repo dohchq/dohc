@@ -2994,7 +2994,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
                     conn,
                     &key,
                     &persisted.doc,
-                    ContentKind::Richdoc,
+                    dohc_engine_collab::ContentKind::Richdoc,
                 )
             })
             .expect("store projection");

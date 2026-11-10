@@ -420,6 +420,11 @@ fn replay_into_clean_peer(
         .expect("the clean peer applies every originated op");
     }
 
+    peer_text(&peer, workspace_id, path)
+}
+
+/// The text `peer` materialized for `path` on main.
+fn peer_text(peer: &EngineStore, workspace_id: &str, path: &str) -> String {
     peer.read_with(|conn| {
         conn.query_row(
             "SELECT b.text FROM path_aliases a \
@@ -430,7 +435,7 @@ fn replay_into_clean_peer(
             |row| row.get::<_, String>(0),
         )
     })
-    .expect("the clean peer materialized the document")
+    .expect("the peer materialized the document")
 }
 
 async fn capture_seed(
@@ -606,6 +611,7 @@ async fn assert_capture_authored_edit_replicates(ending: &str) {
         )
         .expect("peer applies replicated collection edit");
     }
+    assert_eq!(peer_text(&peer, WS, PATH), edited);
 
     let details = peer
         .read_with(|conn| get_collection_record(conn, WS, "tasks", RECORD, 20, None))
