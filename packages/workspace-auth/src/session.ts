@@ -1,4 +1,5 @@
 import type { Actor } from "@dohc/workspace-contracts";
+import type { Pool } from "pg";
 import type { WorkspaceAuth } from "./betterAuth";
 
 export type ResolveActor = (request: Request, workspaceId: string) => Actor | Promise<Actor>;
@@ -63,5 +64,44 @@ export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccoun
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) throw new UnauthorizedError();
     return accountSessionFrom(session);
+  };
+}
+
+/** One of an account's sign-ins as its owner may see it. It never carries the session token. */
+export interface AccountSessionSummary {
+  sessionId: string;
+  createdAtMs: number;
+  /** The client's user agent when it signed in; null when it sent none. */
+  userAgent: string | null;
+}
+
+export interface AccountSessions {
+  /** The account's unexpired sessions, newest first. */
+  list(userId: string): Promise<AccountSessionSummary[]>;
+  /**
+   * Deletes one of the account's unexpired sessions while the caller's own is
+   * still current. False when either is missing, expired, or another account's.
+   */
+  revoke(input: { userId: string; callerSessionId: string; sessionId: string }): Promise<boolean>;
+}
+
+// Reads Better Auth's session table directly, because its own list returns every session's token.
+export function createPostgresAccountSessions(pool: Pool): AccountSessions {
+  return {
+    async list(userId) {
+      const result = await pool.query<{ id: string; createdAt: Date; userAgent: string | null }>(
+        'select "id", "createdAt", "userAgent" from "session" where "userId" = $1 and "expiresAt" > now() order by "createdAt" desc, "id"',
+        [userId],
+      );
+      return result.rows.map(row => ({ sessionId: row.id, createdAtMs: row.createdAt.getTime(), userAgent: row.userAgent || null }));
+    },
+    async revoke({ userId, callerSessionId, sessionId }) {
+      const result = await pool.query(
+        `delete from "session" where "id" = $1 and "userId" = $2 and "expiresAt" > now()
+          and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())`,
+        [sessionId, userId, callerSessionId],
+      );
+      return result.rowCount === 1;
+    },
   };
 }

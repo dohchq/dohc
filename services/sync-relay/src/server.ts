@@ -31,7 +31,7 @@ import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreR
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import type { ResolveAccountSession, ResolveActor } from "@dohc/workspace-auth/session";
+import type { AccountSessions, ResolveAccountSession, ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
@@ -58,6 +58,7 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountOperationRateLimiter, createAccountOperationRoute } from "./accountOperationRoutes";
 import type { ServerCopies } from "./serverCopies";
+import { createAccountSessionRoutes } from "./accountSessionRoutes";
 import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -136,6 +137,8 @@ export interface CreateSyncRelayHandlerOptions {
   resolveActor: ResolveActor;
   // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
   resolveAccountSession?: ResolveAccountSession;
+  // The accounts' sign-ins in Better Auth's session table, which the account API lists and revokes.
+  accountSessions?: AccountSessions;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
   credentialFence?: CredentialFence;
   // This server's VAPID public key. Absent means alerts are unavailable here.
@@ -226,6 +229,7 @@ export function createSyncRelayHandler({
   storage,
   resolveActor,
   resolveAccountSession,
+  accountSessions,
   credentialFence,
   pushVapidPublicKey,
   pushHosts,
@@ -490,6 +494,8 @@ export function createSyncRelayHandler({
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const respondToAccountWorkspaces = accountApi && resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
+  const respondToAccountSessions = accountApi && resolveAccountSession && accountSessions
+    ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions }) : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
   const respondToAccountOperation = accountApi && resolveAccountSession
     ? createAccountOperationRoute({
@@ -1060,6 +1066,10 @@ export function createSyncRelayHandler({
       if (route.route === "account-workspaces" || route.route === "account-workspace") {
         if (!respondToAccountWorkspaces) throw notFound();
         return await respondToAccountWorkspaces(request, route);
+      }
+      if (route.route === "account-sessions" || route.route === "account-session-revoke") {
+        if (!respondToAccountSessions) throw notFound();
+        return await respondToAccountSessions(request, route);
       }
       if (route.route === "account-operation") {
         if (!respondToAccountOperation) throw notFound();
