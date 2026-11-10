@@ -6,7 +6,7 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { killProcessTreePosix, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
+import { killProcessTreePosix, parseProcessTable, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
   killProcessTreeWin32,
@@ -153,11 +153,28 @@ function isPidAlive(pid: number): boolean {
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
-function defaultDescendantsReader(pid: number): Promise<number[]> {
-  return processDescendants(
-    pid,
-    process.platform === "win32" ? readProcessTableWithPowershell : readProcessTableWithPs,
-  );
+function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
+  if (process.platform !== "win32") return processDescendants(pid, readProcessTableWithPs);
+  return processDescendants(pid, async () => withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt));
+}
+
+// Windows keeps a process's parent pid after that parent exits, and gives the
+// number to later processes. A row that started before the process now holding
+// its parent's pid belongs to another program, so it leaves the table, and a
+// stop never reaches it. The root counts as started when dohc spawned it,
+// because a read can land after the root exits. Times are local, in whole
+// seconds, with no offset, so an hour that repeats when clocks go back reads as
+// its first occurrence. The root's time is read the same way.
+export function withoutReusedParents(table: string, rootPid: number, rootSpawnedAt: number): string {
+  const rows = parseProcessTable(table);
+  const started = new Map(rows.map((row) => [row.pid, Date.parse(row.startedAt)]));
+  const spawned = new Date(rootSpawnedAt);
+  started.set(rootPid, new Date(spawned.getFullYear(), spawned.getMonth(), spawned.getDate(),
+    spawned.getHours(), spawned.getMinutes(), spawned.getSeconds()).getTime());
+  return rows
+    .filter((row) => !((started.get(row.ppid) ?? -Infinity) > Date.parse(row.startedAt)))
+    .map((row) => `${row.pid} ${row.ppid} ${row.startedAt}`)
+    .join("\n");
 }
 
 interface DescendantCapture {
@@ -196,14 +213,16 @@ interface DescendantCapture {
 function createDescendantCapture(
   child: ChildProcess,
   options: {
+    // Read before spawn, so it is no later than the child's own start.
+    spawnedAt: number;
     intervalMs?: number;
     reader?: (pid: number) => Promise<number[]>;
-  } = {},
+  },
 ): DescendantCapture {
   const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
   const inFlightCaptures = new Set<Promise<void>>();
-  const readDescendants = options.reader ?? defaultDescendantsReader;
+  const readDescendants = options.reader ?? ((pid: number) => defaultDescendantsReader(pid, options.spawnedAt));
   const captureOnce = (pid: number): Promise<void> => {
     // A read that fails or times out found nothing, so every stop that waits
     // for captures in flight still ends.
@@ -1032,6 +1051,7 @@ export async function startSiteDevServer(input: {
   // directly; resolveSpawnCommand is a no-op on other platforms.
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
   assertMayStart(input);
+  const spawnedAt = Date.now();
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
@@ -1046,6 +1066,7 @@ export async function startSiteDevServer(input: {
   // wrapper case), so a descendant it later backgrounds must stay reachable
   // by pid even once the wrapper itself is gone.
   const descendants = createDescendantCapture(child, {
+    spawnedAt,
     intervalMs: input.descendantCaptureIntervalMs,
     reader: input.descendantsReader,
   });
@@ -1316,6 +1337,7 @@ export async function buildSite(input: {
   const env = siteCommandEnvironment(process.env, input.env);
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
   assertMayStart(input);
+  const spawnedAt = Date.now();
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
@@ -1332,6 +1354,7 @@ export async function buildSite(input: {
   // more than its immediate and exit-adjacent snapshots, but the interval
   // still covers a longer one.
   const descendants = createDescendantCapture(child, {
+    spawnedAt,
     intervalMs: input.descendantCaptureIntervalMs,
     reader: input.descendantsReader,
   });
