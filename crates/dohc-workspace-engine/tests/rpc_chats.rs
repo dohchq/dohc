@@ -6494,6 +6494,26 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     assert_eq!(posts.len(), 2);
     assert_eq!(posts[0]["post"].get("work"), None);
     assert_eq!(posts[1]["post"]["work"], card);
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "group" }),
+    )
+    .await;
+    let listed_work = |thread_id: &str| {
+        listed["threads"]
+            .as_array()
+            .expect("threads")
+            .iter()
+            .find(|summary| summary["thread"]["id"] == json!(thread_id))
+            .expect("listed thread")
+            .get("work")
+            .cloned()
+    };
+    assert_eq!(listed_work("post-1"), None);
+    assert_eq!(listed_work("post-2"), Some(card.clone()));
     let refused = call_error(
         &transport,
         &handle,

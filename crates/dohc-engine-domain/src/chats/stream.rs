@@ -719,7 +719,7 @@ pub(super) fn agent_requests_for_messages(
 /// Each thread's Work card, for the threads that have a work report. The
 /// newest report by (created_at_ms, message_id) gives the status, so every
 /// device shows the same one.
-fn thread_work(
+pub(super) fn thread_work(
     conn: &Connection,
     workspace_id: &str,
     thread_ids: &[String],

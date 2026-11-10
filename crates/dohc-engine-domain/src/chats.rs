@@ -766,6 +766,8 @@ pub struct ChannelThreadSummary {
     pub unread_count: i64,
     pub open_decision_count: i64,
     pub opening_message: Option<ChannelOpeningMessage>,
+    /// The thread's Work card. Absent when no agent reported work in it.
+    pub work: Option<ThreadWork>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4435,6 +4437,11 @@ impl<'a> LinkedChatStore<'a> {
                     .collect()
             };
             let mut reactions = active_reactions_for_messages(conn, workspace_id, &opening_ids)?;
+            let thread_ids: Vec<String> = validated
+                .iter()
+                .map(|(thread, ..)| thread.thread_id.clone())
+                .collect();
+            let mut work = stream::thread_work(conn, workspace_id, &thread_ids)?;
             let mut summaries = Vec::with_capacity(validated.len());
             for (thread, message_count, last_read_sequence, open_decision_count, opening_id) in
                 validated
@@ -4458,6 +4465,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_agent_id: message.author_agent_id,
                     });
                 summaries.push(ChannelThreadSummary {
+                    work: work.remove(&thread.thread_id),
                     thread,
                     message_count,
                     last_read_sequence,

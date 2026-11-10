@@ -91,7 +91,7 @@ struct StreamAgentReplyWire<'a> {
 /// A thread's Work card, as the stream and a thread read serve it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ThreadWorkWire<'a> {
+pub(super) struct ThreadWorkWire<'a> {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<&'a str>,

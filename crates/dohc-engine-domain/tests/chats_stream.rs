@@ -472,7 +472,8 @@ fn a_post_summarises_its_replies_repliers_agent_reply_and_open_decisions() {
 }
 
 /// A thread's Work card is its newest work report, with the newest link any
-/// of its reports carried. The stream and a thread read serve the same card.
+/// of its reports carried. The stream, the thread listing and a thread read
+/// serve the same card.
 #[test]
 fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
     let (_scratch, mut store) = store();
@@ -515,6 +516,20 @@ fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
             .expect("the post's work card");
         let from_thread = chats.get_thread(WS, "post").expect("thread").work;
         assert_eq!(from_thread.as_ref(), Some(&from_stream));
+        let mut listed: Vec<(String, Option<ThreadWork>)> = chats
+            .list_channel_threads(WS, "group", None, 10)
+            .expect("threads")
+            .into_iter()
+            .map(|summary| (summary.thread.thread_id, summary.work))
+            .collect();
+        listed.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            listed,
+            [
+                ("plain".to_owned(), None),
+                ("post".to_owned(), Some(from_stream.clone()))
+            ]
+        );
         from_stream
     };
     let facts = |work: &ThreadWork| {
