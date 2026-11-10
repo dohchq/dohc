@@ -4289,6 +4289,184 @@ fn collection_file_origin_carries_only_moment_append() {
     );
 }
 
+const PERSONAL_AGENT: &str = "p-abcdefghijklmnopqrstuvwxyz";
+const PERSONAL_ORIGIN: &str = "relay:personal-collection:p-abcdefghijklmnopqrstuvwxyz";
+
+fn personal_author(agent_id: &str) -> Value {
+    json!({"kind":"agent", "agentId":agent_id, "onBehalfOf":"owner"})
+}
+
+#[test]
+fn personal_collection_origin_carries_only_moment_append() {
+    let (_scratch, mut store) = test_store();
+    for (seq, op_kind) in (0_i64..).zip(["conflict.resolve", "chat.message.append", "ydoc.update"]) {
+        let op = ReplicationEnvelope {
+            op_kind: op_kind.to_owned(),
+            ..envelope(PERSONAL_ORIGIN, seq, "ws", json!({}))
+        };
+        let outcome = apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("refusal is recorded");
+        assert!(
+            matches!(
+                outcome.primary,
+                ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { ref reason },
+                    ..
+                }) if reason == "relay personal-collection origin carries only moment.append"
+            ),
+            "{op_kind}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn personal_collection_origin_writes_a_collections_own_files_as_its_agent() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n", "Porto"]);
+    let writes = [
+        absent_text_payload(
+            "automations-create",
+            "trip-automations",
+            "trip/automations.yaml",
+            "version: 1\n",
+        ),
+        absent_text_payload("record-create", "trip-porto", "trip/porto.md", "Porto"),
+    ];
+    for (seq, payload) in (0_i64..).zip(writes) {
+        let op = envelope(
+            PERSONAL_ORIGIN,
+            seq,
+            "ws",
+            with_author(payload, personal_author(PERSONAL_AGENT)),
+        );
+        assert_eq!(
+            apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{}",
+            op.payload["path"]
+        );
+    }
+    let authors = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT author_json FROM moments WHERE author_json IS NOT NULL ORDER BY moment_order",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .expect("read authors");
+    assert_eq!(authors.len(), 2);
+    for stored in authors {
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).expect("author JSON"),
+            json!([personal_author(PERSONAL_AGENT)])
+        );
+    }
+}
+
+#[test]
+fn personal_collection_origin_refuses_other_paths_and_any_other_author() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n", "Notes"]);
+    let automations = || {
+        absent_text_payload(
+            "automations-create",
+            "trip-automations",
+            "trip/automations.yaml",
+            "version: 1\n",
+        )
+    };
+    let wrong_author = "personal-collection origin carries only its agent's author";
+    let mut named = personal_author(PERSONAL_AGENT);
+    named["agentName"] = json!("Grok Bot");
+    let mut with_run = personal_author(PERSONAL_AGENT);
+    with_run["agentRunId"] = json!("run");
+    let cases = [
+        (automations(), None, wrong_author),
+        (
+            automations(),
+            Some(personal_author("p-zyxwvutsrqponmlkjihgfedcba")),
+            wrong_author,
+        ),
+        (
+            automations(),
+            Some(json!({"kind":"agent", "agentId":PERSONAL_AGENT})),
+            wrong_author,
+        ),
+        (automations(), Some(named), wrong_author),
+        (automations(), Some(with_run), wrong_author),
+        (automations(), Some(named_author("grant")), wrong_author),
+        (
+            automations(),
+            Some(json!({"kind":"human", "humanId":"owner"})),
+            wrong_author,
+        ),
+        (
+            absent_text_payload("note-create", "note", "notes/page.md", "Notes"),
+            Some(personal_author(PERSONAL_AGENT)),
+            "personal agent may write only a Collection's own files",
+        ),
+    ];
+    for (seq, (payload, author, expected)) in (0_i64..).zip(cases) {
+        let payload = match &author {
+            Some(author) => with_author(payload, author.clone()),
+            None => payload,
+        };
+        let outcome = apply_moment_envelope(
+            &mut store,
+            &envelope(PERSONAL_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .expect("refusal is recorded");
+        assert_eq!(refusal_reason(outcome), expected, "{author:?}");
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+    assert!(snapshot(&store, "note").is_none());
+}
+
+#[test]
+fn a_personal_agent_author_is_refused_from_every_other_origin() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    for origin in [
+        "device-origin",
+        NAMED_ORIGIN,
+        "relay:collection-create:grant",
+        "relay:personal-agent:p-abcdefghijklmnopqrstuvwxyz",
+    ] {
+        let payload = with_author(
+            absent_text_payload(
+                "automations-create",
+                "trip-automations",
+                "trip/automations.yaml",
+                "version: 1\n",
+            ),
+            personal_author(PERSONAL_AGENT),
+        );
+        let seq = read_replication_acked_seq(&store, "ws", origin).expect("ack") + 1;
+        let outcome =
+            apply_moment_envelope(&mut store, &envelope(origin, seq, "ws", payload), &NoFaults)
+                .expect("refusal is recorded");
+        assert_eq!(
+            refusal_reason(outcome),
+            "personal agent author requires its relay personal-collection origin",
+            "{origin}"
+        );
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+}
+
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
     store
         .read_with(|tx| {
