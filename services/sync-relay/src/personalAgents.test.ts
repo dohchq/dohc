@@ -1411,12 +1411,15 @@ describe("a personal agent's wait", () => {
       fileThread("thread-encoded", { linkedObjectId: "object-encoded" }),
       fileThread("thread-moved", { linkedObjectId: "object-moved" }),
       fileThread("thread-by-path", { linkedPath: "config/.env" }),
-      ...["kept", "env", "upper", "encoded", "moved", "by-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
+      // A secret file has no object on the relay, so only its path names it.
+      fileThread("thread-secret-only", { linkedPath: "keys/.env.production" }),
+      ...["kept", "env", "upper", "encoded", "moved", "by-path", "secret-only"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
     ]);
 
     const answer = await waitOnce(f, agent);
     expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([["kept", "notes/kept.md"]]);
     expect(JSON.stringify(answer)).not.toContain("config/");
+    expect(JSON.stringify(answer)).not.toContain("keys/");
   });
 
   it("names a file's path after a rename, and no path once the file is gone or the relay never saw it", async () => {
