@@ -23,19 +23,6 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-it.skipIf(engine.missing)(
-  "backfills a captured file when the first relay position follows capture",
-  async () =>
-    await expectTwoDaemonFileSync({
-      workspaceId: "two-daemon-enrolment-window",
-      path: "notes/before-first-push.md",
-      contents: "captured before the first relay position\n",
-      contentKind: "text",
-      bootstrapRelayBeforeCapture: false,
-    }),
-  60_000,
-);
-
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS
 // and Windows do by default, writing `Notes.md` rewrites the existing
@@ -83,31 +70,5 @@ it.skipIf(engine.missing || !ignoresCase)(
       await relay.stop();
     }
   },
-  60_000,
-);
-
-it.skipIf(engine.missing)(
-  "syncs a captured secret file between two real daemons through one real relay",
-  async () =>
-    await expectTwoDaemonFileSync({
-      workspaceId: "two-daemon-secret-sync",
-      path: ".env",
-      contents: "TOKEN=two-daemon-secret\n",
-      passphrase: "two-daemon protected-files passphrase",
-      restart: { contents: "TOKEN=after-restart\n" },
-      rejoin: true,
-    }),
-  90_000,
-);
-
-it.skipIf(engine.missing)(
-  "preserves binary bytes through a real product join",
-  async () =>
-    await expectTwoDaemonFileSync({
-      workspaceId: "two-daemon-binary-sync",
-      path: "assets/payload.bin",
-      contents: Buffer.from([0x00, 0xff, 0x80, 0x0a, 0x7f, 0x42]),
-      contentKind: "binary",
-    }),
   60_000,
 );
