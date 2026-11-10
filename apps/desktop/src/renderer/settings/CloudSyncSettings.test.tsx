@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toQR } from "toqr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { Overlay } from "../Overlay";
+import { palette } from "../tokens";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
   CloudSyncSettings,
@@ -89,6 +91,28 @@ function cloud(status: CloudStatusResult | null, overrides: Partial<CloudSetting
 }
 
 const syncSwitch = () => screen.getByRole("switch", { name: "Sync this workspace" });
+
+// The dark modules the Connect a phone code draws, read back from its path, and the side of its square.
+const RUN = /M(\d+) (\d+)h(\d+)v1h-\3z/g;
+function drawnCode(svg: Element): { side: number; dark: string[] } {
+  const path = svg.querySelector("path")?.getAttribute("d") ?? "";
+  expect(path.replace(RUN, "")).toBe("");
+  const dark: string[] = [];
+  for (const [, x, y, run] of path.matchAll(RUN)) {
+    for (let i = 0; i < Number(run); i++) dark.push(`${Number(x) + i},${y}`);
+  }
+  return { side: Number(svg.getAttribute("viewBox")?.split(" ")[2]), dark: dark.sort() };
+}
+// The same text's modules from toQR, inside a 4-module quiet zone.
+function encoded(text: string): { side: number; dark: string[] } {
+  const modules = toQR(text);
+  const width = Math.sqrt(modules.length);
+  const dark: string[] = [];
+  modules.forEach((module, index) => {
+    if (module) dark.push(`${(index % width) + 4},${Math.floor(index / width) + 4}`);
+  });
+  return { side: width + 8, dark: dark.sort() };
+}
 const describedBy = (element: HTMLElement) =>
   document.getElementById(element.getAttribute("aria-describedby") ?? "")?.textContent;
 
@@ -167,6 +191,36 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     // The page draws from the shell's read; it reads nothing itself.
     expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
+  });
+
+  it("shows a QR code of the server's origin, and nothing else, for connecting a phone", () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })} />);
+
+    const row = screen.getByTestId("settings-row-connect-phone");
+    expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
+    const code = within(row).getByRole("img", { name: "QR code for dohc.hollis.studio" });
+    expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
+    expect(drawnCode(code)).not.toEqual(encoded("https://relay.hollis.studio"));
+    // Dark on light in both themes.
+    expect(code.querySelector("rect")?.getAttribute("fill")).toBe(palette.light.bg);
+    expect(code.querySelector("path")?.getAttribute("fill")).toBe(palette.light.ink);
+    // It sits under the account row.
+    expect(screen.getByTestId("settings-row-account").nextElementSibling).toBe(row);
+  });
+
+  it("shows no Connect a phone code while signed out", () => {
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ connected: false })} />);
+    expect(screen.queryByTestId("settings-row-connect-phone")).toBeNull();
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SIGNED_OUT_OWNED)} />);
+    expect(screen.queryByTestId("settings-row-connect-phone")).toBeNull();
+    expect(screen.queryByRole("img", { name: /^QR code/ })).toBeNull();
+  });
+
+  it("keeps the Connect a phone code once the sign-in expired, since the phone signs in on its own", () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: true })} />);
+
+    const code = within(screen.getByTestId("settings-row-connect-phone")).getByRole("img", { name: "QR code for dohc.hollis.studio" });
+    expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
   });
 
   it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
