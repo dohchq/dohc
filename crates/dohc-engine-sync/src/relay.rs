@@ -3548,6 +3548,35 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for change in heads {
             insert_changed_path(&mut pass.changed_paths, change);
         }
+        // A document that moved first in a trade of spellings (#2421) shares
+        // the other's file on a disk that ignores case, whichever change
+        // named its path, so its head waits for the pass that makes it ready.
+        let unready: BTreeSet<&str> = replica
+            .documents
+            .iter()
+            .filter(|(object_id, document)| match reads.get(*object_id) {
+                Some(read) => !read.heads_written,
+                None => {
+                    document.status != crate::HostedDocumentStatus::Ready
+                        || held.contains_key(*object_id)
+                }
+            })
+            .map(|(object_id, _)| object_id.as_str())
+            .collect();
+        if !unready.is_empty() {
+            let shared = store
+                .read_with(|conn| {
+                    let mut shared = BTreeSet::new();
+                    for (key, change) in &pass.changed_paths {
+                        if crate::hosted::shares_a_file(conn, workspace_id, &unready, change)? {
+                            shared.insert(key.clone());
+                        }
+                    }
+                    Ok::<_, SyncError>(shared)
+                })
+                .map_err(local)?;
+            pass.changed_paths.retain(|key, _| !shared.contains(key));
+        }
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more

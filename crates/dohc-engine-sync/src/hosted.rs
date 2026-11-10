@@ -555,6 +555,13 @@ pub(crate) fn backfill_path_held(
 /// to `path`. A document already there meets no new collision, so two that
 /// already collide hold neither, and an edit reads nothing more. An ordinary
 /// replica has none.
+///
+/// A document held waiting, through others, on `object_id` holds nothing
+/// against it while `object_id` is not ready: documents that trade spellings
+/// of their paths each wait on the next, and none would ever move first
+/// (#2421). One that is not ready writes nothing at its head, so it moves
+/// first, and [`completed_hold`] keeps it from being ready until the others
+/// move too. A ready one would write its head at once, so it is held first.
 fn spelling_holder(
     conn: &Connection,
     workspace_id: &str,
@@ -576,6 +583,41 @@ fn spelling_holder(
     if at.as_deref() == Some(path) {
         return Ok(None);
     }
+    let may_move_first =
+        document_state(conn, workspace_id, object_id)?.is_some_and(|state| state != "ready");
+    for held_by in spelling_occupants(conn, workspace_id, version_id, object_id, path)? {
+        if !(may_move_first && waits_on(conn, workspace_id, &held_by, object_id)?) {
+            return Ok(Some(held_by));
+        }
+    }
+    Ok(None)
+}
+
+/// A hosted document's state, or `None` for a document outside the scope.
+fn document_state(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT state FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Every other document of the scope, by id, whose head or path alias in
+/// `version_id` collides with `path` by another spelling or as a folder
+/// above or inside it.
+fn spelling_occupants(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<Vec<String>, SyncError> {
     let first = path.split('/').next().unwrap_or(path);
     let prefix = first
         .is_ascii()
@@ -589,14 +631,107 @@ fn spelling_holder(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .map_err(SyncError::corrupt)?;
+    let mut colliding = Vec::new();
     for occupant in occupants {
         let (held_by, held) = occupant.map_err(SyncError::corrupt)?;
         use dohc_engine_files::path_is_held;
         if held != path && (path_is_held(&held, path) || path_is_held(path, &held)) {
-            return Ok(Some(held_by));
+            colliding.push(held_by);
         }
     }
-    Ok(None)
+    Ok(colliding)
+}
+
+/// Whether `change` would write the head of a document in `unready` where
+/// another document of the scope holds that path by another spelling, or as
+/// a folder above or inside it. A change brings its path to the head a path
+/// alias there names, so on a disk that ignores case that head would land on
+/// the other document's file. The pass that makes it ready writes it
+/// ([`head_writes`]).
+pub(crate) fn shares_a_file(
+    conn: &Connection,
+    workspace_id: &str,
+    unready: &BTreeSet<&str>,
+    change: &crate::MomentMaterializationChange,
+) -> Result<bool, SyncError> {
+    let head: Option<String> = conn
+        .prepare_cached(
+            "SELECT a.object_id FROM path_aliases a JOIN snapshots s \
+               ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+              AND s.object_id=a.object_id \
+             WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_row(
+            params![workspace_id, change.version_id, change.path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    match head {
+        Some(object_id) if unready.contains(object_id.as_str()) => Ok(!spelling_occupants(
+            conn,
+            workspace_id,
+            &change.version_id,
+            &object_id,
+            &change.path,
+        )?
+        .is_empty()),
+        _ => Ok(false),
+    }
+}
+
+/// Whether `occupant` is held at a path that `object_id` holds, or that a
+/// document it waits on in turn holds, and so on back to `object_id`. A wait
+/// an earlier pass stored counts only while the document it names still has
+/// a head or path alias that collides with the path it waits for.
+fn waits_on(
+    conn: &Connection,
+    workspace_id: &str,
+    occupant: &str,
+    object_id: &str,
+) -> Result<bool, SyncError> {
+    use dohc_engine_files::path_is_held;
+    let mut seen = BTreeSet::new();
+    let mut waiting = occupant.to_owned();
+    while seen.insert(waiting.clone()) {
+        let link: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT held_by,held_path FROM hosted_documents \
+                 WHERE workspace_id=?1 AND object_id=?2",
+                params![workspace_id, waiting],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some((Some(held_by), Some(held_path))) = link else {
+            return Ok(false);
+        };
+        let mut paths = conn
+            .prepare_cached(
+                "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2 \
+                 UNION ALL SELECT path FROM path_aliases WHERE workspace_id=?1 AND object_id=?2",
+            )
+            .map_err(SyncError::corrupt)?;
+        let mut stands = false;
+        for path in paths
+            .query_map(params![workspace_id, held_by], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(SyncError::corrupt)?
+        {
+            let path = path.map_err(SyncError::corrupt)?;
+            stands |= path_is_held(&path, &held_path) || path_is_held(&held_path, &path);
+        }
+        if !stands {
+            return Ok(false);
+        }
+        if held_by == object_id {
+            return Ok(true);
+        }
+        waiting = held_by;
+    }
+    Ok(false)
 }
 
 /// Every head and path alias in one version, by document, of a document of
@@ -1352,9 +1487,10 @@ pub(crate) fn stopped_hold(
 /// What holds a document whose read reached the end of its rows from being
 /// ready: heads still parked, a released hold whose row still stands, a
 /// live edit its bound session never admitted, retained work of it still
-/// waiting, a head away from the path its scope names, or queued work it
-/// still owes, in that order. A reason it stored before counts only where
-/// it still holds. `None` once nothing does.
+/// waiting, a head at a spelling of the path of a document that is not ready
+/// or has left the scope, a head away from the path its scope names, or
+/// queued work it still owes, in that order. A reason it stored before counts
+/// only where it still holds. `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1374,6 +1510,25 @@ fn completed_hold(
     }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
+    }
+    // A document that moved while another at a spelling of its path still
+    // waited on it (#2421) shares that one's file on a disk that ignores
+    // case, so it is not ready until that one moves or is ready. One that
+    // left the scope keeps its file there until it parks.
+    for head in head_writes(conn, workspace_id, object_id)? {
+        if held_by_departed(conn, workspace_id, &head.version_id, object_id, &head.path)? {
+            return Ok(Some(HostedHold::WorkWaiting));
+        }
+        for held_by in
+            spelling_occupants(conn, workspace_id, &head.version_id, object_id, &head.path)?
+        {
+            if document_state(conn, workspace_id, &held_by)?.is_some_and(|state| state != "ready") {
+                return Ok(Some(HostedHold::PathHeld {
+                    path: head.path,
+                    held_by,
+                }));
+            }
+        }
     }
     let scope_path: String = conn
         .query_row(
