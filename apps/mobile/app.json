@@ -21,7 +21,8 @@
         {
           "cameraPermission": "dohc uses the camera to scan the QR code under Connect a phone on your computer.",
           "microphonePermission": false,
-          "recordAudioAndroid": false
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": false
         }
       ]
     ],
