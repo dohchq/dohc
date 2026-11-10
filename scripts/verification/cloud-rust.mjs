@@ -8,7 +8,7 @@ import { readTreeState, classifyTreeProvenance } from "../../tools/rust-engine-p
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 
-export const RUST_SHARDS = 16;
+export const RUST_SHARDS = 12;
 export const RUST_READER_SHARD = 6;
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 export const RUST_ARCHIVE_PROOFS = ["test fixtures"];

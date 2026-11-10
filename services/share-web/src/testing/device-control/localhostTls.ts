@@ -2,22 +2,16 @@ import "reflect-metadata";
 import { createPrivateKey, X509Certificate } from "node:crypto";
 import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as x509 from "@peculiar/x509";
 
-// A self-signed localhost certificate for test servers. The files are minted on
-// first use and gitignored, so no private key is ever committed. Tests that
-// hand the certificate path to child processes (NODE_EXTRA_CA_CERTS) or read it
-// as a CA keep working because the paths are stable within the checkout.
 const directory = fileURLToPath(new URL("./", import.meta.url));
-export const localhostCertificatePath = join(directory, "localhost-cert.pem");
-export const localhostKeyPath = join(directory, "localhost-key.pem");
 
-function usable(): boolean {
+function usable(certificatePath: string, keyPath: string): boolean {
   try {
-    const certificate = new X509Certificate(readFileSync(localhostCertificatePath));
-    const key = createPrivateKey(readFileSync(localhostKeyPath));
+    const certificate = new X509Certificate(readFileSync(certificatePath));
+    const key = createPrivateKey(readFileSync(keyPath));
     return certificate.checkPrivateKey(key) && Date.parse(certificate.validTo) > Date.now() + 24 * 60 * 60 * 1000;
   } catch {
     return false;
@@ -42,20 +36,23 @@ async function mint(): Promise<{ certificate: string; key: string }> {
   return { certificate: certificate.toString("pem"), key: x509.PemConverter.encode(pkcs8, "PRIVATE KEY") };
 }
 
-/** Returns the certificate and key paths, minting a fresh pair when none is valid. */
-export async function ensureLocalhostTls(): Promise<{ certificate: string; key: string }> {
-  if (!usable()) {
+/** Returns stable paths to the first complete localhost TLS pair. */
+export async function ensureLocalhostTls(root = directory): Promise<{ certificate: string; key: string }> {
+  const published = join(root, "tls-localhost");
+  const certificate = join(published, "cert.pem"), key = join(published, "key.pem");
+  if (!usable(certificate, key)) {
     const pems = await mint();
-    // Write into a sibling temp dir and rename so concurrent test workers never read a partial file.
-    const staging = mkdtempSync(join(dirname(localhostCertificatePath), "tls-"));
+    const staging = mkdtempSync(join(root, "tls-"));
     try {
       await writeFile(join(staging, "cert.pem"), pems.certificate);
       await writeFile(join(staging, "key.pem"), pems.key);
-      renameSync(join(staging, "cert.pem"), localhostCertificatePath);
-      renameSync(join(staging, "key.pem"), localhostKeyPath);
+      // A nonempty directory cannot be replaced. All workers use the first
+      // complete pair, including children given its NODE_EXTRA_CA_CERTS path.
+      try { renameSync(staging, published); }
+      catch (error) { if (!usable(certificate, key)) throw error; }
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }
   }
-  return { certificate: localhostCertificatePath, key: localhostKeyPath };
+  return { certificate, key };
 }

@@ -383,9 +383,9 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
     assert.equal(checkout.with["fetch-depth"], 2);
     assert.equal(checkout.with["persist-credentials"], false);
   }
-  for (const name of ["rust-archive", "rust-policy"]) {
+  for (const [name, tools] of [["rust-archive", ["nextest"]], ["rust-tests", ["nextest"]], ["rust", ["nextest"]], ["rust-policy", ["deny", "audit", "nextest"]]]) {
     const install = jobs[name].steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
-    assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
+    assert.deepEqual(install.with.tool.split(",").sort(), tools.map(tool =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
   assert.equal(jobs.javascript.needs, "changes");

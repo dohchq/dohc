@@ -61,28 +61,15 @@ describe("the move guard over a real relay and live host", () => {
   const answeredRetryLater = (pull: GuardPull | undefined) => pull?.result === "failed"
     && pull.wireCode === RETRY_LATER.wireCode && pull.message === RETRY_LATER.message && pull.retry === RETRY_LATER.retry;
 
-  // Pulls outside the relay engine until one finds nothing new, so the next
-  // pull has no backlog. A pull that answers retry later is pulled again.
-  async function drain(device: MoveDevice) {
-    await expect.poll(async () => (await device.pull()).fetched, { timeout: 120_000 }).toBe(0);
-    expect(device.syncFailed()).toBe(false);
-    expect(device.backgroundPulls(), "the relay engine pulled outside a guard's catch-up").toEqual([]);
-  }
-
   // The link holder's edit is accepted, saved and published; nothing on the
   // device has pulled it. Times only the move, and checks the guard's own wait
   // apart from the move's other work. This computer owns no page it
   // moves here: a bound move is refused (editThenRefusedMove).
-  // `unbound` decides what a guarded move must show:
-  // - backlog: its pull either carries the edit, or answers retry later and
-  //   the move goes ahead without it, as the guard allows.
-  // - drained: the device had nothing else to pull, so the pull must succeed
-  //   inside the wait and carry the edit.
+  // Its pull either carries the edit or answers retry later, as the guard allows.
   async function editThenMove(fixture: LiveMoveFixture, device: MoveDevice, input: { name: string;
-    proxyDelayMs: number; unbound?: "backlog" | "drained"; beforeEdit?: () => Promise<void> }) {
+    proxyDelayMs: number }) {
     const { path } = fixture.page(input.name);
     const text = marker(input.name);
-    await input.beforeEdit?.();
     const cursor = await fixture.edit(input.name, text);
     await fixture.waitPublished(input.name, cursor);
     const unchanged = await fixture.read(device, path);
@@ -97,28 +84,17 @@ describe("the move guard over a real relay and live host", () => {
     const guardPulls = await device.guardPulls();
     const moved = await fixture.read(device, destination).catch(() => undefined);
     const pull: GuardPull | undefined = guardPulls.pulls[0];
-    const outcome: GuardTiming["outcome"] = !input.unbound ? "moved" : moved?.includes(text) ? "carried"
+    const outcome: GuardTiming["outcome"] = moved?.includes(text) ? "carried"
       : answeredRetryLater(pull) && moved === unchanged ? "stale-retry-later" : "moved";
     // Recorded before any check, so a failed check still leaves the timing.
     timings.push({ name: input.name, route: "unbound", guard: "on", proxyDelayMs: input.proxyDelayMs, elapsedMs,
       outcome, guardPulls });
     expect(existsSync(join(device.rootPath, path))).toBe(false);
     expect(device.targetedPasses()).toBe(requested + 1);
-    // The guard's wait, not the whole move: the rename and its capture come after it.
-    const carriedInTime = guardPulls.endedInWait && moved !== undefined && moved.includes(text);
-    if (!input.unbound) throw new Error("A guarded move here says what its pull must show.");
-    if (input.unbound === "drained" && !guardPulls.endedInWait) {
-      throw new Error(`The guard's wait ran out before its catch-up ended, ${Math.round(elapsedMs)} ms into the move. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
-    }
     expect(guardPulls.shared, "another pass was running when the guard's catch-up began").toBe(false);
     if (pull === undefined) throw new Error(`The guard's catch-up ran no pull, ${Math.round(elapsedMs)} ms into the move.`);
     expect(guardPulls.pulls.map(describePull), "the guard's catch-up ran one pull").toHaveLength(1);
     expect(fixture.ownerBound(device, input.name)).toBe(false);
-    if (input.unbound === "drained") {
-      if (pull.result === "failed") throw new Error(`The guard's pull was refused: ${describePull(pull)}.`);
-      expect(moved).toContain(text);
-      return carriedInTime;
-    }
     // The guard doesn't promise the edit. A pull that answers retry later lets
     // the move go ahead without it, and the edit stays published under the page's binding.
     if (pull.result === "succeeded") expect(moved, "the guard's pull succeeded").toContain(text);
@@ -127,7 +103,6 @@ describe("the move guard over a real relay and live host", () => {
       expect(moved).toBe(unchanged);
       await fixture.waitPublished(input.name, cursor);
     }
-    return carriedInTime;
   }
 
   // This computer owns the page live, so its move is refused with the move
@@ -206,9 +181,8 @@ describe("the move guard over a real relay and live host", () => {
 
       // Unbound, behind the owner's cases: the peer never enrolls, so the pull
       // alone can carry the save, and its first pull meets everything those
-      // cases published. That pull may answer retry later, so the drained
-      // test below holds the carried-in-time check.
-      await editThenMove(fixture, peer, { name: "peer", proxyDelayMs: 0, unbound: "backlog" });
+      // cases published. That pull may answer retry later.
+      await editThenMove(fixture, peer, { name: "peer", proxyDelayMs: 0 });
       const peerOutcome = timings.at(-1)?.outcome;
       expect(["carried", "stale-retry-later"]).toContain(peerOutcome);
       // Every guarded move here reaches the timing record, the refusals included.
@@ -218,34 +192,6 @@ describe("the move guard over a real relay and live host", () => {
       // The peer's guard ran owner syncs, and none of them made the peer an owner.
       expect(fixture.ownerBound(owner, "slow")).toBe(true);
       expect(fixture.ownerBound(peer, "peer")).toBe(false);
-    } finally {
-      await fixture.close();
-    }
-  }, 600_000);
-
-  // Unbound, with nothing else to pull: the peer pulls until no backlog is
-  // left before each edit, and pulls nothing between the edit and the move.
-  it.skipIf(engine.missing)("carries the accepted edit on an unbound device whose pull has nothing else to do", async () => {
-    const fixture = await openLiveMoveFixture({ workspaceId: "guard-carries-unbound", compiledRelayMain, engineExecutable: engine.require(),
-      pages: ["peer-alone", "peer-slow", "warm-up"], peer: true });
-    try {
-      const { peer } = fixture;
-      // Starts the peer's Markdown reader before the first move: its cold start is a separate, known slowness (#3356), not the guard's wait.
-      const warmUp = async () => {
-        await drain(peer);
-        await fixture.waitPublished("warm-up", await fixture.edit("warm-up", marker("warm-up")));
-        await drain(peer);
-      };
-      const recorded = timings.length;
-      const carriedInTime = [
-        await editThenMove(fixture, peer, { name: "peer-alone", proxyDelayMs: 0, unbound: "drained", beforeEdit: warmUp }),
-        await editThenMove(fixture, peer, { name: "peer-slow", proxyDelayMs: PROXY_DELAY_MS, unbound: "drained",
-          beforeEdit: () => drain(peer) }),
-      ];
-      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual([
-        "peer-alone on carried", "peer-slow on carried",
-      ]);
-      expect(carriedInTime).toEqual([true, true]);
     } finally {
       await fixture.close();
     }

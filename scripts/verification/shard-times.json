@@ -1669,5 +1669,5 @@
   "services/workspace-api/src/routes.test.ts": 1,
   "services/workspace-api/src/server.test.ts": 2.4,
   "services/workspace-api/src/signUpAdmission.test.ts": 1,
-  "typecheck": 61.7
+  "typecheck": 67.9
 }
