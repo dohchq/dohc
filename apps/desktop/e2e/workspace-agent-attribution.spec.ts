@@ -32,8 +32,7 @@ async function seedMcpAgent(homeDir: string): Promise<string> {
     ...DEFAULT_USER_SETTINGS,
     agents: { rover: { name: "Rover", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 5 } },
   };
-  await writeFile(join(homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}
-`);
+  await writeFile(join(homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
   return "rover";
 }
 
@@ -78,8 +77,7 @@ test("a run's edits show under its agent's name in History; later edits are neut
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Start a dohc-tracked agent run through the same integration the agent
-    // panel uses (AgentIntegration -> workspaceActivity.setAgentRun).
+    // Start the run as Settings' Start run does.
     const runId = await startAgentRun(page, workspace.workspaceId, agentId);
 
     await writeWorkspaceFiles(temp, [
