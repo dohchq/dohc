@@ -1757,6 +1757,8 @@ export function DesktopWorkspaceShell(props: {
     const id = workspaceIdRef.current;
     if (!(await claimUnseenWhatsNew()) || workspaceIdRef.current !== id) return;
     openVirtualTab(WHATS_NEW_TAB_PATH);
+    // At the tab limit it does not open, and the restored file still shows.
+    if (activeTabPath(wbRef.current) !== WHATS_NEW_TAB_PATH) return;
     if (restoredActiveFileSurface.current !== null && markCurrentSwitchPhase("restored-active-surface-ready")) {
       restoredActiveFileSurface.current = null;
     }
