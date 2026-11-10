@@ -499,6 +499,8 @@ Turning automations off deletes server automation copies and their local claims 
 A copy the phone has also read stays for one day after the restart or the phone's last read, then goes with its run history.
 With automations off, a read from the phone or a personal agent still makes a copy of the workspace under `/host-data`.
 That copy goes a day after the last read.
+At startup, the server ends the phone and personal-agent hold on a copy whose workspace has **Show on phone** turned off, or has a new owner.
+Such a copy goes at once unless an automation still uses it.
 To keep a workspace's phone reads off the server, turn off **Show on phone** for it in the phone's Settings.
 Save a private deployment archive first if you need to preserve that history.
 The bundle cannot restore or view archived run history.
