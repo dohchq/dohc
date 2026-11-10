@@ -55,10 +55,14 @@ function boundedInteger(value: unknown, max: number): number {
   return value;
 }
 
-// People mention an agent that joined with a link by the name its posts
-// show. The name is fixed when it signs in, so the mention is too.
+// People mention an agent by the handle of the name its posts show, after an
+// @. A link agent's name is fixed when it signs in, so its mention is too.
+export function agentHandle(reportedName: string | null): string {
+  return handleForName(agentName(reportedName)) || "Agent";
+}
+
 export function agentMention(reportedName: string | null): string {
-  return `@${handleForName(agentName(reportedName)) || "Agent"}`;
+  return `@${agentHandle(reportedName)}`;
 }
 
 export function mentions(body: string | null, mention: string): boolean {

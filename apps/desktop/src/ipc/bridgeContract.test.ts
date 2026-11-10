@@ -3,7 +3,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure, ShareMountStatusRow } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
-import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { ImportWorkspaceFilesResult, NoticeTargetShape } from "./bridgeContract";
 import { OwnerLiveDocumentsResult } from "./bridgeContract";
 
 it("bounds recovery replies with room for the capped restore queues", () => {
@@ -4552,5 +4552,13 @@ describe("ImportWorkspaceFilesResult", () => {
       skipped: 1,
       skippedSources: [{ path, reason: "link" }],
     }).success).toBe(true);
+  });
+});
+
+describe("NoticeTargetShape", () => {
+  it("keeps the personal agent a sign-in notice opens, and only with Settings › Agents", () => {
+    const agent = `p-${"g".repeat(26)}`;
+    expect(NoticeTargetShape.parse({ settings: "agents", agent })).toEqual({ settings: "agents", agent });
+    expect(NoticeTargetShape.safeParse({ agent }).success).toBe(false);
   });
 });

@@ -266,7 +266,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"]; fileOperations?: Parameters<typeof createNoticeStore>[0]["fileOperations"] } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; onPersonalAgentsRevision?: Parameters<typeof createNoticeStore>[0]["onPersonalAgentsRevision"]; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"]; fileOperations?: Parameters<typeof createNoticeStore>[0]["fileOperations"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -297,6 +297,7 @@ async function computer(
     installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; state.onChanged?.(); },
     nowMs: () => clock,
+    onPersonalAgentsRevision: options.onPersonalAgentsRevision,
     refusalNotices: options.refusalNotices,
     dismissRefusal: options.dismissRefusal,
     fileOperations: options.fileOperations,
@@ -442,6 +443,23 @@ async function file(computer: Computer, name: "local" | "account"): Promise<Reco
 }
 
 describe("notices on one person's computers", () => {
+  // Each pull hands the roster cache the account's personal agents revision,
+  // so a rename on another computer reaches this one with the next pull.
+  it("hands each pull's personal agents revision to the roster cache", async () => {
+    const server = await relay();
+    const signedIn = account(server, "ana");
+    const revisions: Array<[string, number]> = [];
+    const laptop = await computer(signedIn, {
+      onPersonalAgentsRevision: (pulled, revision) => { revisions.push([pulled.key, revision]); },
+    });
+    await laptop.store.sync();
+    expect(revisions).toEqual([[signedIn.key, 0]]);
+
+    server.failPulls = true;
+    await laptop.store.sync();
+    expect(revisions).toEqual([[signedIn.key, 0]]);
+  });
+
   it("reaches the person's other computer and carries read and dismissed back", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));

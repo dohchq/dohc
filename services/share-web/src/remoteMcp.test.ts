@@ -424,3 +424,130 @@ it("describes an unfiltered link without claiming access to private workspace da
   const result = await client.callTool({name: "dohc_share_status", arguments: {}});
   expect(asRecord(result.structuredContent)?.summary).toContain("Included: shareable workspace files and this share's comments.");
 });
+
+// A personal agent's MCP address. Its sign-in, against the real relay, is in mcpPersonalSignIn.test.ts.
+const personalPath = "/mcp/agent/w/trip", personalResource = origin + personalPath;
+const personalChallenge = `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${personalPath}"`;
+const PERSONAL_EXCHANGE_KEY = "exchange-key-at-least-thirty-two-bytes";
+
+function personalFixture() {
+  const calls: Request[] = [];
+  const tokens = new Set<string>();
+  let revoked = false;
+  let unavailable: "answer" | "throw" | undefined;
+  const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
+    relayExchangeKey: PERSONAL_EXCHANGE_KEY, publicHosts: new Set(["share.example.test"]),
+    accountAuth: {publicOrigin: origin, upstreamUrl: "https://accounts.example.test"},
+    fetchAuth: async () => {throw new Error("An MCP request never reads the browser's account.");},
+    async fetchRelay(request) {
+      calls.push(request);
+      const path = new URL(request.url).pathname;
+      if (unavailable === "throw") throw new TypeError("connection reset");
+      if (unavailable === "answer") return Response.json({ok: false, code: "personal_agent_unavailable", error: "relay words"}, {status: 503});
+      // The relay's check: an issued token, sent to the address it was issued for, with the exchange key and no browser or link credential.
+      const agent = /^DohcAgent (.+)$/u.exec(request.headers.get("authorization") ?? "")?.[1];
+      if (revoked || !agent || !tokens.has(agent) || request.headers.get("x-dohc-agent-resource") !== personalResource ||
+        request.headers.has("x-dohc-link-profile-secret") || request.headers.has("cookie") ||
+        request.headers.get("x-dohc-relay-exchange-key") !== PERSONAL_EXCHANGE_KEY) return new Response(null, {status: 404});
+      if (path === "/sync/link/personal-agent/workspaces") {
+        return Response.json({ok: true, agent: {agentId: "agent", name: "Trip helper", handle: "Triphelper"},
+          workspaces: [{workspaceId: "trip", name: "Trip", level: "comment", dmChannelWireId: "wire-dm"}]});
+      }
+      if (path === "/sync/link/personal-agent/files") {
+        return Response.json({ok: true, workspaceId: "trip", files: [{path: "doc.md", blobSha256: first, contentKind: "text"}], truncated: false});
+      }
+      throw new Error(`Unexpected route: ${path}`);
+    }});
+  const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host: "share.example.test", ...init.headers}}));
+  function token() {
+    const value = randomBytes(32).toString("base64url");
+    tokens.add(value);
+    return value;
+  }
+  async function connect(bearer: string, headers: Record<string, string> = {}) {
+    const client = new Client({name: "test-agent", version: "1"});
+    clients.push(client);
+    await client.connect(new StreamableHTTPClientTransport(new URL(personalResource), {
+      requestInit: {headers: {...headers, authorization: `Bearer ${bearer}`}},
+      fetch: async (input, init) => {
+        const request = new Request(input, init); request.headers.set("host", "share.example.test");
+        const result = await app.handle(request);
+        expect(result.headers.has("mcp-session-id")).toBe(false);
+        expect(result.headers.has("set-cookie")).toBe(false);
+        return result;
+      },
+    }));
+    return client;
+  }
+  const list = (authorization?: string, path = personalPath) => send(path, {method: "POST",
+    headers: {"content-type": "application/json", accept: "application/json, text/event-stream", ...(authorization ? {authorization} : {})},
+    body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+  return {calls, token, connect, list, revoke() {revoked = true;}, fail(how: "answer" | "throw") {unavailable = how;}};
+}
+
+it("sends a personal agent to sign in, and asks the relay again for each request with a revoked token", async () => {
+  const f = personalFixture();
+  const token = f.token();
+  expect((await (await f.connect(token)).listTools()).tools.length).toBeGreaterThan(0);
+  f.revoke();
+  const snapshot = async (authorization?: string) => {
+    const response = await f.list(authorization);
+    return {status: response.status, body: await response.text(), headers: Object.fromEntries(response.headers)};
+  };
+  const missing = await snapshot();
+  expect(missing).toMatchObject({status: 401, body: "", headers: {"www-authenticate": personalChallenge, "access-control-allow-origin": "*"}});
+  // A malformed credential names no token, so it is invalid without asking the relay.
+  const before = f.calls.length;
+  expect((await snapshot("Bearer short")).headers["www-authenticate"]).toBe(`${personalChallenge}, error="invalid_token"`);
+  expect(f.calls).toHaveLength(before);
+  const first = await snapshot(`Bearer ${token}`);
+  const between = f.calls.length;
+  const later = await snapshot(`Bearer ${token}`);
+  expect(first).toMatchObject({status: 401, body: "", headers: {"www-authenticate": `${personalChallenge}, error="invalid_token"`,
+    "access-control-expose-headers": "WWW-Authenticate, Mcp-Session-Id"}});
+  expect(later).toEqual(first);
+  // share-web keeps no token, so the relay decides each time, with the reach check alone.
+  expect(between - before).toBe(1);
+  expect(f.calls.length - between).toBe(1);
+  expect(new URL(f.calls.at(-1)!.url).pathname).toBe("/sync/link/personal-agent/workspaces");
+});
+
+it("sends the relay only a personal agent's own token and address, never a browser's cookie or a link holder's profile", async () => {
+  const f = personalFixture();
+  const token = f.token();
+  // The relay refuses any of these if they pass through, so the call below would fail.
+  const client = await f.connect(token, {cookie: "__Host-dohc_session=browser", "x-dohc-link-profile-secret": "E".repeat(43),
+    "x-dohc-agent-resource": `${origin}/mcp/agent/w/garden`});
+  expect((await client.callTool({name: "dohc_list_files", arguments: {workspace: "trip"}})).structuredContent)
+    .toEqual({ok: true, workspace: "trip", files: [{path: "doc.md", blobSha256: first, contentKind: "text"}], truncated: false});
+  expect(f.calls.length).toBeGreaterThan(0);
+  for (const call of f.calls) {
+    expect(new URL(call.url).pathname).toMatch(/^\/sync\/link\/personal-agent\/(?:workspaces|files)$/u);
+    expect([call.method, call.headers.get("authorization"), call.headers.get("x-dohc-agent-resource")])
+      .toEqual(["POST", `DohcAgent ${token}`, personalResource]);
+  }
+  // The token comes only from the Authorization header, and the address has one spelling.
+  const calls = f.calls.length;
+  for (const path of [`${personalPath}?access_token=${token}`, `${personalPath}/`, "/mcp/agent/w/", "/mcp/agent/w/%74rip"]) {
+    expect((await f.list(undefined, path)).status, path).toBe(404);
+  }
+  expect(f.calls).toHaveLength(calls);
+});
+
+it("answers 503 in plain words while the relay can't check a personal agent's sign-in, and logs none of it", async () => {
+  const logged: string[] = [];
+  for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {logged.push(args.map(String).join(" "));});
+  }
+  onTestFinished(() => {vi.restoreAllMocks();});
+  const f = personalFixture();
+  const token = f.token();
+  for (const how of ["answer", "throw"] as const) {
+    f.fail(how);
+    const answer = await f.list(`Bearer ${token}`);
+    expect(answer.status, how).toBe(503);
+    expect(answer.headers.get("access-control-allow-origin"), how).toBe("*");
+    expect(await answer.json(), how).toEqual({ok: false, code: "unavailable", error: "dohc can't check this agent's sign-in right now. Try again shortly."});
+  }
+  for (const secret of [personalPath, token, "relay words"]) expect(logged.join("\n")).not.toContain(secret);
+});

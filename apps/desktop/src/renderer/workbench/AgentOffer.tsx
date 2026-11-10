@@ -8,6 +8,7 @@ import {
   type AgentOfferState,
   type AgentRosterPick,
 } from "../offers/agentAddressed";
+import { agentMentionId } from "../../settings/userSettings";
 import { ownAgentPresentation } from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";
 import type { AgentSetupSummary } from "./ChatsView";
@@ -50,7 +51,8 @@ export function useAgentOffer(input: {
   }), [scope]);
   const agent = pick?.scope === scope ? pick.agent : null;
   const offer = useMemo(() => {
-    if (!agent) return null;
+    // A personal agent reads its mentions through the server, so sending starts no run here.
+    if (!agent || agent.id.startsWith(agentMentionId("p-"))) return null;
     return detectAgentAddressed(workspaceId, agent, {
       workspaceId: setup ? setup.workspaceId : workspaceId,
       agentId: agent.id,

@@ -41,6 +41,7 @@ import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { applyLookSettings, currentLookRevision } from "../theme";
 import { reportInstallationFailure } from "../shell/installationNotices";
+import { workspaceName } from "../Titlebar";
 import { palette } from "../tokens";
 import { useColorScheme } from "../useColorScheme";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
@@ -157,6 +158,9 @@ export function SettingsDialog(props: {
   // The part a Customize… command opened Settings for: its row is marked and
   // takes focus.
   focus?: CustomizeTarget;
+  // The personal agent whose page Settings › Agents opens, by id, such as
+  // the one a sign-in notice names. Each request is a new object.
+  openAgent?: { agentId: string };
   onClose: () => void;
   /** The shell's server connection for this workspace, for Sync and sharing. */
   cloud?: CloudSettings;
@@ -773,6 +777,8 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
+              workspaceName={props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+              {...(props.openAgent ? { openAgent: props.openAgent } : {})}
               settings={userSettings}
               agentProblems={userResult?.agentProblems}
               onSave={saveUserSettings}

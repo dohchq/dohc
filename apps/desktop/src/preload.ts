@@ -87,6 +87,8 @@ import {
   ChatDispatchPausedEvent,
   agentsListeningOperations,
   AgentsListeningEvent,
+  personalAgentsOperations,
+  PersonalAgentsEvent,
   ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
@@ -591,6 +593,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentsListeningOperations, invoke),
   onAgentsListening: (listener) =>
     onEvent(CHANNELS.agentsListening, AgentsListeningEvent, listener),
+  ...operationBridge(personalAgentsOperations, invoke),
+  onPersonalAgents: (listener) =>
+    onEvent(CHANNELS.personalAgents, PersonalAgentsEvent, listener),
   onChatAgentRequestsChanged: (listener) =>
     onEvent(CHANNELS.chatAgentRequestsChanged, ChatAgentRequestsChangedEvent, listener),
   // Engine Y.Doc editor binding.

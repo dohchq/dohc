@@ -173,6 +173,8 @@ export const CAPABILITIES = {
   "agent.run.state.read": capability("Read whether this computer's agent is working in this workspace.", {ipc: ["readAgentRunState"]}),
   "agent.run.retry": capability("Try a failed agent run again.", {ipc: ["retryStoppedRun"]}),
   "agent.listening.read": capability("Read which agents you run are waiting for messages on this computer.", {ipc: ["readAgentsListening"]}),
+  "agent.personal.read": capability("Read the personal agents of your server account.", {ipc: ["readPersonalAgents"]}),
+  "agent.personal.change": capability("Rename, recolor, change the reach of, sign out, or remove a personal agent.", {ipc: ["changePersonalAgent"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),
   "automation.host.choose": capability("Choose the computer that runs schedules.", {ipc: ["chooseScheduleHost"]}),
   "automation.host.takeover": capability("Take over scheduled work.", {ipc: ["takeOverScheduleHost"]}),

@@ -120,8 +120,10 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
+import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
@@ -683,6 +685,8 @@ export function ChatsView(props: {
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
+  // Feed posts by personal agents name them from the roster.
+  const personalNames = usePersonalAgentNames();
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
@@ -3544,12 +3548,16 @@ export function ChatsView(props: {
     () => new Set(archivedChatsFor(props.userSettings, workspaceId)),
     [props.userSettings, workspaceId],
   );
-  // An agent chat whose agent left Settings stays readable in Archived. It
-  // returns when an agent with its id is added again.
+  // An agent chat whose agent left Settings, or a personal agent's chat
+  // whose agent left your roster, stays readable in Archived. It returns
+  // when an agent with its id is added again.
   const agentRemoved = useCallback(
     (channel: Pick<ChatChannelRecord, "agentId">) =>
-      props.userSettings != null && !settingsAgents.some((agent) => agent.id === channel.agentId),
-    [props.userSettings, settingsAgents],
+      channel.agentId !== undefined && isPersonalAgentId(channel.agentId)
+        ? personalRosterHolds(channel.agentId) === false
+        : props.userSettings != null && !settingsAgents.some((agent) => agent.id === channel.agentId),
+    // The roster changes outside these values; its version follows it.
+    [props.userSettings, settingsAgents, personalNames],
   );
   const [archiveOpen, setArchiveOpen] = useState(false);
   const setChatArchived = useCallback(
@@ -4279,7 +4287,7 @@ export function ChatsView(props: {
                       className="dohc-focus-row flex w-full cursor-pointer gap-3 rounded-md text-left"
                     >
                       <ChatAvatar presentation={item.message.presentation}
-                        name={item.message.authorDisplayName}
+                        name={chatAuthorLabel(item.message)}
                         kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
@@ -4843,8 +4851,8 @@ export function ChatsView(props: {
     // Only when the agent can't answer: what's wrong, and the fix. An agent
     // you run has no launch; it answers whenever it's connected.
     const agentProblem = !agentDm || !props.agentSetup ? null
-      : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-      : channelSettingsAgent.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+      : agentRemoved(nav.channel) ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+      : channelSettingsAgent?.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
       : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []

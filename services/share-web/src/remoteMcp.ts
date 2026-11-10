@@ -39,8 +39,8 @@ type RemoteOptions = {
 const MAX_REQUEST_BYTES = 32 * 1024;
 const COLLECTION_WRITE_TOOL = "dohc_write_collection_files";
 const MAX_WRITE_REQUEST_BYTES = 2 * MAX_COLLECTION_WRITE_CONTENT_BYTES + 1024 * 1024;
-// Time kept after a write gives up, to send the tool's answer.
-const ANSWER_RESERVE_MS = 5_000;
+// Time kept after a write or a wait gives up, to send the tool's answer.
+export const ANSWER_RESERVE_MS = 5_000;
 
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const discussionPostSchema = z.object({
@@ -51,14 +51,18 @@ const discussionPostSchema = z.object({
 const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
 type LinkChannel = z.infer<typeof linkChannelSchema>;
 const LINK_CHAT_BODY_BYTES = 8_000;
-const POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
+export const POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
   "Send it again with the same idempotencyKey and fields; it posts only once.";
-const channelPostSchema = z.object({
+/** A chat post's text and key, as every post tool takes them: a link agent's in its Group, and a personal agent's. */
+export const chatPostFields = {
   body: z.string().describe("Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed.")
     .refine(value => {const body = value.replace(/\r\n?/gu, "\n").trimEnd(); return body.length > 0 && Buffer.byteLength(body) <= LINK_CHAT_BODY_BYTES;},
       "The body must be nonempty and fit 8,000 UTF-8 bytes."),
   idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u)
     .describe("Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."),
+};
+const channelPostSchema = z.object({
+  ...chatPostFields,
   threadId: z.string().min(1).max(256).optional().describe("A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread."),
 });
 
@@ -160,8 +164,9 @@ const text = (value: unknown): CallToolResult => {
   return {content: [{type: "text", text: encoded}], ...(value && typeof value === "object" ? {structuredContent: value as Record<string, unknown>, ...("ok" in value && value.ok === false ? {isError: true} : {})} : {})};
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
+export {text as toolResult, error as toolError};
 // A post whose answer was lost may have landed, so it answers null; its key makes a retry safe.
-const sentPost = async (send: () => Promise<Response>): Promise<Response | null> => {
+export const sentPost = async (send: () => Promise<Response>): Promise<Response | null> => {
   const response = await send().catch(() => null);
   if (response?.status !== 503) return response;
   await response.body?.cancel().catch(() => {});
@@ -386,16 +391,22 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
       const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${name} in a request of its own, not in a batch.`}});
       return {body: result.body, status: result.status, headers: result.headers};
     }
-    if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
-      const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
-      return {body: result.body, status: result.status, headers: result.headers};
-    }
-    const handler = createMcpHandler(() => buildServer(options, metadata, channel));
-    try {
-      const response = await handler.fetch(request, {parsedBody});
-      return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };
-    } finally {await handler.close();}
+    return await answerMcp(request, parsedBody, () => buildServer(options, metadata, channel), options.signal);
   } finally {body.release();}
+}
+
+/** Answers one MCP request with a server of its own: no session outlives the request, and nothing subscribes. */
+export async function answerMcp(request: Request, parsedBody: unknown, build: () => McpServer, signal: AbortSignal):
+  Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
+  if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
+    const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
+    return {body: result.body, status: result.status, headers: result.headers};
+  }
+  const handler = createMcpHandler(build);
+  try {
+    const response = await handler.fetch(request, {parsedBody});
+    return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, signal) : null, status: response.status, headers: response.headers };
+  } finally {await handler.close();}
 }
 
 /**
@@ -403,7 +414,7 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
  * few large-body slots, which only a link that writes Collections asks for:
  * the body with the slot's release, null when no slot is free, or a throw.
  */
-async function readRequestJson(request: Request, signal: AbortSignal, admitLarge: (() => (() => void) | null) | null):
+export async function readRequestJson(request: Request, signal: AbortSignal, admitLarge: (() => (() => void) | null) | null):
   Promise<{value: unknown; release(): void} | null> {
   const reader = request.body?.getReader();
   if (!reader) throw new TypeError("Missing JSON body.");

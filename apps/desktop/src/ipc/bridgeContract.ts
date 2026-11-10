@@ -31,6 +31,7 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
 import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-work";
 import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
@@ -6926,6 +6927,8 @@ export const NoticeTargetShape = z.object({
   automation: NOTICE_TARGET_FIELD,
   run: NOTICE_TARGET_FIELD,
   recovery: z.literal("automation-controls").optional(),
+  settings: z.literal("agents").optional(),
+  agent: NOTICE_TARGET_FIELD,
 }).refine(isNoticeTarget);
 export const AutomationControlsTargetShape = z.object({
   recovery: z.literal("automation-controls"),
@@ -7139,6 +7142,85 @@ export const agentsListeningOperations = {
     scope: "device",
     channel: "desktop:read-agents-listening",
     payload: z.strictObject({}), result: AgentsListeningEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
+// The personal agents of the server account this computer is signed in to,
+// as main caches them from the relay. A removed agent is left out.
+export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
+export const PERSONAL_AGENT_REACH_LIMIT = 20;
+export const PersonalAgentLevel = z.enum(["view", "comment"]);
+export type PersonalAgentLevel = z.infer<typeof PersonalAgentLevel>;
+const RelayWorkspaceId = z.string().min(1).max(256);
+export const PersonalAgentReach = z.strictObject({ workspaceId: RelayWorkspaceId, level: PersonalAgentLevel });
+export type PersonalAgentReach = z.infer<typeof PersonalAgentReach>;
+export const PersonalAgent = z.strictObject({
+  agentId: z.string().regex(PERSONAL_AGENT_ID),
+  name: z.string().min(1).max(256),
+  hue: z.enum(AGENT_HUES),
+  // What the agent's program says it is, and its version. dohc can't check either.
+  reportedProduct: z.string().min(1).max(256).nullable(),
+  reportedVersion: z.string().min(1).max(256).nullable(),
+  status: z.enum(["active", "signed_out"]),
+  createdAtMs: z.number().int().nonnegative(),
+  // When it last signed in, or null when the relay has no record of it.
+  signedInAtMs: z.number().int().nonnegative().nullable(),
+  lastActionAtMs: z.number().int().nonnegative().nullable(),
+  reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT),
+});
+export type PersonalAgent = z.infer<typeof PersonalAgent>;
+export const PersonalAgentRoster = z.strictObject({
+  revision: z.number().int().nonnegative(),
+  agents: z.array(PersonalAgent),
+  // The workspaces the account owns on the server, which a reach can name.
+  workspaces: z.array(z.strictObject({ workspaceId: RelayWorkspaceId, name: z.string().min(1).max(1_024).nullable() })),
+});
+export type PersonalAgentRoster = z.infer<typeof PersonalAgentRoster>;
+export const PersonalAgentsAccount = z.strictObject({
+  accountKey: z.string().min(1),
+  host: z.string().min(1),
+  // Where a personal agent link starts: `${agentLinkOrigin}/mcp/agent/w/<workspaceId>`.
+  agentLinkOrigin: z.string().url(),
+  // Null until the first read answers.
+  roster: PersonalAgentRoster.nullable(),
+  // Why the last read failed. The roster above stays as it was.
+  failure: z.string().min(1).nullable(),
+});
+export type PersonalAgentsAccount = z.infer<typeof PersonalAgentsAccount>;
+export const PersonalAgentsEvent = z.strictObject({ accounts: z.array(PersonalAgentsAccount) });
+export type PersonalAgentsEvent = z.infer<typeof PersonalAgentsEvent>;
+export const PersonalAgentChange = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("name"), name: z.string().min(1).max(256) }),
+  z.strictObject({ kind: z.literal("hue"), hue: z.enum(AGENT_HUES) }),
+  z.strictObject({ kind: z.literal("reach"), reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT) }),
+  z.strictObject({ kind: z.literal("sign-out") }),
+  z.strictObject({ kind: z.literal("remove") }),
+  z.strictObject({ kind: z.literal("restore") }),
+]);
+export type PersonalAgentChange = z.infer<typeof PersonalAgentChange>;
+export const PersonalAgentChangeResult = z.discriminatedUnion("ok", [
+  z.strictObject({ ok: z.literal(true), personalAgents: PersonalAgentsEvent }),
+  z.strictObject({ ok: z.literal(false), error: z.string().min(1) }),
+]);
+export type PersonalAgentChangeResult = z.infer<typeof PersonalAgentChangeResult>;
+export const personalAgentsOperations = {
+  // `refresh` asks the relay first, as Settings › Agents does when it opens.
+  readPersonalAgents: {
+    capabilityId: "agent.personal.read",
+    scope: "device",
+    channel: "desktop:read-personal-agents",
+    payload: z.strictObject({ refresh: z.boolean() }), result: PersonalAgentsEvent, guard: "trusted-sender",
+  },
+  changePersonalAgent: {
+    capabilityId: "agent.personal.change",
+    scope: "device",
+    channel: "desktop:change-personal-agent",
+    payload: z.strictObject({
+      accountKey: z.string().min(1),
+      agentId: z.string().regex(PERSONAL_AGENT_ID),
+      change: PersonalAgentChange,
+    }),
+    result: PersonalAgentChangeResult, guard: "trusted-sender",
   },
 } as const satisfies OperationTable;
 
@@ -7711,6 +7793,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentsListeningOperations>,
+    OperationBridge<typeof personalAgentsOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7950,6 +8033,8 @@ export interface DohcDesktopBridge
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
   // An agent you run started or stopped waiting for messages on this computer.
   onAgentsListening(listener: (event: AgentsListeningEvent) => void): () => void;
+  // Main's cached personal agents changed: a read, a change, or another account.
+  onPersonalAgents(listener: (event: PersonalAgentsEvent) => void): () => void;
   // An agent request changed state in a group this window shows: re-read
   // that group's page.
   onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;
