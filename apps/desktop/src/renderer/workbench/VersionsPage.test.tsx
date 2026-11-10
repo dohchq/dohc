@@ -794,6 +794,23 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(shownRows()).toEqual([{ message: historyFailed(READS_FAILED), toast: true }]));
   });
 
+  it("files nothing when a read works after the person dismissed the combined row", async () => {
+    bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) => {
+      if (versionId === "nested") throw new Error("count failed");
+      return { count: 2 };
+    });
+    const user = userEvent.setup();
+    render(<ShellPage />);
+    await waitFor(() => expect(shownRows().map((shown) => shown.message)).toEqual([historyFailed(READS_FAILED)]));
+    act(() => shell!.dismissShellError(shell!.shellErrors[0]!.id));
+    bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 5 });
+    await user.click(within(row("nested")).getByTestId("versions-page-count-retry"));
+    await waitFor(() => expect(details("nested")).toContain("5 files differ from Main"));
+    // The last changes still fail, but nothing new did.
+    expect(shownRows()).toEqual([]);
+  });
+
   it("takes back a failed read's row when the page goes", async () => {
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
     const onError = vi.fn();
