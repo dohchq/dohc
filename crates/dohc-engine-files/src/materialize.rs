@@ -7485,6 +7485,29 @@ mod tests {
         }
     }
 
+    /// #3570: a file with only its folder's entries saves as before. A
+    /// secret gets no private DACL on Windows; its folder's entries stay.
+    #[cfg(windows)]
+    #[test]
+    fn replacing_a_file_with_an_inherited_dacl_keeps_it() {
+        let writes: [(&str, fn(&Scratch)); 3] = [
+            ("notes.md", write_new_by_job),
+            (".env", write_new_by_secret_job),
+            ("notes.md", write_new_by_replace),
+        ];
+        for (name, write) in writes {
+            let scratch = Scratch::new("inherited-dacl");
+            icacls(&scratch.root, &["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"]);
+            let target = scratch.root.join(name);
+            std::fs::write(&target, b"old").unwrap();
+            let before = dacl_sddl(&target);
+            assert!(!before.starts_with("D:P(") && before.contains(";BU)"), "{before}");
+            write(&scratch);
+            assert_eq!(std::fs::read(&target).unwrap(), b"new");
+            assert_eq!(dacl_sddl(&target), before, "{name}");
+        }
+    }
+
     /// #3570: an entry someone added to one file stays with it.
     #[cfg(windows)]
     #[test]
