@@ -97,6 +97,7 @@ export function rawChatMessage(
     } : {}),
     ...agentRequestsFor(message),
     ...reportedFor(message),
+    ...(message.work ? { work: { ...message.work } } : {}),
   };
 }
 
@@ -120,6 +121,7 @@ export function cliShowMessage(message: ChatMessage, decision: ChatStreamItem["d
     })),
     ...agentRequestsFor(message),
     ...reportedFor(message),
+    ...(message.work ? { work: { ...message.work } } : {}),
   };
 }
 

@@ -1,6 +1,7 @@
 import { signalChatWrite } from "./chatWriteSignals";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatMessage, ChatReportedAgent, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
@@ -74,6 +75,8 @@ interface ChatMessageInput {
   body: string;
   needsDecision?: boolean;
   options?: string[];
+  // What an agent reports about its work. The engine refuses one from a person.
+  work?: ChatWorkReport;
   // Runs between admission and the final check, so a slow file lookup cannot
   // carry a stale grant or session into the write.
   resolveAttachments(): Promise<ChatAttachments>;
@@ -311,6 +314,7 @@ export function createChatWrites(dependencies: {
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
+      ...(input.work ? { work: input.work } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
     } };
   }

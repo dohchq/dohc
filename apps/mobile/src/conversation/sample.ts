@@ -23,6 +23,8 @@ export type Segment = { readonly text: string } | { readonly mention: string; re
 
 export interface Message {
   readonly id: string;
+  /** The thread a post's replies open, for a message read from the server. */
+  readonly threadId?: string;
   readonly author: Author;
   readonly at: string;
   /** Minutes since the conversation's first message, for grouping. */

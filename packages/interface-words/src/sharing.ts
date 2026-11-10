@@ -86,7 +86,7 @@ export const sharingWords = {
   endWaitingTitle: (file: string, count: number, senders: readonly string[]) =>
     `End the share of ${file} and decline ${count === 1 ? "1 change" : `${count} changes`} ${namesOf(senders, "someone")} sent?`,
   endWaitingBody: (count: number) => `Undo restores the share, not the declined ${count === 1 ? "change" : "changes"}.`,
-  /** "the share of trip/packing-list.md with sam@example.com" */
+  /** "the share of notes/plan.md with sam@example.com" */
   subject: (title: string, recipients: readonly string[]) => `the share of ${title} with ${namesOf(recipients, "the recipient")}`,
   endedShare: (subject: string) => `Ended ${subject}.`,
   undoWindow: "You can undo this for 10 minutes.",

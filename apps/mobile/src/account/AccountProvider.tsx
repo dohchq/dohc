@@ -1,7 +1,9 @@
 import { fetch } from "expo/fetch";
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
-import { View } from "react-native";
+import { AppState, View } from "react-native";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
+import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
+import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import { createWorkspaceList, type WorkspaceList, type WorkspaceListStore } from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
@@ -11,8 +13,10 @@ interface AccountValue {
   readonly account: Account;
   readonly state: AccountState;
   readonly workspaces: WorkspaceList;
-  /** The workspace the person chose in the switcher; null opens the first that shows on the phone. */
-  readonly chosenWorkspaceId: string | null;
+  /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
+  readonly currentWorkspaceId: string | null;
+  /** What the phone has read of the open workspace. */
+  readonly data: WorkspaceData | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -22,10 +26,17 @@ const Context = createContext<AccountValue | null>(null);
 
 const LOADING: WorkspaceList = { status: "loading" };
 const noList = { subscribe: () => () => undefined, state: () => LOADING };
+const NONE: OpenWorkspaceState = { currentWorkspaceId: null, data: null };
+const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 
-// A build without sample data: the phone's sign-in, and the account's workspaces, for every screen. Requests go
-// through expo/fetch, which honours the client's `credentials: "omit"` and `redirect: "error"` whatever the global
-// fetch is.
+// A build without sample data: the phone's sign-in, the account's workspaces, and what the phone has read of the open
+// one, for every screen. Requests go through expo/fetch, which honours the client's `credentials: "omit"` and
+// `redirect: "error"` whatever the global fetch is.
+//
+// The open workspace's reads live in one store, made for its sign-in and workspace (src/server/openWorkspace.ts).
+// Switching workspace, signing out and a new sign-in each make another and stop the last, so nothing the last one
+// started can reach the screen. Its feed runs while the app is in the foreground. The read cache empties whenever the
+// sign-in changes or ends.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -34,17 +45,31 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn), [signIn]);
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
-  const [chosenWorkspaceId, chooseWorkspace] = useState<string | null>(null);
+  useEffect(() => list?.reload(), [list]);
+
+  const [cache] = useState(createReadCache);
+  useEffect(() => cache.follow(account), [account, cache]);
+  // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
+  // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
+  const open = useMemo(() => signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null, [signIn, list, cache]);
+  const { currentWorkspaceId, data } = useSyncExternalStore((open ?? noOpen).subscribe, (open ?? noOpen).state);
   useEffect(() => {
-    chooseWorkspace(null);
-    list?.reload();
-  }, [list]);
+    if (!open) return;
+    // In the background, iOS would end a held request anyway. A launch can report "unknown" before "active".
+    if (AppState.currentState !== "background") open.resume();
+    const subscription = AppState.addEventListener("change", next => next === "background" ? open.pause() : open.resume());
+    return () => {
+      subscription.remove();
+      open.stop();
+    };
+  }, [open]);
 
   const value = useMemo<AccountValue>(() => ({
-    account, state, workspaces, chosenWorkspaceId, chooseWorkspace,
+    account, state, workspaces, currentWorkspaceId, data,
+    chooseWorkspace: workspaceId => open?.choose(workspaceId),
     reloadWorkspaces: () => list?.reload(),
-    setShowOnPhone: (workspaceId, showOnPhone) => list?.setShowOnPhone(workspaceId, showOnPhone),
-  }), [account, state, workspaces, chosenWorkspaceId, list]);
+    setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
+  }), [account, state, workspaces, currentWorkspaceId, data, list, open]);
   return <Context value={value}>{children}</Context>;
 }
 

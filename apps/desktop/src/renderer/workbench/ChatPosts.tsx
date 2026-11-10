@@ -41,6 +41,7 @@ import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentT
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 import { AS_REPORTED, reportedProduct } from "./reportedAgent";
 import { CopyMessageLink } from "./messageLinks";
+import { WorkStatus } from "./WorkCard";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -730,6 +731,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ))}
             </div>
           ) : null}
+          {comment.work ? (
+            <div className="mt-2">
+              <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
+            </div>
+          ) : null}
           {commentDecision ? (
             <div className="mt-2">
               <DecisionStatus
@@ -913,8 +919,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ))}
             </div>
           ) : null}
-          {openingDecision || runRecords[openingMessage.id] ? (
+          {openingMessage.work || openingDecision || runRecords[openingMessage.id] ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">
+              {openingMessage.work ? <WorkStatus testIdPrefix="chats-message" work={openingMessage.work} /> : null}
               {openingDecision ? (
                 <DecisionStatus
                   decision={openingDecision}

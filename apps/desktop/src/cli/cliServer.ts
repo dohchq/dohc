@@ -718,6 +718,14 @@ function agentWriteRun(context: CliWorkspaceContext, options: CliServerOptions):
   return agentRunId === null ? {} : { agentRunId };
 }
 
+// A work report says where an agent's work stands, so a person's message
+// carries none. The engine refuses one too; this names the fix.
+function refusePersonWork(actor: CliActor, work: unknown): void {
+  if (work !== undefined && actor !== "agent") {
+    throw new CliCommandError("Only an agent reports work. Add --as-agent, or drop --work.");
+  }
+}
+
 // Who a chat write through this socket is. An agent you run writes as itself.
 // Any other agent's message during a run dohc dispatched is that run's
 // agent's. What an agent reported about itself rides beside its name; a
@@ -3145,6 +3153,7 @@ async function dispatchWorkspace(
         throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
       }
       const actor = writeActor(request.args.actor, context, options);
+      refusePersonWork(actor, request.args.work);
       const started = await options.chatWrites.startThread(context, {
         writer: cliChatWriter(actor, context, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
@@ -3154,6 +3163,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         needsDecision: request.args.needsDecision,
         ...(request.args.options ? { options: request.args.options } : {}),
+        ...(request.args.work ? { work: request.args.work } : {}),
         resolveAttachments: () =>
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
@@ -3205,6 +3215,7 @@ async function dispatchWorkspace(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
+      refusePersonWork(actor, request.args.work);
       const reply = {
         writer: cliChatWriter(actor, context, request.args.agent, request.args.reported),
         threadId,
@@ -3212,6 +3223,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         needsDecision: request.args.needsDecision,
         ...(request.args.options ? { options: request.args.options } : {}),
+        ...(request.args.work ? { work: request.args.work } : {}),
         resolveAttachments: () =>
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       };

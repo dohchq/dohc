@@ -1662,6 +1662,47 @@ describe("loopback poll validation", () => {
   });
 });
 
+describe("an agent's work report", () => {
+  it("rides on its message, and the thread's Work card follows the newest report", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const agent = { kind: "agent" as const, displayName: "Nova" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: agent, authorOwnerDisplayName: "Ada",
+      body: "Fixing the login redirect", work: { status: "working", url: "https://example.com/threads/7" },
+    });
+    expect(started.message.work).toEqual({ status: "working", url: "https://example.com/threads/7" });
+    const done = await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id, author: agent, authorOwnerDisplayName: "Ada",
+      body: "Merged", work: { status: "done" },
+    });
+    // The card is the newest report alone: it reported no link, so the card has none.
+    const card = {
+      status: "done", messageId: done.id,
+      author: agent, authorOwnerDisplayName: "Ada", reportedAtMs: done.createdAtMs,
+    };
+    expect((await adapter.getThread({ workspaceId: "workspace", threadId: started.thread.id })).work).toEqual(card);
+    expect((await adapter.listChannelThreads({ workspaceId: "workspace", channelId: "channel" }))[0]?.work).toEqual(card);
+    const stream = await adapter.listGroupStream({ workspaceId: "workspace", channelId: "channel" });
+    expect(stream.items[0]?.post?.work).toEqual(card);
+  });
+
+  it.each([
+    { name: "a person's message", authorKind: "human", work: { status: "done" } },
+    { name: "an unknown status", authorKind: "agent", work: { status: "paused" } },
+    { name: "a link that is not a web address", authorKind: "agent", work: { status: "done", url: "file:///etc/passwd" } },
+    { name: "a field the daemon does not know", authorKind: "agent", work: { status: "done", title: "Fix" } },
+  ])("is refused on $name, as the daemon refuses it", async ({ authorKind, work }) => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "bad-work", authorKind, authorDisplayName: "Nova", body: "Done", work,
+    } })).rejects.toThrow(/invalid-(input|parameters)/);
+    expect((await adapter.getThread({ workspaceId: "workspace", threadId: started.thread.id })).work).toBeUndefined();
+  });
+});
+
 describe("loopback reported agent validation", () => {
   it.each([
     { name: "40 emoji, 80 UTF-16 units", model: "\u{1F600}".repeat(40) },

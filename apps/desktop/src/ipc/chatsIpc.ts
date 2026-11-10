@@ -5,7 +5,7 @@ import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { createActorPresentationRequest } from "../workspaces/actorPresentation";
-import type { ActorPresentation, ChatDecisionRecord } from "./bridgeContract";
+import type { ActorPresentation, ChatDecisionRecord, ChatThreadWorkRecord } from "./bridgeContract";
 import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { createGroup } from "../workspaces/groupCreate";
 import {
@@ -47,6 +47,7 @@ import {
 } from "../mainChatIpcHandlers";
 import type {
   ChannelThreadSummary,
+  ChatThreadWork,
   ChatChannelSummary,
   ChatMessage,
   ChatBookmark,
@@ -98,6 +99,17 @@ function linkAgentForIpc(author: ChatMessage["author"]): { linkAgent?: true } {
   return author.kind === "link" && author.agentConnectionId ? { linkAgent: true } : {};
 }
 
+export function chatThreadWorkForIpc(work: ChatThreadWork): ChatThreadWorkRecord {
+  return {
+    status: work.status,
+    ...(work.url === undefined ? {} : { url: work.url }),
+    messageId: work.messageId,
+    authorDisplayName: work.author.displayName,
+    ...(work.authorOwnerDisplayName ? { authorOwnerDisplayName: work.authorOwnerDisplayName } : {}),
+    reportedAtMs: work.reportedAtMs,
+  };
+}
+
 export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf, presentation: ActorPresentation): ChatMessageRecord {
   return {
     presentation,
@@ -109,6 +121,7 @@ export function chatMessageForIpc(message: ChatMessage, collectionOf: Automation
     ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
     ...(message.authorReported ? { authorReported: message.authorReported } : {}),
+    ...(message.work ? { work: message.work } : {}),
     ...(message.authorAgentId ? { authorAgentId: message.authorAgentId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
@@ -504,6 +517,7 @@ export function registerChatsIpcHandlers<
       lastReadSequence: summary.lastReadSequence,
       unreadCount: summary.unreadCount,
       openDecisionCount: summary.openDecisionCount,
+      ...(summary.work ? { work: chatThreadWorkForIpc(summary.work) } : {}),
       openingMessage: summary.openingMessage
         ? {
             presentation,

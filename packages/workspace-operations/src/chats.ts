@@ -450,6 +450,15 @@ async function readGroupStream(
             },
           } : {}),
           openDecisionCount: item.post.openDecisionCount,
+          ...(item.post.work ? {
+            work: {
+              status: item.post.work.status,
+              ...(item.post.work.url === undefined ? {} : { url: item.post.work.url }),
+              messageId: messageId(item.post.work.messageId),
+              author: { kind: item.post.work.author.kind, displayName: item.post.work.author.displayName },
+              reportedAtMs: item.post.work.reportedAtMs,
+            },
+          } : {}),
         },
       } : {}),
     })),

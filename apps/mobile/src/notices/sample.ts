@@ -13,6 +13,8 @@ export interface PhoneNotice {
   readonly body?: string;
   /** How long ago it arrived; the row shows "2m ago" and VoiceOver hears "2 minutes ago". */
   readonly minutesAgo: number;
+  /** When it arrived, for a notice made on this phone: its time then counts from here, not from `minutesAgo`. */
+  readonly atMs?: number;
   readonly read: boolean;
   /** Another workspace's name, shown beside the time. */
   readonly folder?: string;
@@ -20,13 +22,12 @@ export interface PhoneNotice {
   /** Where Open goes, when the phone can go there: a chat. */
   readonly openChat?: { readonly id: string; readonly name: string };
   readonly retry?: boolean;
+  /** What Try again does, for a failure held on this phone. */
+  readonly onRetry?: () => void;
   /** A wake from the server waits for a computer; dismissing it would cancel it. */
   readonly dismissible: boolean;
   readonly failed?: boolean;
 }
-
-/** What Copy puts on the clipboard, as the desktop copies a notice's details. */
-export const noticeDetails = (notice: PhoneNotice) => [notice.title, notice.body].filter(Boolean).join("\n");
 
 export const sampleNotices: readonly PhoneNotice[] = [
   { id: "n1", senderKind: "person", senderLabel: "Maya Chen", title: "Maya Chen mentioned you in #planning",

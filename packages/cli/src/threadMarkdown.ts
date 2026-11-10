@@ -45,11 +45,18 @@ function reportedAgentLabel(reported: CliShowMessage["authorReported"]): string[
   return parts.length > 0 ? [`${parts.join(", ")} (as reported)`] : [];
 }
 
+// An agent's work report, as people see it on the thread's Work card:
+// `work done https://example.com/pull/7 (as reported)`.
+function workReportLabel(work: CliShowMessage["work"]): string[] {
+  return work ? [`work ${work.status}${work.url ? ` ${work.url}` : ""} (as reported)`] : [];
+}
+
 /** A message's author, what its agent reported, how it came, when, and what its agents are doing. */
 export function messageMetadata(message: CliShowMessage, handle: string): string[] {
   return [
     `**${renderAuthorDisplayName(message.author)}**`,
     ...reportedAgentLabel(message.authorReported),
+    ...workReportLabel(message.work),
     // An automation's message says so, so an agent it woke knows no
     // person wrote the request. A link holder's says it came through a link.
     ...(message.author.kind === "automation" ? ["automation"] : []),

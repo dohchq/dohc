@@ -167,10 +167,14 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
   inbox: [["chat", "inbox"]],
   show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
-  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "--as-agent", "--agent", "Scout", "Ship", "it?"]],
+  post: [
+    ["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "--as-agent", "--agent", "Scout", "Ship", "it?"],
+    ["chat", "post", "general", "--as-agent", "--work", "working", "--link", "https://example.com/threads/7", "Fixing", "the", "login", "redirect"],
+  ],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
     ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
+    ["chat", "reply", "th_1", "--as-agent", "--work", "done", "--link", "https://example.com/pull/7", "Opened", "a", "pull", "request"],
   ],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],

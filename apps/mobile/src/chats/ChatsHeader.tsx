@@ -7,8 +7,11 @@ import { useSignIn } from "../account/AccountProvider";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme } from "../theme";
 import { waitingToSend } from "../demo";
-import { sampleMe, type PhoneWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./sample";
 import { useWorkspaceMenu } from "./workspaceMenu";
+
+// The sample's "you", in a sample build only (src/sampleBuild.ts).
+const sampleMe = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? (require("./sample") as typeof import("./sample")).sampleMe : null;
 
 // Slack's Home header: the workspace on the left (tap for its menu, or the switcher once signed in); your mark on the
 // right, which opens Settings once signed in. Without a workspace on the phone, only your mark shows.
@@ -32,7 +35,7 @@ export function ChatsHeader({ workspace, scrolled }: { workspace: PhoneWorkspace
       ) : <View />}
       <View style={styles.actions}>
         {/* New message joins here when compose exists; a button that does nothing tells the person nothing. */}
-        {sampleBuild ? (
+        {sampleMe ? (
           // The sample has no Settings: nothing to press, so it isn't a button.
           <View accessible accessibilityRole="image" accessibilityLabel="You" style={styles.action}>
             <View style={[styles.me, { backgroundColor: sampleMe.hue }]}>

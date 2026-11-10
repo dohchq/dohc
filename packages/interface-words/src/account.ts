@@ -46,6 +46,9 @@ export const accountWords = {
   unnamedWorkspace: "Unnamed workspace",
   noWorkspaces: (server: string) => `No workspaces on ${server} yet. Turn on sync for one on your computer.`,
   noneShown: "No workspaces show on this phone. Turn on Show on phone in Settings.",
+  /** A workspace that shows on the phone, but whose computer hasn't set up its sync, so the server can't open it. */
+  notSyncedYet: "Not synced yet",
+  noneSynced: "No workspace on this phone is synced yet. Turn on sync for one on your computer.",
   workspaces: "Workspaces",
 
   sessions: "Sessions",

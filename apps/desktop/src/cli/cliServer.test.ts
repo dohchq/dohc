@@ -3980,6 +3980,34 @@ describe("CLI socket server", () => {
     expect(shown.messages.map(message => message.authorReported)).toEqual(expected);
   });
 
+  it("posts an agent's work report, serves the thread's Work card, and refuses one from a person", async () => {
+    const url = "https://example.com/threads/7";
+    const started = await invoke("post", {
+      cwd: workspaceRoot, actor: "agent", group: "general", attachments: [], needsDecision: false,
+      body: "Fixing the login redirect", work: { status: "working", url },
+    });
+    const thread = started.threadId;
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread, attachments: [], needsDecision: false,
+      body: "Merged", work: { status: "done" },
+    });
+    await expect(invoke("reply", {
+      cwd: workspaceRoot, actor: "human", thread, attachments: [], needsDecision: false,
+      body: "Mine", work: { status: "done" },
+    })).rejects.toThrow("Only an agent reports work. Add --as-agent, or drop --work.");
+
+    // Each message keeps its own report; the post's card is the newest one alone.
+    const shown = await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread, peek: true });
+    expect(shown.messages.map(message => message.work)).toEqual([{ status: "working", url }, { status: "done" }]);
+    const group = await invokeAny("show", { cwd: workspaceRoot, actor: "agent", target: "general", peek: true });
+    if (!("stream" in group)) throw new Error("expected a stream");
+    const post = group.stream.items.find(item => item.threadId === thread)?.post;
+    expect(post?.work).toMatchObject({
+      status: "done", messageId: shown.messages[1]!.id, author: { kind: "agent", displayName: "Agent" },
+    });
+    expect(post?.work).not.toHaveProperty("url");
+  });
+
   it("keeps what an agent reported on a file comment, and a retry must report the same", async () => {
     if (!store) throw new Error("Store is not available");
     const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };

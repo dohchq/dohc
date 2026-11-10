@@ -1676,6 +1676,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 automation: None,
                 author_agent_id: None,
                 author_reported: None,
+                work: None,
                 wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,

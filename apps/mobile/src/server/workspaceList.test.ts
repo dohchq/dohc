@@ -5,8 +5,8 @@ import { deferred, testServer, type Answer } from "./testServer";
 import { createWorkspaceList } from "./workspaceList";
 
 const listed = (...workspaces: AccountWorkspace[]): Answer => ({ status: 200, body: { ok: true, workspaces } });
-const A: AccountWorkspace = { workspaceId: "ws-a", name: "Trip", showOnPhone: true };
-const B: AccountWorkspace = { workspaceId: "ws-b", name: "Budget", showOnPhone: true };
+const A: AccountWorkspace = { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true };
+const B: AccountWorkspace = { workspaceId: "ws-b", name: "Budget", canOpen: true, showOnPhone: true };
 const changed = (workspaceId: string, showOnPhone: boolean): Answer => ({ status: 200, body: { ok: true, workspaceId, showOnPhone } });
 
 /** Lets every answer already given reach the list: no timer, only the macrotask after the answers' callbacks. */

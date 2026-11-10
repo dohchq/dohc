@@ -134,7 +134,7 @@ describe("the sign-in generation", () => {
     const { server, tokens, account } = setup();
     await account.restore();
     server.on("GET", "/sync/account/workspaces", { status: 401, body: { ok: false, code: "unauthorized" } });
-    await expect(listWorkspaces(signedIn(account).client)).rejects.toEqual(new ServerError("signed-out", 401));
+    await expect(listWorkspaces(signedIn(account).client)).rejects.toEqual(new ServerError("signed-out", 401, "unauthorized"));
     expect(account.state()).toEqual({ status: "signed-out", origin: SAVED.origin, ended: true, forgetFailed: false });
     await vi.waitFor(() => expect(tokens.current()).toBeNull());
     expect(server.paths()).toEqual(["GET /sync/account/workspaces"]);

@@ -18,7 +18,8 @@ import type { ServerProblemKind } from "@dohc/interface-words/account";
 export type ServerProblem = "signed-out" | "not-found" | "server-busy" | "offline" | "refused" | "invalid" | "cancelled";
 
 export class ServerError extends Error {
-  constructor(readonly problem: ServerProblem, readonly status: number | null = null) {
+  /** `code` is the error code a refusal's answer named, such as `restore-in-progress`. */
+  constructor(readonly problem: ServerProblem, readonly status: number | null = null, readonly code: string | null = null) {
     super(status === null ? problem : `${problem} (${status})`);
     this.name = "ServerError";
   }
@@ -117,13 +118,25 @@ export function statusProblem(status: number): Exclude<ServerProblem, "offline" 
   return "refused";
 }
 
+/** What one request adds to the sign-in's: its own signal, which aborts it alone, and a longer wait for a held answer. */
+export interface SendOptions {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
+
 export interface ServerClient {
   readonly origin: string;
   /**
    * Sends a request with the sign-in's token, and resolves its answer as `read` validates it. `read` returns null
    * for an answer it can't use. A 401 ends the sign-in.
    */
-  send<T>(method: "GET" | "POST" | "PATCH", path: string, read: (body: unknown) => T | null, body?: unknown): Promise<T>;
+  send<T>(method: "GET" | "POST" | "PATCH", path: string, read: (body: unknown) => T | null, body?: unknown, options?: SendOptions): Promise<T>;
+}
+
+/** The error code a refusal's answer names, as the server's errors carry it: `{ ok: false, error, code }`. */
+function refusalCode(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || !("code" in body)) return null;
+  return typeof body.code === "string" && body.code.length <= 64 ? body.code : null;
 }
 
 export function createServerClient(options: {
@@ -138,19 +151,31 @@ export function createServerClient(options: {
 }): ServerClient {
   return {
     origin: options.origin,
-    async send(method, path, read, body) {
-      const answer = await exchange(options.fetch, `${options.origin}${path}`, {
-        method, body, signal: options.signal, timeoutMs: options.timeoutMs,
-        headers: { authorization: `Bearer ${options.token}` },
-      });
-      if (answer.status < 200 || answer.status > 299) {
-        const problem = statusProblem(answer.status);
-        if (problem === "signed-out") options.onSignedOut?.();
-        throw new ServerError(problem, answer.status);
+    async send(method, path, read, body, request) {
+      // The request ends when the sign-in does, or when its own signal aborts.
+      const ending = new AbortController();
+      const end = () => ending.abort();
+      for (const signal of [options.signal, request?.signal]) {
+        if (signal?.aborted) end();
+        signal?.addEventListener("abort", end);
       }
-      const value = read(answer.body);
-      if (value === null) throw new ServerError("invalid", answer.status);
-      return value;
+      try {
+        const answer = await exchange(options.fetch, `${options.origin}${path}`, {
+          method, body, signal: ending.signal, timeoutMs: request?.timeoutMs ?? options.timeoutMs,
+          headers: { authorization: `Bearer ${options.token}` },
+        });
+        if (answer.status < 200 || answer.status > 299) {
+          const problem = statusProblem(answer.status);
+          if (problem === "signed-out") options.onSignedOut?.();
+          throw new ServerError(problem, answer.status, refusalCode(answer.body));
+        }
+        const value = read(answer.body);
+        if (value === null) throw new ServerError("invalid", answer.status);
+        return value;
+      } finally {
+        options.signal.removeEventListener("abort", end);
+        request?.signal?.removeEventListener("abort", end);
+      }
     },
   };
 }

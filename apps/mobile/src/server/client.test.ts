@@ -19,7 +19,7 @@ describe("the server client", () => {
   it("sends the Bearer token without cookies, and reads a checked answer", async () => {
     const server = testServer();
     server.on("GET", "/sync/account/workspaces", { status: 200, body: WORKSPACES });
-    expect(await listWorkspaces(client(server))).toEqual([{ workspaceId: "ws-1", name: "Trip", showOnPhone: true }]);
+    expect(await listWorkspaces(client(server))).toEqual([{ workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true }]);
     expect(server.calls[0]!.headers.authorization).toBe("Bearer tok");
   });
 
