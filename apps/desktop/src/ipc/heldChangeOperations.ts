@@ -6,15 +6,6 @@ const workspace = { workspaceId: z.string().min(1).max(256) };
 const path = z.string().min(1).max(4096);
 
 export const heldChangeOperations = {
-  listHeldChanges: {
-    capabilityId: "document.held.read",
-    channel: "desktop:list-held-changes",
-    scope: "workspace",
-    guard: "active-workspace",
-    inactiveMessage: "dohc stopped reading held changes because this window changed workspaces.",
-    payload: z.object(workspace).strict(),
-    result: z.object({ paths: z.array(path) }).strict(),
-  },
   readHeldChange: {
     capabilityId: "document.held.read",
     channel: "desktop:read-held-change",

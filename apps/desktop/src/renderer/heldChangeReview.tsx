@@ -15,9 +15,9 @@ export type HeldChangeRead =
 const TITLE_ID = "held-change-title";
 
 /**
- * What saving a held change would write, against the file, as a diff. The
- * engine answers from the same projection the save writes, so the review
- * shows what Edit anyway would save, not a guess.
+ * What saving a held change would write, against the file on disk, as a
+ * diff. The engine answers from the same selection and projection the save
+ * uses, so the review shows what Edit anyway would save, not a guess.
  */
 export function HeldChangeDialog(props: { workspaceId: string; path: string; onClose: () => void }) {
   const [attempt, setAttempt] = useState(0);
@@ -51,6 +51,8 @@ export function HeldChangeDialog(props: { workspaceId: string; path: string; onC
 export function HeldChangeCard(props: { path: string; read: HeldChangeRead; onRetry: () => void; onClose: () => void }) {
   const change = props.read.kind === "ready" ? props.read.change : null;
   const sides = change && "held" in change ? change : null;
+  // dohc refuses a preview it can't make equal to what saving writes.
+  const unavailable = change && "unavailable" in change ? change.unavailable : null;
   // The file's text is the base; what saving writes is the candidate.
   const diff = useMemo(() => sides ? computeTextDiff(sides.file ?? undefined, sides.held, 800) : null, [sides]);
   const lines = useMemo(() => diff ? buildUnifiedDiffLines(diff) : null, [diff]);
@@ -62,19 +64,25 @@ export function HeldChangeCard(props: { path: string; read: HeldChangeRead; onRe
           <h2 id={TITLE_ID} className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink">Held change to {name}</h2>
           {diff?.counts ? <DiffCounts counts={diff.counts} testId="held-change-counts" /> : null}
         </div>
-        <div className="flex items-center gap-4 font-mono text-[11px]" data-testid="held-change-legend">
-          <span className="text-danger">− <span className="font-sans text-muted">{sides?.file === null ? "No file yet" : "In the file"}</span></span>
-          <span className="text-success">+ <span className="font-sans text-muted">Held change, if saved</span></span>
-        </div>
+        {unavailable ? null : (
+          <div className="flex items-center gap-4 font-mono text-[11px]" data-testid="held-change-legend">
+            <span className="text-danger">− <span className="font-sans text-muted">{sides?.file === null ? "No file yet" : "In the file"}</span></span>
+            <span className="text-success">+ <span className="font-sans text-muted">Held change, if saved</span></span>
+          </div>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
         {props.read.kind === "loading" ? <SkeletonRows label="Reading the held change…" /> : null}
         {props.read.kind === "failed" ? (
-          <div role="alert" data-testid="held-change-failed" className="flex items-start gap-2 text-[12px] text-ink">
-            <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
-            <span className="min-w-0">dohc could not read the held change.</span>
-            <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetry}>Try again</SecondaryButton>
-          </div>
+          <ReadFailed testId="held-change-failed" onRetry={props.onRetry}>dohc could not read the held change.</ReadFailed>
+        ) : null}
+        {unavailable === "fileUnreadable" ? (
+          <ReadFailed testId="held-change-file-unreadable" onRetry={props.onRetry}>dohc could not read this file to compare it.</ReadFailed>
+        ) : null}
+        {unavailable === "waitingForSync" || unavailable === "unsupported" ? (
+          <p data-testid="held-change-unavailable" className="m-0 text-[13px] text-muted">
+            {unavailable === "waitingForSync" ? "dohc can't preview this change while edits wait to sync." : "dohc can't preview this change."}
+          </p>
         ) : null}
         {props.read.kind === "ready" && change === null ? (
           <p data-testid="held-change-gone" className="m-0 text-[13px] text-muted">dohc no longer holds a change to this note.</p>
@@ -92,5 +100,15 @@ export function HeldChangeCard(props: { path: string; read: HeldChangeRead; onRe
         <SecondaryButton onClick={props.onClose}>Close</SecondaryButton>
       </div>
     </>
+  );
+}
+
+function ReadFailed(props: { testId: string; onRetry: () => void; children: string }) {
+  return (
+    <div role="alert" data-testid={props.testId} className="flex items-start gap-2 text-[12px] text-ink">
+      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
+      <span className="min-w-0">{props.children}</span>
+      <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetry}>Try again</SecondaryButton>
+    </div>
   );
 }

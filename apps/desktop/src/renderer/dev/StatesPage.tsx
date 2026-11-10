@@ -175,6 +175,9 @@ const HELD_CHANGE_READS: { label: string; read: HeldChangeRead }[] = [
     held: HELD_FILE.replace("See [the docs][docs].", "See [the setup docs][docs] first.").replace("Run the installer.", "Run the installer, then sign in.") } } },
   { label: "too large to show", read: { kind: "ready", change: { path: "docs/readme.md", tooLarge: true } } },
   { label: "a failed read", read: { kind: "failed" } },
+  { label: "waiting for edits to sync, so no preview", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "waitingForSync" } } },
+  { label: "a save dohc can't reproduce, such as a live note's", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "unsupported" } } },
+  { label: "the file on disk could not be read", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "fileUnreadable" } } },
   { label: "no longer held", read: { kind: "ready", change: null } },
 ];
 

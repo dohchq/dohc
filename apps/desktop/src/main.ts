@@ -6604,7 +6604,6 @@ function registerIpcHandlers(): void {
     linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
   });
   registerOperations(operationBoundary, heldChangeOperations, {
-    listHeldChanges: async (_input, { operation }) => ({ paths: await workspaceHeldChanges.paths(operation.workspace) }),
     readHeldChange: async ({ path }, { operation }) => ({ change: await workspaceHeldChanges.change(operation.workspace, path) }),
   });
   registerOperations(operationBoundary, shareCopyOperations, {

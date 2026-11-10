@@ -3501,7 +3501,7 @@
     },
     {
       "name": "dohc_read_held_change",
-      "description": "Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text now, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`.",
+      "description": "Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.",
       "inputSchema": {
         "type": "object",
         "properties": {

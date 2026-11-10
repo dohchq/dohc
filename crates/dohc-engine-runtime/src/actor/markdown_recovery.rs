@@ -24,17 +24,35 @@ pub struct MarkdownRecoveryCandidate {
     pub fingerprint: String,
 }
 
-/// A held save, as a person reviews it: what the file holds now beside what
-/// saving the waiting change would write. Both come from the engine: `held`
-/// is the projection the settle would materialize.
-#[derive(Clone, Debug, serde::Serialize)]
+/// A held save, as a person reviews it: the file on disk beside the bytes
+/// saving the waiting change would write. When the engine can't reproduce
+/// the save's choice of text, it says so instead of showing another text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum HeldMarkdownChange {
+    Ready {
+        path: String,
+        /// The file's text on disk; None when there is no file.
+        file: Option<String>,
+        held: String,
+    },
+    Unavailable {
+        path: String,
+        unavailable: HeldChangeUnavailable,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HeldMarkdownChange {
-    pub path: String,
-    /// The file's text in History, which matches the disk while a save is
-    /// held; None when it has no text head.
-    pub file: Option<String>,
-    pub held: String,
+pub enum HeldChangeUnavailable {
+    /// An update waits for one it depends on, so the save would refuse.
+    WaitingForSync,
+    /// The file on disk is not text dohc can read safely.
+    FileUnreadable,
+    /// The save's text is not one the review can reproduce: an adopted
+    /// owner's save writes only what the relay accepted, which only the live
+    /// host knows, and other kinds write text other than this projection.
+    Unsupported,
 }
 
 impl ActorHandle {
@@ -109,53 +127,43 @@ impl ActorHandle {
         }).await
     }
 
-    /// The paths in the active version whose save dohc holds. A dismissed
-    /// Notice leaves its hold here, because dismissal deletes no edits.
-    pub async fn held_markdown_paths(
-        &self,
-        workspace: String,
-    ) -> Result<Vec<String>, RuntimeError> {
-        self.run(move |store, _| {
-            let version = VersionedTextStore::new(store)
-                .get_active_version(&workspace)?
-                .version_id;
-            let pending = store.read_with(|conn| obligations::pending_in(conn, &workspace))?;
-            let mut paths: Vec<String> = pending
-                .into_iter()
-                .filter(|owed| {
-                    owed.held_checkpoint_sha256.is_some() && owed.key.version_id == version
-                })
-                .map(|owed| owed.path)
-                .collect();
-            paths.sort();
-            paths.dedup();
-            Ok(paths)
-        })
-        .await
-    }
-
-    /// The held save at `path` in the active version, projected the way its
-    /// settle projects it; None when nothing there is held.
+    /// The held save at `path` in the active version, beside the file on
+    /// disk; None when nothing there is held. The review selects and projects
+    /// the document through the save's own helpers, and refuses each case
+    /// whose text it can't reproduce rather than show another text.
     pub async fn held_markdown_change(
         &self,
         workspace: String,
         path: String,
+        root: PathBuf,
     ) -> Result<Option<HeldMarkdownChange>, RuntimeError> {
-        self.run(move |store, cache| {
+        self.run_with_reader_retry(move |store, cache| {
             let version = VersionedTextStore::new(store)
                 .get_active_version(&workspace)?
                 .version_id;
-            let pending = store.read_with(|conn| obligations::pending_in(conn, &workspace))?;
-            let Some(owed) = pending.into_iter().find(|owed| {
-                owed.held_checkpoint_sha256.is_some()
-                    && owed.key.version_id == version
-                    && owed.path == path
-            }) else {
+            let Some(owed) = store
+                .read_with(|conn| obligations::held_at_in(conn, &workspace, &version, &path))?
+            else {
                 return Ok(None);
             };
             let Some(marker) = dohc_engine_collab::read_marker(store, &owed.key)? else {
                 return Ok(None);
             };
+            let unavailable = |unavailable| {
+                Ok(Some(HeldMarkdownChange::Unavailable {
+                    path: path.clone(),
+                    unavailable,
+                }))
+            };
+            // Only a session or link-baseline save of a note no relay hosts
+            // projects the document as the review can.
+            if !matches!(owed.kind, Kind::Session | Kind::LinkBaseline)
+                || store.read_with(|conn| {
+                    dohc_engine_collab::owner_outbox::has_adopted_owner_in(conn, &owed.key)
+                })?
+            {
+                return unavailable(HeldChangeUnavailable::Unsupported);
+            }
             let cold;
             let doc = match store.read_with(|conn| cache.doc_for_consumer(conn, &owed.key))? {
                 Some(doc) => doc,
@@ -167,21 +175,42 @@ impl ActorHandle {
                     &cold
                 }
             };
-            let projection = store.read_with(|conn| {
-                dohc_engine_sync::project_ydoc_with_reader(
-                    conn,
-                    &owed.key,
-                    doc,
-                    marker.content_kind,
-                    cache.reader_resolver.as_deref(),
-                )
-                .map_err(RuntimeError::from)
-            })?;
-            let file = VersionedTextStore::new(store)
-                .read_text(&workspace, &version, &path)?
-                .map(|head| head.text);
-            Ok(Some(HeldMarkdownChange {
-                path,
+            let doc = match super::ydoc::settle_source(doc, None) {
+                Ok(doc) => doc,
+                Err(RuntimeError::Collab(CollabError::MissingDependencies)) => {
+                    return unavailable(HeldChangeUnavailable::WaitingForSync);
+                }
+                Err(error) => return Err(error),
+            };
+            let use_reader = owed
+                .retry_inputs
+                .get("useReader")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let projection = super::ydoc::settle_projection(
+                store,
+                &owed.key,
+                doc,
+                marker.content_kind,
+                cache.reader_resolver.as_deref(),
+                use_reader,
+            )?;
+            // The disk, not History: capture defers an outside edit while a
+            // live session holds the note, so History can lag the file.
+            let file = match dohc_engine_files::materialize::read_publication_target(&root, &path) {
+                Ok(dohc_engine_files::materialize::PublicationTarget::Absent) => None,
+                Ok(dohc_engine_files::materialize::PublicationTarget::Bytes(bytes)) => {
+                    match String::from_utf8(bytes) {
+                        Ok(text) => Some(text),
+                        Err(_) => return unavailable(HeldChangeUnavailable::FileUnreadable),
+                    }
+                }
+                Ok(dohc_engine_files::materialize::PublicationTarget::Untracked) | Err(_) => {
+                    return unavailable(HeldChangeUnavailable::FileUnreadable);
+                }
+            };
+            Ok(Some(HeldMarkdownChange::Ready {
+                path: path.clone(),
                 file,
                 held: projection.content,
             }))

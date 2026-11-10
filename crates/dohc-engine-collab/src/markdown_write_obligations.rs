@@ -186,69 +186,114 @@ pub fn record_in(conn: &Connection, owed: &Obligation, now_ms: i64) -> Result<()
     Ok(())
 }
 
+const COLUMNS: &str =
+    "obligation_order,version_id,object_id,lineage_claim_id,operation_id,kind,path,\
+    retry_inputs_json,held_checkpoint_sha256,held_head_sha256,source_sha256,settled_head_sha256";
+
 pub fn pending_in(conn: &Connection, workspace_id: &str) -> Result<Vec<Obligation>, CollabError> {
-    let mut statement = conn.prepare(
-        "SELECT obligation_order,version_id,object_id,lineage_claim_id,operation_id,kind,path,\
-          retry_inputs_json,held_checkpoint_sha256,held_head_sha256,source_sha256,settled_head_sha256 \
-         FROM markdown_write_obligations WHERE workspace_id=?1 AND completed=0 \
+    let mut statement = conn
+        .prepare(&format!(
+        "SELECT {COLUMNS} FROM markdown_write_obligations WHERE workspace_id=?1 AND completed=0 \
          ORDER BY CASE kind WHEN 'collection-adoption' THEN 1 WHEN 'relation-cleanup' THEN 1 \
           ELSE 0 END,obligation_order"
-    ).map_err(crate::durable::map_sql)?;
-    let rows = statement
-        .query_map([workspace_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-            ))
-        })
+    ))
         .map_err(crate::durable::map_sql)?;
-    let mut result = Vec::new();
-    for row in rows {
-        let (
-            order,
-            version,
-            object,
-            lineage_claim_id,
-            operation_id,
-            kind,
-            path,
-            inputs,
-            held_checkpoint_sha256,
-            held_head_sha256,
-            source_sha256,
-            settled_head_sha256,
-        ) = row.map_err(crate::durable::map_sql)?;
-        result.push(Obligation {
-            order,
-            key: DocKey::new(workspace_id, version, object)?,
-            lineage_claim_id,
-            operation_id,
-            kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(|_| {
-                CollabError::Corrupt {
-                    reason: "Markdown write obligation kind is invalid".into(),
-                }
-            })?,
-            path,
-            retry_inputs: serde_json::from_str(&inputs).map_err(|_| CollabError::Corrupt {
-                reason: "Markdown write obligation inputs are invalid".into(),
-            })?,
-            held_checkpoint_sha256,
-            held_head_sha256,
-            source_sha256,
-            settled_head_sha256,
-        });
-    }
-    Ok(result)
+    let rows = statement
+        .query_map([workspace_id], read_row)
+        .map_err(crate::durable::map_sql)?;
+    rows.map(|row| decode(workspace_id, row.map_err(crate::durable::map_sql)?))
+        .collect()
+}
+
+/// The earliest held save at one path, read without decoding the
+/// workspace's other pending rows.
+pub fn held_at_in(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<Obligation>, CollabError> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT {COLUMNS} FROM markdown_write_obligations WHERE workspace_id=?1 \
+                 AND completed=0 AND version_id=?2 AND path=?3 \
+                 AND held_checkpoint_sha256 IS NOT NULL ORDER BY obligation_order LIMIT 1"
+            ),
+            params![workspace_id, version_id, path],
+            read_row,
+        )
+        .optional()
+        .map_err(crate::durable::map_sql)?;
+    row.map(|row| decode(workspace_id, row)).transpose()
+}
+
+type Row = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    ))
+}
+
+fn decode(workspace_id: &str, row: Row) -> Result<Obligation, CollabError> {
+    let (
+        order,
+        version,
+        object,
+        lineage_claim_id,
+        operation_id,
+        kind,
+        path,
+        inputs,
+        held_checkpoint_sha256,
+        held_head_sha256,
+        source_sha256,
+        settled_head_sha256,
+    ) = row;
+    Ok(Obligation {
+        order,
+        key: DocKey::new(workspace_id, version, object)?,
+        lineage_claim_id,
+        operation_id,
+        kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(|_| {
+            CollabError::Corrupt {
+                reason: "Markdown write obligation kind is invalid".into(),
+            }
+        })?,
+        path,
+        retry_inputs: serde_json::from_str(&inputs).map_err(|_| CollabError::Corrupt {
+            reason: "Markdown write obligation inputs are invalid".into(),
+        })?,
+        held_checkpoint_sha256,
+        held_head_sha256,
+        source_sha256,
+        settled_head_sha256,
+    })
 }
 
 pub fn complete_in(conn: &Connection, owed: &Obligation, now_ms: i64) -> Result<(), CollabError> {

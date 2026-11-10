@@ -161,7 +161,6 @@
     "desktop:list-collections",
     "desktop:list-engine-moments",
     "desktop:list-file-chats",
-    "desktop:list-held-changes",
     "desktop:list-history",
     "desktop:list-joined-shared-channels",
     "desktop:list-kept-copies",
@@ -413,7 +412,6 @@
     "desktop:links-in": "active-workspace",
     "desktop:links-resolve": "active-workspace",
     "desktop:links-edges": "active-workspace",
-    "desktop:list-held-changes": "active-workspace",
     "desktop:read-held-change": "active-workspace",
     "desktop:make-message-link": "active-workspace",
     "desktop:resolve-work-link": "active-workspace"

@@ -1,3 +1,4 @@
+use super::super::markdown_recovery::{HeldChangeUnavailable, HeldMarkdownChange};
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dohc_engine_collab::{LeaseRegistry, Ydoc, reader_resolver};
@@ -205,6 +206,13 @@ impl Fixture {
                 )
                 .await
         }
+    }
+
+    async fn held_change(&self, path: &str) -> Option<HeldMarkdownChange> {
+        self.actor
+            .held_markdown_change("w".into(), path.into(), self.scratch.path().to_owned())
+            .await
+            .unwrap()
     }
 
     async fn unchanged(&self) {
@@ -534,20 +542,7 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
 #[tokio::test]
 async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed() {
     let f = Fixture::new().await;
-    assert!(
-        f.actor
-            .held_markdown_paths("w".into())
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        f.actor
-            .held_markdown_change("w".into(), "note.md".into())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert_eq!(f.held_change("note.md").await, None);
     assert!(matches!(
         f.settle(false, None).await,
         Err(RuntimeError::MarkdownWriteHeld { .. })
@@ -569,26 +564,13 @@ async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed(
         .await
         .unwrap();
     // Dismissing the Notice deleted nothing: the save is still held.
-    assert_eq!(
-        f.actor.held_markdown_paths("w".into()).await.unwrap(),
-        ["note.md"]
-    );
-    let change = f
-        .actor
-        .held_markdown_change("w".into(), "note.md".into())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(change.file.as_deref(), Some(f.source.as_str()));
-    assert_ne!(change.held, f.source);
-    assert!(change.held.contains("Accepted text remains available"));
-    assert!(
-        f.actor
-            .held_markdown_change("w".into(), "other.md".into())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a dismissed Notice must leave its held change readable");
+    };
+    assert_eq!(file.as_deref(), Some(f.source.as_str()));
+    assert_ne!(held, f.source);
+    assert!(held.contains("Accepted text remains available"));
+    assert_eq!(f.held_change("other.md").await, None);
     f.unchanged().await;
     // What the review showed is exactly what consenting writes.
     assert!(
@@ -601,22 +583,114 @@ async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed(
     );
     assert_eq!(
         std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
-        change.held
+        held
+    );
+    assert_eq!(f.held_change("note.md").await, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_compares_against_the_file_on_disk() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // An outside edit capture has not taken in: History still holds the source.
+    let outside = "Edited outside dohc.\n";
+    std::fs::write(f.scratch.path().join("note.md"), outside).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a held change over readable text must be shown");
+    };
+    assert_eq!(file.as_deref(), Some(outside));
+    assert!(held.contains("Accepted text remains available"));
+    // Bytes that are not text can't be compared.
+    std::fs::write(f.scratch.path().join("note.md"), [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::FileUnreadable,
+        })
+    );
+    std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, .. }) = f.held_change("note.md").await else {
+        panic!("a deleted file leaves the held change readable");
+    };
+    assert_eq!(file, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_waits_for_a_missing_dependency_like_the_save() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let remote = Ydoc::wire();
+            remote.apply(
+                &dohc_engine_collab::load_persisted(store, &key)?
+                    .unwrap()
+                    .doc
+                    .encode_full_state(),
+            )?;
+            remote.richdoc_append_paragraph("Not yet received");
+            let waiting = remote.richdoc_append_paragraph("Waits for the paragraph above");
+            match store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_update_in_tx(tx, &key, &waiting, None, None, 6)
+            })? {
+                TxnOutcome::Committed(_) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::WaitingForSync,
+        })
+    );
+    // The save refuses for the same reason, so the review shows no text it won't write.
+    assert!(matches!(
+        f.settle(false, Some(f.consent())).await,
+        Err(RuntimeError::Collab(CollabError::MissingDependencies))
+    ));
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_adopted_owner_held_change_is_not_previewed() {
+    let mut f = Fixture::with_reader_source(true).await;
+    f.adopt().await;
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+    let (_owner, host) = f.audited_host().await;
+    assert!(matches!(
+        f.audited_settle(&host, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // The save writes only what the relay accepted, and only the live host
+    // knows that prefix, so the review refuses rather than show another text.
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::Unsupported,
+        })
     );
     assert!(
-        f.actor
-            .held_markdown_paths("w".into())
+        f.audited_settle(&host, Some(f.consent()))
             .await
             .unwrap()
-            .is_empty()
+            .materialized
     );
-    assert!(
-        f.actor
-            .held_markdown_change("w".into(), "note.md".into())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert_eq!(f.held_change("note.md").await, None);
     f.supervisor.close(&f.db).unwrap();
 }
 

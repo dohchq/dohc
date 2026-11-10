@@ -831,6 +831,13 @@ function keptEditsUnavailable() {
   };
 }
 
+function heldChangesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Held changes are kept only in the original workspace. Open it to continue.",
+  };
+}
+
 const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
 const SERVER_RUNS_UNREADABLE = "Your server has no runs in this workspace that this computer can read.";
 
@@ -2077,6 +2084,7 @@ async function dispatch(
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
+  if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2707,7 +2715,7 @@ async function dispatchWorkspace(
       }
 
     case "documentHeld":
-      if (!context.heldChange) return { ok: false as const, reason: "Held changes are unavailable in this workspace." };
+      if (!context.heldChange || context.readOnly) return heldChangesUnavailable();
       try {
         return { ok: true as const, change: await context.heldChange(request.args.path) };
       } catch (error) {

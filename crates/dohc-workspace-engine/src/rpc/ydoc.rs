@@ -2157,25 +2157,7 @@ impl EngineService {
         })
     }
 
-    /// The notes whose save dohc holds, from the holds themselves rather
-    /// than their Notices, so a dismissed Notice leaves the note held.
-    pub(super) async fn ydoc_held_changes(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-    ) -> Result<Value, WireError> {
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let paths = Self::read_under_ctx(
-            &cancellation,
-            "ydoc.heldChanges",
-            open.actor.held_markdown_paths(open.workspace_id.clone()),
-        )
-        .await?;
-        Ok(serde_json::json!({ "paths": paths }))
-    }
-
-    /// One held save: the file's text beside what saving the waiting change
+    /// One held save: the file on disk beside what saving the waiting change
     /// would write. Read only; a pair past the response cap answers
     /// `tooLarge` instead of either text.
     pub(super) async fn ydoc_held_change(
@@ -2190,16 +2172,16 @@ impl EngineService {
         let change = Self::read_under_ctx(
             &cancellation,
             "ydoc.heldChange",
-            open.actor
-                .held_markdown_change(open.workspace_id.clone(), params.path),
+            open.actor.held_markdown_change(
+                open.workspace_id.clone(),
+                params.path.clone(),
+                open.root.clone(),
+            ),
         )
         .await?;
-        let Some(change) = change else {
-            return Ok(serde_json::json!({ "change": null }));
-        };
         let result = serde_json::json!({ "change": change });
         if super::reads::response_encoded_bytes(u64::MAX, &result) > collection_in_band_cap(ctx) {
-            return Ok(serde_json::json!({ "change": { "path": change.path, "tooLarge": true } }));
+            return Ok(serde_json::json!({ "change": { "path": params.path, "tooLarge": true } }));
         }
         Ok(result)
     }

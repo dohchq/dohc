@@ -406,13 +406,13 @@ Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
 
 ### `dohc_read_held_change`
 
-Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text now, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`.
+Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.
 
 A shared view holds no saves of its own, so it does not offer this tool.
 
 - `path`: `string`. Required.
 
-Returns `{ ok: true, change: { path, file, held } | { path, tooLarge: true } | null } | { ok: false, reason }`.
+Returns `{ ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null } | { ok: false, reason }`.
 
 ### `dohc_edit_document`
 
@@ -986,7 +986,7 @@ Show a change dohc held: the file's text and what saving the change would write.
 
 Prints null when nothing is held for the file.
 
-With `--json`, prints `{ schemaVersion, ok: true, change: { path, file, held } | { path, tooLarge: true } | null }`.
+With `--json`, prints `{ schemaVersion, ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null }`.
 
 #### `dohc document edit`
 

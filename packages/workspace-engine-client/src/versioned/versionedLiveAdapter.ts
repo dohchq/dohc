@@ -1493,12 +1493,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return result.waiting;
   }
 
-  /** The notes whose save dohc holds, whether or not their Notice shows. */
-  async heldChanges(): Promise<string[]> {
-    return (await this.workspaceRequest(WORKSPACE_METHOD.ydocHeldChanges, {})).paths;
-  }
-
-  /** The held save at `path`: the file's text beside what saving would write. */
+  /** The held save at `path`: the file on disk beside what saving would write. */
   async heldChange(path: string): Promise<HeldChange | null> {
     return (await this.workspaceRequest(WORKSPACE_METHOD.ydocHeldChange, { path })).change;
   }

@@ -138,7 +138,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     chatFileMentions: vi.fn(async () => null),
     notices: vi.fn(async () => []),
     chatLinks: vi.fn(async () => null),
-    heldChanges: { paths: vi.fn(async () => []), change: vi.fn(async () => null) },
+    heldChanges: { change: vi.fn(async () => null) },
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
@@ -2144,6 +2144,28 @@ it("reads a held change through CLI and MCP from the caller's folder", async () 
   expect(await readHeldChange({ root: f.workspace.rootPath, home: "state", request: send }, { path: "Notes/a.md" })).toEqual({ ok: true, change });
   expect(await readHeldChange({ root: f.workspace.rootPath, home: "state", request: send }, { path: "Notes/b.md" })).toEqual({ ok: true, change: null });
   expect(read.mock.calls.map(([, path]) => path)).toEqual(["Notes/a.md", "Notes/a.md", "Notes/b.md"]);
+});
+
+it("refuses a held change read in a shared view instead of answering that nothing is held", async () => {
+  const f = fixture(await createTestScratch("held-change-shared-"));
+  const read = vi.fn(async () => null);
+  f.dependencies.heldChanges.change = read;
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+
+  const cli = await executeCli({ argv: ["document", "held", "a.md"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).not.toBe(0);
+  expect(cli.stderr).toContain("original workspace");
+  const { readHeldChange } = await import("@dohc/mcp/tools");
+  expect(await readHeldChange({ root: f.workspace.rootPath, home: "state", request: send }, { path: "a.md" }))
+    .toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+  expect(read).not.toHaveBeenCalled();
 });
 
 it("returns an edge page directly through CLI and MCP", async () => {

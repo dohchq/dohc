@@ -2,9 +2,9 @@ import type { HeldChange, VersionedLiveAdapter } from "@dohc/workspace-engine-cl
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 
-// The saves the engine holds because writing them would rewrite Markdown dohc
-// can't show. The person's band and the agent's CLI and MCP read reach the
-// engine through these same two reads. A share view holds no saves of its own.
+// A save the engine holds because writing it would rewrite Markdown dohc can't
+// show. The person's band and the agent's CLI and MCP read reach the engine
+// through this one read. A share view holds no saves of its own.
 export function createWorkspaceHeldChanges(
   withAdapter: <T>(workspace: RegistryEntry, run: (adapter: VersionedLiveAdapter) => Promise<T>) => Promise<T | null>,
 ) {
@@ -14,10 +14,6 @@ export function createWorkspaceHeldChanges(
     return answer.value;
   }
   return {
-    async paths(workspace: RegistryEntry): Promise<string[]> {
-      if (shareViewIsPresent(workspace.shareView)) return [];
-      return await read(workspace, adapter => adapter.heldChanges());
-    },
     async change(workspace: RegistryEntry, path: string): Promise<HeldChange | null> {
       if (shareViewIsPresent(workspace.shareView)) return null;
       return await read(workspace, adapter => adapter.heldChange(path));
