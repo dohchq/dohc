@@ -2297,10 +2297,10 @@ fn verify_direct_write_author(
 }
 
 /// A personal agent's write from `relay:personal-collection:<agentId>`: its
-/// one author is that agent on behalf of the workspace owner, with no other
-/// field, and it writes only a Collection's own files. This engine does not
-/// know the workspace owner, so the relay alone vouches for `onBehalfOf`; no
-/// push may use this origin.
+/// one author is that agent, by the name it had, on behalf of the workspace
+/// owner, with no other field, and it writes only a Collection's own files.
+/// This engine does not know the workspace owner or the agent's name, so the
+/// relay alone vouches for them; no push may use this origin.
 fn verify_personal_collection_author(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -2311,11 +2311,11 @@ fn verify_personal_collection_author(
         payload.authors.as_deref(),
         Some([MomentAuthor::Agent {
             agent_id,
-            agent_name: None,
+            agent_name: Some(name),
             on_behalf_of: Some(owner),
             agent_run_id: None,
             depth: None,
-        }]) if agent_id == lane_agent && !owner.is_empty()
+        }]) if agent_id == lane_agent && !owner.is_empty() && !name.is_empty()
     );
     let exact = envelope
         .payload
@@ -2324,8 +2324,8 @@ fn verify_personal_collection_author(
         .filter(|authors| authors.len() == 1)
         .and_then(|authors| authors[0].as_object())
         .is_some_and(|author| {
-            author.len() == 3
-                && ["kind", "agentId", "onBehalfOf"]
+            author.len() == 4
+                && ["kind", "agentId", "agentName", "onBehalfOf"]
                     .iter()
                     .all(|key| author.contains_key(*key))
         });

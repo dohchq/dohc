@@ -816,6 +816,7 @@ export function createSyncRelayHandler({
       nowMs,
       newId,
       discussionActivity,
+      lookupUserDisplayName,
     }),
   });
 

@@ -295,6 +295,7 @@ export function createPersonalCollectionWriteRoute(input: {
   nowMs: () => number;
   newId: () => string;
   discussionActivity: Pick<DiscussionActivityHub, "wake">;
+  lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
 }) {
   return async function respondToPersonalCollectionWrite(
     request: Request,
@@ -310,6 +311,10 @@ export function createPersonalCollectionWriteRoute(input: {
     const release = input.admission.admit(key);
     if (!release) throw relayError("collection_write_rate_limited");
     try {
+      // History names the agent on its owner's behalf, so the owner's name is looked up while the body arrives.
+      const ownerName = accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId).then(name => {
+        try { return parseLiveUpdateIdentifier(name); } catch { return "Unnamed"; }
+      });
       const body = await readBody(request, MAX_LINK_COLLECTION_WRITE_BODY_BYTES);
       if (Object.keys(body).some((field) => field !== "workspaceId" && field !== "submitId" && field !== "changes")) {
         throw badRequest("invalid request");
@@ -318,8 +323,9 @@ export function createPersonalCollectionWriteRoute(input: {
       const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
       const credential = await fresh();
       const { changes, content } = personalChanges(body.changes);
+      const owner = await ownerName;
       return answer(() => input.storage.commitPersonalCollectionWrite({
-        ...credential, workspaceId, submitId, rawChanges: changes, content, now: input.nowMs, newId: input.newId,
+        ...credential, workspaceId, submitId, ownerName: owner, rawChanges: changes, content, now: input.nowMs, newId: input.newId,
       }), workspaceId, input.discussionActivity, NO_STORE);
     } finally {
       release();

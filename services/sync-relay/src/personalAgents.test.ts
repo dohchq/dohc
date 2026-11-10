@@ -1686,6 +1686,22 @@ describe("a personal agent's Collection writes", () => {
     expect(written(f, agent)).toHaveLength(1);
   });
 
+  it("names the agent and its owner in the stored moment and to a share's readers", async () => {
+    const f = await fixture({ lookupUserDisplayName: (userId) => userId === OWNER ? "Owner name" : null });
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+    await packing(f);
+    const shareId = await createShare(f.h, OWNER, WS_A, { recipientUserId: "recipient", paths: ["trip"] });
+    await ok(await write(f, agent, [created()]));
+    const named = { kind: "agent", agentId: agent.agentId, agentName: "Helper", onBehalfOf: OWNER };
+    // Signed out, History has only the moment's own author to name.
+    expect(payloadOf(written(f, agent)[0]!).authors).toEqual([named]);
+    const response = await f.h(request("recipient", `/sync/shares/${shareId}/log?since=0`));
+    expect(response.status).toBe(200);
+    const ops = (await json(response)).ops as Array<{ payload: Record<string, unknown> }>;
+    expect(ops.at(-1)?.payload).toMatchObject({ path: "trip/packing/Socks.md",
+      authors: [{ kind: "human", humanId: OWNER, humanName: "Owner name" }, named] });
+  });
+
   it("refuses at View and Comment, any file outside a Collection, a workspace out of reach, and a field it does not take", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });

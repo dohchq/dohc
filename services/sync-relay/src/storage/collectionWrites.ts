@@ -343,6 +343,8 @@ export function commitCollectionWrite(
 export interface CommitPersonalCollectionWriteInput extends PersonalCredential {
   workspaceId: string;
   submitId: string;
+  /** The owner's account name, read before the write, or "Unnamed". */
+  ownerName: string;
   /** The changes as the agent sent them, each naming the hash of content it sent. */
   rawChanges: unknown;
   /** The bytes of every file the write names, by the hash the relay computed. */
@@ -355,9 +357,10 @@ export interface CommitPersonalCollectionWriteInput extends PersonalCredential {
 /**
  * Commits one personal agent's direct write to a Collection's own files on
  * its owner's main version. The relay mints the moments under
- * `relay:personal-collection:<agentId>`, with the agent on behalf of its
- * account as their one author and its current name in the admitted author
- * snapshot. Content is checked before the transaction. Inside it, the
+ * `relay:personal-collection:<agentId>`, with the agent by its current name,
+ * on behalf of its account, as their one author. The admitted author
+ * snapshot holds the account and then the agent, so a share's readers see
+ * whose agent wrote. Content is checked before the transaction. Inside it, the
  * agent's authority at the fence its request read, the account's ownership
  * of the workspace, and Edit reach there are read again first, so a sign-out,
  * a password change, or narrowed reach that commits first refuses the write,
@@ -401,8 +404,11 @@ export function commitPersonalCollectionWrite(
     assertWorkspaceQuota(storage, workspaceId, newBlobBytes(storage, workspaceId, input.content));
     insertNewBlobs(storage, workspaceId, input.content, nowMs);
 
-    const author: DirectWriteMomentAuthor = { kind: "agent", agentId, onBehalfOf: ownerUserId };
-    const admittedAuthorSnapshot = parseLiveAuthorSnapshot([{ kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId }]);
+    const author: DirectWriteMomentAuthor = { kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId };
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot([
+      { kind: "human", humanId: ownerUserId, humanName: input.ownerName },
+      { kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId },
+    ]);
     const originId = personalCollectionOrigin(agentId);
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(write).map((change, index) => ({

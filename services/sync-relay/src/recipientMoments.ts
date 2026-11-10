@@ -75,12 +75,13 @@ export interface LinkMomentAuthor {
   principalId: string;
 }
 
-// A personal agent at Edit, on behalf of the account that owns the
-// workspace. Only the relay's personal-collection origin carries it, with
-// nothing else: its name is in the admitted author snapshot.
+// A personal agent at Edit, by the name it had when it wrote, on behalf of
+// the account that owns the workspace. Only the relay's personal-collection
+// origin carries it, with nothing else.
 export interface PersonalMomentAuthor {
   kind: "agent";
   agentId: string;
+  agentName: string;
   onBehalfOf: string;
 }
 

@@ -4293,7 +4293,7 @@ const PERSONAL_AGENT: &str = "p-abcdefghijklmnopqrstuvwxyz";
 const PERSONAL_ORIGIN: &str = "relay:personal-collection:p-abcdefghijklmnopqrstuvwxyz";
 
 fn personal_author(agent_id: &str) -> Value {
-    json!({"kind":"agent", "agentId":agent_id, "onBehalfOf":"owner"})
+    json!({"kind":"agent", "agentId":agent_id, "agentName":"Grok Bot", "onBehalfOf":"owner"})
 }
 
 #[test]
@@ -4388,8 +4388,8 @@ fn personal_collection_origin_refuses_other_paths_and_any_other_author() {
         )
     };
     let wrong_author = "personal-collection origin carries only its agent's author";
-    let mut named = personal_author(PERSONAL_AGENT);
-    named["agentName"] = json!("Grok Bot");
+    let mut unnamed = personal_author(PERSONAL_AGENT);
+    unnamed.as_object_mut().expect("author").remove("agentName");
     let mut with_run = personal_author(PERSONAL_AGENT);
     with_run["agentRunId"] = json!("run");
     let cases = [
@@ -4404,7 +4404,7 @@ fn personal_collection_origin_refuses_other_paths_and_any_other_author() {
             Some(json!({"kind":"agent", "agentId":PERSONAL_AGENT})),
             wrong_author,
         ),
-        (automations(), Some(named), wrong_author),
+        (automations(), Some(unnamed), wrong_author),
         (automations(), Some(with_run), wrong_author),
         (automations(), Some(named_author("grant")), wrong_author),
         (
