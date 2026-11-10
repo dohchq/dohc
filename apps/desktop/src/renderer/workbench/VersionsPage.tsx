@@ -19,9 +19,10 @@ interface ConflictCount { count: number; more: boolean }
 const CONFLICT_PAGES_MAX = 5;
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
-// `quiet` changes the row where it stands, with no new toast.
+// `quiet` changes the row where it stands, with no new toast. `onDismiss` runs
+// when the person dismisses the row.
 interface ReadReports {
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string, quiet: boolean) => void;
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string, quiet: boolean, onDismiss: () => void) => void;
   onSettled: (identity: string) => void;
 }
 
@@ -39,7 +40,9 @@ export const READS_FAILED = "dohc could not finish loading Versions.";
 // settled, so one cause shows one toast in its final words. A second failure
 // changes the row where it stands. A toast only means something new failed,
 // so a row that says more than one read failed keeps saying so until every
-// read works, then goes. Its Try again reads every failed read again.
+// read works, then goes. Its Try again reads every failed read again. Once
+// the person dismisses the row, it stays gone until a read fails again, which
+// files a new row and toast.
 function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) => void) {
   // Each page has its own row, since a split can show two.
   const identity = `versions-reads:${useId()}`;
@@ -51,6 +54,9 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
   current.current = failures;
   // The row's sentence, or null with no row.
   const filed = useRef<string | null>(null);
+  // Set when the person dismisses the row. Any failure clears it, and the
+  // change runs the effect again, even for a read that already failed.
+  const [dismissed, setDismissed] = useState(false);
   // Its Try again reads for this page, so the row goes with the page, as when
   // its tab closes or another tab shows in its place.
   useEffect(() => () => {
@@ -64,7 +70,7 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
       filed.current = null;
       return;
     }
-    if (filed.current === null && reading.size > 0) return;
+    if (dismissed || (filed.current === null && reading.size > 0)) return;
     const [first, ...others] = [...failures.keys()];
     const sentence = others.length > 0 || filed.current === READS_FAILED ? READS_FAILED : READ_FAILED[first!];
     if (sentence === filed.current) return;
@@ -79,8 +85,11 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
       filed.current = null;
       setFailures(current.current);
       retry(failed);
-    }, identity, quiet);
-  }, [failures, reading]);
+    }, identity, quiet, () => {
+      filed.current = null;
+      setDismissed(true);
+    });
+  }, [failures, reading, dismissed]);
   const settled = (read: Read) => setReading((now) => {
     if (!now.has(read)) return now;
     const next = new Set(now);
@@ -92,6 +101,7 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
       setReading((now) => (now.has(read) ? now : new Set(now).add(read)));
     },
     failed(read: Read, error: unknown) {
+      setDismissed(false);
       settled(read);
       setFailures((now) => (now.has(read) ? now : new Map(now).set(read, error)));
     },
@@ -192,10 +202,16 @@ export function VersionsPage(props: {
   const failedCounts = useRef<string[]>([]);
   failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
   const failedKey = failedCounts.current.join("\n");
+  const reportedCounts = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    const before = reportedCounts.current;
+    reportedCounts.current = new Set(failedCounts.current);
     const first = failedCounts.current[0];
     if (first === undefined) notice.worked("counts");
-    else notice.failed("counts", countErrors.current.get(first));
+    // Fewer failed counts, or the same ones in a new order, is not a failure.
+    else if (failedCounts.current.some((versionId) => !before.has(versionId))) {
+      notice.failed("counts", countErrors.current.get(first));
+    }
   }, [failedKey]);
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
