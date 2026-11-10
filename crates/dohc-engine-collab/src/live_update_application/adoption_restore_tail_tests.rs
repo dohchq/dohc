@@ -406,7 +406,6 @@ fn adopt_with_settled_edit(f: &mut Fixture) {
     let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
     acknowledge_entry(f, &covered);
     settled(f, Some(covered), "covered").unwrap();
-    settle_accepted_prefix(f);
     assert!(f
         .store
         .read_with(|conn| crate::author_coverage::reserved_in(conn, &f.key))
@@ -452,9 +451,11 @@ fn a_held_lineage_refuses_the_agent_run_one_moment_has_no_bytes_for() {
         .len()
         - "[]".len()
         + r#","depth":64"#.len();
-    // The list adds its brackets and a comma between entries.
-    let list = |authors: usize| 1 + authors * (entry + 1);
-    let admitted = (crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES - 1) / (entry + 1);
+    // The list adds its brackets and a comma between entries, and the
+    // release reserves the unknown-author marker.
+    let marker = r#"{"kind":"unattributed"}"#.len() + 1;
+    let list = |runs: usize| 1 + runs * (entry + 1) + marker;
+    let admitted = (crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES - 1 - marker) / (entry + 1);
     assert!(admitted < crate::author_coverage::MAX_INTERVAL_AUTHORS);
     assert!(list(admitted) <= crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
     assert!(list(admitted + 1) > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
@@ -483,19 +484,19 @@ fn a_held_lineage_refuses_the_agent_run_one_moment_has_no_bytes_for() {
 
 /// Separate runs of an agent each make a private edit on a held lineage, and
 /// the relay refuses them. Retirement keeps them all, and the release brings
-/// every one of their authors into the interval at once. So the run that one
-/// moment could not name is refused when it edits, and writes nothing. It is
-/// still refused after sync accepts an edit that names it, because the
-/// relay's settlement consumes that author before the release, and so is a
-/// replicated update by that run. After the
-/// release, the document settles and its moment names every run that was
-/// admitted.
+/// every one of their authors into the interval at once, with room kept for
+/// the unknown-author marker. So the run that one moment could not name is
+/// refused when it edits, and writes nothing, though nothing names the
+/// marker. It is still refused after sync accepts an edit that names it,
+/// because the relay's settlement consumes that author before the release,
+/// and so is a replicated update by that run. After the release, the
+/// document settles and its moment names every run that was admitted.
 #[test]
 fn a_held_lineage_refuses_the_agent_run_one_moment_cannot_name() {
     let mut f = Fixture::new();
     adopt_with_settled_edit(&mut f);
     let mut cache = WriterDocCache::new();
-    let runs = crate::author_coverage::MAX_INTERVAL_AUTHORS;
+    let runs = crate::author_coverage::MAX_INTERVAL_AUTHORS - 1;
     for run in 0..runs {
         agent_run_edit(&mut f, &mut cache, run).unwrap();
     }
@@ -700,157 +701,232 @@ fn a_held_lineage_admits_a_new_identity_into_a_full_interval() {
     assert!(agent_runs(&interval.json()).is_empty());
 }
 
-/// A private total that drifted low stops no write. Clearing the lineage's
-/// coverage takes it below zero, and only the admission that reads it, a
-/// held lineage's admission of a new identity, refuses.
+/// A drifted private total refuses only the admission that reads it, a held
+/// lineage's admission of a new identity. Clearing the lineage's coverage
+/// leaves no private author, so its totals are zero again and that
+/// admission works.
 #[test]
-fn a_drifted_private_total_refuses_only_held_admission() {
+fn a_drifted_private_total_clears_with_the_lineages_coverage() {
     let mut f = Fixture::new();
     adopt_with_settled_edit(&mut f);
     agent_run_edit(&mut f, &mut WriterDocCache::new(), 0).unwrap();
     let key = f.key.clone();
-    f.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE ydoc_docs SET private_authors=0, private_author_bytes=0 \
-                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    let totals = |f: &Fixture| -> (i64, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT private_authors, private_author_bytes FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    let admit = |f: &Fixture| {
+        f.store.read_with(|conn| {
+            crate::author_coverage::check_admission_in(
+                conn,
+                &key,
+                Some("agent"),
+                Some(&agent_run("run-1".to_owned(), None)),
             )
-            .map_err(write_sql)
         })
-        .unwrap();
+    };
+    write(
+        &mut f,
+        "UPDATE ydoc_docs SET private_authors=-1, private_author_bytes=-1 WHERE object_id='object'",
+    );
+    let refused = admit(&f);
+    assert!(
+        matches!(refused, Err(crate::CollabError::Corrupt { .. })),
+        "{refused:?}"
+    );
     f.store
         .write_with(&NoFaults, |tx| {
             crate::author_coverage::reset_in(tx, &key, false)
         })
         .expect("a drifted total does not stop clearing coverage");
-    let admitted = f.store.read_with(|conn| {
-        crate::author_coverage::check_admission_in(
-            conn,
-            &key,
-            Some("agent"),
-            Some(&agent_run("run-1".to_owned(), None)),
-        )
-    });
-    assert!(
-        matches!(admitted, Err(crate::CollabError::Corrupt { .. })),
-        "{admitted:?}"
-    );
+    assert_eq!(totals(&f), (0, 0));
+    admit(&f).expect("held admission works again");
 }
 
-/// The relay's settlement of a held lineage names the people it accepted and
-/// writes its file. New agent runs edit privately while the write is
-/// unresolved. The write fails, so those people return to the interval. The
-/// release would bring them in with the runs, more than one moment can
-/// name, so it waits for the relay to settle them first. Then it brings in
-/// only the runs.
-#[test]
-fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
-    let mut f = Fixture::new();
-    adopt_with_settled_edit(&mut f);
-    let (returned, runs) = (600, 600);
-    assert!(returned + runs > crate::author_coverage::MAX_INTERVAL_AUTHORS);
-    let named = people(returned);
-    set_pending(&mut f, &named);
-    let key = f.key.clone();
-    let TxnOutcome::Committed(()) = f
-        .store
-        .write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
-            let moment = dohc_engine_domain::write_projected_text_in_tx(
+/// The relay's settlement of a held lineage, as the host makes it: it
+/// projects the accepted prefix, names the interval and takes it in. The
+/// first attempt writes its moment and waits for the file write. A later one
+/// finds the file holds that moment, so it takes in the interval at once.
+fn relay_settlement(
+    store: &mut EngineStore,
+    audit: &LiveSettlementAudit,
+    key: &DocKey,
+    first: bool,
+) -> Result<String, ApplicationError> {
+    let doc = audit.accepted_prefix().ok_or(ApplicationError::Corrupt)?;
+    let text = doc.project(ContentKind::Richdoc)?.content;
+    let vector = hex_sha256(&doc.encode_state_vector());
+    let TxnOutcome::Committed(id) =
+        store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let authors = crate::author_coverage::interval_in(tx, key, i64::MAX)?;
+            let written = dohc_engine_domain::write_projected_text_in_tx(
                 tx,
                 dohc_engine_domain::ProjectedWriteText {
                     workspace_id: "workspace",
                     version_id: "main",
                     object_id: "object",
                     path: std::borrow::Cow::Borrowed("owner.md"),
-                    text: std::borrow::Cow::Borrowed("# Covered\n\nSettled by the relay.\n"),
+                    text: std::borrow::Cow::Borrowed(&text),
                     moment_id: "relay-settlement",
                     metadata_origin: "ydoc",
                     metadata_summary: None,
                     metadata_correlation_id: None,
-                    author_json: Some(named.as_str()),
+                    author_json: authors.moment_json().as_deref(),
                     now_ms: 20,
                     request_id: None,
                 },
             )
-            .map_err(|_| ApplicationError::Corrupt)?
-            .moment;
-            crate::author_coverage::advance_accepted_prefix_in(tx, &key, true)?;
+            .map_err(|_| ApplicationError::Corrupt)?;
+            crate::author_coverage::advance_accepted_prefix_in(tx, key, first)?;
             tx.execute(
-                "UPDATE ydoc_docs SET settle_seq=?1 \
-                 WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4",
-                rusqlite::params![
-                    moment.moment_order,
-                    key.workspace_id,
-                    key.version_id,
-                    key.object_id
-                ],
+                "UPDATE ydoc_docs SET settle_seq=?1, last_settled_sha=?2 WHERE object_id='object'",
+                rusqlite::params![written.moment.moment_order, written.snapshot.blob_sha256],
             )
             .map_err(write_sql)?;
-            Ok(())
-        })
-        .unwrap()
+            audit.record_in_tx(
+                tx,
+                "relay-settlement",
+                &written.snapshot.blob_sha256,
+                &vector,
+                20,
+            )
+        })?
     else {
-        panic!("settlement interrupted")
+        return Err(ApplicationError::Interrupted);
     };
-    assert!(interval_of(&f).is_empty());
-    let mut cache = WriterDocCache::new();
-    for run in 0..runs {
-        agent_run_edit(&mut f, &mut cache, run).unwrap();
+    Ok(id)
+}
+
+/// The relay's settlement of a held lineage names the people it accepted.
+/// New agent runs edit privately while its file write is unresolved. The
+/// write fails, so those people return to the interval, and the document
+/// parks only once a settlement takes them in again. However few they are,
+/// reconciling the retirement asks the relay to settle, and its settlement
+/// replays the failed one. Then the document parks, and the release brings
+/// in only the runs.
+#[test]
+fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
+    for (returned, runs) in [(600, 600), (10, 10)] {
+        let case = format!("{returned} returned authors and {runs} runs");
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+        native_tail_apply(
+            &mut f,
+            covered.update.clone(),
+            covered.delivery_id.clone(),
+            3,
+        );
+        let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+        acknowledge_entry(&mut f, &covered);
+        set_pending(&mut f, &people(returned));
+        let named = interval_of(&f);
+        // A private edit makes the settlement project the accepted prefix,
+        // as its replay does.
+        let mut cache = WriterDocCache::new();
+        agent_run_edit(&mut f, &mut cache, 0).unwrap();
+        let key = f.key.clone();
+        let reconstruction = NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        };
+        with_settlement(
+            &mut f.store,
+            &f.handle,
+            Some(covered.clone()),
+            128,
+            reconstruction,
+            |store, audit| relay_settlement(store, audit, &key, true),
+        )
+        .unwrap();
+        assert!(interval_of(&f).is_empty(), "{case}");
+        for run in 1..runs {
+            agent_run_edit(&mut f, &mut cache, run).unwrap();
+        }
+        f.store
+            .write_with(&NoFaults, |tx| {
+                crate::author_coverage::compensate_in(tx, &key, Some("relay-settlement"), 30)
+            })
+            .unwrap();
+        assert_eq!(interval_of(&f).json(), named.json(), "{case}");
+        let deliveries: Vec<String> = f
+            .store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        refuse_head(&mut f, &deliveries[0], "delivery-conflict");
+        let absent = JournalEvidence {
+            receipts: vec![],
+            absent: deliveries.clone(),
+        };
+        let scope = RetirementScope {
+            max_deliveries: deliveries.len(),
+            ..retirement_scope()
+        };
+        let retiring = retirement_key(&f, 10);
+        let reconciled = reconcile_activation(
+            &mut f.store,
+            &scope,
+            &retiring,
+            None,
+            Some(&absent),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            matches!(reconciled, Reconciliation::Reconciled { settle: true, .. }),
+            "{case}: the relay settles the returned authors first: {reconciled:?}"
+        );
+        with_retirement_settlement(
+            &mut f.store,
+            &scope,
+            &retiring,
+            &retirement_host(),
+            Some(covered),
+            128,
+            reconstruction,
+            |store, audit| relay_settlement(store, audit, &key, false),
+        )
+        .unwrap();
+        // With its interval empty and no attempt unresolved, the document
+        // parks.
+        assert!(interval_of(&f).is_empty(), "{case}");
+        assert!(
+            !f.store
+                .read_with(|conn| crate::author_coverage::unresolved_in(conn, &key))
+                .unwrap(),
+            "{case}"
+        );
+        release_parked(&mut f);
+        let released = interval_of(&f);
+        assert_eq!(released.len(), runs, "{case}");
+        let mut expected: Vec<String> = (0..runs).map(|run| format!("run-{run}")).collect();
+        expected.sort();
+        assert_eq!(agent_runs(&released.json()), expected, "{case}");
+        let moment_authors: String = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='relay-settlement'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(moment_authors, named.json(), "{case}");
     }
-    f.store
-        .write_with(&NoFaults, |tx| {
-            crate::author_coverage::compensate_in(tx, &key, Some("relay-settlement"), 30)
-        })
-        .unwrap();
-    assert_eq!(interval_of(&f).len(), returned);
-    let deliveries: Vec<String> = f
-        .store
-        .read_with(|conn| {
-            conn.prepare(
-                "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap();
-    assert_eq!(deliveries.len(), runs);
-    refuse_head(&mut f, &deliveries[0], "delivery-conflict");
-    let absent = JournalEvidence {
-        receipts: vec![],
-        absent: deliveries.clone(),
-    };
-    let scope = RetirementScope {
-        max_deliveries: deliveries.len(),
-        ..retirement_scope()
-    };
-    let retiring = retirement_key(&f, 10);
-    let reconciled = reconcile_activation(
-        &mut f.store,
-        &scope,
-        &retiring,
-        None,
-        Some(&absent),
-        &NoFaults,
-    )
-    .unwrap();
-    assert!(
-        matches!(reconciled, Reconciliation::Reconciled { settle: true, .. }),
-        "the relay settles the returned authors first: {reconciled:?}"
-    );
-    host_document(&mut f, true, true);
-    assert_eq!(
-        release_through(&mut f, 10).unwrap(),
-        Release::Pending(ReleasePending::Reconciliation),
-        "the release waits for that settlement"
-    );
-    settle_accepted_prefix(&mut f);
-    release_parked(&mut f);
-    let released = interval_of(&f);
-    assert_eq!(released.len(), runs);
-    let mut expected: Vec<String> = (0..runs).map(|run| format!("run-{run}")).collect();
-    expected.sort();
-    assert_eq!(agent_runs(&released.json()), expected);
 }
 
 #[test]

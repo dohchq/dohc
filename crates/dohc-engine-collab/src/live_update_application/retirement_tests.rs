@@ -1285,8 +1285,12 @@ fn retirement_host() -> ApplicationHostCoordinate {
 }
 
 /// The document as a hosted replica holds it: in its scope or departed
-/// from it, and parked or not.
+/// from it, and parked or not. It parks only with an empty interval, so a
+/// settlement took in what its interval named first.
 fn host_document(f: &mut Fixture, departed: bool, parked: bool) {
+    if parked {
+        settle_accepted_prefix(f);
+    }
     let sql = format!(
         "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms)
            VALUES ('workspace','origin','epoch','stream',0);
@@ -1390,7 +1394,8 @@ fn record_projection(
 }
 
 /// Write `text` as the settled file and record the settlement as `moment`,
-/// with `vector` the state vector digest of the document it projects.
+/// with `vector` the state vector digest of the document it projects. As the
+/// host's settlement does, it takes in the interval.
 fn record_text(
     store: &mut EngineStore,
     audit: &LiveSettlementAudit,
@@ -1398,6 +1403,7 @@ fn record_text(
     text: &str,
     vector: &str,
 ) -> Result<LiveSettlementResult, ApplicationError> {
+    let key = DocKey::new("workspace", "main", "object")?;
     let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
         let written = dohc_engine_domain::write_projected_text_in_tx(
             tx,
@@ -1422,6 +1428,12 @@ fn record_text(
             [&written.snapshot.blob_sha256],
         )
         .map_err(write_sql)?;
+        crate::author_coverage::advance_moment_in(
+            tx,
+            &key,
+            moment,
+            audit.accepted_prefix().is_some(),
+        )?;
         let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, vector, 30)?;
         Ok(audit.result(Some(id), moment.into(), written.snapshot.blob_sha256, false))
     })?;

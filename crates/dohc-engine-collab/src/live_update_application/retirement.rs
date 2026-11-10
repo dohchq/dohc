@@ -62,9 +62,8 @@ pub enum Reconciliation {
         applications: Vec<LiveUpdateHostApplicationAck>,
         has_more_applications: bool,
         /// Whether the relay settles before the release: the activation
-        /// applied past its last settlement, or its release would bring in
-        /// more authors than one moment can name until a settlement consumes
-        /// its interval.
+        /// applied past its last settlement, or its interval still names
+        /// authors, which keep its document from parking.
         settle: bool,
     },
 }
