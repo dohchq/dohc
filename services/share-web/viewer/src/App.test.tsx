@@ -1826,7 +1826,7 @@ describe("App", () => {
     expect(container.textContent).not.toContain("Replace <secret>");
   });
 
-  it.each(["same page", "reload", "refused exchange"] as const)("keeps the real MCP address only for the admitted page: %s", async scenario => {
+  it.each(["same page", "reload", "another link refused"] as const)("keeps the real MCP address only for the admitted page: %s", async scenario => {
     const secret = "m".repeat(43), refusedSecret = "n".repeat(43);
     const address = `${location.origin}/mcp/s/${secret}`;
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -1841,6 +1841,8 @@ describe("App", () => {
     await renderApp();
     const entry = () => container.querySelector('section[aria-labelledby="link-agent-title"]');
     expect(entry()?.querySelector("code")?.textContent).toBe(address);
+    // The address text is the only place the secret appears on the page.
+    expect(container.innerHTML.split(secret).length).toBe(2);
     expect(entry()?.textContent).not.toContain("Replace <secret>");
     expect(entry()?.textContent).toContain("Anyone with the full address gets this link's access");
     expect(location.hash).toBe("");
@@ -1853,7 +1855,7 @@ describe("App", () => {
     await act(async () => root?.unmount());
     root = null;
     writeText.mockClear();
-    if (scenario === "refused exchange") {
+    if (scenario === "another link refused") {
       refuse = true;
       history.replaceState(null, "", `/s/#${refusedSecret}`);
     }
@@ -1861,7 +1863,7 @@ describe("App", () => {
     expect(location.hash).toBe("");
     expect(container.innerHTML).not.toContain(secret);
     expect(container.innerHTML).not.toContain(refusedSecret);
-    if (scenario === "refused exchange") {
+    if (scenario === "another link refused") {
       expect(container.textContent).toContain("This link isn't available.");
       expect(entry()).toBeNull();
       expect(writeText).not.toHaveBeenCalled();

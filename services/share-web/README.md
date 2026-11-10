@@ -28,7 +28,7 @@ Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is 
 The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
 The share page shows and copies the full address after a successful exchange of the original link.
 The viewer keeps the secret in memory for that page only, and removes it from the address bar.
-After a reload or a session-only entry, the page shows the address format instead.
+After a reload, or when the page is opened from its `/s/<session>` address, it shows the address format instead.
 Replace `<secret>` with the text after `#` in the original link in that case.
 The share page also advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
