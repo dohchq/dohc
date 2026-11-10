@@ -3326,6 +3326,12 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportExplorerError, showSuccessNotice]);
+  // The Chats sidebar's notices, held to their workspace like the Explorer's:
+  // an Undo pressed after the window moved on does nothing.
+  const chatsNavigatorNotice = useCallback((message: string, undo?: () => void) => {
+    const owner = workspaceIdRef.current;
+    showSuccessNotice(message, undo && (() => { if (workspaceIdRef.current === owner) undo(); }));
+  }, [showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
@@ -5925,6 +5931,10 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onNotice: chatsNavigatorNotice,
+    onClearError: clearIdentity,
+    onThreadRead: onChatsThreadRead,
+    onDmRead: onChatsDmRead,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,

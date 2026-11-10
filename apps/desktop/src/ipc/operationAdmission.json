@@ -10,6 +10,7 @@
   "desktop:app-view": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:order-agents": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-agent-color": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:set-chat-archived": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:reset-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-user-settings-file-path": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:open-user-settings-file": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

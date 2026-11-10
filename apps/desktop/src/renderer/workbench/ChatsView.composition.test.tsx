@@ -199,7 +199,7 @@ describe("ChatsView agents' chats", () => {
     expect(onSetupAgent).toHaveBeenCalledTimes(2);
   });
 
-  it("lists each agent's chat in Settings order with its own name and hue, then removed agents' chats", async () => {
+  it("lists each agent's chat in Settings order with its own name and hue, and keeps a removed agent's chat in Archived", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -220,26 +220,36 @@ describe("ChatsView agents' chats", () => {
       onSaveUserSettings: vi.fn(async () => undefined),
     });
 
-    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(2));
     const rows = screen.getAllByTestId("chats-my-agent");
-    expect(rows.map((row) => row.dataset.agentId)).toEqual(["default", "scout", "helper"]);
-    expect(screen.getAllByTestId("chats-my-agent-name").map((name) => name.textContent)).toEqual(["Nova", "Ranger", "Helper"]);
+    expect(rows.map((row) => row.dataset.agentId)).toEqual(["default", "scout"]);
+    expect(screen.getAllByTestId("chats-my-agent-name").map((name) => name.textContent)).toEqual(["Nova", "Ranger"]);
     const mark = (row: HTMLElement, name: string) => row.querySelector(`[title="${name}"]`)!.className;
     expect(mark(rows[0]!, "Nova")).toContain("border-agent");
     expect(mark(rows[1]!, "Ranger")).toContain("text-hue-teal");
-    expect(mark(rows[2]!, "Helper")).toContain("border-subtle bg-panel text-subtle");
-    // Each row says whether its own agent is off or has no runner, and its own unread count.
+    // Each row says whether its own agent is off, and its own unread count.
     expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
     expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("off");
-    expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("removed");
     expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
-    expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
     // An unread agent chat's name goes bold beside its ink count; a read one stays regular.
     const name = (row: HTMLElement) => within(row).getByTestId("chats-my-agent-name").className;
     expect(name(rows[0]!)).not.toContain("font-medium");
     expect(name(rows[1]!)).toContain("font-medium");
-    expect(name(rows[2]!)).toContain("font-medium");
     expect(within(rows[1]!).getByTestId("chats-my-agent-unread").className).toContain("bg-ink");
+
+    // Helper's agent left Settings. Its chat waits in Archived with no
+    // "removed" tag, and Archived counts the unread message.
+    const archived = screen.getByTestId("chats-archived-toggle");
+    expect(archived.getAttribute("aria-expanded")).toBe("false");
+    expect(within(archived).getByText("Archived").className).toContain("font-medium");
+    expect(within(archived).getByTestId("chats-archived-unread").textContent).toBe("1");
+    await user.click(archived);
+    const helper = within(screen.getByTestId("chats-archived-list")).getByTestId("chats-my-agent");
+    expect(helper.dataset.agentId).toBe("helper");
+    expect(mark(helper, "Helper")).toContain("border-subtle bg-panel text-subtle");
+    expect(within(helper).queryByTestId("chats-my-agent-state")).toBeNull();
+    expect(within(helper).getByTestId("chats-my-agent-unread").className).toContain("bg-line/70");
+    expect(name(helper)).toContain("font-medium");
 
     await user.click(rows[1]!);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Ranger");

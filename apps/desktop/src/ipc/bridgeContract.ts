@@ -6119,6 +6119,14 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
+// Archives or unarchives one chat in this person's sidebar for one workspace.
+export const SetChatArchivedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  channelId: OPAQUE_ID,
+  archived: z.boolean(),
+}).strict();
+export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
+
 // Ids of entries in the settings file, broken ones included, so Undo can put
 // back an order with an entry dohc could not use.
 export const OrderAgentsPayload = z.object({
