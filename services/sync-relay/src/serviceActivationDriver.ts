@@ -329,15 +329,16 @@ export class ServiceActivationDriver {
   }
   /**
    * Asks the relay, outside the pass, to start a target whose fresh capture found no Y.Doc lineage. Only a
-   * document the relay holds no Y.Doc update for, whose latest write is text at the target's path, is asked
-   * about, once its retry allows. A base, a replay or earlier history lets the next pass pull and capture it
+   * document the relay holds no Y.Doc update for, whose latest write is text of a known length at the target's
+   * path, is asked about, once its retry allows. A base, a replay or earlier history lets the next pass pull and capture it
    * again, as a stale source does, so only that capture makes it ready. A refusal stops it.
    */
   #openFirst(target:ServiceActivationTarget){
     const o=this.options,key=targetKey(target),request=o.firstOpen?.(target);
     if(!request || this.#opening.has(key) || this.#blocked.get(key)?.reason!=="without-lineage")return;
     const objectId=this.#objects.get(key),head=objectId===undefined || this.#latestUpdate(target)!==0?null:o.storage.readFirstOpenMoment(target.workspaceId,objectId);
-    const source=head?.path===target.path && head.contentKind==="text" && head.sourceDigest?{workspaceId:target.workspaceId,objectId:objectId!,
+    // The relay answers any other head stale, as its publisher reads it, and that answer wakes the next pass at once.
+    const source=head?.path===target.path && head.contentKind==="text" && head.sourceDigest && head.sourceByteLength!==null?{workspaceId:target.workspaceId,objectId:objectId!,
       path:head.path,sourceMomentId:head.sourceMomentId,sourceDigest:head.sourceDigest}:undefined;
     if(!source || this.#firstOpen.standing(source,this.#firstOpenContext) || this.#firstOpenRetry.state(source)?.stop){this.#pursued.delete(key);return;}
     const abort=new AbortController(),signal=AbortSignal.any([abort.signal,o.lifetime]),attached=o.workspace(target.workspaceId);
