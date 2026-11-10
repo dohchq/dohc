@@ -914,15 +914,52 @@ mod tests {
     #[test]
     fn v2_validation_rejects_each_missing_required_table() {
         let image = closed_schema_image();
-        let (_directory, _path, conn) = copied_schema_connection(&image);
-        let tables: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type IN ('table', 'virtual') AND name NOT LIKE 'sqlite_%'")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        drop(conn);
+        // Keep these persistence boundaries independent of the validator's list.
+        let tables: std::collections::BTreeSet<_> = super::REQUIRED_TABLES
+            .iter()
+            .copied()
+            .chain([
+                "markdown_write_obligations",
+                "markdown_write_obligation_notice_dismissals",
+                "live_audit_held_records",
+                "live_audit_held_blobs",
+                "live_audit_held_exports",
+                "live_audit_base_publications",
+                "live_audit_bases",
+                "live_audit_base_conflicts",
+                "live_accepted_updates",
+                "live_accepted_checkpoints",
+                "live_accepted_reader_history",
+                "live_restore_fences",
+                "live_restore_cancellations",
+                "live_owner_adoptions",
+                "live_owner_activations",
+                "live_owner_retirements",
+                "released_tail_generations",
+                "released_hold_revisions",
+                "live_device_bootstraps",
+                "live_device_application_bindings",
+                "live_device_update_applications",
+                "live_device_application_first_seen",
+                "live_device_settlements",
+                "owner_ydoc_outboxes",
+                "owner_ydoc_outbox_entries",
+                "owner_ydoc_outbox_refusals",
+                "ydoc_owner_base_sources",
+                "ydoc_owner_activation_sources",
+                "work_references",
+                "work_reference_outbox",
+                "replication_pending_conflict_bundles",
+                "replication_pending_conflict_ops",
+                "replication_pending_conflict_moments",
+                "replication_pending_conflict_text_blobs",
+                "replication_pending_conflict_binary_blobs",
+                "ydoc_base_relay_candidates",
+                "ydoc_recovery_decisions",
+                "ydoc_drain_reports",
+                "released_hold_copy_decisions",
+            ])
+            .collect();
         for table in tables {
             let (_directory, _path, conn) = copied_schema_connection(&image);
             super::validate_v2(&conn).unwrap();

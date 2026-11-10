@@ -437,11 +437,9 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
       - name: Reader test Node
         run: |-
           dir="$(mktemp -d)"
@@ -449,15 +447,13 @@ jobs:
           echo "DOHC_READER_TEST_NODE=$dir/node" >> "$GITHUB_ENV"
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         if: inputs.cache != 'cold'
         with:
           shared-key: engine-archive
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
-          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.143
       - name: Compile and inventory every workspace test
         run: node scripts/verification/cloud-rust.mjs archive
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -504,6 +500,10 @@ jobs:
           - 9
           - 10
           - 11
+          - 12
+          - 13
+          - 14
+          - 15
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
