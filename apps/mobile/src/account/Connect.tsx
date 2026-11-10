@@ -1,6 +1,7 @@
 import { accountWords } from "@dohc/interface-words/account";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { StatusBar } from "expo-status-bar";
+import { ScanQrCode } from "lucide-react-native";
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,7 +10,9 @@ import { ServerError } from "../server/client";
 import { checkServerAddress, serverName } from "../server/origin";
 import { useTheme } from "../theme";
 import { useAccount } from "./AccountProvider";
+import { Button } from "./Button";
 import { ProblemLine } from "./ProblemLine";
+import { ScanSheet } from "./ScanSheet";
 
 type Phase =
   | { readonly kind: "form" }
@@ -21,9 +24,10 @@ const check = (address: string) => checkServerAddress(address, { developmentServ
 
 const ADDRESS_PROBLEM = { empty: accountWords.enterAddress, insecure: accountWords.enterHttps, invalid: accountWords.enterAddressLike } as const;
 
-// Connecting this phone to a server: the address, then the server's device sign-in. The phone opens the server's
-// approval page in the system browser, with its code filled in, and polls until the person approves it there. The
-// page doesn't return to the app, so the browser opens as a plain sheet and closes once the phone is signed in.
+// Connecting this phone to a server: the address, typed or scanned from a computer's Connect a phone code, then the
+// server's device sign-in. The phone opens the server's approval page in the system browser, with its code filled in,
+// and polls until the person approves it there. The page doesn't return to the app, so the browser opens as a plain
+// sheet and closes once the phone is signed in.
 export function Connect() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -36,12 +40,14 @@ export function Connect() {
   // What the last attempt ended with, above the button that tries again.
   const [outcome, setOutcome] = useState<string | null>(last?.ended && last.origin ? accountWords.sessionEnded(serverName(last.origin)) : null);
   const field = useRef<TextInputInstance>(null);
+  // The scanner's sheet. Each opening is a new session, so it asks for the camera again and forgets earlier scans.
+  const [scan, setScan] = useState({ open: false, session: 0 });
 
   // Leaving this screen ends a sign-in still in progress. Once signed in, it has nothing to end.
   useEffect(() => () => account.cancelSignIn(), [account]);
 
-  async function connect() {
-    const checked = check(address);
+  async function connect(value = address) {
+    const checked = check(value);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
       field.current?.focus();
@@ -69,6 +75,13 @@ export function Connect() {
       setOutcome(problem === "offline" || problem === "server-busy" ? accountWords.problem(problem, server) : accountWords.couldNotSignIn(server));
       setPhase({ kind: "form" });
     }
+  }
+
+  // A scanned address goes in the field and connects, as Connect server would.
+  function scanned(origin: string) {
+    setScan(current => ({ ...current, open: false }));
+    setAddress(origin);
+    void connect(origin);
   }
 
   function cancel() {
@@ -100,34 +113,42 @@ export function Connect() {
             {/* The last sign-out could not delete its token, so it is still on this phone. */}
             {last?.forgetFailed ? <ProblemLine text={accountWords.forgetFailed} onRetry={() => void account.retryForget()} /> : null}
             <Text style={[styles.label, { color: theme.muted }]}>{accountWords.serverAddress}</Text>
-            <TextInput
-              ref={field}
-              value={address}
-              onChangeText={text => { setAddress(text); setAddressProblem(null); }}
-              onBlur={() => {
-                if (busy || !address.trim()) return;
-                const checked = check(address);
-                setAddressProblem("problem" in checked ? ADDRESS_PROBLEM[checked.problem] : null);
-              }}
-              onSubmitEditing={() => void connect()}
-              editable={!busy}
-              placeholder={accountWords.serverAddressExample}
-              placeholderTextColor={theme.subtle}
-              autoCapitalize="none"
-              autoCorrect={false}
-              spellCheck={false}
-              keyboardType="url"
-              textContentType="URL"
-              returnKeyType="go"
-              accessibilityLabel={accountWords.serverAddress}
-              style={[styles.input, { color: busy ? theme.muted : theme.ink, backgroundColor: theme.field, borderColor: addressProblem ? theme.danger : "transparent" }]}
-            />
+            <View style={styles.addressRow}>
+              <TextInput
+                ref={field}
+                value={address}
+                onChangeText={text => { setAddress(text); setAddressProblem(null); }}
+                onBlur={() => {
+                  if (busy || !address.trim()) return;
+                  const checked = check(address);
+                  setAddressProblem("problem" in checked ? ADDRESS_PROBLEM[checked.problem] : null);
+                }}
+                onSubmitEditing={() => void connect()}
+                editable={!busy}
+                placeholder={accountWords.serverAddressExample}
+                placeholderTextColor={theme.subtle}
+                autoCapitalize="none"
+                autoCorrect={false}
+                spellCheck={false}
+                keyboardType="url"
+                textContentType="URL"
+                returnKeyType="go"
+                accessibilityLabel={accountWords.serverAddress}
+                style={[styles.input, { color: busy ? theme.muted : theme.ink, backgroundColor: theme.field, borderColor: addressProblem ? theme.danger : "transparent" }]}
+              />
+              <Pressable accessibilityRole="button" accessibilityLabel={accountWords.scanCode} accessibilityState={{ disabled: busy }} disabled={busy}
+                onPress={() => setScan(current => ({ open: true, session: current.session + 1 }))}
+                style={({ pressed }) => [styles.scan, { backgroundColor: theme.field, opacity: busy ? 0.4 : pressed ? 0.7 : 1 }]}>
+                <ScanQrCode size={22} color={theme.ink} strokeWidth={1.9} />
+              </Pressable>
+            </View>
             {addressProblem ? <Text style={[styles.note, { color: theme.danger }]} accessibilityLiveRegion="polite">{addressProblem}</Text> : null}
             {outcome ? <Text style={[styles.body, { color: theme.danger }]} accessibilityRole="alert">{outcome}</Text> : null}
             <Button label={busy ? accountWords.connecting : accountWords.connectServer} disabled={busy} onPress={() => void connect()} />
           </View>
         )}
       </ScrollView>
+      <ScanSheet open={scan.open} session={scan.session} onClose={() => setScan(current => ({ ...current, open: false }))} onScanned={scanned} />
     </View>
   );
 }
@@ -145,27 +166,17 @@ async function closeApproval(): Promise<void> {
   await browser().then(module => module.dismissBrowser()).catch(() => undefined);
 }
 
-function Button({ label, onPress, disabled = false, quiet = false }: { label: string; onPress(): void; disabled?: boolean; quiet?: boolean }) {
-  const theme = useTheme();
-  return (
-    <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [styles.button, quiet ? null : { backgroundColor: disabled ? theme.line : theme.accent, opacity: pressed ? 0.85 : 1 }]}>
-      <Text style={[styles.buttonLabel, { color: quiet ? theme.ink : disabled ? theme.subtle : theme.bg }]}>{label}</Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   content: { paddingHorizontal: 24, gap: 32 },
   block: { gap: 12 },
   label: { fontSize: 15 },
-  input: { minHeight: 44, borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, fontSize: 17 },
+  addressRow: { flexDirection: "row", gap: 8 },
+  input: { flex: 1, minHeight: 44, borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, fontSize: 17 },
+  scan: { width: 44, minHeight: 44, borderRadius: 10, alignItems: "center", justifyContent: "center" },
   title: { fontSize: 20, fontWeight: "600" },
   body: { fontSize: 17, lineHeight: 22 },
   note: { fontSize: 15, lineHeight: 20 },
   code: { fontSize: 32, fontWeight: "600", letterSpacing: 6, textAlign: "center", marginVertical: 8, fontVariant: ["tabular-nums"] },
   waiting: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
-  button: { minHeight: 50, borderRadius: 12, alignItems: "center", justifyContent: "center", paddingHorizontal: 16 },
-  buttonLabel: { fontSize: 17, fontWeight: "600" },
 });
