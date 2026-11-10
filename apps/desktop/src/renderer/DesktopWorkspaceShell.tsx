@@ -258,6 +258,8 @@ import {
   useWorkspaceVersions,
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
+import { WhatsNewPage } from "./workbench/WhatsNewPage";
+import { takeUnseenWhatsNew } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -288,6 +290,7 @@ import {
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   VERSIONS_TAB_PATH,
+  WHATS_NEW_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
   mergeSavedTabs,
@@ -1790,6 +1793,7 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
+        if (takeUnseenWhatsNew()) openVirtualTab(WHATS_NEW_TAB_PATH);
       },
       onError: (error) => {
         restoredActiveFileSurface.current = null;
@@ -4953,6 +4957,7 @@ export function DesktopWorkspaceShell(props: {
       "check-updates": () => void runDesktopUpdate("check"),
       "download-update": () => void runDesktopUpdate("download"),
       "install-update": () => void runDesktopUpdate("install"),
+      "whats-new": () => openVirtualTab(WHATS_NEW_TAB_PATH),
       "toggle-theme": toggleTheme,
       "zoom-in": () =>
         void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
@@ -6832,6 +6837,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             );
+                case "whatsNew": return <WhatsNewPage />;
                 case "versions": return (
               // The same capability gate and lines as a compare tab.
               !captureAvailable ? (

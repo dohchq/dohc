@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   FileText,
   FileType,
+  Gift,
   Hash,
   History,
   Image,
@@ -89,7 +90,7 @@ export function FileGlyph(props: { kind: FileKindRecord; icon: string | undefine
 // wherever it is listed. A `Record` over the kinds, so a new kind is a
 // compile error here until it has its icon. Like a file's, the glyph is
 // decorative beside the object's name.
-export type ObjectKind = "app" | "collection" | "group" | "chat" | "agent" | "compare" | "change" | "graph" | "history";
+export type ObjectKind = "app" | "collection" | "group" | "chat" | "agent" | "compare" | "change" | "graph" | "history" | "news";
 
 const OBJECT_GLYPHS: Record<ObjectKind, LucideIcon> = {
   app: AppWindow,
@@ -101,6 +102,7 @@ const OBJECT_GLYPHS: Record<ObjectKind, LucideIcon> = {
   change: FileDiff,
   graph: Workflow,
   history: History,
+  news: Gift,
 };
 
 export function isObjectKind(kind: string): kind is ObjectKind {

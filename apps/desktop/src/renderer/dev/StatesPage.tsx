@@ -520,6 +520,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   change: "Diff: plan.md",
   graph: "Graph",
   history: "History",
+  news: "What's new",
 };
 const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
 // The kind and object name columns share one width, wider than the longest
