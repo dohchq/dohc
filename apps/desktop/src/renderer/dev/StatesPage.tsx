@@ -994,6 +994,7 @@ function ChatThreadSpecimen() {
         runRecords={{}}
         failedRun={null}
         retryBusy={false}
+        waiting={null}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -1043,6 +1044,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFa
         onRetryFailedRun={noop}
         onOpenAgentSettings={noop}
         onAskAgain={noop}
+        waiting={null}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}

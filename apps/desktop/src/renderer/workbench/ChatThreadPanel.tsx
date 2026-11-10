@@ -181,6 +181,17 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
   );
 }
 
+// Under a message that waits for its agent to end another run: the agent's
+// mark and that it will reply. It goes once the agent starts on the message.
+export function WaitingLine(props: { testIdPrefix: string; agentName: string; presentation: ActorPresentation; className?: string }) {
+  return (
+    <div data-testid={`${props.testIdPrefix}-waiting`} className={`flex h-7 items-center gap-2 text-[13px] text-muted ${props.className ?? ""}`}>
+      <ChatAvatar presentation={props.presentation} name={props.agentName} kind="agent" size="strip" />
+      <span className="min-w-0 truncate">{`${props.agentName} will reply when it's free.`}</span>
+    </div>
+  );
+}
+
 // Under the message an agent didn't answer, one shape whatever the cause:
 // why, in its notice's words, with the icon on their first line, then the
 // next step on a line of its own that starts under the words. The step is a

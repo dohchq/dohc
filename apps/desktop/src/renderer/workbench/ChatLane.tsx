@@ -8,12 +8,12 @@ import type {
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
 import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import { CHAT_DISPATCH_POST_THREADS_MAX, type WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { withErrorWords } from "../../ipc/errorWords";
 import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages";
-import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
+import { FailedRunLine, failedRunEnd, WaitingLine, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
@@ -27,6 +27,7 @@ import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./ch
 import type { AgentSetupSummary } from "./ChatsView";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { WorkStatus } from "./WorkCard";
+import { neutralPresentation } from "./actorPresentation";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -78,6 +79,9 @@ export function ChatLane(props: {
   // An agent DM's agent, by the name and colors its row shows.
   agentName?: string;
   agentPresentation?: ActorPresentation;
+  // Agent replies are paused on this computer, which holds each request
+  // instead of the busy agent.
+  dispatchPaused?: boolean;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
@@ -183,10 +187,15 @@ export function ChatLane(props: {
       // remembered as painted until its content has actually been loaded.
       // A run can start or end without a new message, so the dispatch is
       // read on every pass. Without it the lane shows no Stop, not no chat.
+      // A reply to an earlier post can wait for the agent too, so the one
+      // read covers the posts.
       const laneId = lane?.id ?? null;
+      const postIds = posts.slice(0, CHAT_DISPATCH_POST_THREADS_MAX).map((post) => post.id);
       const [revision, nextDispatch] = await Promise.all([
         laneId ? bridge().getChatThreadRevision({ workspaceId, threadId: laneId }).then((read) => read.revision) : 0,
-        agentDm && laneId ? bridge().chatDispatchStateForThread({ workspaceId, threadId: laneId }).catch(() => null) : null,
+        agentDm ? bridge().chatDispatchStateForThread({
+          workspaceId, threadId: laneId, ...(postIds.length > 0 ? { postThreadIds: postIds } : {}),
+        }).catch(() => null) : null,
       ]);
       if (!isCurrent()) return;
       setDispatch(nextDispatch);
@@ -286,6 +295,16 @@ export function ChatLane(props: {
     const frame = requestAnimationFrame(() => focusMessage(document, flashMessageId));
     return () => cancelAnimationFrame(frame);
   }, [flashMessageId]);
+
+  // A resume puts requests back to waiting on the busy agent, and no
+  // activity says so, so the lane reads its dispatch again.
+  const dispatchPaused = props.dispatchPaused === true;
+  const wasPaused = useRef(dispatchPaused);
+  useEffect(() => {
+    const resumed = wasPaused.current && !dispatchPaused;
+    wasPaused.current = dispatchPaused;
+    if (resumed) void load();
+  }, [dispatchPaused, load]);
 
   useEffect(() => {
     let queued = false;
@@ -507,6 +526,11 @@ export function ChatLane(props: {
     stopping,
     ...(props.locked ? {} : { onStop: () => void stopRun() }),
   }, [liveRunId, props.agentName, props.agentPresentation, props.locked, stopping, stopRun]);
+  // The messages that wait for the agent to end its run, which none do while
+  // a pause holds them. Another agent asked here takes the default agent color.
+  const waiting = dispatchPaused ? undefined : dispatch?.waiting;
+  const waitingIds = useMemo(() => new Set(waiting?.triggerMessageIds), [waiting]);
+  const waitingPresentation = (waiting && waiting.agentId === chatAgentId ? props.agentPresentation : undefined) ?? neutralPresentation;
   // Reactions live with each message's own thread: the conversation's, or an
   // earlier post's.
   const reactionThreads = useMemo(() => (threadId ? [threadId, ...postThreadIds] : postThreadIds), [postThreadIds, threadId]);
@@ -589,8 +613,14 @@ export function ChatLane(props: {
         {...(chatAgentId ? { chatAgentId } : {})}
         {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
       /> : null}
+      {waiting && waitingIds.has(message.id) ? <WaitingLine
+        testIdPrefix="chats-lane"
+        agentName={waiting.name}
+        presentation={waitingPresentation}
+        className="mt-1"
+      /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain, waiting, waitingIds, waitingPresentation]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
