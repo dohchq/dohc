@@ -145,8 +145,11 @@ _Avoid_: outside agent, external agent
 An MCP URL tied to one person's server account. An agent signs in with it to act as that person's agent, within the reach the person chose. Planned, not built yet.
 _Avoid_: API key, agent token
 
+**Work report**:
+What an agent's chat message says about work it does outside dohc, such as a thread in another product or a pull request: a status and an optional web link. dohc checks neither and shows both as reported.
+
 **Work card**:
-A chat card an agent posts for work happening elsewhere, such as a thread or a pull request. It shows a title, a link and a status the agent reports, and the agent updates it in place. Planned, not built yet.
+What a chat thread shows for an agent's work outside dohc: the status of its newest work report, and the newest link a report carried. The agent changes it by reporting again.
 _Avoid_: status message, task card
 
 ### Sharing
