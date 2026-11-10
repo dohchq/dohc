@@ -322,7 +322,7 @@ describe("Home's Apps section", () => {
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(1));
     await act(async () => undefined);
 
-    expect(screen.getByTestId("explorer-apps-empty").textContent).toBe("No apps yet. Any folder with a web app in it shows up here.");
+    expect(screen.getByTestId("explorer-apps-empty").textContent).toBe("No apps yet.");
     expect(onHasApps).toHaveBeenLastCalledWith(false);
 
     // An agent wrote an app folder; the listing settled.
