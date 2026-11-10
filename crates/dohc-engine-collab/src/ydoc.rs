@@ -9809,7 +9809,10 @@ mod projection_tests {
         let body = "x".repeat(2 * 1024 * 1024);
         let doc = remote_doc_with_body([paragraph(&body)]);
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert_eq!(doc.project_richdoc_with_node_budget(3).unwrap(), format!("{body}\n"));
+        assert_eq!(
+            doc.project_richdoc_with_node_budget(3).unwrap(),
+            format!("{body}\n")
+        );
         PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
         assert!(matches!(
@@ -11877,13 +11880,15 @@ mod projection_tests {
 
     #[test]
     fn a_local_settle_keeps_undefined_reference_links_as_plain_text() {
-        let source = "See [the airline's bag rules][bags].\n";
+        // Without its final line break, so the settle must keep the source
+        // rather than write the same bytes as the projection.
+        let source = "See [the airline's bag rules][bags].";
         // Base-path guard: this source needs no reference-link pass.
         // marked emits plain text when no definition resolves the label.
         let desktop = Ydoc::wire();
         let body = desktop.doc.get_or_insert_xml_fragment(ROOT_BODY);
         desktop.with_delta(|txn| {
-            insert_md_paragraph(txn, &body, 0, source.trim_end());
+            insert_md_paragraph(txn, &body, 0, source);
         });
         let canonical = witness_source(&desktop, source);
         let native = Ydoc::wire();
@@ -11891,7 +11896,7 @@ mod projection_tests {
             .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
             .unwrap();
         assert_eq!(native.project_richdoc().unwrap(), canonical);
-        assert_eq!(canonical, source);
+        assert_eq!(canonical, format!("{source}\n"));
         assert_eq!(
             settled(&desktop, &canonical, source).as_deref(),
             Some(source)
@@ -12260,7 +12265,8 @@ fn main() {}
     #[test]
     fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
         let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
-        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
+        let artifact =
+            "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
         let result_sha256 = crate::hex_sha256(artifact.as_bytes());
         let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
             key: &key,
@@ -12852,7 +12858,10 @@ fn main() {}
                 "---\nvalue: -0.0\n---\n\n",
             );
         }
-        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody\n");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\nvalue: 0\n---\n\nBody\n"
+        );
     }
 
     fn decode_fixture_int64_markers(value: &mut Value) {
@@ -13021,7 +13030,8 @@ fn main() {}
     #[test]
     fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
         let doc = Ydoc::wire();
-        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
+        let chosen =
+            "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
 
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");

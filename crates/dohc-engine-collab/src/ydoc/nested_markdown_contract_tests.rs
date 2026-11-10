@@ -1014,7 +1014,11 @@ fn nested_contract_item_setext_other_readings_keep_text() {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .unwrap();
-        assert_eq!(doc.project_richdoc().unwrap(), format!("{text}\n"), "{source:?}, fold");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            format!("{text}\n"),
+            "{source:?}, fold"
+        );
     }
 }
 
