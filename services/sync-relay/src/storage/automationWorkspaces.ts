@@ -5,8 +5,8 @@ import type { StorageContext } from "./context";
 import { getWorkspaceIdentity } from "./workspaces";
 import type { SqliteDb } from "./types";
 
-// The workspaces this server keeps a replica of to run their automations.
-// Each row holds the workspace's sync identity and owner when the replica
+// The workspaces this server keeps a replica of, to run their automations
+// or to answer their owner's account. Each row holds the workspace's sync identity and owner when the replica
 // was made, the nonce its replication credential derives from, and the
 // replica's incarnation, which rises when a changed identity forces a new
 // replica. `started_at_ms` is when that incarnation began: its schedules
@@ -28,7 +28,27 @@ export function initializeAutomationWorkspaceSchema(db: SqliteDb): void {
       left_at_ms INTEGER CHECK (left_at_ms IS NULL OR left_at_ms BETWEEN 0 AND 9007199254740991)
     ) STRICT;
   `);
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_automation_workspace_reasons'").get()) return;
+  // Every row written before copies had reasons was made for automations,
+  // so it keeps its hold for Undo and run history.
+  db.exec(`
+    CREATE TABLE sync_relay_automation_workspace_reasons (
+      workspace_id TEXT NOT NULL REFERENCES sync_relay_automation_workspaces(workspace_id) ON DELETE CASCADE,
+      reason TEXT NOT NULL CHECK (reason IN ('automation', 'account')),
+      PRIMARY KEY (workspace_id, reason)
+    ) STRICT;
+    INSERT INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
+      SELECT workspace_id, 'automation' FROM sync_relay_automation_workspaces;
+  `);
 }
+
+/**
+ * Why the server keeps a copy. Automations keep a copy that left for
+ * AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, for Undo and run history.
+ * The owner's account keeps it only while it reads the workspace, and a row
+ * with no reason left goes with its folder.
+ */
+export type CopyReason = "automation" | "account";
 
 export interface AutomationWorkspace {
   workspaceId: string;
@@ -40,6 +60,7 @@ export interface AutomationWorkspace {
   startedAtMs: number;
   unwantedSinceMs: number | null;
   leftAtMs: number | null;
+  reasons: readonly CopyReason[];
 }
 
 // A replica leaves this long after no condition needs it, so a handover
@@ -59,11 +80,16 @@ function rowOf(row: Record<string, unknown>): AutomationWorkspace {
     startedAtMs: Number(row.started_at_ms),
     unwantedSinceMs: row.unwanted_since_ms === null ? null : Number(row.unwanted_since_ms),
     leftAtMs: row.left_at_ms === null ? null : Number(row.left_at_ms),
+    reasons: row.reasons === null ? [] : String(row.reasons).split(",") as CopyReason[],
   };
 }
 
+// Every row read names its reasons in order, so rows compare as values.
+const WITH_REASONS = `(SELECT group_concat(reason, ',') FROM (SELECT reason FROM sync_relay_automation_workspace_reasons r
+  WHERE r.workspace_id = a.workspace_id ORDER BY reason)) AS reasons`;
+
 function read(storage: StorageContext, workspaceId: string): AutomationWorkspace | null {
-  const row = storage.db.prepare("SELECT * FROM sync_relay_automation_workspaces WHERE workspace_id = ?").get(workspaceId);
+  const row = storage.db.prepare(`SELECT a.*, ${WITH_REASONS} FROM sync_relay_automation_workspaces a WHERE a.workspace_id = ?`).get(workspaceId);
   return row ? rowOf(row) : null;
 }
 
@@ -73,15 +99,19 @@ function ownerOf(storage: StorageContext, workspaceId: string): string | null {
 }
 
 /**
- * The server needs a replica of this workspace now. Returns its row, joined
- * or rejoined, or null while the workspace has no sync identity to join.
+ * The server needs a replica of this workspace now, for `reasons`. Returns
+ * its row, joined or rejoined with those reasons added, or null while the
+ * workspace has no sync identity to join.
  * When the owner or the identity changed since the replica was made, as
  * after a restore, the replica is obsolete: the row moves to the next
  * incarnation with a new credential, and in the same transaction the
  * presses the server accepted end, since the new replica has no claim for
  * them and would run them again, and the new incarnation starts now.
  */
-export function joinAutomationWorkspace(storage: StorageContext, input: { workspaceId: string; nowMs: number }): AutomationWorkspace | null {
+export function joinAutomationWorkspace(
+  storage: StorageContext,
+  input: { workspaceId: string; nowMs: number; reasons: readonly CopyReason[] },
+): AutomationWorkspace | null {
   return storage.tx(() => {
     const { workspaceId, nowMs } = input;
     const ownerUserId = ownerOf(storage, workspaceId);
@@ -90,15 +120,19 @@ export function joinAutomationWorkspace(storage: StorageContext, input: { worksp
     const current = read(storage, workspaceId);
     const same = current !== null && current.ownerUserId === ownerUserId &&
       current.replicationEpoch === identity.replicationEpoch && current.streamIdentity === identity.streamIdentity;
+    // Only a change counts as a relay write, which wakes the replicas again.
+    if (same && current.unwantedSinceMs === null && current.leftAtMs === null &&
+      input.reasons.every((reason) => current.reasons.includes(reason))) return current;
     if (same) {
-      // Only a change counts as a relay write, which wakes the replicas again.
-      if (current.unwantedSinceMs === null && current.leftAtMs === null) return current;
       storage.db.prepare(
         "UPDATE sync_relay_automation_workspaces SET unwanted_since_ms = NULL, left_at_ms = NULL WHERE workspace_id = ?",
       ).run(workspaceId);
-      return read(storage, workspaceId);
+    } else {
+      replace(storage, { workspaceId, ownerUserId, ...identity }, current, nowMs);
     }
-    return replace(storage, { workspaceId, ownerUserId, ...identity }, current, nowMs);
+    const add = storage.db.prepare("INSERT OR IGNORE INTO sync_relay_automation_workspace_reasons (workspace_id, reason) VALUES (?, ?)");
+    for (const reason of input.reasons) add.run(workspaceId, reason);
+    return read(storage, workspaceId);
   });
 }
 
@@ -195,21 +229,37 @@ export function restoreAutomationWorkspaceTimes(
 
 /** Every replica row, joined or left. */
 export function listAutomationWorkspaces(storage: StorageContext): AutomationWorkspace[] {
-  return storage.readTx(() => storage.db.prepare("SELECT * FROM sync_relay_automation_workspaces ORDER BY workspace_id").all().map(rowOf));
+  return storage.readTx(() => storage.db.prepare(`SELECT a.*, ${WITH_REASONS} FROM sync_relay_automation_workspaces a ORDER BY a.workspace_id`).all().map(rowOf));
 }
 
-/** Every replica row goes: the server no longer runs automations, so it keeps no copies. */
+/** Every replica row goes: the server keeps no copies. */
 export function forgetAutomationWorkspaces(storage: StorageContext): void {
   storage.tx(() => {
     storage.db.prepare("DELETE FROM sync_relay_automation_workspaces").run();
   });
 }
 
-/** A left replica kept past AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS goes, with its row. */
+/** No copy keeps `reason` any more, as when the server stops running automations. */
+export function endCopyReasonEverywhere(storage: StorageContext, reason: CopyReason): void {
+  storage.tx(() => {
+    storage.db.prepare("DELETE FROM sync_relay_automation_workspace_reasons WHERE reason = ?").run(reason);
+  });
+}
+
+/** One copy no longer has `reason`. Call it inside a write transaction. */
+export function endCopyReasonInTransaction(storage: StorageContext, workspaceId: string, reason: CopyReason): void {
+  storage.db.prepare("DELETE FROM sync_relay_automation_workspace_reasons WHERE workspace_id = ? AND reason = ?").run(workspaceId, reason);
+}
+
+/**
+ * A replica row goes. One that left goes once nothing keeps it, and one
+ * with no reason left goes at once; a row that joined again since stays.
+ */
 export function forgetAutomationWorkspace(storage: StorageContext, input: { workspaceId: string; incarnation: number }): void {
   storage.tx(() => {
     storage.db.prepare(
-      "DELETE FROM sync_relay_automation_workspaces WHERE workspace_id = ? AND incarnation = ? AND left_at_ms IS NOT NULL",
+      `DELETE FROM sync_relay_automation_workspaces WHERE workspace_id = ? AND incarnation = ? AND (left_at_ms IS NOT NULL
+         OR NOT EXISTS (SELECT 1 FROM sync_relay_automation_workspace_reasons r WHERE r.workspace_id = sync_relay_automation_workspaces.workspace_id))`,
     ).run(input.workspaceId, input.incarnation);
   });
 }
@@ -222,7 +272,7 @@ export function forgetAutomationWorkspace(storage: StorageContext, input: { work
 export function currentAutomationWorkspace(storage: StorageContext, workspaceId: string): AutomationWorkspace | null {
   storage.captureStanding();
   const row = storage.db.prepare(
-    `SELECT a.* FROM sync_relay_automation_workspaces a JOIN sync_relay_workspaces w USING (workspace_id)
+    `SELECT a.*, ${WITH_REASONS} FROM sync_relay_automation_workspaces a JOIN sync_relay_workspaces w USING (workspace_id)
      WHERE a.workspace_id = ? AND a.left_at_ms IS NULL AND a.owner_user_id = w.owner_user_id
        AND a.replication_epoch = w.replication_epoch AND a.stream_identity = w.stream_identity`,
   ).get(workspaceId);

@@ -1,5 +1,5 @@
 // These relay route namespaces cannot identify a workspace.
-export const RESERVED_WORKSPACE_IDS: readonly string[] = Object.freeze(["link", "shares", "notices", "workspaces", "personal-agents"]);
+export const RESERVED_WORKSPACE_IDS: readonly string[] = Object.freeze(["link", "shares", "notices", "workspaces", "personal-agents", "account"]);
 
 export const RESERVED_WORKSPACE_ID_TITLE = "dohc can't open this folder";
 

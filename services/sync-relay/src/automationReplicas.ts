@@ -16,6 +16,7 @@ import {
   AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS,
   AUTOMATION_WORKSPACE_LEAVE_AFTER_MS,
   type AutomationWorkspace,
+  type CopyReason,
 } from "./storage/automationWorkspaces";
 import {deriveAutomationReplicaBearer} from "./automationReplicaCredential";
 import {observeRelayWrites} from "./relayWriteChanges";
@@ -27,6 +28,8 @@ export interface AutomationReplica {
   readonly workspaceId: string;
   readonly ownerUserId: string;
   readonly incarnation: number;
+  /** Why the server keeps this copy, as its row said at the last pass. */
+  readonly reasons: readonly CopyReason[];
   /** Relay log head covered by the last completed sync. */
   readonly pulledHead: number;
   /** When this incarnation began: its schedules start after it. */
@@ -61,15 +64,19 @@ const BUSY_REFUSALS_REPORTED = 3;
 const DEADLINE_MAX_WAIT_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Keeps one engine replica per workspace whose automations this server runs,
- * in one engine daemon of its own. The live host's engine serves browsers
- * and restarts when its documents change, so it never runs automations.
+ * Keeps one engine replica per workspace whose automations this server runs
+ * or whose owner's account reads it, in one engine daemon of its own. The
+ * live host's engine serves browsers and restarts when its documents change,
+ * so it never runs automations.
  *
- * `wanted` names the workspaces that need a replica now. Each joins through
- * ordinary replication as the workspace owner, with a credential derived for
- * that replica alone. A relay write that reaches a replica's workspace pulls
- * it; nothing polls. A replica no longer wanted leaves after a day and stays
- * on disk for Undo and run history until its retention ends.
+ * `wanted` names the workspaces that need a replica now, with why. Each
+ * joins through ordinary replication as the workspace owner, with a
+ * credential derived for that replica alone. A relay write that reaches a
+ * replica's workspace pulls it; nothing polls. A replica no longer wanted
+ * leaves after a day. One automations kept stays on disk after that for Undo
+ * and run history until its retention ends. One only the account kept closes
+ * as soon as nothing wants it, so idle copies hold no engine, and its folder
+ * goes when it leaves.
  */
 export async function startAutomationReplicas(options: {
   storage: SyncRelayStorage;
@@ -80,9 +87,9 @@ export async function startAutomationReplicas(options: {
   relayOrigin: string;
   key: Uint8Array;
   namespace: string;
-  wanted(): readonly string[];
+  wanted(): ReadonlyMap<string, readonly CopyReason[]>;
   nowMs?(): number;
-  /** A replica opened or closed. */
+  /** A replica opened or closed, or the reasons its row keeps it for changed. */
   onChanged?(workspaceId: string): void;
   /** The engine announced something, such as an automation claim, for a workspace it names. */
   onEngineEvent?(event: Event): void;
@@ -102,7 +109,7 @@ export async function startAutomationReplicas(options: {
   const lifetime = new AbortController();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const replicas = new Map<string, AutomationReplica & {
-    close(): Promise<void>; pulledHead: number;
+    close(): Promise<void>; pulledHead: number; reasons: readonly CopyReason[];
     /** A bounded sync for a pass: answers whether it caught up. */
     step(): Promise<boolean>;
     busy(): boolean;
@@ -255,7 +262,7 @@ export async function startAutomationReplicas(options: {
       return run;
     };
     const replica = {
-      workspaceId: row.workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, startedAtMs: row.startedAtMs,
+      workspaceId: row.workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs,
       root, metadataDir, client: engineClient, workspace: handle, signal: replicaSignal, nextRequestId, pulledHead: 0,
       withRecordWork,
       sync(callerSignal?: AbortSignal): Promise<void> {
@@ -343,14 +350,19 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
-    const wanted = new Set(options.wanted().filter(id => !workspaceIsDeleted(storage, id)));
-    for (const workspaceId of wanted) {
+    const wanted = new Map([...options.wanted()].filter(([id]) => !workspaceIsDeleted(storage, id)));
+    for (const [workspaceId, reasons] of wanted) {
       ok = await each(workspaceId, async () => {
-        const row = storage.joinAutomationWorkspace({workspaceId, nowMs: nowMs()});
+        const row = storage.joinAutomationWorkspace({workspaceId, nowMs: nowMs(), reasons});
         const retry = syncRetries.get(workspaceId);
         if (row === null || (retry && retry.incarnation !== row.incarnation)) syncRetries.delete(workspaceId);
         const open_ = replicas.get(workspaceId);
         if (open_ && (row === null || open_.incarnation !== row.incarnation)) await open_.close();
+        else if (open_ && row !== null && row.reasons.join() !== open_.reasons.join()) {
+          // A copy the account opened that automations now need, or the reverse.
+          open_.reasons = row.reasons;
+          options.onChanged?.(workspaceId);
+        }
         if (!canSync(workspaceId)) return;
         if (row !== null && !replicas.has(workspaceId)) {
           let opening: AutomationWorkspace | null = row;
@@ -381,16 +393,30 @@ export async function startAutomationReplicas(options: {
       if (wanted.has(row.workspaceId)) continue;
       syncRetries.delete(row.workspaceId);
       ok = await each(row.workspaceId, async () => {
-        if (row.leftAtMs === null) {
-          const left = storage.unwantAutomationWorkspace({workspaceId: row.workspaceId, nowMs: nowMs()});
-          if (left) await replicas.get(row.workspaceId)?.close();
-        } else if (nowMs() - row.leftAtMs >= AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS) {
-          await replicas.get(row.workspaceId)?.close();
+        // A visit admitted while this pass ran wants the copy again, so each
+        // step asks once more just before it acts. The pass the visit asked
+        // for joins the copy again.
+        const unwanted = () => !options.wanted().has(row.workspaceId);
+        if (!unwanted()) return;
+        const close = async () => { if (unwanted()) await replicas.get(row.workspaceId)?.close(); };
+        const retire = async () => {
+          await close();
+          if (!unwanted()) return;
           await rm(folderOf(row.workspaceId), {recursive: true, force: true});
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
+        };
+        const kept = row.reasons.includes("automation");
+        if (row.reasons.length === 0) {
+          await retire();
+        } else if (row.leftAtMs === null) {
+          const left = storage.unwantAutomationWorkspace({workspaceId: row.workspaceId, nowMs: nowMs()});
+          if (left && !kept) await retire();
+          else if (left || !kept) await close();
+        } else if (!kept || nowMs() - row.leftAtMs >= AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS) {
+          await retire();
         } else {
           // A copy an owner's action opened again leaves once the action ends.
-          await replicas.get(row.workspaceId)?.close();
+          await close();
         }
       }) && ok;
     }
@@ -466,7 +492,7 @@ export async function startAutomationReplicas(options: {
     let next = Number.POSITIVE_INFINITY;
     for (const row of storage.listAutomationWorkspaces()) {
       if (failedSyncs.has(row.workspaceId)) continue;
-      if (row.leftAtMs !== null) next = Math.min(next, row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS);
+      if (row.leftAtMs !== null) next = Math.min(next, row.reasons.includes("automation") ? row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS : nowMs());
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
     }
     return next === Number.POSITIVE_INFINITY ? undefined : Math.min(Math.max(next - nowMs(), 0), DEADLINE_MAX_WAIT_MS);
@@ -619,9 +645,9 @@ function replicaFolder(root: string, namespace: string, workspaceId: string): st
 }
 
 /**
- * The server no longer runs automations: its copies go at once, with their
- * rows, rather than after the retention a host move keeps them for. Call it
- * at start when the deployment turns automations off.
+ * The server keeps no copies: they go at once, with their rows, rather than
+ * after the retention a host move keeps them for. Call it at start when the
+ * deployment runs neither automations nor the account API.
  */
 export async function removeAutomationReplicas(storage: SyncRelayStorage, root: string): Promise<void> {
   storage.forgetAutomationWorkspaces();

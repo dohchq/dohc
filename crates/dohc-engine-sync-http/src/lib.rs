@@ -1551,6 +1551,7 @@ define_server_error_codes! {
     "quota_exceeded" => |_| RelayError::QuotaExceeded,
     "secret_path" => |_| RelayError::BadRequest,
     "self_share" => |_| RelayError::SelfShare,
+    "server_busy" => |_| RelayError::HttpStatus(503),
     "share_op_rejected" => |_| RelayError::ShareOperationRejected,
     "share_read_only" => |_| RelayError::ShareReadOnly,
     "share_access_rate_limited" => |_| RelayError::ShareAccessRateLimited,

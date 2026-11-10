@@ -26,7 +26,7 @@ describe("workspace modes", () => {
 });
 
 describe("manifest validation", () => {
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents"])("refuses the reserved manifest ID %s", (workspaceId) => {
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])("refuses the reserved manifest ID %s", (workspaceId) => {
     expect(checkManifest({ version: 1, workspaceId, kind: "personal", mode: "local-first" }))
       .toEqual({ status: "reserved-id", workspaceId });
     expect(() => createWorkspaceManifest({ workspaceId, kind: "personal" })).toThrow(

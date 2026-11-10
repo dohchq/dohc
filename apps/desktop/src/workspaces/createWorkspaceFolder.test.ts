@@ -51,7 +51,7 @@ function statOf(path: string, answer: (real: import("node:fs").BigIntStats) => P
 }
 
 describe("createWorkspaceFolder", () => {
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents"])("refuses a manifest with reserved id %s without changing it", async (workspaceId) => {
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])("refuses a manifest with reserved id %s without changing it", async (workspaceId) => {
     const root = join(base, workspaceId);
     await mkdir(join(root, ".dohc"), { recursive: true });
     const manifestPath = join(root, ".dohc", "manifest.json");

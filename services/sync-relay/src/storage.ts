@@ -126,6 +126,7 @@ import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
+import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
 import * as automationPressStorage from "./storage/automationPresses";
@@ -862,7 +863,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     automationHostStorage.reportAutomationServerRunsLost(this, input);
   }
 
-  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
+  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number; reasons: readonly automationWorkspaceStorage.CopyReason[] }) {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
   }
 
@@ -884,6 +885,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   forgetAutomationWorkspaces() {
     automationWorkspaceStorage.forgetAutomationWorkspaces(this);
+  }
+
+  endCopyReasonEverywhere(reason: automationWorkspaceStorage.CopyReason) {
+    automationWorkspaceStorage.endCopyReasonEverywhere(this, reason);
+  }
+
+  endCopyReason(workspaceId: string, reason: automationWorkspaceStorage.CopyReason) {
+    this.tx(() => automationWorkspaceStorage.endCopyReasonInTransaction(this, workspaceId, reason));
+  }
+
+  listAccountWorkspaces(ownerUserId: string) {
+    return accountWorkspaceStorage.listAccountWorkspaces(this, ownerUserId);
+  }
+
+  showsOnPhone(ownerUserId: string, workspaceId: string) {
+    return accountWorkspaceStorage.showsOnPhone(this, ownerUserId, workspaceId);
+  }
+
+  setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }) {
+    return accountWorkspaceStorage.setShowOnPhone(this, input);
   }
 
   currentAutomationWorkspace(workspaceId: string) {

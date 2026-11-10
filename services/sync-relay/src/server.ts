@@ -55,6 +55,7 @@ import {
   type ServerRuns,
 } from "./automationServerRoutes";
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
+import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
@@ -195,6 +196,8 @@ export interface CreateSyncRelayHandlerOptions {
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
+  // The routes a signed-in account reads its workspaces through (DOHC_ACCOUNT_API). They need resolveAccountSession.
+  accountApi?: boolean;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -277,6 +280,7 @@ export function createSyncRelayHandler({
   automationServer,
   pressDataset,
   serverRuns = () => undefined,
+  accountApi = false,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
@@ -474,6 +478,8 @@ export function createSyncRelayHandler({
     storage, nowMs, automationHostRateLimiter, automationServer ?? null,
   );
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
+  const respondToAccountWorkspaces = accountApi && resolveAccountSession
+    ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -1019,6 +1025,10 @@ export function createSyncRelayHandler({
         }), route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToAutomationServer(request, route, actor.userId);
+      }
+      if (route.route === "account-workspaces" || route.route === "account-workspace") {
+        if (!respondToAccountWorkspaces) throw notFound();
+        return await respondToAccountWorkspaces(request, route);
       }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
