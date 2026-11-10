@@ -830,6 +830,8 @@ test('automation cases expect the package limits to refuse only the cases over t
   assert.deepEqual(cases.map(spec => [spec.name, spec.expected]), [['baseline', 'done'], ['find-500', 'refused'], ['five-finds', 'refused'], ['set-then-find', 'done'],
     ['add-then-find', 'done'], ['find-at-cap', 'done'], ['find-over-cap', 'refused'], ['wide', 'done'], ['baseline-typing', 'done'], ['find-500-typing', 'refused']]);
   assert.deepEqual(automationCases({ findCap: 500, writeCap: 1000 }).filter(spec => spec.expected === 'refused').map(spec => spec.name), ['find-over-cap']);
+  // Small limits keep the at-cap case under the write limit too.
+  assert.deepEqual(automationCases({ findCap: 5, writeCap: 5 }).filter(spec => spec.name.startsWith('find-') && spec.name.endsWith('cap')).map(spec => [spec.name, spec.expected]), [['find-at-cap', 'done'], ['find-over-cap', 'refused']]);
   assert.deepEqual(cases.map(spec => spec.seed.length), [50, 500, 300, 40, 10, 500, 501, 50, 50, 500]);
   assert.deepEqual(cases.filter(spec => spec.contention).map(spec => spec.name), ['baseline-typing', 'find-500-typing']);
   // Five Finds of 100 records each, so their 1,000 assignments count records in two Finds twice.

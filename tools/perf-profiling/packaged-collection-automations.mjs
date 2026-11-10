@@ -61,8 +61,8 @@ export function automationCases({ findCap, writeCap }) {
     seed: numbered(500).map(n => ({ N: n })),
     steps: [find('found', 'Case', name), set('found', { A: 1, C: '=record.N * 2' })],
     expect: records => ({ records: records.map(changed(r => ({ A: 1, C: r.N * 2 }))), added: [] }) });
-  // The Find limit is above the write limit, so a cap case changes only its 10 marked records.
-  const cap = (name, count) => ({ name, matches: count, assignments: 10,
+  // The Find limit is above the write limit, so a cap case changes at most its first 10 records.
+  const cap = (name, count) => ({ name, matches: count, assignments: Math.min(count, 10),
     seed: numbered(count).map(n => ({ N: n, Stage: n <= 10 ? `${name}-mark` : name })),
     steps: [find('found', 'Case', name), find('marked', 'Stage', `${name}-mark`), set('marked', { A: 1 })],
     expect: records => ({ records: records.map(changed(r => r.N <= 10 ? { A: 1 } : {})), added: [] }) });
