@@ -4,11 +4,30 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
-import { aggregateJavascript, aggregateRust } from "./cloud-aggregate.mjs";
+import { aggregateJavascript, aggregateRust, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
+
+test("early reporting waits for every successful job and preserves the complete group deadline", async () => {
+  const started_at = "2026-11-10T00:00:00Z", start = Date.parse(started_at);
+  const names = ["what changed", "confinement", "JS shared preparation", ...Array.from({ length: JS_SHARDS }, (_, i) => `JS worker ${i}`)];
+  const complete = names.map(name => ({ name, started_at, status: "completed", conclusion: "success" }));
+  let reads = 0, pauses = 0;
+  await waitForGate("js", { now: () => start + 1000, pause: async () => { pauses++; }, readJobs: async () => {
+    reads++;
+    return reads === 1 ? complete.slice(0, -1) : reads === 2
+      ? complete.map(row => row.name === "JS worker 0" ? { ...row, status: "in_progress", conclusion: null } : row) : complete;
+  } });
+  assert.equal(pauses, 2);
+  for (const conclusion of ["failure", "cancelled", "skipped"]) {
+    await assert.rejects(waitForGate("js", { now: () => start + 1000,
+      readJobs: async () => complete.map(row => row.name === "JS worker 0" ? { ...row, conclusion } : row) }), /did not finish successfully/);
+  }
+  await assert.rejects(waitForGate("js", { now: () => start + 291_000, readJobs: async () => complete }), /no time left/);
+  await assert.rejects(waitForGate("js", { now: () => start, readJobs: async () => [...complete, complete[1]] }), /Duplicate/);
+});
 
 test("native results retain declared opt-in skips but reject runtime skips and missing engines", async t => {
   const parent = resolve(".agent-artifacts/verification/native-report-tests");

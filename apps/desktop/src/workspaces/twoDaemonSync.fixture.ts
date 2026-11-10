@@ -74,6 +74,10 @@ export let compiledRelayMain: string;
 
 beforeAll(async () => {
   if (engine.missing) return;
+  if (process.env.DOHC_TEST_RELAY_MAIN) {
+    compiledRelayMain = process.env.DOHC_TEST_RELAY_MAIN;
+    return;
+  }
   const output = fileURLToPath(new URL("../../../../services/sync-relay/.output/", import.meta.url));
   await mkdir(output, { recursive: true });
   relayBuildDirectory = await mkdtemp(join(output, "two-daemon-sync-"));

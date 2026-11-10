@@ -87,6 +87,21 @@ test("a freed lane runs a waiting package beside the running ones", async () => 
   await run;
 });
 
+test("a rejected preparation stops admission and drains commands before returning", async () => {
+  const preparation = deferred(), held = deferred(), entered = deferred(), failure = Error("preparation failed");
+  let drained = false, returned = false;
+  const running = runBounded(["held", "waiting"], async task => {
+    assert.equal(task, "held"); entered.resolve(); await held.promise; drained = true;
+  }, 1, preparation.promise).finally(() => { returned = true; });
+  const outcome = assert.rejects(running, error => error === failure);
+  await entered.promise;
+  preparation.reject(failure);
+  await new Promise(setImmediate);
+  assert.equal(returned, false);
+  held.resolve(); await outcome;
+  assert.equal(drained, true);
+});
+
 test("a failed package stops admission and waits for its running sibling", async () => {
   const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), more = deferred(), started = [];
   const run = runBounded([{name:"fail"}, {name:"sibling"}, {name:"must-not-start"}], async task => {

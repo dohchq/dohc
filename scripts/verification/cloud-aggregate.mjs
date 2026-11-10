@@ -1,5 +1,6 @@
 import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
@@ -79,6 +80,7 @@ async function jobs() {
   for (let page = 1; ; page++) {
     const response = await fetch(`${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100&page=${page}`, {
       headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error(`Cannot read workflow job times: HTTP ${response.status}.`);
     const data = await response.json();
@@ -86,6 +88,26 @@ async function jobs() {
     result.push(...data.jobs);
     if (data.jobs.length < 100) return result;
   }
+}
+
+// Allocate reporting before workers finish so it does not enter a second queue.
+export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, now = Date.now } = {}) {
+  const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
+  const expected = gateJobNames(scope).filter(name => name !== finalJob);
+  const budget = scope === "js" ? 300 : 600;
+  for (let reads = 0; reads < 125; reads++) {
+    const all = await readJobs();
+    const selections = all.filter(job => job.name === "what changed");
+    if (selections.length !== 1 || !Number.isFinite(Date.parse(selections[0].started_at))) throw new Error("Gate selection has no unique start time.");
+    const remaining = Date.parse(selections[0].started_at) + budget * 1000 - now();
+    if (remaining <= 10_000) throw new Error(`The ${scope} group has no time left for complete reporting within ${budget}s.`);
+    const required = all.filter(job => expected.includes(job.name));
+    if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
+    if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
+    if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
+    await pause(Math.min(5_000, remaining - 10_000));
+  }
+  throw new Error(`Waiting for the ${scope} group exceeded its bounded job reads.`);
 }
 
 export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded") {
@@ -123,4 +145,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) aggregateCloud(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
+  const action = process.argv[2] === "wait" ? waitForGate(process.argv[3]) : aggregateCloud(process.argv[2]);
+  action.catch(error => { console.error(error); process.exitCode = 1; });
+}

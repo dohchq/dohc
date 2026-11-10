@@ -35,6 +35,7 @@ permissions:
   actions: read
 
 env:
+  CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_AUDIT_VERSION: "0.22.2"
   CARGO_NEXTEST_VERSION: "0.9.143"
@@ -319,14 +320,10 @@ jobs:
           compression-level: 0
   javascript:
     name: typecheck + tests
-    needs:
-      - changes
-      - javascript-prepare
-      - javascript-workers
-      - confinement
+    needs: changes
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 3
+    timeout-minutes: 6
     env:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -338,12 +335,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - name: Wait for the complete JavaScript group
+        run: node scripts/verification/cloud-aggregate.mjs wait js
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: verification-js-*-${{ github.run_attempt }}
           merge-multiple: true
           path: .agent-artifacts/verification/downloaded
       - name: Require complete proof and the five-minute group budget
+        if: always()
         run: node scripts/verification/cloud-aggregate.mjs js
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -519,15 +519,10 @@ jobs:
           compression-level: 0
   rust:
     name: engine gate
-    needs:
-      - changes
-      - rust-archive
-      - rust-tests
-      - rust-policy
-      - confinement
+    needs: [changes, rust-archive]
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 3
+    timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -539,12 +534,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - name: Wait for the complete Rust group
+        run: node scripts/verification/cloud-aggregate.mjs wait rust
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: verification-rust-*-${{ github.run_attempt }}
           merge-multiple: true
           path: .agent-artifacts/verification/downloaded
       - name: Require complete proof and the ten-minute group budget
+        if: always()
         run: node scripts/verification/cloud-aggregate.mjs rust
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

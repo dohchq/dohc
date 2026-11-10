@@ -388,8 +388,16 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
     assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
-  assert.deepEqual(jobs.javascript.needs, ["changes", "javascript-prepare", "javascript-workers", "confinement"]);
-  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive", "rust-tests", "rust-policy", "confinement"]);
+  assert.equal(jobs.javascript.needs, "changes");
+  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive"]);
+  for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
+    const steps = jobs[name].steps;
+    const wait = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs wait ${scope}`);
+    const download = steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+    const aggregate = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope}`);
+    assert.ok(wait >= 0 && wait < download && download < aggregate);
+    assert.equal(steps[aggregate].if, "always()", "failed waits must retain failure evidence");
+  }
   const workers = jobs["javascript-workers"];
   assert.equal(workers.needs, "changes", "pure work can start while native artifacts build");
   assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");

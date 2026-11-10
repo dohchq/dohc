@@ -34,7 +34,7 @@ export async function runBounded(tasks, execute, concurrency = 2, more, availabi
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Test concurrency must be a positive integer.");
   const pending = [...tasks], active = new Set(), resources = new Set();
   let failure, limit = concurrency;
-  let widening = more?.then(() => { limit += 1; widening = undefined; });
+  let widening = more?.then(() => { limit += 1; widening = undefined; }, error => { failure ??= error; widening = undefined; });
   let ready = availability?.changed.then(() => { ready = undefined; }, error => { failure ??= error; ready = undefined; });
   while (pending.length || active.size) {
     while (!failure && active.size < limit) {

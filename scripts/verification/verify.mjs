@@ -526,7 +526,8 @@ export async function verify(args) {
       if (mode === "pr" && gates.js) {
         database = await measure("postgres-start", () => postgres(output, run, measure, grant?.request ?? "inline"));
         report.postgres = { id: database.id }; save();
-        const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
+        const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath,
+          DOHC_TEST_RELAY_MAIN: join(repoRoot, "services/sync-relay/dist/main.js") };
         await step("typecheck", ...typecheck(), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their

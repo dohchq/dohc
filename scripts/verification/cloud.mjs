@@ -97,7 +97,7 @@ async function runJavascript(groups, record, save, availability) {
   }
   // This test replaces the packaged runtime. Its readers finish first.
   const runtime = groups.filter(group => group.tasks.some(task => task.id.includes("stage-app-backend-runtime.test.mjs")));
-  await runBounded(groups.filter(group => !runtime.includes(group)), execute, 2, undefined, availability);
+  await runBounded(groups.filter(group => !runtime.includes(group)), execute, 2, availability?.changed, availability);
   for (const group of runtime) await execute(group);
   assertTaskCoverage([...selected.values()], [{ ...record, verdict: "PASS" }]);
 }
@@ -142,6 +142,7 @@ export async function cloudJavascript(part, index = 0) {
       process.env.DOHC_REQUIRE_ENGINE_E2E = "1";
       process.env.DOHC_REQUIRE_POSTGRES = "1";
       process.env.DOHC_TEST_ENGINE_BINARY = stagedEnginePath;
+      process.env.DOHC_TEST_RELAY_MAIN = resolve(repoRoot, "services/sync-relay/dist/main.js");
       const tasks = await step("test inventory", cloudPlan);
       record.planned = tasks.map(task => task.id);
       const shard = partitionJavascript(javascriptGroups(tasks))[index];
