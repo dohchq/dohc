@@ -4299,7 +4299,8 @@ fn personal_author(agent_id: &str) -> Value {
 #[test]
 fn personal_collection_origin_carries_only_moment_append() {
     let (_scratch, mut store) = test_store();
-    for (seq, op_kind) in (0_i64..).zip(["conflict.resolve", "chat.message.append", "ydoc.update"]) {
+    for (seq, op_kind) in (0_i64..).zip(["conflict.resolve", "chat.message.append", "ydoc.update"])
+    {
         let op = ReplicationEnvelope {
             op_kind: op_kind.to_owned(),
             ..envelope(PERSONAL_ORIGIN, seq, "ws", json!({}))
