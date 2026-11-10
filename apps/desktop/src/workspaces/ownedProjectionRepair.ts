@@ -73,12 +73,13 @@ function heldRequest(
   held: ReadonlyMap<string, UnjournalablePath>,
   path: { resolved: string; requested: string },
 ): UnjournalablePath | undefined {
+  // A standalone view's resolved path is the path as asked, so compare both by their parts.
+  const parts = (value: string) => posix.normalize(value.replaceAll("\\", "/")).split("/").filter(part => part && part !== ".");
+  const resolved = parts(path.resolved);
   // The view's own root is never a held file.
-  if (path.resolved === "") return undefined;
-  const depth = path.resolved.split("/").length;
-  const asked = posix.normalize(path.requested.replaceAll("\\", "/"))
-    .split("/").filter(Boolean).slice(-depth).join("/");
-  const key = workspacePathKey(path.resolved);
+  if (resolved.length === 0) return undefined;
+  const asked = parts(path.requested).slice(-resolved.length).join("/");
+  const key = workspacePathKey(resolved.join("/"));
   return [...held.values()].find(entry => entry.reason === "local-collision"
     ? workspacePathKey(entry.path) === key
     : entry.path === asked);

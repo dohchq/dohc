@@ -234,6 +234,7 @@ describe("createOwnedProjectionRepairer", () => {
 
   it.each([
     { name: "a file held behind a local one", resolved: "mine.md", requested: "mine.md", refusal: "mine.md already has a file from this machine." },
+    { name: "a held file asked for from its folder", resolved: "./mine.md", requested: "./mine.md", refusal: "mine.md already has a file from this machine." },
     { name: "a held spelling the disk resolves to its owner", resolved: "notes.md", requested: "shared-with-me/alex/Notes.md", refusal: "This machine treats Notes.md and notes.md as the same name." },
     ...process.platform === "win32"
       ? [{ name: "another case of a file held behind a local one", resolved: "MINE.md", requested: "MINE.md", refusal: "mine.md already has a file from this machine." }]
