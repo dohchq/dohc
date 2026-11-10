@@ -587,6 +587,44 @@ fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
     );
 }
 
+/// A retried write replays only with the report it first carried.
+#[test]
+fn a_retried_message_must_carry_the_same_work_report() {
+    let (_scratch, mut store) = store();
+    group(&mut store);
+    start(
+        &mut store,
+        "group",
+        "post",
+        "open",
+        ChatThreadLane::Posts,
+        10,
+    );
+    let mut first = reply_input("post", "report", 20);
+    first.request_id = Some("request".to_owned());
+    first.work = Some(ChatWorkReport {
+        status: ChatWorkStatus::Working,
+        url: None,
+    });
+    let mut chats = LinkedChatStore::new(&mut store);
+    let sent = chats.send_message(&first, &NO_FAULTS).expect("send");
+    assert_eq!(chats.send_message(&first, &NO_FAULTS).expect("retry"), sent);
+    for work in [
+        None,
+        Some(ChatWorkReport {
+            status: ChatWorkStatus::Done,
+            url: None,
+        }),
+    ] {
+        let mut changed = first.clone();
+        changed.work = work;
+        assert!(matches!(
+            chats.send_message(&changed, &NO_FAULTS),
+            Err(DomainError::IdempotencyKeyReuseMismatch)
+        ));
+    }
+}
+
 /// A stored report that the checks did not write reads as corrupt, and is
 /// never served.
 #[test]

@@ -3427,7 +3427,8 @@ impl<'a> LinkedChatStore<'a> {
             ));
         }
 
-        let payload_hash = hash_fields(&[
+        let wake_agents = wake_agent_ids.join(",");
+        let mut hashed: Vec<&[u8]> = vec![
             thread_id.as_bytes(),
             input.message_id.as_bytes(),
             input.channel_id.as_bytes(),
@@ -3452,9 +3453,14 @@ impl<'a> LinkedChatStore<'a> {
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
             author_reported_json.as_deref().unwrap_or("").as_bytes(),
-            work_json.as_deref().unwrap_or("").as_bytes(),
-            wake_agent_ids.join(",").as_bytes(),
-        ]);
+            wake_agents.as_bytes(),
+        ];
+        // A message with no work report keeps the hash an earlier build
+        // recorded for it, so its retry still replays.
+        if let Some(work_json) = &work_json {
+            hashed.push(work_json.as_bytes());
+        }
+        let payload_hash = hash_fields(&hashed);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
         if let Some(request_id) = &input.request_id
@@ -3816,7 +3822,8 @@ impl<'a> LinkedChatStore<'a> {
         let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
 
-        let payload_hash = hash_fields(&[
+        let wake_agents = wake_agent_ids.join(",");
+        let mut hashed: Vec<&[u8]> = vec![
             input.thread_id.as_bytes(),
             input.message_id.as_bytes(),
             body.as_bytes(),
@@ -3840,9 +3847,14 @@ impl<'a> LinkedChatStore<'a> {
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
             author_reported_json.as_deref().unwrap_or("").as_bytes(),
-            work_json.as_deref().unwrap_or("").as_bytes(),
-            wake_agent_ids.join(",").as_bytes(),
-        ]);
+            wake_agents.as_bytes(),
+        ];
+        // A message with no work report keeps the hash an earlier build
+        // recorded for it, so its retry still replays.
+        if let Some(work_json) = &work_json {
+            hashed.push(work_json.as_bytes());
+        }
+        let payload_hash = hash_fields(&hashed);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
                 .store
