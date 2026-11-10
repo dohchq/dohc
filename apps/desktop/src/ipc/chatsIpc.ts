@@ -105,6 +105,7 @@ export function chatThreadWorkForIpc(work: ChatThreadWork): ChatThreadWorkRecord
     ...(work.url === undefined ? {} : { url: work.url }),
     messageId: work.messageId,
     authorDisplayName: work.author.displayName,
+    ...(work.authorOwnerDisplayName ? { authorOwnerDisplayName: work.authorOwnerDisplayName } : {}),
     reportedAtMs: work.reportedAtMs,
   };
 }

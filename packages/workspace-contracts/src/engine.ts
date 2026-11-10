@@ -462,8 +462,7 @@ export type ChatReportedAgent = {
   model?: string;
 };
 
-// A thread's Work card: its newest work report, with the newest link any of
-// its reports carried, and the agent that wrote that report.
+// A thread's Work card: its newest work report, and the agent that wrote it.
 export interface ChatThreadWork {
   status: ChatWorkStatus;
   url?: string;

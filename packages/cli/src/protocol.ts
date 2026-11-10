@@ -960,8 +960,7 @@ function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group:
             bodyExcerpt: z.string(),
           }).strict().optional(),
           openDecisionCount: z.number().int().nonnegative(),
-          // The thread's Work card: its newest work report, with the newest
-          // link any of its reports carried.
+          // The thread's Work card: its newest work report.
           work: z.object({
             status: z.enum(CHAT_WORK_STATUSES),
             url: z.string().optional(),

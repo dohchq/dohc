@@ -2177,13 +2177,13 @@ fn parse_reported_agent(json: Option<String>) -> Result<Option<ChatReportedAgent
     .transpose()
 }
 
-/// The longest link in a work report, in UTF-16 code units, as JavaScript
-/// and the wire count it.
+/// The longest link in a work report, in characters.
 pub const MAX_WORK_URL_CHARS: usize = 2048;
 
 /// Check what an agent reported about its work. Only an agent message
 /// carries it. The link is a web address: `http://` or `https://` followed by
-/// text with no space or control character.
+/// printable ASCII with no space, so no character can draw it as another
+/// address. Other characters go in percent-encoded or as punycode.
 pub fn normalize_work_report(
     is_agent: bool,
     work: Option<&ChatWorkReport>,
@@ -2200,8 +2200,8 @@ pub fn normalize_work_report(
             .strip_prefix("https://")
             .or_else(|| url.strip_prefix("http://"));
         rest.is_some_and(|rest| !rest.is_empty())
-            && url.encode_utf16().count() <= MAX_WORK_URL_CHARS
-            && !url.chars().any(|c| is_js_trim_ws(c) || c.is_control())
+            && url.len() <= MAX_WORK_URL_CHARS
+            && url.bytes().all(|byte| byte.is_ascii_graphic())
     });
     if !url_is_valid {
         return invalid("a work report's link is invalid");
@@ -2213,13 +2213,17 @@ pub fn work_report_json(work: Option<&ChatWorkReport>) -> Option<String> {
     work.map(|work| serde_json::to_string(work).expect("a work report serializes"))
 }
 
+/// A stored report is checked again on read, so a row the checks did not
+/// write never reaches a reader.
 fn parse_work_report(json: Option<String>) -> Result<Option<ChatWorkReport>, DomainError> {
-    json.map(|json| {
-        serde_json::from_str(&json).map_err(|_| DomainError::StateCorrupt {
-            reason: "chat message work report is corrupt",
-        })
-    })
-    .transpose()
+    let corrupt = || DomainError::StateCorrupt {
+        reason: "chat message work report is corrupt",
+    };
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let work: ChatWorkReport = serde_json::from_str(&json).map_err(|_| corrupt())?;
+    normalize_work_report(true, Some(&work)).map_err(|_| corrupt())
 }
 
 /// An automation message must name its Collection automation and chain

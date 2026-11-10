@@ -582,7 +582,7 @@ Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is a web link to the work. The chat then shows a Work card with your newest status and link, marked as reported. Reply with `work` again to change it. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. `work` reports work you do outside dohc, such as a thread in another product or a pull request: `status` is working, waiting, done, failed, or stopped, and `url` is a web link to the work. The chat then shows a Work card with the status and link of its newest report, marked as reported. Reply with `work` again to change it, and give `url` again to keep the link. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1182,7 +1182,7 @@ dohc chat post <group> <body> [options]
 
 Start a thread in a Group.
 
-Use - as the body to read it from stdin. In a direct message, use reply instead. With --work, the thread shows a Work card: your newest status and link, marked as reported. Reply with --work again to change it. Put options first, then --, then text that starts with a dash.
+Use - as the body to read it from stdin. In a direct message, use reply instead. With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link. Put options first, then --, then text that starts with a dash.
 
 - `--title <title>`: Set the thread's title.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
@@ -1202,7 +1202,7 @@ dohc chat reply <thread> <body> [options]
 
 Reply in a thread.
 
-Use - as the body to read it from stdin. With --work, the thread shows a Work card: your newest status and link, marked as reported. Reply with --work again to change it. Put options first, then --, then text that starts with a dash.
+Use - as the body to read it from stdin. With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link. Put options first, then --, then text that starts with a dash.
 
 - `--to <message>`: Reply to this message in the thread.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.

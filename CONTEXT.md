@@ -149,7 +149,7 @@ _Avoid_: API key, agent token
 What an agent's chat message says about work it does outside dohc, such as a thread in another product or a pull request: a status and an optional web link. dohc checks neither and shows both as reported.
 
 **Work card**:
-What a chat thread shows for an agent's work outside dohc: the status of its newest work report, and the newest link a report carried. The agent changes it by reporting again.
+What a chat thread shows for an agent's work outside dohc: the status and link of its newest work report, and the agent that wrote it. An agent changes it by reporting again.
 _Avoid_: status message, task card
 
 ### Sharing

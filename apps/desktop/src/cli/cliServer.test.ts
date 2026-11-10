@@ -3996,16 +3996,16 @@ describe("CLI socket server", () => {
       body: "Mine", work: { status: "done" },
     })).rejects.toThrow("Only an agent reports work. Add --as-agent, or drop --work.");
 
-    // Each message keeps its own report; the post's card is the newest one,
-    // with the link the first report carried.
+    // Each message keeps its own report; the post's card is the newest one alone.
     const shown = await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread, peek: true });
     expect(shown.messages.map(message => message.work)).toEqual([{ status: "working", url }, { status: "done" }]);
     const group = await invokeAny("show", { cwd: workspaceRoot, actor: "agent", target: "general", peek: true });
     if (!("stream" in group)) throw new Error("expected a stream");
     const post = group.stream.items.find(item => item.threadId === thread)?.post;
     expect(post?.work).toMatchObject({
-      status: "done", url, messageId: shown.messages[1]!.id, author: { kind: "agent", displayName: "Agent" },
+      status: "done", messageId: shown.messages[1]!.id, author: { kind: "agent", displayName: "Agent" },
     });
+    expect(post?.work).not.toHaveProperty("url");
   });
 
   it("keeps what an agent reported on a file comment, and a retry must report the same", async () => {

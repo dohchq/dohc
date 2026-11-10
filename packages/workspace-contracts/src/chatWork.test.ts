@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isChatWorkStatus, isWorkUrl, MAX_WORK_URL_CHARS } from "./chatWork";
 
 describe("a work report's link", () => {
-  it("is a web address with no space or control character", () => {
+  it("is a web address in printable ASCII with no space", () => {
     const longest = `https://example.com/${"a".repeat(MAX_WORK_URL_CHARS - 20)}`;
     expect(longest).toHaveLength(MAX_WORK_URL_CHARS);
     for (const url of ["https://example.com/pull/7", "http://localhost:3773/threads/1", longest]) {
@@ -18,7 +18,10 @@ describe("a work report's link", () => {
       " https://example.com",
       "https://example.com/a b",
       "https://example.com/\u0007",
-      "https://example.com/﻿",
+      "https://example.com/\ufeff",
+      // A right-to-left override would draw the address as another one.
+      "https://\u202ex/moc.buhtig",
+      "https://example.com/caf\u00e9",
       `${longest}a`,
     ]) {
       expect(isWorkUrl(url), url).toBe(false);

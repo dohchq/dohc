@@ -1676,8 +1676,9 @@ describe("an agent's work report", () => {
       authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id, author: agent, authorOwnerDisplayName: "Ada",
       body: "Merged", work: { status: "done" },
     });
+    // The card is the newest report alone: it reported no link, so the card has none.
     const card = {
-      status: "done", url: "https://example.com/threads/7", messageId: done.id,
+      status: "done", messageId: done.id,
       author: agent, authorOwnerDisplayName: "Ada", reportedAtMs: done.createdAtMs,
     };
     expect((await adapter.getThread({ workspaceId: "workspace", threadId: started.thread.id })).work).toEqual(card);

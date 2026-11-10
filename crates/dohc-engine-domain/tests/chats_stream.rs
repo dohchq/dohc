@@ -471,11 +471,11 @@ fn a_post_summarises_its_replies_repliers_agent_reply_and_open_decisions() {
     assert_eq!(post.open_decision_count, 1);
 }
 
-/// A thread's Work card is its newest work report, with the newest link any
-/// of its reports carried. The stream, the thread listing and a thread read
+/// A thread's Work card is its newest work report: that report's status and
+/// that report's own link. The stream, the thread listing and a thread read
 /// serve the same card.
 #[test]
-fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
+fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
     let (_scratch, mut store) = store();
     group(&mut store);
     let report = |status, url: Option<&str>| {
@@ -554,21 +554,20 @@ fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
     assert_eq!(first.author_display_name, "Scout");
     assert_eq!(first.author_owner_display_name.as_deref(), Some("Ada"));
 
-    // A reply with no report changes nothing. A report with no link keeps the
-    // link an earlier report carried.
+    // A reply with no report changes nothing. Another agent's report with no
+    // link shows no link: the card never puts one report's link under
+    // another report's author.
     send(&mut store, reply_input("post", "talk", 20));
     let mut done = reply_input("post", "done", 30);
+    done.author_display_name = "Nova".to_owned();
     done.work = report(ChatWorkStatus::Done, None);
     send(&mut store, done);
+    let newest = card(&mut store);
     assert_eq!(
-        facts(&card(&mut store)),
-        (
-            ChatWorkStatus::Done,
-            Some("https://example.com/threads/1".to_owned()),
-            "done".to_owned(),
-            30
-        )
+        facts(&newest),
+        (ChatWorkStatus::Done, None, "done".to_owned(), 30)
     );
+    assert_eq!(newest.author_display_name, "Nova");
     assert_eq!(
         LinkedChatStore::new(&mut store)
             .get_message(WS, "done")
@@ -578,19 +577,49 @@ fn a_threads_work_card_follows_its_newest_report_and_keeps_the_newest_link() {
         "each message keeps its own report"
     );
 
-    // An older report that arrives late gives its newer link, not its status.
+    // An older report that arrives late changes nothing.
     let mut late = reply_input("post", "late", 25);
     late.work = report(ChatWorkStatus::Failed, Some("http://example.com/threads/2"));
     send(&mut store, late);
     assert_eq!(
         facts(&card(&mut store)),
-        (
-            ChatWorkStatus::Done,
-            Some("http://example.com/threads/2".to_owned()),
-            "done".to_owned(),
-            30
-        )
+        (ChatWorkStatus::Done, None, "done".to_owned(), 30)
     );
+}
+
+/// A stored report that the checks did not write reads as corrupt, and is
+/// never served.
+#[test]
+fn a_stored_work_report_with_a_bad_link_reads_as_corrupt() {
+    let (_scratch, mut store) = store();
+    group(&mut store);
+    let mut opening = start_input("group", "post", "open", ChatThreadLane::Posts, 10);
+    opening.work = Some(ChatWorkReport {
+        status: ChatWorkStatus::Working,
+        url: None,
+    });
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(&opening, &NO_FAULTS)
+        .expect("post");
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_messages SET work = ?1 WHERE message_id = 'open'",
+                [r#"{"status":"done","url":"javascript:alert(1)"}"#],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("tamper");
+    let chats = LinkedChatStore::new(&mut store);
+    assert!(matches!(
+        chats.get_message(WS, "open"),
+        Err(DomainError::StateCorrupt { .. })
+    ));
+    assert!(matches!(
+        chats.get_thread(WS, "post"),
+        Err(DomainError::StateCorrupt { .. })
+    ));
 }
 
 /// Only an agent's message reports work, and a report's link is a web
@@ -629,6 +658,9 @@ fn a_work_report_from_a_person_or_with_a_bad_link_is_refused() {
         " https://example.com",
         "https://example.com/a b",
         "https://example.com/\u{7}",
+        // A right-to-left override would draw the address as another one.
+        "https://\u{202E}x/moc.buhtig",
+        "https://example.com/caf\u{e9}",
         &format!("{longest}a"),
     ]
     .into_iter()

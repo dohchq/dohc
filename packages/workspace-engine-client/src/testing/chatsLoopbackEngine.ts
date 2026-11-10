@@ -164,16 +164,12 @@ function messageWork(params: ChatsJsonObject): ChatWorkReport | undefined {
   return { status: work.status, ...(url !== undefined ? { url } : {}) };
 }
 
-// The daemon's rule: a thread's Work card is its newest work report, with the
-// newest link any of its reports carried.
+// The daemon's rule: a thread's Work card is its newest work report.
 function threadWork(state: WorkspaceState, threadId: string) {
-  const reports = threadMessages(state, threadId).filter((message) => message.work !== undefined);
-  const newest = reports.at(-1);
+  const newest = threadMessages(state, threadId).filter((message) => message.work !== undefined).at(-1);
   if (!newest?.work) return undefined;
-  const url = reports.filter((message) => message.work?.url !== undefined).at(-1)?.work?.url;
   return {
-    status: newest.work.status,
-    ...(url !== undefined ? { url } : {}),
+    ...newest.work,
     messageId: newest.id,
     author: newest.author,
     ...(newest.authorOwnerDisplayName ? { authorOwnerDisplayName: newest.authorOwnerDisplayName } : {}),

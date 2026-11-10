@@ -2106,11 +2106,11 @@ const ChatWorkReportRecord = z.object({
   status: z.enum(CHAT_WORK_STATUSES),
   url: z.string().refine(isWorkUrl).optional(),
 });
-// A thread's Work card: its newest work report, with the newest link any of
-// its reports carried, and the agent that wrote that report.
+// A thread's Work card: its newest work report, and the agent that wrote it.
 export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
   messageId: OPAQUE_ID,
   authorDisplayName: z.string().min(1).max(200),
+  authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   reportedAtMs: z.number(),
 });
 export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;

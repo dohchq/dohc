@@ -462,7 +462,7 @@ const workFlags: readonly CliFlag[] = [
   },
   { name: "--link", value: "url", text: "Link to that work, such as its thread or pull request. Needs --work." },
 ];
-const workNote = "With --work, the thread shows a Work card: your newest status and link, marked as reported. Reply with --work again to change it.";
+const workNote = "With --work, the thread shows a Work card: the status and link of its newest report, marked as reported. Reply with --work again to change it, and give --link again to keep the link.";
 function workFields(input: VerbInput): { work?: CliWorkReport } {
   const status = lastValue(input, "--work");
   const url = lastValue(input, "--link");

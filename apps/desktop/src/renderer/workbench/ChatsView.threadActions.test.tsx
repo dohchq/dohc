@@ -20,12 +20,15 @@ import {
 const barWords = (testId: string) => screen.getByTestId(testId).firstElementChild?.textContent;
 
 describe("ChatsView work reports", () => {
-  it("shows the thread's Work card on the opening post, and each report on its own message", async () => {
+  it("shows each report on its own message, the opening post's included", async () => {
     const user = userEvent.setup();
-    const opening = message({ authorDisplayName: "Sam", body: "Fix the login redirect" });
+    const opening = message({
+      authorKind: "agent", authorDisplayName: "Nova", body: "Fix the login redirect",
+      work: { status: "working", url: "https://example.com/threads/7" },
+    });
     const working = message({
       id: "message-working", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Nova",
-      body: "On it", createdAtMs: NOW + 1, work: { status: "working", url: "https://example.com/threads/7" },
+      body: "On it", createdAtMs: NOW + 1, work: { status: "waiting" },
     });
     const done = message({
       id: "message-done", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Nova",
@@ -37,13 +40,13 @@ describe("ChatsView work reports", () => {
 
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
-    // The card is the newest report, with the link the earlier report carried.
-    const card = await screen.findByTestId("chats-thread-work");
-    expect(card.getAttribute("data-status")).toBe("done");
-    expect(screen.getByTestId("chats-thread-work-reporter").textContent).toBe("Nova");
-    expect(screen.getByTestId("chats-thread-work-open").getAttribute("title")).toBe("https://example.com/threads/7");
-    expect(screen.getAllByTestId("chats-comment-work").map((report) => report.getAttribute("data-status"))).toEqual(["working", "done"]);
-    expect(screen.getAllByTestId("chats-comment-work-open")).toHaveLength(1);
+    // A later report never replaces the opening post's own, and no report
+    // takes another's link.
+    const own = await screen.findByTestId("chats-message-work");
+    expect(own.getAttribute("data-status")).toBe("working");
+    expect(screen.getByTestId("chats-message-work-open").getAttribute("title")).toBe("https://example.com/threads/7");
+    expect(screen.getAllByTestId("chats-comment-work").map((report) => report.getAttribute("data-status"))).toEqual(["waiting", "done"]);
+    expect(screen.queryByTestId("chats-comment-work-open")).toBeNull();
   });
 });
 

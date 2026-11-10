@@ -310,8 +310,10 @@ export function PostCard(props: {
                 <WorkStatus
                   testIdPrefix="chats-post"
                   work={work}
-                  reportedBy={{ name: work.authorDisplayName, atMs: work.reportedAtMs }}
-                  showReporter={work.authorDisplayName !== message?.authorDisplayName}
+                  reportedBy={{ name: work.authorDisplayName, owner: work.authorOwnerDisplayName, atMs: work.reportedAtMs }}
+                  // The row names the post's author. A report on a later
+                  // message names its own.
+                  showReporter={work.messageId !== message?.id}
                 />
               ) : null}
               {[...byEmoji.entries()].map(([emoji, records]) => {

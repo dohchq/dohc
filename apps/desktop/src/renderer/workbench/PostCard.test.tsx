@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChannelThreadRecord } from "../../ipc/bridgeContract";
-import { formatShortTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { PostCard, type PostData } from "./PostCard";
 
 afterEach(cleanup);
@@ -66,7 +66,7 @@ describe("PostCard as a feed row", () => {
   it("shows the thread's Work card on the meta line, and names the agent when someone else posted", () => {
     row({
       title: "Fix the login redirect",
-      work: { status: "working", url: "https://example.com/threads/7", messageId: "message-nova", authorDisplayName: "Nova", reportedAtMs: at },
+      work: { status: "working", url: "https://example.com/threads/7", messageId: "message-nova", authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", reportedAtMs: at },
     }, "Fix the login redirect");
     const footer = screen.getByTestId("chats-post-footer");
     const status = screen.getByTestId("chats-post-work");
@@ -74,7 +74,16 @@ describe("PostCard as a feed row", () => {
     expect(status.getAttribute("data-status")).toBe("working");
     expect(status.textContent).toContain("Working");
     expect(screen.getByTestId("chats-post-work-reporter").textContent).toBe("Nova");
-    expect(screen.getByRole("button", { name: "Open example.com" })).not.toBeNull();
+    expect(screen.getByTitle(`As reported by Nova, Ada's agent, ${formatChatTime(at).label}`)).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Open example.com, as reported" })).not.toBeNull();
+  });
+
+  it("names the reporter by the report's message, so a same-named agent's later report is still named", () => {
+    row({
+      title: "Fix the login redirect",
+      work: { status: "waiting", messageId: "message-later", authorDisplayName: "Sam", reportedAtMs: at },
+    }, "Fix the login redirect");
+    expect(screen.getByTestId("chats-post-work-reporter").textContent).toBe("Sam");
   });
 
   it("leaves the agent's name off its own post's Work card", () => {

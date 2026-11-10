@@ -59,7 +59,7 @@ function reply(temp: TempWorkspace, thread: string, body: string, work: Work, ac
   }, { stateDir: temp.homeDir });
 }
 
-test("an agent's work report shows as the thread's Work card and follows its newest report", async () => {
+test("an agent's work report shows as the thread's Work card, which is its newest report", async () => {
   test.setTimeout(180_000);
   if (SHOT_DIR !== "") await mkdir(SHOT_DIR, { recursive: true });
   const temp = await createTempWorkspace();
@@ -87,7 +87,7 @@ test("an agent's work report shows as the thread's Work card and follows its new
     const status = card.getByTestId("chats-post-work");
     await expect(status).toHaveAttribute("data-status", "working");
     await expect(status).toContainText("Working");
-    const open = card.getByRole("button", { name: "Open example.com" });
+    const open = card.getByRole("button", { name: "Open example.com, as reported" });
     await expect(open).toHaveAttribute("title", LINK);
     await expect(card.getByTestId("chats-post-work-reporter")).toHaveCount(0);
     const plain = main.getByTestId("chats-post-card").filter({ hasText: "Notes from the review" });
@@ -98,24 +98,24 @@ test("an agent's work report shows as the thread's Work card and follows its new
     await expect(reply(temp, started.threadId, "Mine", { status: "done" }, "human"))
       .rejects.toThrow("Only an agent reports work");
 
-    // The agent reports again without a link. The card follows the newest
-    // report and keeps the link, with no reload.
+    // The agent reports again without a link. The card becomes that report,
+    // with no reload: its status, and no link, because it gave none.
     await reply(temp, started.threadId, "Waiting for a review on the pull request.", { status: "waiting" });
     await expect(status).toHaveAttribute("data-status", "waiting");
-    await expect(open).toHaveAttribute("title", LINK);
+    await expect(card.getByTestId("chats-post-work-open")).toHaveCount(0);
+    await expect(card.getByTestId("chats-post-work-reporter")).toHaveText("Nova");
     await shoot(page, "b-post-waiting");
     await reply(temp, started.threadId, "Merged.", { status: "done", url: "https://example.com/pull/12" });
     await expect(status).toHaveAttribute("data-status", "done");
-    await expect(open).toHaveAttribute("title", "https://example.com/pull/12");
+    await expect(card.getByTestId("chats-post-work-open")).toHaveAttribute("title", "https://example.com/pull/12");
     await shoot(page, "c-post-done");
 
-    // Inside the thread, the opening post carries the card and each report
-    // shows on its own message.
+    // Inside the thread, each report shows on its own message, the opening
+    // post's included.
     await card.click();
     await expect(main.getByTestId("chats-thread-view")).toBeVisible();
-    const threadCard = main.getByTestId("chats-thread-work");
-    await expect(threadCard).toHaveAttribute("data-status", "done");
-    await expect(main.getByTestId("chats-thread-work-open")).toHaveAttribute("title", "https://example.com/pull/12");
+    await expect(main.getByTestId("chats-message-work")).toHaveAttribute("data-status", "working");
+    await expect(main.getByTestId("chats-message-work-open")).toHaveAttribute("title", LINK);
     await expect.poll(() => main.getByTestId("chats-comment-work").evaluateAll(
       (reports) => reports.map((report) => report.getAttribute("data-status")),
     )).toEqual(["waiting", "done"]);
