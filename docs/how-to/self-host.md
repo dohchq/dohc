@@ -497,6 +497,9 @@ node tools/self-host/bootstrap.mjs start
 
 Turning automations off deletes server automation copies and their local claims and run history at startup.
 A copy the phone has also read stays for one day after the restart or the phone's last read, then goes with its run history.
+With automations off, a read from the phone or a personal agent still makes a copy of the workspace under `/host-data`.
+That copy goes a day after the last read.
+To keep a workspace's phone reads off the server, turn off **Show on phone** for it in the phone's Settings.
 Save a private deployment archive first if you need to preserve that history.
 The bundle cannot restore or view archived run history.
 The synced workspace files remain in the relay.

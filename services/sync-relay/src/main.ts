@@ -743,6 +743,8 @@ const publicationOperator = await startPublicationOperator(storage, operatorSock
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
 if (!copiesOn && automationRoot) await removeAutomationReplicas(storage, automationRoot);
 if (!automationsOn && copiesOn) storage.endCopyReasonEverywhere("automation");
+// No phone read is open at start, but one a crash cut short can leave the reason a pass gave back after "Show on phone" went off.
+if (copiesOn) storage.endAccountReasonsOfHiddenOrDisownedCopies();
 const copyReplicas = automationReplicaKey && automationRoot ? {root: automationRoot, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, ...automationReplicaKey} : undefined;
 automations = automationServer && copyReplicas ? await startAutomationServer({

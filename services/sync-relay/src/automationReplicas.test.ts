@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import { authorizeAutomationReplication, deriveAutomationReplicaBearer } from "./automationReplicaCredential";
 import { removeAutomationReplicas, startAutomationReplicas } from "./automationReplicas";
+import { startServerCopies } from "./serverCopies";
 import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
@@ -1259,6 +1260,48 @@ describe("the automation replicas", () => {
     running.reconcile(); await running.settled();
     expect(folders(root)).toEqual([]);
     expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  it("ends at start the account's reason a crash left on a copy hidden from the phone, and keeps the others'", async () => {
+    const { storage } = await relay();
+    for (const workspaceId of ["ledger", "notes"]) {
+      storage.claimWorkspace({ workspaceId, ownerUserId: "owner", createdAtMs: 1 });
+      storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch", streamIdentity: "stream" });
+    }
+    fakeEngine();
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const options = { storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example", key, namespace, nowMs: () => 0,
+      onError: unexpectedErrors() };
+    const first = await startServerCopies(options);
+    // Phone reads of every workspace are in flight. They never end: the server crashes during them.
+    const inside = ["trip", "ledger", "notes"].map((name, n) => new Promise<void>((entered) => {
+      const workspaceId = n === 0 ? WORKSPACE : name;
+      void first.withServerCopy("owner", workspaceId, { reason: "account", caller: `phone-${n}`, signal: new AbortController().signal, phone: true },
+        () => { entered(); return new Promise<never>(() => {}); });
+    }));
+    await Promise.all(inside);
+    // The owner hides one workspace, and a pass while its read holds the copy gives the reason back.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    expect(storage.listAutomationWorkspaces().find(row => row.workspaceId === WORKSPACE)?.reasons).toEqual([]);
+    first.reconcile();
+    await vi.waitFor(() => expect(storage.listAutomationWorkspaces().find(row => row.workspaceId === WORKSPACE)?.reasons).toEqual(["account"]));
+    // Another moves to an account the copy was not made for.
+    (storage as StorageContext).db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'notes'").run();
+    await first.close();
+    const reasons = () => storage.listAutomationWorkspaces().map(row => [row.workspaceId, row.reasons]);
+    expect(reasons()).toEqual([["ledger", ["account"]], ["notes", ["account"]], [WORKSPACE, ["account"]]]);
+
+    // What main.ts does at start, before the copies' first pass.
+    storage.endAccountReasonsOfHiddenOrDisownedCopies();
+    expect(reasons()).toEqual([["ledger", ["account"]], ["notes", []], [WORKSPACE, []]]);
+    const after = await startAutomationReplicas({ ...options, wanted: () => new Map() });
+    cleanup.push(() => after.close());
+    await after.settled();
+    // The hidden and moved copies go in the first pass. The shown one closes and waits out its day.
+    expect(storage.listAutomationWorkspaces().map(row => [row.workspaceId, row.reasons, row.unwantedSinceMs])).toEqual([["ledger", ["account"], 0]]);
+    expect(folders(root)).toHaveLength(1);
+    expect(after.replica("ledger")).toBeUndefined();
   });
 
   it("keeps an account copy when the server stops running automations, and lets the automations' copies go", async () => {
