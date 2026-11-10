@@ -67,6 +67,7 @@ import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
+import { syncFailureNotice } from "../renderer/shell/useSyncFailureNotice";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
@@ -3913,6 +3914,28 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       expect(await readFile(join(root, "n.md"), "utf8")).toBe("new collaborator text");
       const replaced = requests.filter(request => request.method === "files.replace").map(request => (request.params as { path: string }).path);
       expect(replaced).toEqual(process.platform === "darwin" || process.platform === "win32" ? ["n.md"] : []);
+    } finally { await engine.stop(); }
+  });
+
+  // The engine refuses to replace a Windows file whose permissions it can't
+  // read. The pass stops there, and the sync failure names the file.
+  it.runIf(process.platform === "darwin" || process.platform === "win32")("names the file whose permissions the engine could not keep", async () => {
+    const root = await createTestScratch("relay-engine-refused-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "earlier recorded text", origin: "local-file" });
+    await write(root, "n.md", "earlier recorded text");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "new collaborator text", origin: "sync" });
+    const engine = capture(root, { rustEngineSessions: mockLiveSessions(loopback, undefined, undefined, request => {
+      if (request.method === "files.replace") throw new DaemonRefusalError({ code: "INTERNAL", message: "permissions-not-kept", retry: "no" }, undefined);
+    }) });
+    try {
+      const failed = await engine.runRelaySync(page => page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]))
+        .then(() => null, (error: unknown) => error as Error);
+      // relaySyncEngine records a failed pass as `${name}: ${message}`.
+      expect(syncFailureNotice({ cause: "unknown", detail: `${failed?.name}: ${failed?.message}`, sinceMs: 1, attempts: 1 }).message)
+        .toMatch(/^dohc could not read the permissions of n\.md, so it left the file as it was\./u);
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("earlier recorded text");
     } finally { await engine.stop(); }
   });
 
