@@ -111,6 +111,13 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
   const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
   return { root, os, write, remove, undo, operation, recordDelete, history, options };
 }
+// A copy of the 12-byte "not retained" that stopped partway holds what it
+// wrote, zeros to byte 12, and Undo's 16-byte tag past the end.
+async function copyBytes(): Promise<{ text: string; tagged: boolean }> {
+  const bytes = await readFile(faults.copyTarget);
+  const tagged = bytes.length === 12 + 16;
+  return { text: (tagged ? bytes.subarray(0, 12) : bytes).toString("utf8").replace(/\0+$/u, ""), tagged };
+}
 async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
   const result = await f.remove();
   expect(result.undo).toEqual({ available: true });
@@ -326,7 +333,7 @@ describe("delete recovery placement and receipts", () => {
         path: "folder/rowless.txt", reason: expect.stringContaining("now occupies"),
       }] });
       expect(faults.opened).toEqual(["r+"]);
-      expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
+      expect(await copyBytes()).toEqual({ text: "not ", tagged: true });
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.openError = ""; }
   });
   it("offers another Undo and a trash path after an interrupted copy", async () => {
@@ -337,7 +344,7 @@ describe("delete recovery placement and receipts", () => {
       expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt",
         reason: expect.stringMatching(/folder\/rowless.txt may be incomplete\. Undo again to retry, or restore it from \.dohc\/local\/trash\//),
       }] });
-      expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
+      expect(await copyBytes()).toEqual({ text: "not ", tagged: true });
       faults.failCopy = "";
       expect(await f.undo(id)).toMatchObject({ remaining: [] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
@@ -470,7 +477,8 @@ describe("delete recovery placement and receipts", () => {
     faults.copyOnly = true; faults.failCopy = failure === "readonly" ? "close" : failure === "readonly-write" ? "write" : failure; faults.failFlush = failure === "flush";
     try {
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt" }] });
-      expect(await readFile(faults.copyTarget, "utf8")).toBe(failure === "write" || failure === "readonly-write" ? "not " : "not retained");
+      expect(await copyBytes()).toEqual(failure === "write" || failure === "readonly-write"
+        ? { text: "not ", tagged: true } : { text: "not retained", tagged: false });
       const trash = join(f.root, ".dohc/local/trash");
       const record = JSON.parse(await readFile(join(trash, (await readdir(trash)).find(name => name.endsWith(".json"))!), "utf8"));
       expect(record.result).toBeUndefined();
@@ -497,7 +505,7 @@ describe("delete recovery placement and receipts", () => {
       expect(await readFile(faults.copyTarget, "utf8")).toBe("racing replacement");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.beforeResume = undefined; }
   });
-  it.each(["edit", "replace", "grow", "link"])("never removes an occupant that differs from the interrupted copy (%s)", async change => {
+  it.each(["edit", "replace", "grow", "link", "reuse"])("never removes an occupant that differs from the interrupted copy (%s)", async change => {
     const f = await fixture();
     const id = await deleted(f);
     faults.copyOnly = true; faults.failCopy = "write"; faults.failRemove = true;
@@ -511,6 +519,10 @@ describe("delete recovery placement and receipts", () => {
         // Rename over the copy so the replacement cannot reuse the copy's freed inode.
         await writeFile(`${faults.copyTarget}.new`, "not ");
         await rename(`${faults.copyTarget}.new`, faults.copyTarget);
+      } else if (change === "reuse") {
+        // A new file that starts with the copy's bytes, at the copy's inode and
+        // creation time, as Linux can give one made just after the copy was deleted.
+        await writeFile(faults.copyTarget, "not ");
       } else await writeFile(faults.copyTarget, change === "edit" ? "edit" : "not retained plus a later edit");
       const before = await stat(faults.copyTarget);
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
