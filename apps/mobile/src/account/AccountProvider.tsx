@@ -2,6 +2,7 @@ import { fetch } from "expo/fetch";
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AppState, View } from "react-native";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
+import { createCacheFiles } from "../server/cacheFiles";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import { createWorkspaceList, type WorkspaceList, type WorkspaceListStore } from "../server/workspaceList";
@@ -35,8 +36,9 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 //
 // The open workspace's reads live in one store, made for its sign-in and workspace (src/server/openWorkspace.ts).
 // Switching workspace, signing out and a new sign-in each make another and stop the last, so nothing the last one
-// started can reach the screen. Its feed runs while the app is in the foreground. The read cache empties whenever the
-// sign-in changes or ends.
+// started can reach the screen. Its feed runs while the app is in the foreground. The read cache keeps a copy on disk,
+// saved before the app goes to the background, so a relaunch shows what was read last. It empties, on disk too,
+// whenever the sign-in changes or ends.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -47,7 +49,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   useEffect(() => list?.reload(), [list]);
 
-  const [cache] = useState(createReadCache);
+  const [cache] = useState(() => createReadCache(createCacheFiles()));
   useEffect(() => cache.follow(account), [account, cache]);
   // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
   // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
@@ -57,12 +59,16 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     if (!open) return;
     // In the background, iOS would end a held request anyway. A launch can report "unknown" before "active".
     if (AppState.currentState !== "background") open.resume();
-    const subscription = AppState.addEventListener("change", next => next === "background" ? open.pause() : open.resume());
+    const subscription = AppState.addEventListener("change", next => {
+      if (next !== "background") return open.resume();
+      open.pause();
+      cache.flush();
+    });
     return () => {
       subscription.remove();
       open.stop();
     };
-  }, [open]);
+  }, [open, cache]);
 
   const value = useMemo<AccountValue>(() => ({
     account, state, workspaces, currentWorkspaceId, data,
