@@ -20,6 +20,11 @@
 //!   A handler answers `CANCELLED` only when nothing it started has landed;
 //!   after expiry that answer becomes `DEADLINE_EXCEEDED`. The request keeps
 //!   its admission until the handler finishes.
+//! - **Reads answer at their deadline or cancel**: a request the service
+//!   marks [`EngineService::reads_only`] answers `DEADLINE_EXCEEDED` when its
+//!   deadline passes, or `CANCELLED` when it is cancelled, without waiting for
+//!   its handler. The handler still runs to its end and keeps the request's
+//!   admission until then.
 //!
 //! Execution slots are granted in approximate submission order (tokio's
 //! semaphore queues waiters fairly); strict FIFO is not a protocol
@@ -193,8 +198,18 @@ impl<S: EngineService + 'static> Supervisor<S> {
         let (respond, receiver) = oneshot::channel();
         let semaphore = self.semaphore.clone();
         let service = self.service.clone();
-        let cancels = self.cancels.clone();
         let admitted = self.admitted.clone();
+        let mut answer = Some(Answer {
+            respond,
+            before_cancel_release,
+            cancels: self.cancels.clone(),
+            id: request.id,
+        });
+        // A read may be answered at its deadline or cancel, before its handler ends.
+        let mut early = None;
+        if self.service.reads_only(&request) {
+            early = answer.take();
+        }
         self.runtime.spawn(async move {
             let outcome = acquire_and_run(
                 semaphore,
@@ -207,12 +222,13 @@ impl<S: EngineService + 'static> Supervisor<S> {
                 connection,
                 input,
                 progress,
+                &mut early,
             )
             .await;
-            before_cancel_release(&outcome);
             admitted.fetch_sub(1, Ordering::SeqCst);
-            lock(&cancels).remove(&request.id);
-            let _ = respond.send(outcome);
+            if let Some(answer) = answer.or(early) {
+                answer.send(outcome);
+            }
         });
         Ok(receiver)
     }
@@ -230,10 +246,27 @@ impl<S: EngineService + 'static> Supervisor<S> {
     }
 }
 
+/// A request's one answer: the transport's hook, then the registry release,
+/// then the reply.
+struct Answer<F> {
+    respond: oneshot::Sender<RequestOutcome>,
+    before_cancel_release: F,
+    cancels: CancelRegistry,
+    id: RequestId,
+}
+
+impl<F: FnOnce(&RequestOutcome)> Answer<F> {
+    fn send(self, outcome: RequestOutcome) {
+        (self.before_cancel_release)(&outcome);
+        lock(&self.cancels).remove(&self.id);
+        let _ = self.respond.send(outcome);
+    }
+}
+
 /// Wait for an execution slot, then run. A queued request resolves its own
 /// cancellation or deadline instead of waiting behind in-flight handlers.
 #[allow(clippy::too_many_arguments)]
-async fn acquire_and_run<S: EngineService>(
+async fn acquire_and_run<S: EngineService, F: FnOnce(&RequestOutcome)>(
     semaphore: Arc<Semaphore>,
     service: &S,
     request: &Request,
@@ -244,6 +277,7 @@ async fn acquire_and_run<S: EngineService>(
     connection: Option<ConnectionHandle>,
     input: Option<S::Input>,
     progress: ProgressSink,
+    early: &mut Option<Answer<F>>,
 ) -> RequestOutcome {
     let permit = tokio::select! {
         biased;
@@ -272,12 +306,13 @@ async fn acquire_and_run<S: EngineService>(
         connection,
         input,
         progress,
+        early,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_job<S: EngineService>(
+async fn run_job<S: EngineService, F: FnOnce(&RequestOutcome)>(
     service: &S,
     request: &Request,
     cancel: &CancelSignal,
@@ -288,6 +323,7 @@ async fn run_job<S: EngineService>(
     connection: Option<ConnectionHandle>,
     input: Option<S::Input>,
     progress: ProgressSink,
+    early: &mut Option<Answer<F>>,
 ) -> RequestOutcome {
     if cancel.is_cancelled() {
         return Err(WireError::new(
@@ -313,6 +349,13 @@ async fn run_job<S: EngineService>(
     };
     cancel.cancel();
     drop(permit);
+    if let Some(answer) = early.take() {
+        answer.send(Err(if expired {
+            WireError::new(ErrorCode::DeadlineExceeded, "request deadline elapsed")
+        } else {
+            WireError::new(ErrorCode::Cancelled, "request cancelled")
+        }));
+    }
     match handler.await {
         Err(error) if expired && error.code == ErrorCode::Cancelled => Err(WireError::new(
             ErrorCode::DeadlineExceeded,
@@ -793,6 +836,98 @@ mod tests {
         let response = receiver.await.expect("responded").expect("landed outcome");
         assert_eq!(response.response.result, json!("landed"));
         assert!(service.signalled.load(Ordering::SeqCst));
+    }
+
+    /// Request 1 waits for `release` and never looks at cancellation, as a
+    /// read queued on a stuck workspace does. Every request is a read.
+    struct StuckRead {
+        entered: Notify,
+        release: Notify,
+        finished: std::sync::atomic::AtomicBool,
+    }
+
+    impl EngineService for StuckRead {
+        type Input = ();
+        async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
+            if request.id == 1 {
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.finished.store(true, Ordering::SeqCst);
+            }
+            Ok(ServiceResponse::response(Response {
+                id: request.id,
+                result: json!("read"),
+            }))
+        }
+
+        fn reads_only(&self, _request: &Request) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_answers_at_its_deadline_or_cancel_while_its_handler_is_stuck() {
+        for cancelled in [false, true] {
+            let service = Arc::new(StuckRead {
+                entered: Notify::new(),
+                release: Notify::new(),
+                finished: std::sync::atomic::AtomicBool::new(false),
+            });
+            // One execution slot, two admitted requests.
+            let supervisor = Supervisor::new(config(1, 1), service.clone());
+            let mut stuck = request(1);
+            if !cancelled {
+                stuck.deadline_ms = Some(50);
+            }
+            let receiver = supervisor.try_submit(stuck).expect("accepted");
+            service.entered.notified().await;
+            if cancelled {
+                assert!(supervisor.cancel(1));
+            }
+            let error = tokio::time::timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("a read answers at its deadline or cancel")
+                .expect("responded")
+                .expect_err("the read did not finish");
+            let expected = if cancelled {
+                ErrorCode::Cancelled
+            } else {
+                ErrorCode::DeadlineExceeded
+            };
+            assert_eq!(error.code, expected);
+            assert!(!service.finished.load(Ordering::SeqCst));
+            assert!(!supervisor.cancel(1), "an answered id is released");
+
+            // The stuck handler gave up its slot but keeps its admission.
+            let next = supervisor.try_submit(request(2)).expect("accepted");
+            assert_eq!(
+                next.await.expect("responded").expect("ran").response.result,
+                json!("read")
+            );
+            let queued = supervisor.try_submit(request(3)).expect("accepted");
+            assert_eq!(
+                supervisor
+                    .try_submit(request(4))
+                    .expect_err("the stuck handler still counts")
+                    .code,
+                ErrorCode::Overloaded
+            );
+            queued.await.expect("responded").expect("ran");
+
+            // Once the handler ends, its admission comes back.
+            service.release.notify_one();
+            for _ in 0..100 {
+                if service.finished.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(service.finished.load(Ordering::SeqCst));
+            let _fifth = supervisor.try_submit(request(5)).expect("accepted");
+            let _sixth = supervisor
+                .try_submit(request(6))
+                .expect("the finished handler released its admission");
+        }
     }
 
     #[tokio::test(start_paused = true)]
