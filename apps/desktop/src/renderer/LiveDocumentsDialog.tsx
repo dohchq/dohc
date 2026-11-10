@@ -69,6 +69,9 @@ export type LiveDocumentsDialogProps = {
   saveRecoveryCopy?: (workspaceId: string, path: string, incident?: string) => Promise<void>;
   /** Reads again the kept edits of a row dohc could not read, named by its incident. */
   readKeptEdits?: (workspaceId: string, objectId: string, incident: string) => Promise<void>;
+  /** The rows of edits a restore set aside on this computer, which the list
+   * shows when it cannot read the server's list. */
+  setAside?: readonly LiveDocumentRow[];
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -311,6 +314,7 @@ export function LiveDocumentsDialog({
   reveal,
   saveRecoveryCopy,
   readKeptEdits,
+  setAside = [],
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -593,6 +597,9 @@ export function LiveDocumentsDialog({
   }
 
   const nextCursor = state.kind === "ready" ? state.nextCursor : null;
+  // Without the server's list, edits a restore set aside still show: only this
+  // computer keeps them, and only their recovery copy can return them.
+  const rows = state.kind === "ready" ? state.rows : state.kind === "unknown" ? setAside : [];
   const refusalRows = refusalState.kind === "ready" ? refusalState.rows : [];
   const refusalNextCursor =
     refusalState.kind === "ready" ? refusalState.nextCursor : null;
@@ -650,15 +657,23 @@ export function LiveDocumentsDialog({
       </p>
       {state.kind === "loading" ? <SkeletonLines rows={2} className="py-2" /> : null}
 
-      {state.kind === "ready" ? (
-        state.rows.length ? (
+      {state.kind === "unknown" ? (
+        <p className={`${rows.length ? "pb-2" : "py-6"} text-[13px] text-muted`}>
+          {rows.length
+            ? "dohc could not load the server's list. These edits are kept on this computer."
+            : "This list is not current. Reload to see this workspace's live documents."}
+        </p>
+      ) : null}
+
+      {rows.length || state.kind === "ready" ? (
+        rows.length ? (
           <ul
             ref={listRef}
             aria-busy={listBusy}
             aria-label="Live documents"
             className="divide-y divide-line border-y border-line"
           >
-            {state.rows.map((row) => (
+            {rows.map((row) => (
               <li
                 key={rowIdentity(row)}
                 data-testid={`live-document-row-${row.path}${row.saveOnly ? `-${row.incident}` : ""}`}
@@ -811,12 +826,6 @@ export function LiveDocumentsDialog({
             <EmptyState title="No live documents in this workspace. Reload after a document starts live editing." />
           </div>
         )
-      ) : null}
-
-      {state.kind === "unknown" ? (
-        <p className="py-6 text-[13px] text-muted">
-          This list is not current. Reload to see this workspace's live documents.
-        </p>
       ) : null}
 
       {/* Its own section: these shares are not editing live, so they must
