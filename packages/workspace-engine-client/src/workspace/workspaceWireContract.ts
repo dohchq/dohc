@@ -21,7 +21,7 @@ import type { JsonValue } from "../protocol";
 
 export type HeldNoteChangeInput = {path: string} & (
   | {action: "review"}
-  | {action: "drop" | "undo"; token: string}
+  | {action: "drop" | "undo"; token: string; author: WriteAuthor}
 );
 export type HeldNoteChangeResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.heldNoteChange];
 

@@ -7653,6 +7653,8 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity,
+    localPerson,
+    authorNames: (workspaceId, event: IpcMainInvokeEvent) => workspaceEngineIpc.authorNames(workspaceId, event.sender, () => []),
     onRefusalsChanged: notifyNoticesChanged,
   }), rendererUsage.version);
 

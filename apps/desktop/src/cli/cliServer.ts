@@ -2899,7 +2899,11 @@ async function dispatchWorkspace(
       if (!path.ok) return cliPathRejected(path.reason, request.args.path);
       try {
         const input = request.args.action === "review" ? {path: path.normalized, action: "review" as const}
-          : {path: path.normalized, action: request.args.action, token: request.args.token};
+          : {path: path.normalized, action: request.args.action, token: request.args.token, author: {
+            kind: "agent" as const, agentId: editingAgentId(context), onBehalfOf: options.localPersonId(),
+            ...agentWriteRun(context, options),
+            ...(options.agentRunDepth(context.workspaceId) > 0 ? {depth: options.agentRunDepth(context.workspaceId)} : {}),
+          }};
         const result = await context.heldNoteChange(input);
         if (input.action !== "review") await notifyWrite(options, context);
         return {ok: true as const, ...result};

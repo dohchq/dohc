@@ -20,6 +20,11 @@ async fn held_request(
     let mut params = json!({"path":"note.md", "action":action});
     if let Some(token) = token {
         params["token"] = json!(token);
+        params["author"] = if action == "undo" {
+            json!({"kind":"agent","agentId":"undo-agent","onBehalfOf":"local-owner"})
+        } else {
+            json!({"kind":"human","humanId":"local-owner"})
+        };
     }
     service
         .dispatch(
@@ -158,8 +163,37 @@ async fn held_drop_rpc_preserves_history_and_undo_without_writing_the_file() {
         "{held:?}"
     );
     let review = held_request(&service, &handle, "review", None).await;
+    let (session, egress) = service.ydoc_open(
+        &RequestContext::unbounded(), Some(handle.clone()),
+        json!({"versionId":"main","path":"note.md","contentKind":"richdoc",
+            "allowLossySourceSha256":hex_sha256(source.as_bytes())}), 2,
+    ).await.unwrap();
+    drop(egress);
+    let session_id = session["sessionId"].as_str().unwrap();
+    let original_consent = crate::lock(&service.sessions)[session_id].conversion_consent.clone().unwrap();
+    let refused = service.dispatch(RequestContext::unbounded(), Request {
+        id: 3, method: "documents.heldChange".into(), workspace: Some(handle.clone()),
+        deadline_ms: None, idempotency_key: None, progress: false,
+        params: json!({"path":"note.md","action":"drop","token":"stale",
+            "author":{"kind":"human","humanId":"local-owner"}}),
+    }).await.unwrap_err();
+    assert!(refused.message.contains("changed"), "{refused:?}");
+    assert!(original_consent.is_consumed(), "in-flight consent clones stay revoked");
+    let restored_consent = {
+        let sessions = crate::lock(&service.sessions);
+        let session = &sessions[session_id];
+        let consent = session.conversion_consent.clone().expect("a refused Drop keeps session consent");
+        let source_sha = hex_sha256(source.as_bytes());
+        assert!(consent.permits(&key, session_id, session.lineage_claim_id.as_deref(),
+            session.restore_generation, Some(&source_sha), session.open_head_sha.as_deref()));
+        assert!(!consent.permits(&key, "another-session", session.lineage_claim_id.as_deref(),
+            session.restore_generation, Some(&source_sha), session.open_head_sha.as_deref()));
+        consent
+    };
     let dropped = held_request(&service, &handle, "drop", review["token"].as_str()).await;
     assert_eq!(dropped["held"], false);
+    assert!(restored_consent.is_consumed());
+    assert!(crate::lock(&service.sessions)[session_id].conversion_consent.is_none());
     let history = dropped["historyMomentId"].as_str().unwrap().to_owned();
     {
         let mut store = EngineStore::open_read_only(&db).unwrap();
@@ -190,12 +224,18 @@ async fn held_drop_rpc_preserves_history_and_undo_without_writing_the_file() {
             .unwrap()
             .unwrap();
         assert!(moment.before_text.unwrap().contains(waiting));
+        assert_eq!(serde_json::from_str::<Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+            json!([{"kind":"human","humanId":"local-owner"}]));
         assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
     }
     let restored = held_request(&service, &handle, "undo", dropped["token"].as_str()).await;
     assert_eq!(restored["held"], true);
+    assert!(crate::lock(&service.sessions)[session_id].conversion_consent.is_none());
     {
         let mut store = EngineStore::open_read_only(&db).unwrap();
+        let moment = VersionedTextStore::new(&mut store).get_moment("drop-proof", restored["historyMomentId"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+            json!([{"kind":"agent","agentId":"undo-agent","onBehalfOf":"local-owner"}]));
         assert!(
             dohc_engine_collab::load_persisted(&store, &key)
                 .unwrap()

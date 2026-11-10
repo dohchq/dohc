@@ -83,6 +83,14 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     ops,
     workspaceVersionHandlers({
       requireEngineCapture, notifyRenderer,
+      localPerson: async () => ({kind: "human", humanId: "local-person"}),
+      authorNames: () => ({
+        person: author => author.humanId === "local-person" ? "Ice" : undefined,
+        agent: () => "Codex",
+        automation: () => ({name: "Stamp"}),
+        named: () => "Pat",
+        presentations: () => [],
+      }),
       onRefusalsChanged,
       activity: { queueCloudSync },
     }),
@@ -96,6 +104,33 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
 }
 
 describe("registered workspace version handlers", () => {
+  it.each(["drop", "undo"] as const)("forwards only engine params and the local author for %s", async action => {
+    const h = harness();
+    const token = "a".repeat(64);
+    h.operations.heldNoteChange.mockResolvedValue({path: "notes.md", token, held: action === "undo", authors: [], historyMomentId: "history"});
+    await h.invoke(ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action, token});
+    expect(h.operations.heldNoteChange.mock.calls[0]).toEqual([{
+      path: "notes.md", action, token, author: {kind: "human", humanId: "local-person"},
+    }]);
+  });
+
+  it("resolves realistic live provenance in main, including the local person", async () => {
+    const h = harness();
+    h.operations.heldNoteChange.mockResolvedValue({path: "notes.md", token: "a".repeat(64), held: true, historyMomentId: null,
+      authors: [{kind: "human", humanId: "local-person"}, {kind: "agent", agentId: "writer", onBehalfOf: "local-person"},
+        {kind: "automation", automationId: "collection:Tasks#stamp", depth: 0}, {kind: "unattributed"}],
+    });
+    expect(await h.invoke(ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action: "review"})).toMatchObject({
+      authors: [{name: "Ice"}, {name: "Codex"}, {name: "Stamp"}, {name: null}],
+    });
+  });
+
+  it("explains the adopted shared-note refusal without an engine code", async () => {
+    const h = harness();
+    h.operations.heldNoteChange.mockRejectedValue(new Error("owner-outbox-frozen"));
+    await expect(h.invoke(ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action: "review"}))
+      .rejects.toThrow("Drop is not available for shared notes yet. Keep the waiting edits or save a copy.");
+  });
   it.each(requests)("refuses %s from a window showing another workspace", async (channel, payload) => {
     const h = harness();
     await expect(h.invoke(channel, payload, "other-workspace")).rejects.toThrow(

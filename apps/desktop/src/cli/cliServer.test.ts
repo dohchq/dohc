@@ -4164,7 +4164,9 @@ describe("CLI socket server", () => {
   it("lets a local agent review, drop, and undo through the shared held operation", async () => {
     const token = "a".repeat(64);
     let waiting = true;
+    const calls: unknown[] = [];
     context.heldNoteChange = async input => {
+      calls.push(input);
       if (input.action === "drop") waiting = false;
       if (input.action === "undo") waiting = true;
       return {path: input.path, token, authors: [], held: waiting, historyMomentId: "history"};
@@ -4173,6 +4175,8 @@ describe("CLI socket server", () => {
     expect(await invoke("heldNoteChange", {...args, action: "review"})).toMatchObject({ok: true, held: true, token});
     expect(await invoke("heldNoteChange", {...args, action: "drop", token})).toMatchObject({ok: true, held: false});
     expect(await invoke("heldNoteChange", {...args, action: "undo", token})).toMatchObject({ok: true, held: true});
+    expect(calls.slice(1)).toEqual(["drop", "undo"].map(action => ({path: "tracked.md", action, token,
+      author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local"}})));
     expect(await invoke("heldNoteChange", {...args, actor: "human", action: "drop", token})).toMatchObject({ok: false});
     expect(waiting).toBe(true);
     context.readOnly = true;

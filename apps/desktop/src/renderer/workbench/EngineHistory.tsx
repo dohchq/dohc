@@ -139,7 +139,7 @@ export function engineMomentSourceLabel(moment: SourcedMoment): string {
   return sourceName(moment) ?? engineOriginLabel(moment.origin);
 }
 
-type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
+type SourcedMoment = Pick<EngineMomentRecord, "origin" | "correlationId" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
 
 // Your personal agent's id when it made the moment, so its name and color come
 // from your roster. Only main can say an author is yours. Anyone who can write
@@ -150,8 +150,13 @@ function personalAuthorId(moment: Pick<EngineMomentRecord, "authors" | "authorPr
     ? author.agentId : undefined;
 }
 
+function isHeldChangeMoment(moment: SourcedMoment): boolean {
+  return moment.origin === "capture-recovery-cleared"
+    && (moment.correlationId === "held-change:drop" || moment.correlationId === "held-change:undo");
+}
+
 function sourceName(moment: SourcedMoment): string | undefined {
-  if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
+  if ((moment.origin === "restore" || isHeldChangeMoment(moment)) && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.authorLabels) {
     const [first, second, third, ...rest] = moment.authorLabels;
     const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
@@ -511,7 +516,7 @@ function momentAuthorLabel(moment: CreditedMoment): string {
 
 /** The name a History row gives whoever made a change, or undefined when the row says only where it came from. */
 export function engineMomentAuthorName(moment: SourcedMoment): string | undefined {
-  return (isCaptureRecoveryOrigin(moment.origin) ? undefined : moment.personAuthorName) ?? sourceName(moment);
+  return (isCaptureRecoveryOrigin(moment.origin) && !isHeldChangeMoment(moment) ? undefined : moment.personAuthorName) ?? sourceName(moment);
 }
 
 // One author in words: an agent and an automation say what they are, so

@@ -2805,12 +2805,22 @@ impl Fixture {
         &self,
         action: crate::actor::HeldChangeAction,
     ) -> Result<crate::actor::HeldChangeResult, RuntimeError> {
+        self.held_action_as(action, r#"[{"kind":"human","humanId":"drop-owner"}]"#)
+            .await
+    }
+
+    async fn held_action_as(
+        &self,
+        action: crate::actor::HeldChangeAction,
+        author_json: &str,
+    ) -> Result<crate::actor::HeldChangeResult, RuntimeError> {
         self.actor
             .held_note_change(
                 self.key.clone(),
                 "note.md".into(),
                 self.scratch.path().to_owned(),
                 action,
+                Some(author_json.to_owned()),
                 40,
             )
             .await
@@ -2856,6 +2866,14 @@ async fn held_drop_resets_live_state_and_completes_obligations_without_a_file_wr
         .await
         .unwrap();
     assert!(!dropped.held);
+    assert!(
+        !f.settle(false, None)
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
     let key = f.key.clone();
     let source = f.source.clone();
     f.actor
@@ -2927,6 +2945,12 @@ async fn held_drop_keeps_waiting_text_in_history_before_resetting_the_doc() {
                 moment.metadata_summary.as_deref(),
                 Some("Dropped held change")
             );
+            assert_eq!(serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+                serde_json::json!([{"kind":"human","humanId":"drop-owner"}]));
+            let credit: (String, String) = store.read_with(|conn| conn.query_row(
+                "SELECT actor_origin_id,actor_kind FROM ydoc_updates ORDER BY seq DESC LIMIT 1", [],
+                |row| Ok((row.get(0)?,row.get(1)?))).map_err(StorageError::corrupt_public))?;
+            assert_eq!(credit, ("drop-owner".into(),"human".into()));
             assert!(
                 store
                     .read_with(|conn| dohc_engine_domain::capture_recoveries_in(conn, "w"))?
@@ -2951,12 +2975,32 @@ async fn held_drop_undo_restores_waiting_text_and_holds_again_without_consent() 
         .await
         .unwrap();
     let restored = f
-        .held_action(HeldChangeAction::Undo {
-            token: dropped.token,
-        })
+        .held_action_as(
+            HeldChangeAction::Undo {
+                token: dropped.token,
+            },
+            r#"[{"kind":"agent","agentId":"restore-agent","onBehalfOf":"drop-owner"}]"#,
+        )
         .await
         .unwrap();
     assert!(restored.held);
+    let moment_id = restored.history_moment_id.unwrap();
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        let moment = VersionedTextStore::new(store).get_moment("w", &moment_id)?.unwrap();
+        assert_eq!(moment.metadata_summary.as_deref(), Some("Restored held change"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+            serde_json::json!([{"kind":"agent","agentId":"restore-agent","onBehalfOf":"drop-owner"}]));
+        let credit: (String, String, String) = store.read_with(|conn| conn.query_row(
+            "SELECT actor_origin_id,actor_kind,on_behalf_of FROM ydoc_updates ORDER BY seq DESC LIMIT 1", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(StorageError::corrupt_public))?;
+        assert_eq!(credit, ("restore-agent".into(),"agent".into(),"drop-owner".into()));
+        let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(),1);
+        assert_eq!(owed[0].retry_inputs["headUpdateSeq"], marker.head_update_seq);
+        Ok(())
+    }).await.unwrap();
     assert!(matches!(
         f.settle(false, None).await,
         Err(RuntimeError::MarkdownWriteHeld { .. })
@@ -3217,4 +3261,83 @@ async fn held_drop_does_not_bypass_the_adopted_owner_audit() {
     ));
     f.unchanged().await;
     f.supervisor.close(&f.db).unwrap();
+}
+
+impl Fixture {
+    async fn prepend_held_obligation(&self, kind: WriteObligationKind) {
+        self.actor.run(move |store, _| {
+            let mut row = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                .into_iter().find(|row| row.kind == WriteObligationKind::Session).unwrap();
+            row.kind = kind;
+            row.operation_id = "earlier-obligation".into();
+            row.held_checkpoint_sha256 = None;
+            if kind == WriteObligationKind::AuditedSettle {
+                let retry = write_obligations::AuditedRetry {
+                    namespace: "relay".into(),
+                    binding: dohc_engine_collab::live_object_binding::LiveObjectBinding {
+                        workspace_id: row.key.workspace_id.clone(), main_version_id: row.key.version_id.clone(),
+                        object_id: row.key.object_id.clone(), lineage_claim_id: row.lineage_claim_id.clone(),
+                        current_path: row.path.clone(), selector_paths: vec![row.path.clone()], restore_fence_generation: 0,
+                    },
+                    terminal_cursor: 7, head_update_seq: 1,
+                };
+                row.operation_id = retry.operation_id();
+                row.retry_inputs = serde_json::to_value(retry).unwrap();
+            } else {
+                row.retry_inputs = serde_json::json!({"expectedHeadSha256":row.held_head_sha256});
+            }
+            store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+                write_obligations::record_in(tx, &row, 30)?;
+                tx.execute("UPDATE markdown_write_obligations SET obligation_order=0 WHERE kind=?1", [kind.as_str()])
+                    .map_err(StorageError::persist_public)?;
+                Ok(())
+            })?;
+            Ok(())
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn held_drop_refuses_pending_audited_settlement_without_corrupting_its_retry() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    f.prepend_held_obligation(WriteObligationKind::AuditedSettle).await;
+    assert!(matches!(f.held_action(HeldChangeAction::Drop {token: review.token}).await,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {reason: "held-change-conflict"}))));
+    f.unchanged().await;
+    f.actor.run(|store, _| {
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 2);
+        let audit = owed.iter().find(|row| row.kind == WriteObligationKind::AuditedSettle).unwrap();
+        assert!(serde_json::from_value::<write_obligations::AuditedRetry>(audit.retry_inputs.clone()).is_ok());
+        store.write_with(&NoFaults, |tx| write_obligations::record_audited_in(tx, audit, 50))?;
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_stores_undo_on_the_held_session_instead_of_an_earlier_obligation() {
+    use crate::actor::HeldChangeAction;
+    for kind in [WriteObligationKind::OwnerStop, WriteObligationKind::SyncProjection, WriteObligationKind::LinkBaseline] {
+        let f = Fixture::new().await;
+        let review = f.hold_and_review().await;
+        f.prepend_held_obligation(kind).await;
+        let dropped = f.held_action(HeldChangeAction::Drop {token: review.token}).await.unwrap();
+        f.actor.run(move |store, _| {
+            let saved_kind: String = store.read_with(|conn| conn.query_row(
+                "SELECT kind FROM markdown_write_obligations WHERE json_type(retry_inputs_json,'$.heldDrop')='object'", [],
+                |row| row.get(0)).map_err(StorageError::corrupt_public))?;
+            assert_eq!(saved_kind, "session");
+            let other_has_undo: bool = store.read_with(|conn| conn.query_row(
+                "SELECT json_type(retry_inputs_json,'$.heldDrop') IS NOT NULL FROM markdown_write_obligations WHERE kind=?1",
+                [kind.as_str()], |row| row.get(0)).map_err(StorageError::corrupt_public))?;
+            assert!(!other_has_undo);
+            Ok(())
+        }).await.unwrap();
+        assert!(f.held_action(HeldChangeAction::Undo {token: dropped.token}).await.unwrap().held);
+        assert_eq!(std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(), f.source);
+        f.supervisor.close(&f.db).unwrap();
+    }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import {
   engineMomentSourceLabel,
+  engineMomentAuthorName,
   engineMomentSummary,
   engineOriginLabel,
   momentDescription,
@@ -71,6 +72,13 @@ describe("engineOriginLabel", () => {
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("momentDescription", () => {
+  it.each(["drop", "undo"])("names the local person who performed held-change %s", action => {
+    const change = moment({id: `held-${action}`, origin: "capture-recovery-cleared", personAuthorName: "Ice",
+      correlationId: `held-change:${action}`, summary: action === "drop" ? "Dropped held change" : "Restored held change"});
+    expect(engineMomentAuthorName(change)).toBe("Ice");
+    expect(engineMomentSourceLabel(change)).toBe("Ice");
+    expect(momentDescription(change)).toContain(", Ice,");
+  });
   // A change several wrote lists each author; an agent or an automation
   // among them says what it is, so it never reads as another person.
   it("names each of several authors by their own kind", () => {

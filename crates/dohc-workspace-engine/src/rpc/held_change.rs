@@ -1,6 +1,6 @@
 use crate::rpc::{
     error::map_runtime,
-    request::{now_ms, parse},
+    request::{now_ms, parse, validated_author},
 };
 use crate::{EngineService, lock};
 use dohc_engine_protocol::{
@@ -15,6 +15,7 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 struct Params {
     path: String,
+    author: Option<Value>,
     #[serde(flatten)]
     action: HeldChangeAction,
 }
@@ -31,6 +32,13 @@ impl EngineService {
             return Err(WireError::new(
                 ErrorCode::Forbidden,
                 "Only the owner on this computer can drop or restore a held change.",
+            ));
+        }
+        let author_json = validated_author(params.author.as_ref())?;
+        if !matches!(params.action, HeldChangeAction::Review) && author_json.is_none() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "A held change needs its caller's author.",
             ));
         }
         let capture = open.capture_apply_gate.clone().lock_owned().await;
@@ -64,13 +72,16 @@ impl EngineService {
             let key = DocKey::new(&open.workspace_id, version, object)
                 .map_err(|error| map_runtime(error.into()))?;
             let changes = !matches!(params.action, HeldChangeAction::Review);
+            let mut revoked = Vec::new();
             if changes {
-                for session in lock(&sessions)
-                    .values_mut()
-                    .filter(|session| session.key == key)
+                for (id, session) in lock(&sessions)
+                    .iter_mut()
+                    .filter(|(_, session)| session.key == key)
                 {
-                    if let Some(consent) = session.conversion_consent.take() {
-                        consent.revoke();
+                    if let Some(consent) = session.conversion_consent.take()
+                        && let Some(replacement) = consent.revoke_with_replacement()
+                    {
+                        revoked.push((id.clone(), std::sync::Arc::new(replacement)));
                     }
                 }
             }
@@ -81,10 +92,28 @@ impl EngineService {
                     params.path,
                     open.root.clone(),
                     params.action,
+                    author_json,
                     now,
                 )
-                .await
-                .map_err(map_runtime)?;
+                .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let mut sessions = lock(&sessions);
+                    for (id, consent) in revoked {
+                        if let Some(session) = sessions.get_mut(&id).filter(|session| {
+                            session.key == key && session.conversion_consent.is_none()
+                        }) {
+                            session.conversion_consent = Some(consent);
+                        }
+                    }
+                    return Err(match error {
+                        dohc_engine_runtime::RuntimeError::Collab(dohc_engine_collab::CollabError::OwnerOutboxFrozen) =>
+                            WireError::new(ErrorCode::InvalidParams, "Drop is not available for shared notes yet. Keep the waiting edits or save a copy."),
+                        error => map_runtime(error),
+                    });
+                }
+            };
             if changes {
                 let mut sessions = lock(&sessions);
                 for (id, session) in sessions

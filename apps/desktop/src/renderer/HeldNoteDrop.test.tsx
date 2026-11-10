@@ -12,7 +12,7 @@ const heldNoteChange = vi.hoisted(() => vi.fn());
 vi.mock("./bridge", () => ({ bridge: () => ({ heldNoteChange }) }));
 afterEach(() => { cleanup(); localStorage.clear(); vi.resetAllMocks(); });
 const token = "a".repeat(64);
-const review: HeldNoteChangeResult = { path: "note.md", token, authors: [{kind: "human", humanName: "Ice"}, {kind: "agent", agentName: "Codex"}], held: true, historyMomentId: null };
+const review: HeldNoteChangeResult = { path: "note.md", token, authors: [{name: "Ice"}, {name: "Codex"}], held: true, historyMomentId: null };
 
 function Harness() {
   const notices = useShellError("workspace");
@@ -61,8 +61,8 @@ it("keeps Undo when an engine event removes the band before the Drop reply", asy
 });
 
 it("states unknown provenance without presenting an opaque identity as a name", () => {
-  expect(waitingAuthors([{kind: "named", userId: "private-id"}])).toBe("dohc does not know who made the waiting edits.");
-  expect(waitingAuthors([{humanName: "Ice"}, {kind: "unattributed"}])).toBe("Waiting edits by Ice. Some edits have no known author.");
+  expect(waitingAuthors([{name: null}])).toBe("dohc does not know who made the waiting edits.");
+  expect(waitingAuthors([{name: "Ice"}, {name: null}])).toBe("Waiting edits by Ice. Some edits have no known author.");
 });
 
 it("drops a late review when the workspace changes", async () => {

@@ -67,6 +67,7 @@ impl ActorHandle {
         path: String,
         root: PathBuf,
         action: HeldChangeAction,
+        author_json: Option<String>,
         now_ms: i64,
     ) -> Result<HeldChangeResult, RuntimeError> {
         self.run(move |store, cache| {
@@ -117,6 +118,11 @@ impl ActorHandle {
                 }
                 let (delta, token, history_moment_id, held, result_authors) = match &action {
                     HeldChangeAction::Drop { token } => {
+                        if owed.iter().any(|row| row.kind == obligations::Kind::AuditedSettle) {
+                            return Err(refusal("held-change-conflict"));
+                        }
+                        let session = owed.iter().find(|row| row.kind == obligations::Kind::Session
+                            && row.held_checkpoint_sha256.is_some()).ok_or_else(|| refusal("held-change-missing"))?;
                         if token != &current_token || !owed.iter().any(|row| row.held_checkpoint_sha256.is_some())
                             || owed.iter().filter(|row| row.held_checkpoint_sha256.is_some()).any(|row| row.held_head_sha256.as_deref() != Some(head.blob_sha256.as_str())) {
                             return Err(refusal("held-change-stale"));
@@ -125,13 +131,12 @@ impl ActorHandle {
                         let text = doc.project(ContentKind::Richdoc)?.content;
                         let moment = format!("moment-held-drop-{current_token}");
                         dohc_engine_domain::store::record_keyed_capture_recovery_in_tx(tx, &key.workspace_id, &head,
-                            &text, &moment, Some(&authors.to_string()), now_ms)?;
+                            &text, &moment, author_json.as_deref(), now_ms)?;
                         dohc_engine_domain::clear_capture_recovery_in(tx, &key.workspace_id, &moment)?;
-                        tx.execute("UPDATE moments SET metadata_summary='Dropped held change' WHERE workspace_id=?1 AND moment_id=?2",
+                        tx.execute("UPDATE moments SET metadata_summary='Dropped held change',metadata_correlation_id='held-change:drop' WHERE workspace_id=?1 AND moment_id=?2",
                             params![key.workspace_id,moment]).map_err(StorageError::persist_public)?;
                         let delta = doc.reset_held_content_to_file(ContentKind::Richdoc, &head.text)?;
                         let after_sha = document_fingerprint(&doc);
-                        let first = owed.first().ok_or_else(|| refusal("held-change-missing"))?;
                         let saved = serde_json::json!({"heldDrop": {
                             "token": current_token, "waitingCheckpoint": STANDARD.encode(&checkpoint),
                             "droppedCheckpointSha256": after_sha, "headSha256": head.blob_sha256,
@@ -139,12 +144,12 @@ impl ActorHandle {
                         }});
                         for row in &owed { obligations::complete_in(tx, row, now_ms)?; }
                         tx.execute("UPDATE markdown_write_obligations SET retry_inputs_json=?2 WHERE obligation_order=?1",
-                            params![first.order, saved.to_string()]).map_err(StorageError::persist_public)?;
+                            params![session.order, saved.to_string()]).map_err(StorageError::persist_public)?;
                         (delta, current_token.clone(), Some(moment), false, authors.clone())
                     }
                     HeldChangeAction::Undo { token } => {
                         let saved: Option<String> = tx.query_row("SELECT retry_inputs_json FROM markdown_write_obligations \
-                            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND completed=1 \
+                            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND kind='session' AND completed=1 \
                             AND json_extract(retry_inputs_json,'$.heldDrop.token')=?5 ORDER BY obligation_order DESC LIMIT 1",
                             params![key.workspace_id,key.version_id,key.object_id,marker.lineage_claim_id,token], |row| row.get(0))
                             .optional().map_err(StorageError::corrupt_public)?;
@@ -160,21 +165,28 @@ impl ActorHandle {
                             .map_err(StorageError::corrupt_public)?;
                         let waiting = Ydoc::wire(); waiting.apply(&bytes)?;
                         let delta = doc.restore_held_content(ContentKind::Richdoc, &waiting)?;
-                        let moment = drop["historyMomentId"].as_str().map(str::to_owned);
-                        (delta, token.clone(), moment, true, drop["authors"].clone())
+                        let moment = format!("moment-held-undo-{current_token}");
+                        let text = waiting.project(ContentKind::Richdoc)?.content;
+                        dohc_engine_domain::store::record_keyed_capture_recovery_in_tx(tx, &key.workspace_id, &head,
+                            &text, &moment, author_json.as_deref(), now_ms)?;
+                        dohc_engine_domain::clear_capture_recovery_in(tx, &key.workspace_id, &moment)?;
+                        tx.execute("UPDATE moments SET metadata_summary='Restored held change',metadata_correlation_id='held-change:undo' WHERE workspace_id=?1 AND moment_id=?2",
+                            params![key.workspace_id,moment]).map_err(StorageError::persist_public)?;
+                        (delta, token.clone(), Some(moment), true, drop["authors"].clone())
                     }
                     HeldChangeAction::Review => unreachable!(),
                 };
-                let mut appended = dohc_engine_collab::record_update_in_tx(tx, &key, &delta, None, None, now_ms)?;
+                let (actor, attribution) = dohc_engine_domain::moment_author_attribution(author_json.as_deref());
+                let mut appended = dohc_engine_collab::record_update_in_tx(tx, &key, &delta, actor.as_deref(), attribution.as_ref(), now_ms)?;
                 super::ydoc::journal_recovery_append_in_tx(tx, &key, &path, ContentKind::Richdoc, &delta,
-                    None, None, &preparations, &mut appended, now_ms)?;
+                    actor.as_deref(), attribution.as_ref(), &preparations, &mut appended, now_ms)?;
                 if held {
                     tx.execute("UPDATE ydoc_docs SET pending_authors_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                         params![key.workspace_id,key.version_id,key.object_id,result_authors.to_string()]).map_err(StorageError::persist_public)?;
                     obligations::record_in(tx, &obligations::Obligation {
                         order: 0, key: key.clone(), lineage_claim_id: marker.lineage_claim_id.clone().unwrap_or_default(),
                         operation_id: format!("undo-held-drop:{token}"), kind: obligations::Kind::Session, path: path.clone(),
-                        retry_inputs: serde_json::json!({"expectedHeadSha256":head.blob_sha256,"restoreGeneration":restore,"useReader":true}),
+                        retry_inputs: serde_json::json!({"expectedHeadSha256":head.blob_sha256,"restoreGeneration":restore,"useReader":true,"headUpdateSeq":appended.seq}),
                         held_checkpoint_sha256: Some(hex_sha256(&doc.encode_full_state())), held_head_sha256: Some(head.blob_sha256.clone()),
                         source_sha256: None, settled_head_sha256: None,
                     }, now_ms)?;

@@ -5,14 +5,11 @@ import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { bridge } from "./bridge";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 
-export function waitingAuthors(authors: unknown[]): string {
+export function waitingAuthors(authors: HeldNoteChangeResult["authors"]): string {
   const names: string[] = [];
   let unknown = authors.length === 0;
   for (const author of authors) {
-    if (!author || typeof author !== "object") { unknown = true; continue; }
-    const entry = author as Record<string, unknown>;
-    const name = [entry.humanName, entry.agentName, entry.automationName, entry.displayName, entry.name, entry.label]
-      .find((value): value is string => typeof value === "string" && value.length > 0);
+    const name = author.name;
     if (name) names.push(name);
     else unknown = true;
   }
