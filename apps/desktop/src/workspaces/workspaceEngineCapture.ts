@@ -1701,7 +1701,7 @@ async function diskContentOf(path: string, size: number, read: () => Promise<Buf
 // bytes round-trip through UTF-8 within the size cap is capturable secret
 // text. Everything else mirrors the text rules (symlink refusal, size cap,
 // confirmed-absent vs transiently-unreadable).
-async function readDiskSecretState(rootPath: string, path: string): Promise<DiskTextState> {
+async function readDiskSecretState(rootPath: string, path: string): Promise<Exclude<DiskTextState, { kind: "binary" }>> {
   const absolute = join(rootPath, path);
   try {
     const info = await lstat(absolute);
