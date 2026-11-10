@@ -49,6 +49,7 @@ function privateShortTmpdir(): string {
 export default defineConfig({
   test: {
     testTimeout: 30_000,
+    setupFiles: ["./vitest.setup.ts"],
     ...(selection === "only" ? { include: confinementSuites } : {}),
     ...(selection === "exclude" ? { exclude: [...configDefaults.exclude, ...confinementSuites] } : {}),
     // expect.poll's own default is 1 s; a loaded host needs the same 10 s as desktop.
