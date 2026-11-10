@@ -38,11 +38,15 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
     );
   }, [signIn, read]);
   useEffect(reload, [reload]);
-  /** Applies a change's answer to the list. */
+  /**
+   * Applies a change's answer to the list, then reads the list again. The new read replaces any read still in flight,
+   * which started before the change and could otherwise land over it.
+   */
   const update = useCallback((change: (value: T) => T) => {
     if (!signIn.isCurrent()) return;
     setLoad(previous => previous.status === "ready" ? { status: "ready", value: change(previous.value), problem: null } : previous);
-  }, [signIn]);
+    reload();
+  }, [signIn, reload]);
   /** Shows a change's failure in the list's place. Something gone or changed elsewhere reads the list again. */
   const fail = useCallback((error: unknown) => {
     if (!signIn.isCurrent()) return;

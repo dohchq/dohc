@@ -2,7 +2,7 @@ import { accountWords } from "@dohc/interface-words/account";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
 import { Check } from "lucide-react-native";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useShownWorkspaces } from "../src/chats/Workspaces";
 import { useTheme } from "../src/theme";
 import { signedInOnly } from "../src/sampleOnly";
@@ -14,7 +14,8 @@ function WorkspacesSheet() {
   const router = useRouter();
   const { current, workspaces, choose } = useShownWorkspaces();
   return (
-    <View style={styles.sheet}>
+    // A scroll view, so the sheet stops at the screen's height and every workspace stays reachable.
+    <ScrollView contentContainerStyle={styles.sheet}>
       <Text style={[styles.title, { color: theme.ink }]} accessibilityRole="header">{accountWords.workspaces}</Text>
       {workspaces.length === 0 ? <Text style={[styles.empty, { color: theme.muted }]}>{accountWords.noneShown}</Text> : null}
       {workspaces.map(workspace => {
@@ -35,7 +36,7 @@ function WorkspacesSheet() {
           </Pressable>
         );
       })}
-    </View>
+    </ScrollView>
   );
 }
 
