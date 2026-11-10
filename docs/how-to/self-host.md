@@ -562,9 +562,12 @@ It immediately refuses serving, new launches, and writes, including requests fro
 The takedown also holds app publishing for the owner's account on this server.
 While the hold is on, the relay refuses every new publication and republication from that account.
 That includes the same app on a new share link, an edited copy, and the app in another workspace.
-The owner's other publications keep serving.
+The owner's other publications keep serving, including copies of the same app published before the takedown.
+Disable each of those by its own publication ID.
+The hold belongs to the account. Deleting the account removes it.
 
-To lift the hold, run the same command with `--lift-hold` instead of `--reason`:
+To lift the hold, run the same command with `--lift-hold` instead of `--reason`.
+Any publication taken down since the last lift identifies the hold:
 
 ```sh
 docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \

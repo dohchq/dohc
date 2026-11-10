@@ -228,8 +228,8 @@ export function disableAppPublication(storage: StorageContext, input: DisableApp
     if (!row) throw notFound();
     const current = withOperatorTakedown(storage, header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id)).state);
     // A takedown holds the owner's app publishing, and a retry after a lift holds it again.
-    storage.db.prepare("INSERT OR IGNORE INTO sync_relay_app_publishing_holds(owner_user_id,publication_id,held_at_ms) VALUES(?,?,?)")
-      .run(String(row.owner_user_id), input.publicationId, now);
+    storage.db.prepare("INSERT OR IGNORE INTO sync_relay_app_publishing_holds(publication_id,owner_user_id,held_at_ms) VALUES(?,?,?)")
+      .run(input.publicationId, String(row.owner_user_id), now);
     if (current.operatorTakedown) return current;
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     const operatorTakedown: AppPublicationTakedown = {actor: "operator", disabledAtMs: now, reason: input.reason.trim()};
@@ -246,12 +246,12 @@ function assertPublishingNotHeld(storage: StorageContext, ownerUserId: string): 
   }
 }
 
-/** Lifts the hold a takedown of this publication placed on its owner. False when no hold matches. */
+/** Lifts the hold from the owner of any publication taken down since the last lift. False when no hold matches. */
 export function liftAppPublishingHold(storage: StorageContext, publicationId: string): boolean {
   if (!/^[a-f0-9]{64}$/.test(publicationId)) throw badRequest("Invalid publication ID.");
-  return storage.tx(() => storage.db.prepare(`DELETE FROM sync_relay_app_publishing_holds WHERE publication_id=?
-    OR owner_user_id=(SELECT p.owner_user_id FROM sync_relay_app_publications p JOIN sync_relay_app_publication_takedowns t USING(publication_id) WHERE p.publication_id=?)`)
-    .run(publicationId, publicationId).changes > 0);
+  return storage.tx(() => storage.db.prepare(`DELETE FROM sync_relay_app_publishing_holds
+    WHERE owner_user_id=(SELECT owner_user_id FROM sync_relay_app_publishing_holds WHERE publication_id=?)`)
+    .run(publicationId).changes > 0);
 }
 
 function recordApproval(storage: StorageContext, publicationId: string, authorityRevision: number, owner: PublicationOwner, candidate: AppPublicationCandidate, agent?: ApprovalAgent | null): AppPublicationApproval {

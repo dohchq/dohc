@@ -20,7 +20,7 @@ async function main(args: string[]): Promise<void> {
     const publicationId = values["publication-id"];
     if (values["lift-hold"] && values.reason !== undefined) throw new Error("A hold lift takes no reason.");
     request = parseOperatorRequest(values["lift-hold"] ? {type: "lift-publishing-hold", publicationId} : {type: "disable-publication", publicationId, reason: values.reason});
-  } catch {console.error("Invalid takedown arguments. Use --help for the required publication ID and reason."); process.exitCode = 2; return;}
+  } catch {console.error("Invalid takedown arguments. Use --help for the arguments each action needs."); process.exitCode = 2; return;}
   try {
     const result = await requestPublicationTakedown(operatorSocketPath(), request, await readFile(operatorSecretPath(), "utf8"));
     if (result.code === 0) {console.log(result.message); console.log(JSON.stringify(result));}

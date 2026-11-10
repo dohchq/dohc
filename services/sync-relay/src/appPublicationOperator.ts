@@ -63,7 +63,7 @@ export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "
         }
         request = parseOperatorRequest(value);
       }
-      catch {reply({code: 2, message: "Invalid takedown request. Supply a publication ID and a reason of 1 to 1024 characters."}); return;}
+      catch {reply({code: 2, message: "Invalid takedown request. Supply a publication ID, and for a takedown a reason of 1 to 1024 characters."}); return;}
       try {
         if (request.type === "lift-publishing-hold") {
           const {publicationId} = request;

@@ -665,15 +665,18 @@ it("holds the owner's app publishing after a takedown until the operator lifts t
   expect(f.storage.readAppPublication({...owner, publicationId: original.publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Malware"}});
 });
 
-it("keeps the hold after the taken-down app's workspace is deleted, and lifts it by that publication", () => {
+it("keeps the hold after the taken-down apps' workspaces are deleted, and lifts it by any of them", () => {
   const f = fixture();
-  f.storage.claimWorkspace({workspaceId: "doomed", ownerUserId: "owner", createdAtMs: 1});
-  const doomed = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "doomed", "doomed")});
-  f.storage.disableAppPublication({publicationId: doomed.publicationId, reason: "Malware", nowMs: 30});
-  f.raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id='doomed'").run();
-  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publications WHERE publication_id=?").get(doomed.publicationId)!.n).toBe(0);
+  const [first, second] = ["first", "second"].map(id => {
+    f.storage.claimWorkspace({workspaceId: id, ownerUserId: "owner", createdAtMs: 1});
+    return f.storage.publishAppPublication({...request(), ...addShare(f.storage, id, id)}).publicationId;
+  });
+  for (const publicationId of [first, second]) f.storage.disableAppPublication({publicationId, reason: "Malware", nowMs: 30});
+  f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id IN ('first','second')");
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publications WHERE publication_id IN (?,?)").get(first, second)!.n).toBe(0);
   expect(() => f.storage.publishAppPublication(request())).toThrow(held);
-  expect(f.storage.liftAppPublishingHold(doomed.publicationId)).toBe(true);
+  expect(f.storage.liftAppPublishingHold(second)).toBe(true);
+  expect(f.storage.liftAppPublishingHold(first)).toBe(false);
   expect(f.storage.publishAppPublication(request()).active).toBe(true);
 });
 

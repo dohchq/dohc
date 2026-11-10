@@ -51,19 +51,20 @@ const TAKEDOWN_SQL = `CREATE TABLE sync_relay_app_publication_takedowns (
 ) STRICT`;
 
 // A takedown holds app publishing for the owner's whole account until the
-// operator lifts it. The hold has no foreign key, so deleting the publication
-// or its workspace keeps it. Deleting the account removes it.
+// operator lifts it. Each takedown keeps its own row, with no foreign key, so
+// any of them still lifts the hold after its publication or workspace is
+// deleted. Deleting the account removes them.
 const HOLD_MIGRATION = "app-publishing-holds-v1";
 const HOLD_TABLE = "sync_relay_app_publishing_holds";
 const HOLD_SQL = `CREATE TABLE sync_relay_app_publishing_holds (
-  owner_user_id TEXT PRIMARY KEY,
-  publication_id TEXT NOT NULL,
+  publication_id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL,
   held_at_ms INTEGER NOT NULL CHECK (held_at_ms BETWEEN 0 AND 9007199254740991)
 ) STRICT`;
 // Takedowns made before the hold existed hold their owners too.
-const HOLD_BACKFILL = `INSERT OR IGNORE INTO sync_relay_app_publishing_holds(owner_user_id,publication_id,held_at_ms)
-  SELECT p.owner_user_id,t.publication_id,t.disabled_at_ms FROM sync_relay_app_publication_takedowns t
-  JOIN sync_relay_app_publications p USING(publication_id) ORDER BY t.disabled_at_ms,t.publication_id`;
+const HOLD_BACKFILL = `INSERT INTO sync_relay_app_publishing_holds(publication_id,owner_user_id,held_at_ms)
+  SELECT t.publication_id,p.owner_user_id,t.disabled_at_ms FROM sync_relay_app_publication_takedowns t
+  JOIN sync_relay_app_publications p USING(publication_id)`;
 
 function initializeMarkedTable(db: SqliteDb, migration: string, table: string, sql: string, label: string, backfill?: string): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration);
