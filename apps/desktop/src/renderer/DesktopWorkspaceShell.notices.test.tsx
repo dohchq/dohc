@@ -3477,6 +3477,92 @@ describe("owner live documents", () => {
     expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
   });
 
+  // Issue 2946: a Stop asked for before the list closed answers after it opens again.
+  it("shows a Stop that is refused after Live documents reopens in its row, without a toast or a Notice", async () => {
+    const notices = vi.spyOn(shellError, "useShellError");
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    const row = await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await within(row).findByText("Stopping live editing…");
+    expect((within(row).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    await within(row).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(within(row).getByRole("button", {name: `Try again to stop live editing for ${LIVE_ROW.path}`})).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const latest: ReturnType<typeof shellError.useShellError> = notices.mock.results.at(-1)!.value;
+    notices.mockRestore();
+    expect(latest.shellErrors.some(error => error.identity === `live-stop-edits-pending:${LIVE_ROW.objectId}`)).toBe(false);
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists a Stop that succeeds after Live documents reopens as stopped", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    let stopped = false;
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [stopped ? {...LIVE_ROW, status: "retired" as const} : LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    const row = await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await within(row).findByText("Stopping live editing…");
+    stopped = true;
+    await act(async () => stopping.resolve({keptEdits: "none"}));
+    await waitFor(() => expect(within(reopened).getByTestId(`live-document-row-${LIVE_ROW.path}`).children[1]?.textContent).toBe("Stopped"));
+    expect(within(reopened).queryByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`})).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a Stop refused after Live documents reopens and closes again in a toast", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeTruthy();
+    expect(within(toast).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+  });
+
+  it("keeps a Stop running in one workspace out of another workspace's Live documents", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    const view = render(shell(WORKSPACE)), user = userEvent.setup();
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
+    const other = await openLiveDocumentsFromSettings(user);
+    await waitFor(() => expect(bridge.listOwnerLiveDocuments).toHaveBeenLastCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
+    const row = await within(other).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await waitFor(() => expect((within(row).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}) as HTMLButtonElement).disabled).toBe(false));
+    expect(within(row).queryByText("Stopping live editing…")).toBeNull();
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    expect(within(row).queryByText(/^Live editing didn't stop/u)).toBeNull();
+    expect(screen.queryByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeNull();
+  });
+
 
   it.each(["toast", "Notices"] as const)("opens Live documents from an out-of-sight withheld Stop in %s", async surface => {
     const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
