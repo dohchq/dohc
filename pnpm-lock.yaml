@@ -373,6 +373,9 @@ importers:
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
+      toqr:
+        specifier: 0.1.1
+        version: 0.1.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
