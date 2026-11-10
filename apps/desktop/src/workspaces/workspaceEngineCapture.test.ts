@@ -1454,6 +1454,37 @@ describe("workspaceEngineCapture batch capture", () => {
     } finally { await engine.stop(); }
   });
 
+  it("counts merge conflicts per version without asking for their text (#3298)", async () => {
+    const root = await createTestScratch("dohc-conflict-count-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions,
+    );
+    type Page = Awaited<ReturnType<CaptureVersionedTextStore["listTextConflicts"]>>;
+    const row = (id: string, sourceVersionId: string, origin = "merge") =>
+      ({ id, path: `${id}.md`, sourceVersionId, targetVersionId: "main", metadata: { origin } }) as unknown as Page["conflicts"][number];
+    const pages: Record<string, Page> = {
+      first: { conflicts: [row("c1", "draft"), row("c2", "draft"), row("c3", "fresh", "sync")], nextAfterConflictId: "c3" },
+      c3: { conflicts: [row("c4", "fresh")], nextAfterConflictId: null },
+    };
+    const list = vi.spyOn(store, "listTextConflicts")
+      .mockImplementation(async ({ afterConflictId }) => pages[afterConflictId ?? "first"]!);
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      await expect(engine.countOpenMergeConflicts(5)).resolves.toEqual({
+        versions: [{ versionId: "draft", count: 2 }, { versionId: "fresh", count: 1 }],
+        more: false,
+      });
+      expect(list.mock.calls.map(([input]) => input.bodies)).toEqual(["withheld", "withheld"]);
+      // Stopping at the page limit reports the counts as a lower bound.
+      await expect(engine.countOpenMergeConflicts(1)).resolves.toEqual({
+        versions: [{ versionId: "draft", count: 2 }],
+        more: true,
+      });
+      expect(list).toHaveBeenCalledTimes(3);
+    } finally { await engine.stop(); }
+  });
+
   it("flushes daemon capture before reading conflicts for resolution", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];

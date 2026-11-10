@@ -1,6 +1,6 @@
 import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -13,10 +13,6 @@ import { type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
 interface ConflictCount { count: number; more: boolean }
-
-// Conflict counts read the open conflicts a page at a time. Past this many pages
-// a count shows as a lower bound.
-const CONFLICT_PAGES_MAX = 5;
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
 // `quiet` changes the row where it stands, with no new toast. `onDismiss` runs
@@ -291,33 +287,17 @@ export function VersionsPage(props: {
     if (versionIds === null) return;
     const token = conflictReads.next();
     notice.started("conflicts");
-    void (async () => {
-      const found = new Map<string, ConflictCount>();
-      let after: string | null = null;
-      try {
-        for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
-          const result: ListWorkspaceVersionConflictsResult = await withDeadline(bridge().listWorkspaceVersionConflicts({
-            workspaceId,
-            ...(after === null ? {} : { afterConflictId: after }),
-          }), "listWorkspaceVersionConflicts");
-          if (!conflictReads.isCurrent(token)) return;
-          for (const conflict of result.conflicts) {
-            if (conflict.origin !== "merge") continue;
-            const entry = found.get(conflict.sourceVersionId) ?? { count: 0, more: false };
-            found.set(conflict.sourceVersionId, { ...entry, count: entry.count + 1 });
-          }
-          after = result.nextAfterConflictId;
-          if (after === null) break;
-        }
-      } catch (error) {
+    void withDeadline(bridge().countWorkspaceVersionConflicts({ workspaceId }), "countWorkspaceVersionConflicts").then(
+      (result) => {
+        if (!conflictReads.isCurrent(token)) return;
+        notice.worked("conflicts");
+        // When the count stopped before the list did, every count is a lower bound.
+        setConflictCounts(new Map(result.versions.map(({ versionId, count }) => [versionId, { count, more: result.more }])));
+      },
+      (error: unknown) => {
         if (conflictReads.isCurrent(token)) notice.failed("conflicts", error);
-        return;
-      }
-      notice.worked("conflicts");
-      // The pages ran out before the list did, so every count is a lower bound.
-      if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
-      setConflictCounts(found);
-    })();
+      },
+    );
   }, [workspaceId, versionIds, props.versionKey, conflictsRetry]);
 
   const locked = versions.busy !== null || props.disabled === true;

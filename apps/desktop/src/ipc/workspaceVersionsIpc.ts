@@ -6,6 +6,10 @@ import { versionConflictForIpc } from "./engineHistoryIpc";
 import type { OperationHandlers } from "./operationTable";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 
+// Each engine page can carry up to about 8 MiB, so the Versions page's count
+// stops here and shows "N+" past it.
+const CONFLICT_COUNT_PAGES_MAX = 5;
+
 type VersionOperations = Pick<WorkspaceEngineCapture,
   | "listVersions"
   | "createVersion"
@@ -14,6 +18,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "compareVersionsChangedCount"
   | "mergeVersionIntoMain"
   | "listOpenConflictsPage"
+  | "countOpenMergeConflicts"
   | "resolveConflict"
   | "listKeptCopies"
   | "saveKeptCopy"
@@ -144,6 +149,11 @@ export function workspaceVersionHandlers(dependencies: {
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
       };
+    },
+
+    async countWorkspaceVersionConflicts(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.countOpenMergeConflicts(CONFLICT_COUNT_PAGES_MAX);
     },
 
     async resolveWorkspaceVersionConflict(input) {

@@ -728,6 +728,11 @@ export interface WorkspaceEngineCapture {
     afterConflictId?: string,
   ): Promise<WorkspaceVersionConflictPage>;
   countOpenConflicts(): Promise<number>;
+  // Open conflicts a merge left, per version they came from, read from at most
+  // `pageLimit` pages without any conflict's text. `more` says the list ran on.
+  countOpenMergeConflicts(
+    pageLimit: number,
+  ): Promise<{ versions: { versionId: string; count: number }[]; more: boolean }>;
   // Files dohc moved aside while saving because another program changed them
   // meanwhile. Each waits at a hidden name until saveKeptCopy moves it to a
   // visible copy beside its file.
@@ -7194,6 +7199,30 @@ export function createWorkspaceEngineCapture(
         afterConflictId = page.nextAfterConflictId ?? undefined;
       } while (afterConflictId !== undefined);
       return count;
+    },
+
+    async countOpenMergeConflicts(pageLimit) {
+      const engine = await engineStore();
+      const counts = new Map<string, number>();
+      let afterConflictId: string | undefined;
+      for (let page = 0; page < pageLimit; page += 1) {
+        const result = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          bodies: "withheld",
+          ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+        });
+        for (const conflict of result.conflicts) {
+          if (conflict.metadata.origin === "sync") continue;
+          counts.set(conflict.sourceVersionId, (counts.get(conflict.sourceVersionId) ?? 0) + 1);
+        }
+        afterConflictId = result.nextAfterConflictId ?? undefined;
+        if (afterConflictId === undefined) break;
+      }
+      return {
+        versions: [...counts].map(([versionId, count]) => ({ versionId, count })),
+        more: afterConflictId !== undefined,
+      };
     },
 
     async listKeptCopies() {
