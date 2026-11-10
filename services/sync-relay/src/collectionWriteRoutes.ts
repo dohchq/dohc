@@ -279,17 +279,21 @@ export function createLinkCollectionWriteRoute(input: {
   };
 }
 
+/** A personal agent's write names its workspace here, URI-encoded, ahead of its body. */
+export const PERSONAL_WRITE_WORKSPACE_HEADER = "x-dohc-agent-workspace";
+
 /**
  * `POST /sync/link/personal-agent/collection-writes`: a personal agent at
  * Edit writes a Collection's own files directly, in a workspace its account
- * owns. The request names the workspace, a submit id, and the changes with
- * their content as base64, as an Edit link sends them, never an author. The
- * fence is read again once the body is in, and the write reads the agent's
- * authority at that fence, the workspace's ownership, and Edit reach again
- * inside its transaction.
+ * owns. The request names the workspace in a header and again in its body,
+ * with a submit id and the changes with their content as base64, as an Edit
+ * link sends them, never an author. The agent's access to the workspace is
+ * checked before the body is read. The fence is read again once the body is
+ * in, and the write reads the agent's authority at that fence, the
+ * workspace's ownership, and Edit reach again inside its transaction.
  */
 export function createPersonalCollectionWriteRoute(input: {
-  storage: Pick<SyncRelayStorage, "commitPersonalCollectionWrite">;
+  storage: Pick<SyncRelayStorage, "checkPersonalCollectionWriter" | "commitPersonalCollectionWrite">;
   rateLimiter: TokenBucketLimiter;
   admission: LinkCollectionWriteAdmission;
   nowMs: () => number;
@@ -305,6 +309,12 @@ export function createPersonalCollectionWriteRoute(input: {
     if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
       throw badRequest("Collection writes require JSON.");
     }
+    // A workspace the agent may not edit refuses the write before it holds a slot or reads a byte.
+    // The commit reads the agent's access there again.
+    const workspaceId = headerWorkspaceId(request);
+    input.storage.checkPersonalCollectionWriter({
+      check: authority.check, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch, workspaceId,
+    }, input.nowMs());
     // One agent's writes spend one bucket and hold one body, whichever connection sends them.
     const key = `personal:${authority.agentId}`;
     if (!input.rateLimiter.allow(key, input.nowMs())) throw relayError("collection_write_rate_limited");
@@ -319,7 +329,7 @@ export function createPersonalCollectionWriteRoute(input: {
       if (Object.keys(body).some((field) => field !== "workspaceId" && field !== "submitId" && field !== "changes")) {
         throw badRequest("invalid request");
       }
-      const workspaceId = parseWorkspaceId(body.workspaceId);
+      if (parseWorkspaceId(body.workspaceId) !== workspaceId) throw badRequest("invalid request");
       const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
       const credential = await fresh();
       const { changes, content } = personalChanges(body.changes);
@@ -331,6 +341,16 @@ export function createPersonalCollectionWriteRoute(input: {
       release();
     }
   };
+}
+
+function headerWorkspaceId(request: Request): string {
+  let workspaceId: string;
+  try {
+    workspaceId = decodeURIComponent(request.headers.get(PERSONAL_WRITE_WORKSPACE_HEADER) ?? "");
+  } catch {
+    throw badRequest("invalid request");
+  }
+  return parseWorkspaceId(workspaceId);
 }
 
 // The changes as a link sends them. The agent's tool passes a refusal's reason on, so this one says what to fix.

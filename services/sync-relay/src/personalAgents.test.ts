@@ -13,6 +13,7 @@ import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-a
 import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
 import type { AutomationReplica } from "./automationReplicas";
+import { PERSONAL_WRITE_WORKSPACE_HEADER } from "./collectionWriteRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
@@ -1188,6 +1189,7 @@ function chats(f: Fixture, workspaceId: string, agentId: string): void {
 /** A personal agent's tool call, as share-web forwards it. A stream is sent as the body as it arrives. */
 function tool(
   f: Fixture, agent: Pick<Signed, "accessToken" | "resource">, action: string, body: unknown, signal?: AbortSignal,
+  headers: Record<string, string> = {},
 ): Promise<Response> {
   return f.h(request(null, `/sync/link/personal-agent/${action}`, {
     method: "POST",
@@ -1196,6 +1198,7 @@ function tool(
       "x-dohc-agent-resource": agent.resource,
       "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
       "content-type": "application/json",
+      ...headers,
     },
     ...(body instanceof ReadableStream ? { body, duplex: "half" } : { body: JSON.stringify(body) }),
     ...(signal === undefined ? {} : { signal }),
@@ -1661,8 +1664,9 @@ describe("a personal agent's Collection writes", () => {
     afterContentKind: "text", afterContentBase64: Buffer.from(text).toString("base64"), recordedAtMs: 1,
   });
   const body = (changes: unknown[], fields: Record<string, unknown> = {}) => ({ workspaceId: WS_A, submitId: "submit-1", changes, ...fields });
+  const writingTo = (workspaceId: string) => ({ [PERSONAL_WRITE_WORKSPACE_HEADER]: encodeURIComponent(workspaceId) });
   const write = (f: Fixture, agent: Signed, changes: unknown[], fields: Record<string, unknown> = {}) =>
-    tool(f, agent, "collection-writes", body(changes, fields));
+    tool(f, agent, "collection-writes", body(changes, fields), undefined, writingTo(String(fields.workspaceId ?? WS_A)));
   const written = (f: Fixture, agent: Signed) => logOf(f, WS_A).filter((row) => row.originId === personalCollectionOrigin(agent.agentId));
 
   async function packing(f: Fixture): Promise<void> {
@@ -1741,9 +1745,30 @@ describe("a personal agent's Collection writes", () => {
           controller.close();
         },
       }, { highWaterMark: 0 });
-      await refused(await tool(f, agent, "collection-writes", arriving));
+      await refused(await tool(f, agent, "collection-writes", arriving, undefined, writingTo(WS_A)));
       expect(written(f, agent)).toEqual([]);
     }
+  });
+
+  it("refuses a workspace the agent may not edit before reading any of the body", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "edit" }] });
+    let pulled = false;
+    // A large body, whose bytes come only if the relay reads them.
+    const unread = () => new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled = true;
+        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(WS_A)), 403, "personal_agent_edit_needed");
+    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(OTHER_WS)), 403, "personal_agent_out_of_reach");
+    await expectCode(await tool(f, agent, "collection-writes", unread()), 400, "bad_request");
+    expect(pulled).toBe(false);
+    // The body names the workspace the relay checked, or nothing is written.
+    await expectCode(await tool(f, agent, "collection-writes", body([created()]), undefined, writingTo(WS_B)), 400, "bad_request");
+    expect(written(f, agent)).toEqual([]);
   });
 });
 

@@ -748,6 +748,7 @@ export interface SyncRelayStorage {
   automationWorkspaceInfo(workspaceId: string): { ownerUserId: string; everShared: boolean } | null;
   restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }): void;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
+  checkPersonalCollectionWriter(input: import("./collectionWrites").PersonalWriterInput, nowMs: number): void;
   commitPersonalCollectionWrite(input: import("./collectionWrites").CommitPersonalCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;

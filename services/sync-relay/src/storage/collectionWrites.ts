@@ -340,8 +340,21 @@ export function commitCollectionWrite(
   });
 }
 
-export interface CommitPersonalCollectionWriteInput extends PersonalCredential {
+/** A personal agent's credential, and the workspace it would write in. */
+export interface PersonalWriterInput extends PersonalCredential {
   workspaceId: string;
+}
+
+/**
+ * Refuses, as a write would, an agent that may not write a Collection in the
+ * workspace now. The relay reads this before a write's body, and the commit
+ * reads it all again.
+ */
+export function checkPersonalCollectionWriter(storage: StorageContext, input: PersonalWriterInput, nowMs: number): void {
+  storage.readTx(() => personalWriter(storage, input, nowMs));
+}
+
+export interface CommitPersonalCollectionWriteInput extends PersonalWriterInput {
   submitId: string;
   /** The owner's account name, read before the write, or "Unnamed". */
   ownerName: string;
@@ -444,7 +457,7 @@ export function commitPersonalCollectionWrite(
 // account, at Edit. Its current name comes with it.
 function personalWriter(
   storage: StorageContext,
-  input: CommitPersonalCollectionWriteInput,
+  input: PersonalWriterInput,
   nowMs: number,
 ): { connection: PersonalConnectionRow; name: string } {
   const connection = readPersonalAuthority(storage, input.check, input.fenceEpoch, nowMs);
