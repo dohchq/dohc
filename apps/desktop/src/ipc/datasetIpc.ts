@@ -90,11 +90,20 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
    */
   return async (caller: Caller, raw: unknown, agent: LocalDatasetAgent | null = null) => {
     const request = DatasetRequest.parse(raw);
-    const invocation = request.action === "invoke" && request.invocationId ? { caller, workspaceId: request.workspaceId, controller: new AbortController() } : undefined;
-    if (invocation && request.action === "invoke" && request.invocationId) {
-      if (invocations.has(request.invocationId)) throw new Error("This Collection request is already running.");
+    if (request.action === "cancelInvoke") {
+      // A dialog can unmount after its window switches workspaces. Only signal a request this sender registered.
+      const running = invocations.get(request.invocationId);
+      if (running && running.caller === caller && running.workspaceId === request.workspaceId) {
+        running.controller.abort(new Error("dohc could not confirm whether this action finished. Try again with the same idempotencyKey."));
+      }
+      return { kind: "invoke-cancel-requested" as const, outcome: "unknown" as const };
+    }
+    const invocationId = request.action === "invoke" ? request.invocationId : undefined;
+    const invocation = invocationId ? { caller, workspaceId: request.workspaceId, controller: new AbortController() } : undefined;
+    if (invocationId && invocation) {
+      if (invocations.has(invocationId)) throw new Error("This Collection request is already running.");
       if (invocations.size >= 256) throw new Error("Too many Collection requests are running. Wait for one to finish.");
-      invocations.set(request.invocationId, invocation);
+      invocations.set(invocationId, invocation);
     }
     let formFailure: ((error: unknown) => CreationPartial) | undefined;
     let formPartial: CreationPartial | undefined;
@@ -107,11 +116,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         catch (error) { throw new DatasetScopeError(error); }
       };
       current();
-      if (request.action === "cancelInvoke") {
-        const running = invocations.get(request.invocationId);
-        if (running && running.caller === caller && running.workspaceId === request.workspaceId) running.controller.abort();
-        return { kind: "invoke-cancel-requested" as const, outcome: "unknown" as const };
-      }
       const invokeSignal = invocation ? AbortSignal.any([operation.signal, invocation.controller.signal]) : operation.signal;
       let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
       const flushSourceCapture = async () => {
@@ -553,6 +557,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (formPartial) return formPartial;
       if (formFailure) return formFailure(new DatasetScopeError(error));
       throw error;
-    } finally { if (request.action === "invoke" && request.invocationId && invocation) invocations.delete(request.invocationId); }
+    } finally { if (invocationId) invocations.delete(invocationId); }
   };
 }

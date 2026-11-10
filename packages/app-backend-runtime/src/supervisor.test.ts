@@ -372,11 +372,11 @@ it("keeps a committed action when cancellation arrives before finalization and r
   const controller = new AbortController();
   let cancelled = false;
   const f = await fixture({ launch: launcher((command, controls) => {
-    if (command.command.kind === "finalize" && !cancelled) { cancelled = true; controller.abort(); }
+    if (command.command.kind === "finalize" && !cancelled) { cancelled = true; controller.abort(new Error("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.")); }
     else controls.deliver();
   }) });
   const input = { id: "once", value: "saved" };
-  await expect(f.invoke(input, { signal: controller.signal })).rejects.toThrow();
+  await expect(f.invoke(input, { signal: controller.signal })).rejects.toThrow("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.");
   expect(f.journal.head(f.scope, f.authorize).cursor.revision).toBe(1);
   expect(await f.invoke(input)).toMatchObject({ replayed: true, revision: 1, result: [input] });
   expect((await f.invoke({}, { readOnly: true })).result).toEqual([input]);

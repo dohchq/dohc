@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CollectionActionDialog, type CollectionActionDialogProps } from "./CollectionActionDialog";
 import { deferred } from "../testing/deferred";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 const dataset: CollectionActionDialogProps["dataset"] = { datasetId: "data", name: "Event", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [{ operationId: "action", name: "draw", label: "Draw winner", kind: "action", access: "owner", readOnly: false, tableId: "table", fieldIds: [] }] };
 function setup(overrides: Partial<CollectionActionDialogProps> = {}) {
-  const invoke = vi.fn<CollectionActionDialogProps["invoke"]>(async () => ({ result: { winner: "Alice" } })), onSettled = vi.fn(), onError = vi.fn(), onClose = vi.fn();
-  const props = { workspaceId: "a", dataset, operationId: "action", invoke, onSettled, onError, onClose, ...overrides };
-  return { props, invoke, onSettled, onError, onClose, ...render(<CollectionActionDialog {...props} />) };
+  const invoke = vi.fn<CollectionActionDialogProps["invoke"]>(async () => ({ result: { winner: "Alice" } })), onSettled = vi.fn(), onClose = vi.fn();
+  const props = { workspaceId: "a", dataset, operationId: "action", invoke, onSettled, onClose, ...overrides };
+  return { props, invoke, onSettled, onClose, ...render(<CollectionActionDialog {...props} />) };
 }
 afterEach(cleanup);
 describe("CollectionActionDialog", () => {
@@ -18,14 +18,14 @@ describe("CollectionActionDialog", () => {
       signal.addEventListener("abort", () => first.reject(signal.reason), { once: true });
       return first.promise;
     }).mockResolvedValue({ result: { winner: "Alice" } });
-    const { onClose, onError, onSettled } = setup({ invoke });
+    const { onClose, onSettled } = setup({ invoke });
     fireEvent.click(screen.getByRole("button", { name: "Run action" }));
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(invoke.mock.calls[0]![1].aborted).toBe(true);
     await screen.findByText("Action cancelled");
     expect(screen.getByText(/may have changed records/)).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
     expect(onSettled).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await screen.findByText("Action completed");
@@ -55,8 +55,21 @@ describe("CollectionActionDialog", () => {
   });
   it("unlocks refused input without replaying its failed key", async () => {
     const invoke = vi.fn<CollectionActionDialogProps["invoke"]>().mockRejectedValueOnce(Object.assign(new Error("invalid prize"), { code: "operation_refused" })).mockResolvedValue({ result: null });
-    const { onError } = setup({ invoke }); fireEvent.click(screen.getByRole("button", { name: "Run action" })); await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    setup({ invoke }); fireEvent.click(screen.getByRole("button", { name: "Run action" })); await screen.findByText("The Collection refused this action.");
     expect((screen.getByLabelText("Advanced JSON input") as HTMLTextAreaElement).disabled).toBe(false); fireEvent.click(screen.getByRole("button", { name: "Run action" })); await screen.findByText("Action completed"); expect(invoke.mock.calls[1]![0].idempotencyKey).not.toBe(invoke.mock.calls[0]![0].idempotencyKey);
+  });
+  it("shows a definite refusal even when Cancel races its response", async () => {
+    const response = deferred<{ result: AppBackendJson }>();
+    setup({ invoke: () => response.promise });
+    fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await act(async () => response.reject(Object.assign(new Error("Choose an available prize."), { code: "operation_refused" })));
+    expect(screen.getByRole("alert").textContent).toContain("Choose an available prize.");
+    expect(screen.queryByText(/may have changed records/)).toBeNull();
+    expect(screen.queryByText("Action cancelled")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect((screen.getByLabelText("Advanced JSON input") as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Run action" }) as HTMLButtonElement).disabled).toBe(false);
   });
   it("aborts and drops results when its workspace changes", async () => {
     const pending = deferred<{ result: AppBackendJson }>(), invoke = vi.fn<CollectionActionDialogProps["invoke"]>(() => pending.promise); const { props, rerender, onSettled } = setup({ invoke });
