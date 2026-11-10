@@ -171,17 +171,73 @@ it('projects an unwitnessed document without a snapshot or worker', async () => 
   const {projectArtifactSource} = await import('./artifactSource'); const doc = new Y.Doc(); vi.mocked(Y.encodeStateAsUpdate).mockClear();
   const output = projectArtifactSource(doc); expect(Y.encodeStateAsUpdate).not.toHaveBeenCalled(); expect(TestWorker.instances).toHaveLength(0); expect(await output).toBe(''); doc.destroy();
 });
-it('terminates a quiet worker and keeps the unchanged per-revision answer', async () => {
-  vi.useFakeTimers(); const {projectArtifactSource} = await import('./artifactSource'); const doc = witnessedDoc();
-  const pending = projectArtifactSource(doc); const worker = TestWorker.instances[0]!; worker.onmessage!({data:{id:worker.postMessage.mock.calls[0]![0].id,markdown:'Verified'}});
-  expect(await pending).toBe('Verified'); await vi.advanceTimersByTimeAsync(999); expect(worker.terminate).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(1); expect(worker.terminate).toHaveBeenCalledOnce(); expect(await projectArtifactSource(doc)).toBe('Verified'); expect(TestWorker.instances).toHaveLength(1);
-  doc.getMap('meta').set('edit','changed'); const changed = projectArtifactSource(doc); const next=TestWorker.instances[1]!;
-  await vi.advanceTimersByTimeAsync(1000); expect(next.terminate).not.toHaveBeenCalled(); next.onmessage!({data:{id:next.postMessage.mock.calls[0]![0].id,markdown:'Changed'}}); expect(await changed).toBe('Changed'); doc.destroy();
+it('keeps the worker through a pause between edits until its note closes', async () => {
+  vi.useFakeTimers();
+  const {projectArtifactSource} = await import('./artifactSource');
+  const doc = witnessedDoc();
+  const pending = projectArtifactSource(doc);
+  const worker = TestWorker.instances[0]!;
+  worker.onmessage!({data: {id: worker.postMessage.mock.calls[0]![0].id, markdown: 'Verified'}});
+  expect(await pending).toBe('Verified');
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(worker.terminate).not.toHaveBeenCalled();
+  expect(await projectArtifactSource(doc)).toBe('Verified');
+  doc.getMap('meta').set('edit', 'changed');
+  const changed = projectArtifactSource(doc);
+  expect(TestWorker.instances).toHaveLength(1);
+  worker.onmessage!({data: {id: worker.postMessage.mock.calls[1]![0].id, markdown: 'Changed'}});
+  expect(await changed).toBe('Changed');
+  doc.destroy();
+  expect(worker.terminate).toHaveBeenCalledOnce();
 });
-it('cancels idle termination when another document needs a proof', async () => {
-  vi.useFakeTimers(); const {projectArtifactSource} = await import('./artifactSource'); const a=witnessedDoc(), b=witnessedDoc();
-  const first=projectArtifactSource(a),worker=TestWorker.instances[0]!; worker.onmessage!({data:{id:worker.postMessage.mock.calls[0]![0].id,markdown:'First'}}); await first;
-  await vi.advanceTimersByTimeAsync(500); const second=projectArtifactSource(b); await vi.advanceTimersByTimeAsync(1000); expect(worker.terminate).not.toHaveBeenCalled();
-  worker.onmessage!({data:{id:worker.postMessage.mock.calls[1]![0].id,markdown:'Second'}}); await second; await vi.advanceTimersByTimeAsync(1000); expect(worker.terminate).toHaveBeenCalledOnce(); a.destroy();b.destroy();
+
+it('keeps the worker while another note is open', async () => {
+  const {projectArtifactSource} = await import('./artifactSource');
+  const a = witnessedDoc(), b = witnessedDoc();
+  const first = projectArtifactSource(a), second = projectArtifactSource(b);
+  const worker = TestWorker.instances[0]!;
+  for (const [{id}] of worker.postMessage.mock.calls) worker.onmessage!({data: {id, markdown: 'Verified'}});
+  await Promise.all([first, second]);
+  a.destroy();
+  expect(worker.terminate).not.toHaveBeenCalled();
+  b.destroy();
+  expect(worker.terminate).toHaveBeenCalledOnce();
+});
+
+it("drops a closed note's proof, so the next note does not wait behind it", async () => {
+  const {projectArtifactSource} = await import('./artifactSource');
+  const a = witnessedDoc(), b = witnessedDoc();
+  const left = projectArtifactSource(a);
+  const refused = expect(left).rejects.toThrow('The document closed');
+  const opened = projectArtifactSource(b);
+  const old = TestWorker.instances[0]!;
+  const sent = old.postMessage.mock.calls[1]![0];
+  a.destroy();
+  await refused;
+  expect(old.terminate).toHaveBeenCalledOnce();
+  const replacement = TestWorker.instances[1]!;
+  expect(replacement.postMessage).toHaveBeenCalledOnce();
+  const resent = replacement.postMessage.mock.calls[0]![0];
+  expect(resent.id).toBe(sent.id);
+  expect(resent.snapshot).toEqual(sent.snapshot);
+  replacement.onmessage!({data: {id: resent.id, markdown: 'Opened'}});
+  expect(await opened).toBe('Opened');
+  await expect(projectArtifactSource(a)).rejects.toThrow('The document closed');
+  expect(TestWorker.instances).toHaveLength(2);
+  b.destroy();
+});
+
+it("stops a closed note's proof, so the next note's proof starts at once", async () => {
+  const {projectArtifactSource} = await import('./artifactSource');
+  const a = witnessedDoc(), b = witnessedDoc();
+  const left = projectArtifactSource(a).catch(String);
+  const old = TestWorker.instances[0]!;
+  a.destroy();
+  expect(await left).toContain('The document closed');
+  expect(old.terminate).toHaveBeenCalledOnce();
+  const opened = projectArtifactSource(b);
+  const fresh = TestWorker.instances[1]!;
+  fresh.onmessage!({data: {id: fresh.postMessage.mock.calls[0]![0].id, markdown: 'Opened'}});
+  expect(await opened).toBe('Opened');
+  b.destroy();
 });
