@@ -558,7 +558,7 @@ describe("ChatLane", () => {
       choose(async () => ({ message: { id: "answer", threadId: "thread-1" }, failure, resolveFailure: "Error: Pick one of the poll's choices." }));
       fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
       await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
-        "Sent your choice. dohc could not mark the question answered.", "Error: Pick one of the poll's choices."));
+        "Sent your choice. dohc could not mark the question answered.", "Error: Pick one of the poll's choices.", expect.any(Function)));
       expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
     });
 
