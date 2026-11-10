@@ -6023,9 +6023,14 @@ export type ResumeThreadDispatchPayload = z.infer<
   typeof ResumeThreadDispatchPayload
 >;
 
+// The most earlier posts of an agent's chat one dispatch read covers.
+export const CHAT_DISPATCH_POST_THREADS_MAX = 1_000;
 export const ChatDispatchStateForThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  threadId: OPAQUE_ID,
+  // The conversation. An agent's chat with only earlier posts has none.
+  threadId: OPAQUE_ID.nullable(),
+  // An agent's chat's earlier posts, where a reply can wait for the agent too.
+  postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
 }).strict();
 export type ChatDispatchStateForThreadPayload = z.infer<
   typeof ChatDispatchStateForThreadPayload
@@ -6085,8 +6090,9 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  // The messages here that wait for the agent at work, here or in another
-  // chat, to end its run, so a line under each says it will reply.
+  // The messages here and in the earlier posts asked for that wait for the
+  // agent at work, here or in another chat, to end its run, so a line under
+  // each says it will reply.
   waiting: z.object({
     agentId: AgentId,
     name: z.string().min(1).max(1_000),

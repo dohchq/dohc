@@ -1749,6 +1749,13 @@ describe("chatDispatchService", () => {
       pendingCount: 1,
       waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
     });
+    // An agent's chat with only earlier posts reads them with no conversation.
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, null, [trigger.threadId])).toEqual({
+      liveRunId: null, liveTriggerMessageId: null,
+      pendingCount: 0,
+      paused: false,
+      waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
+    });
 
     const firstClaim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
     if (!firstClaim) throw new Error("Expected the coalesced run.");
@@ -4139,6 +4146,9 @@ describe("chatDispatchService", () => {
     });
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(1);
+    // The stopped run still holds the workspace, so the request waits for Nova.
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, followUp.threadId)).waiting)
+      .toEqual({ agentId: "default", name: "Nova", triggerMessageIds: [followUp.messageId] });
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
     expect(fixture.killCalls).toEqual([
@@ -4149,6 +4159,8 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(followUp.threadId);
+    // Nova started on it, so it no longer waits.
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, followUp.threadId)).waiting).toBeUndefined();
   });
 
   it("does not let a queued stop for an exited run stop its successor", async () => {

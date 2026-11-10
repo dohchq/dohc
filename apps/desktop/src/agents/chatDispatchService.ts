@@ -1724,26 +1724,34 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function dispatchStateForThread(
     workspaceId: string,
-    threadId: string,
+    threadId: string | null,
+    postThreadIds: readonly string[] = [],
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
     const pendingRead = Promise.resolve(dispatch.listPending(workspaceId));
     const [pauseState, pending, failed] = await Promise.all([
-      dispatch.getThreadDispatchPauseState(workspaceId, threadId),
+      threadId === null ? null : dispatch.getThreadDispatchPauseState(workspaceId, threadId),
       pendingRead,
-      failedRunForThread(workspace, threadId, pendingRead),
+      threadId === null ? null : failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
     const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
     const queued = pending.filter((pending) => pending.threadId === threadId);
-    // A request to the agent at work waits for its run to end. A pause holds
-    // the request instead, so it isn't waiting on the agent.
-    const busy = live?.finalized === false && !paused && pauseState?.paused !== true ? live : null;
-    const waiting = busy
-      ? queued.filter(({ agentId }) => agentId === busy.claim.run.agentId).map(({ triggerMessageId }) => triggerMessageId)
-      : [];
+    // A request to the agent at work waits while that run holds the
+    // workspace, which a stopped or timed-out run does until its process
+    // exits and its end is saved. A pause holds the request instead, so it
+    // isn't waiting on the agent.
+    const busy = paused ? undefined : live;
+    // The conversation and the earlier posts its chat shows.
+    const shown = new Set([threadId, ...postThreadIds]);
+    const asked = busy ? pending.filter((each) => shown.has(each.threadId) && each.agentId === busy.claim.run.agentId) : [];
+    const askedThreads = [...new Set(asked.map((each) => each.threadId))];
+    const pauses = await Promise.all(askedThreads.map((id) =>
+      id === threadId ? pauseState : dispatch.getThreadDispatchPauseState(workspaceId, id)));
+    const held = new Set(askedThreads.filter((_, at) => pauses[at]?.paused === true));
+    const waiting = asked.filter((each) => !held.has(each.threadId)).map((each) => each.triggerMessageId);
     return {
       liveRunId: running?.runId ?? null,
       liveTriggerMessageId: running?.triggerMessageId ?? null,
