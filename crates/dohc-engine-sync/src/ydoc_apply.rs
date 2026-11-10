@@ -672,7 +672,9 @@ fn apply_deferred_base(
             local_corruption("parked winning Y.Doc lineage has no claim identity")
         })?;
         let projection = project_ydoc_with_store(tx, &key, &incoming_doc, winner.content_kind)?;
-        let (conflict, recovered_paths) = preserve_base_sides_in_tx(
+        // This base's own row stays queued until the drain ends, so the winner
+        // cannot take the local edits here.
+        let (sides, recovered_paths) = preserve_base_sides_in_tx(
             tx, &key, &payload.path,
             crate::ydoc_recovery::RecoveryEnvelopeBinding {
                 content_kind: &payload.content_kind,
@@ -680,28 +682,33 @@ fn apply_deferred_base(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: payload.is_base_state,
             },
-            losing_claim_id.as_deref(), losing_doc.as_ref(), losing_projection.as_ref(), losing_seed_untouched, losing_authors.as_deref(), last_settled_sha.as_deref(),
+            losing_claim_id.as_deref(), losing_doc.as_ref(), losing_projection.as_ref(), losing_seed_untouched, None, losing_authors.as_deref(), last_settled_sha.as_deref(),
             &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy, resolver,
         )?;
-        if let Some(opened) = conflict {
-            record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
-            return Ok(Some(YdocLineageReplacement {
-                winner_lineage_claim_id: winner_claim_id,
-                recovered_paths,
-            }));
+        match sides {
+            BaseSides::Conflict(opened) => {
+                record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
+                return Ok(Some(YdocLineageReplacement {
+                    winner_lineage_claim_id: winner_claim_id,
+                    recovered_paths,
+                }));
+            }
+            BaseSides::Carried => {}
+            BaseSides::Winner => {
+                project_retaining_markdown_hold_in_tx(
+                    tx,
+                    &key,
+                    &payload.path,
+                    &incoming_doc,
+                    winner.content_kind,
+                    &origin_id,
+                    origin_seq,
+                    recorded_at_ms,
+                    search_policy,
+                    resolver,
+                )?;
+            }
         }
-        project_retaining_markdown_hold_in_tx(
-            tx,
-            &key,
-            &payload.path,
-            &incoming_doc,
-            winner.content_kind,
-            &origin_id,
-            origin_seq,
-            recorded_at_ms,
-            search_policy,
-            resolver,
-        )?;
         Ok(losing_claim_id.map(|_| YdocLineageReplacement {
             winner_lineage_claim_id: winner_claim_id,
             recovered_paths,
@@ -5044,6 +5051,16 @@ fn open_base_conflict_in_tx(
     Ok(conflicts_opened)
 }
 
+/// What a base that replaced a local lineage leaves to its caller.
+enum BaseSides {
+    /// A conflict opened beside the file, this many rows.
+    Conflict(i64),
+    /// The winner now continues with the local text the file already holds.
+    Carried,
+    /// The winner's projection is the note's next text.
+    Winner,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn preserve_base_sides_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -5054,6 +5071,7 @@ fn preserve_base_sides_in_tx(
     losing_doc: Option<&dohc_engine_collab::Ydoc>,
     losing_projection: Option<&dohc_engine_collab::Projection>,
     losing_seed_untouched: bool,
+    losing_seed_source: Option<&str>,
     losing_authors: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
@@ -5062,7 +5080,7 @@ fn preserve_base_sides_in_tx(
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
-) -> Result<(Option<i64>, Vec<String>), SyncError> {
+) -> Result<(BaseSides, Vec<String>), SyncError> {
     let mut recovered_paths = Vec::new();
     let incoming_sha = hex_sha256(incoming_content.as_bytes());
     // Equal projections need neither a choice nor a second copy, and neither
@@ -5076,6 +5094,30 @@ fn preserve_base_sides_in_tx(
         && !quiet_adoption
         && hex_sha256(local.content.as_bytes()) != incoming_sha
     {
+        // The winner holds exactly the text the local lineage was seeded
+        // from, so the local edits are the only change since that seed and
+        // merging the three gives the local text. When the file already
+        // holds it, continue the winner with that text and publish it there.
+        // An untouched seed differs only by construction and has none.
+        if !losing_seed_untouched
+            && losing_seed_source == Some(incoming_sha.as_str())
+            && validate_retryable_ydoc_identity(tx, key, path)?
+                .snapshot
+                .is_some_and(|snapshot| {
+                    snapshot.blob_sha256 == hex_sha256(local.content.as_bytes())
+                })
+            && carry_local_onto_winner_in_tx(
+                tx,
+                key,
+                path,
+                &incoming_sha,
+                &local.content,
+                losing_authors,
+                now_ms,
+            )?
+        {
+            return Ok((BaseSides::Carried, recovered_paths));
+        }
         if let Some(opened) = conflict_replaced_lineage_in_tx(
             tx,
             key,
@@ -5091,7 +5133,7 @@ fn preserve_base_sides_in_tx(
             search_policy,
             resolver,
         )? {
-            return Ok((Some(opened), recovered_paths));
+            return Ok((BaseSides::Conflict(opened), recovered_paths));
         }
         let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
             tx,
@@ -5155,10 +5197,69 @@ fn preserve_base_sides_in_tx(
                 origin_seq,
                 now_ms,
             )?;
-            return Ok((Some(opened), recovered_paths));
+            return Ok((BaseSides::Conflict(opened), recovered_paths));
         }
     }
-    Ok((None, recovered_paths))
+    Ok((BaseSides::Winner, recovered_paths))
+}
+
+/// Rewrite the winner just installed to the local text and publish that as a
+/// local edit. A winner the rewrite cannot take leaves everything as it was and
+/// answers false, so the caller opens its conflict instead.
+fn carry_local_onto_winner_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    winner_sha: &str,
+    local: &str,
+    losing_authors: Option<&str>,
+    now_ms: i64,
+) -> Result<bool, SyncError> {
+    let YdocLineageCompleteness::Complete(state) = ydoc_lineage_completeness_in_tx(tx, key)? else {
+        return Ok(false);
+    };
+    let complete = CompleteYdocLineage {
+        key: key.clone(),
+        state,
+    };
+    tx.execute_batch("SAVEPOINT dohc_carry_local")
+        .map_err(SyncError::persist)?;
+    // The winner's text is the file text the local lineage was seeded from,
+    // so the fold keeps no copy of it.
+    tx.execute(
+        "UPDATE ydoc_docs SET last_settled_sha=?4 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id, winner_sha],
+    )
+    .map_err(SyncError::persist)?;
+    let carried = match fold_complete_ydoc_lineage_in_tx(
+        tx,
+        &complete,
+        path,
+        local,
+        LineageFoldAuthor::default(),
+        now_ms,
+        LineageFoldCause::LocalMutation {
+            unsettled_authors: losing_authors.map(str::to_owned),
+        },
+    ) {
+        Ok(LineageFold::Folded { .. }) => true,
+        Ok(LineageFold::NoContent)
+        | Err(
+            SyncError::InvalidInput { .. }
+            | SyncError::RetryableState { .. }
+            | SyncError::LiveDocumentBindingActive
+            | SyncError::BlobTooLarge { .. },
+        ) => false,
+        Err(error) => return Err(error),
+    };
+    tx.execute_batch(if carried {
+        "RELEASE dohc_carry_local"
+    } else {
+        "ROLLBACK TO dohc_carry_local; RELEASE dohc_carry_local"
+    })
+    .map_err(SyncError::persist)?;
+    Ok(carried)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7841,20 +7942,20 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             .map_err(SyncError::persist)?;
             let marker_before = dohc_engine_collab::read_marker_in(tx, &claim_key)
                 .map_err(map_collab_hard_error)?;
-            let losing_last_settled_sha: Option<String> = tx
-                .query_row(
-                    "SELECT COALESCE(last_settled_sha,seed_source_sha256) FROM ydoc_docs \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            let (losing_last_settled_sha, losing_seed_source): (Option<String>, Option<String>) =
+                tx.query_row(
+                    "SELECT COALESCE(last_settled_sha,seed_source_sha256),seed_source_sha256 \
+                     FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                     params![
                         claim_key.workspace_id,
                         claim_key.version_id,
                         claim_key.object_id
                     ],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(SyncError::corrupt)?
-                .flatten();
+                .unwrap_or_default();
             let local_unpublished = marker_before.as_ref().is_some_and(|marker| {
                 marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
                     && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
@@ -8034,7 +8135,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 .clone()
                 .ok_or_else(|| local_corruption("winning Y.Doc lineage has no claim identity"))?;
             let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
-            let (conflict, recovered_paths) = preserve_base_sides_in_tx(
+            let (sides, recovered_paths) = preserve_base_sides_in_tx(
                 tx,
                 &claim_key,
                 &base_path,
@@ -8043,6 +8144,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 losing_doc.as_ref(),
                 losing_projection.as_ref(),
                 losing_seed_untouched,
+                losing_seed_source.as_deref(),
                 losing_authors.as_deref(),
                 losing_last_settled_sha.as_deref(),
                 &projection.content,
@@ -8052,32 +8154,35 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 search_policy.as_ref(),
                 reader_resolver.as_deref(),
             )?;
-            if let Some(conflicts_opened) = conflict {
-                record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
-                return Ok(YdocApplyResult {
-                    deferred: false,
-                    reason: Some("ydoc-base-conflict"),
-                    conflicts_opened,
-                    lineage_replacement: replaced.then_some(YdocLineageReplacement {
-                        winner_lineage_claim_id,
-                        recovered_paths,
-                    }),
-                    record_facts: Vec::new(),
-                });
-            }
-            // A fresh base-only replica gets its FILE, not just CRDT rows.
-            let held = project_retaining_markdown_hold_in_tx(
-                tx,
-                &claim_key,
-                &base_path,
-                &incoming_doc,
-                winner.content_kind,
-                &op.origin_id,
-                op.origin_seq,
-                op.recorded_at_ms,
-                search_policy.as_ref(),
-                reader_resolver.as_deref(),
-            )?;
+            let held = match sides {
+                BaseSides::Conflict(conflicts_opened) => {
+                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
+                    return Ok(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-base-conflict"),
+                        conflicts_opened,
+                        lineage_replacement: replaced.then_some(YdocLineageReplacement {
+                            winner_lineage_claim_id,
+                            recovered_paths,
+                        }),
+                        record_facts: Vec::new(),
+                    });
+                }
+                BaseSides::Carried => false,
+                // A fresh base-only replica gets its FILE, not just CRDT rows.
+                BaseSides::Winner => project_retaining_markdown_hold_in_tx(
+                    tx,
+                    &claim_key,
+                    &base_path,
+                    &incoming_doc,
+                    winner.content_kind,
+                    &op.origin_id,
+                    op.origin_seq,
+                    op.recorded_at_ms,
+                    search_policy.as_ref(),
+                    reader_resolver.as_deref(),
+                )?,
+            };
             Ok(YdocApplyResult {
                 deferred: false,
                 reason: held.then_some("markdown-write-held"),

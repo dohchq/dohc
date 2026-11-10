@@ -5172,6 +5172,173 @@ fn an_untouched_seed_of_the_winners_bytes_keeps_a_file_changed_after_seeding() {
     );
 }
 
+/// The relay's first-open base, built from the text this desktop seeded its
+/// note from, lands ahead of the desktop's own base. The desktop's lineage by
+/// then holds an edit its file already shows. The edit continues on the
+/// winner, published as an update there, and no conflict holds it back.
+///
+/// Mutation check: drop the carry from `preserve_base_sides_in_tx` and the
+/// edit stays the current side of a conflict, published on no lineage.
+#[test]
+fn a_winner_of_the_seeded_text_continues_an_edit_the_file_shows() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    adopt_join_identity(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let (path, seeded, edited) = ("notes/cleanup.md", "Seeded.\n", "Edited. Seeded.\n");
+    let seeded_sha = seed_text_head(&mut engine, "cleanup", path, seeded);
+    let key = DocKey::new("ws", "main", "cleanup").unwrap();
+    let local = Ydoc::wire();
+    local.plaintext_insert(0, "Seeded");
+    local.plaintext_insert(6, ".\n");
+    let local_base = local.encode_full_state();
+    let winner = build_base(ContentKind::Plaintext, seeded);
+    assert_ne!(local_base, winner, "the two constructions differ");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Plaintext,
+        &local_base,
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    let edit = local.plaintext_insert(0, "Edited. ");
+    dohc_engine_collab::apply_remote_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "local".into(),
+            origin_seq: 1,
+            bytes: edit,
+        },
+        None,
+        None,
+        &NoFaults,
+        1_200,
+    )
+    .unwrap();
+    // The lineage was seeded from the file's earlier text, and its settle
+    // wrote the edit to the file.
+    let edited_sha = dohc_engine_storage::hex_sha256(edited.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256=?1,last_settled_sha=?2 WHERE object_id=?3",
+                params![seeded_sha, edited_sha, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![edited_sha, edited.len() as i64, edited],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET blob_sha256=?1 WHERE object_id=?2",
+                params![edited_sha, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+
+    let claim = engine.put_binary_blob(&winner).unwrap();
+    let mut base_op = envelope(
+        "first-open",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "plaintext", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let ApplyDisposition::Applied(result) = outcome.primary else {
+        panic!("base did not apply")
+    };
+    assert_eq!(result.conflicts_opened, 0);
+    assert_eq!(
+        result
+            .lineage_replacement
+            .map(|replacement| replacement.winner_lineage_claim_id),
+        Some(claim.clone())
+    );
+    let (open_conflicts, files, published) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM snapshots", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log
+                     WHERE origin_id='local' AND imported=0 AND op_kind='ydoc.update'
+                       AND json_extract(payload_json,'$.lineageClaimId')=?1
+                       AND json_extract(payload_json,'$.isBaseState')=0",
+                    [&claim],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        (open_conflicts, files, published),
+        (0, 1, 1),
+        "no conflict, no recovered copy, one update on the winner"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .text,
+        edited
+    );
+    assert_eq!(
+        engine
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .unwrap()
+            .plaintext_string(),
+        edited
+    );
+}
+
 /// One row of the first-open fixtures: the table note and its first base.
 fn table_note(fixture: &str) -> (String, Vec<u8>) {
     use base64::Engine as _;
