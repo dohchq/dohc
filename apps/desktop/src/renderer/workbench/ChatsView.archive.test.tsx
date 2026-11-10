@@ -2,10 +2,11 @@ import "../../testing/legendListMock";
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { bridgeMock, channel, ChatsView, dm, renderView, shareListing, thread } from "./ChatsView.testHarness";
+import { resetChosenColorsForTests, setPersonalAgents } from "./chosenColors";
 
 function archived(settings: DesktopUserSettings, ...channelIds: string[]): DesktopUserSettings {
   return { ...settings, sidebar: { ...settings.sidebar, archivedChats: { "workspace-a": channelIds } } };
@@ -250,5 +251,21 @@ describe("ChatsView archive and row menus", () => {
     await user.click(codex);
     expect((await screen.findByTestId("chats-agent-problem")).textContent).toContain("Codex was removed.");
     expect(screen.queryByTestId("chats-archived-line")).toBeNull();
+  });
+
+  it("keeps a personal agent's chat in the sidebar while your roster holds it, and archives it once removed", async () => {
+    const grok = `p-${"g".repeat(26)}`;
+    onTestFinished(resetChosenColorsForTests);
+    setPersonalAgents([{ agentId: grok, name: "Grok", hue: "teal" }]);
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel(), channel({ id: "chat-grok", name: "Grok", slug: "agent-grok", kind: "agent", agentId: grok })],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), { userSettings: settingsWithAgent({ name: "Nova" }) });
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent").some((row) => row.textContent?.includes("Grok"))).toBe(true));
+    expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
+
+    act(() => setPersonalAgents([]));
+    await screen.findByTestId("chats-archived-toggle");
   });
 });

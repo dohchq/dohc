@@ -69,6 +69,11 @@ export function setPersonalAgents(agents: readonly { agentId: string; name: stri
   for (const listener of listeners) listener();
 }
 
+/** Whether your roster holds a personal agent, or null when no roster has been read. */
+export function personalRosterHolds(agentId: string): boolean | null {
+  return personal === null ? null : personal.has(agentId);
+}
+
 /** A personal agent's current name, or null when the roster doesn't hold it. */
 export function personalAgentName(agentId: string): string | null {
   return personal?.get(agentId)?.name ?? null;

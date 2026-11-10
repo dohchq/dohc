@@ -123,6 +123,7 @@ import {
   usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
+import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
@@ -685,7 +686,7 @@ export function ChatsView(props: {
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   // Feed posts by personal agents name them from the roster.
-  usePersonalAgentNames();
+  const personalNames = usePersonalAgentNames();
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
@@ -3547,12 +3548,16 @@ export function ChatsView(props: {
     () => new Set(archivedChatsFor(props.userSettings, workspaceId)),
     [props.userSettings, workspaceId],
   );
-  // An agent chat whose agent left Settings stays readable in Archived. It
-  // returns when an agent with its id is added again.
+  // An agent chat whose agent left Settings, or a personal agent's chat
+  // whose agent left your roster, stays readable in Archived. It returns
+  // when an agent with its id is added again.
   const agentRemoved = useCallback(
     (channel: Pick<ChatChannelRecord, "agentId">) =>
-      props.userSettings != null && !settingsAgents.some((agent) => agent.id === channel.agentId),
-    [props.userSettings, settingsAgents],
+      channel.agentId !== undefined && isPersonalAgentId(channel.agentId)
+        ? personalRosterHolds(channel.agentId) === false
+        : props.userSettings != null && !settingsAgents.some((agent) => agent.id === channel.agentId),
+    // The roster changes outside these values; its version follows it.
+    [props.userSettings, settingsAgents, personalNames],
   );
   const [archiveOpen, setArchiveOpen] = useState(false);
   const setChatArchived = useCallback(
