@@ -407,7 +407,7 @@ describe("local dataset owner adapter", () => {
   it.each(["installed", "claimed"] as const)("restores a backup then resumes a relay transfer after response loss in the %s phase", async phase => {
     const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
     const compileOperations = relayCompileDatasetOperations;
-    let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
+    let relayHost = await f.storage.createDatasetHost({publicEditRelease:undefined,directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
     const controller=new AbortController(); let offline=false,posted=0;
     const handler=()=>createSyncRelayHandler({storage:f.storage,datasetHost:relayHost,appPublicationLimits:relayLimits,
       resolveActor(request,workspaceId){if(request.headers.get("authorization")!=="Bearer token")throw Error("credentials");return {workspaceId,userId:"owner"};}});
@@ -452,7 +452,7 @@ describe("local dataset owner adapter", () => {
       expect(local.host.transferStatus(id(1))?.state).toBe("ready");
       await expect(local.host.action(call(approved,id(6),"forbidden",{name:"forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
       await local.host.close();await relayHost.close();f.restart();
-      relayHost=await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
+      relayHost=await f.storage.createDatasetHost({publicEditRelease:undefined,directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
       const restarted=(await open({workspaceRoot:local.workspaceRoot})).host;offline=false;
       const completed=await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()});
       expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);

@@ -51,7 +51,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;
   let clockOffset=0;
-  const datasetHost=await storage.createDatasetHost({directory:join(directory,"workers"),limits:APP_PUBLICATION_LIMITS,
+  const datasetHost=await storage.createDatasetHost({publicEditRelease:undefined,directory:join(directory,"workers"),limits:APP_PUBLICATION_LIMITS,
     compileOperations:compileDatasetOperations,nowMs:()=>Date.now()+clockOffset,
     onShutdownError(error){throw error;}});
   const linkKey="fundraiser-browser-link-key-with-thirty-two-bytes",exchangeKey="fundraiser-browser-relay-exchange-key-with-thirty-two-bytes";

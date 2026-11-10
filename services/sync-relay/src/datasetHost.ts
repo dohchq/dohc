@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import type { PublicEditRelease } from "@dohc/security-contract";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
@@ -35,6 +36,8 @@ export interface RelayDatasetHostOptions {
   storage: StorageContext;
   directory: string;
   limits: AppPublicationLimits;
+  /** Whether Edit links are released. An Edit link reaches an app's data only when they are. */
+  publicEditRelease: PublicEditRelease | undefined;
   nowMs?: () => number;
   runtime?: DatasetSupervisorOptions["runtime"];
   maxWorkers?: number;
@@ -57,7 +60,7 @@ export function datasetReferenceReadContainsRecord(result: unknown, primaryKeyFi
 
 /** The existing relay connection owns every authoritative dataset transaction. */
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
-  const {storage, limits} = options, nowMs = options.nowMs ?? Date.now;
+  const {storage, limits, publicEditRelease} = options, nowMs = options.nowMs ?? Date.now;
   // Only artifact-verified revisions read from this host's catalog reach this cache.
   const generatedVerdicts = new Map<string, boolean>();
   function generatedRevision(approved: DatasetRevision): boolean {
@@ -187,7 +190,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     current();
     let candidate: AppPublicationCandidate, authority: DatasetAuthority;
     if (auth.kind === "link") {
-      const published = requireLinkAppPublication(storage, {...auth, publicationId: appId, limits, nowMs: nowMs()});
+      const published = requireLinkAppPublication(storage, {...auth, publicationId: appId, limits, publicEditRelease, nowMs: nowMs()});
       if (published.workspaceId !== workspaceId) throw notFound();
       const enrollment = readLinkEnrollment(storage, auth, nowMs());
       if (!enrollment || linkWriteRefusal(enrollment)) throw notFound();
@@ -221,7 +224,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     current();
     let candidate: AppPublicationCandidate, workspaceId: string, authorityRevision: number;
     if (auth.kind === "link") {
-      const published = requireLinkAppPublication(storage, {...auth, publicationId, limits, nowMs: nowMs()});
+      const published = requireLinkAppPublication(storage, {...auth, publicationId, limits, publicEditRelease, nowMs: nowMs()});
       candidate = published.candidate; workspaceId = published.workspaceId; authorityRevision = published.result.descriptor.authorityRevision;
     } else {
       const published = namedPublication(auth, publicationId);

@@ -1,4 +1,4 @@
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { isShareAccessValue, visibleSharePath } from "@dohc/security-contract/share-selector";
 import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -9,8 +9,7 @@ import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
 import type { PublicEditRelease } from "@dohc/security-contract";
-import { authorizeLinkShareAction } from "../shareAuthorization";
-import { isPublicLinkAccess } from "../linkSecurity";
+import { authorizeLinkSession } from "../linkSecurity";
 import { readLinkEnrollment } from "./linkEnrollment";
 import { readCurrentShareGrant } from "./currentShareGrant";
 
@@ -43,7 +42,7 @@ export interface LinkAppPublicationInput {
   nowMs: number;
   limits: AppPublicationLimits;
   expectedAuthorityRevision?: number;
-  publicEditRelease?: PublicEditRelease;
+  publicEditRelease: PublicEditRelease | undefined;
 }
 export interface LinkAppPublicationDescriptor {
   publicationId: string;
@@ -271,10 +270,10 @@ function currentLinkPublicationPrincipal(storage: StorageContext, input: Omit<Li
   if (!enrollment || enrollment.principal?.blockedAtMs != null) throw notFound();
   const session = storage.findLinkSessionByCapabilityHash(input.capabilityHash);
   if (!session || session.capabilityHash !== input.capabilityHash || !Number.isSafeInteger(input.nowMs) ||
-      input.nowMs < 0 || session.expiresAtMs <= input.nowMs) throw notFound();
-  const authorized = authorizeLinkShareAction({storage, grantId: session.grantId, action: "read"});
-  if (!authorized.ok || authorized.grant.generation !== session.generation ||
-      !isPublicLinkAccess(authorized.grant.access, input.publicEditRelease)) throw notFound();
+      input.nowMs < 0) throw notFound();
+  const authorized = authorizeLinkSession(storage, session, input.nowMs, input.publicEditRelease);
+  // A Group link's grant carries chat access, and no app is published to a Group.
+  if (!authorized || !isShareAccessValue(authorized.grant.access)) throw notFound();
   return {enrollment, session, authorized};
 }
 

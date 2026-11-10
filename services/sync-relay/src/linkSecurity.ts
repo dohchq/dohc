@@ -235,22 +235,9 @@ export function validateLinkCapability(input: {
   const capabilityHash = hashLinkBearer(input.capabilityToken, input.linkKey);
   const session = input.storage.findLinkSessionByCapabilityHash(capabilityHash);
   const matches = constantTimeHashEqual(capabilityHash, session?.capabilityHash ?? hashLinkBearer("", input.linkKey));
-  if (
-    !session ||
-    !matches ||
-    session.expiresAtMs <= input.nowMs
-  ) {
-    return null;
-  }
-  const authorized = authorizeLinkShareAction({
-    storage: input.storage,
-    grantId: session.grantId,
-    action: "read",
-  });
-  if (!authorized.ok || authorized.grant.generation !== session.generation ||
-    !servableFiles(authorized.effectiveSelector, input.publicEditRelease)) {
-    return null;
-  }
+  if (!session || !matches) return null;
+  const authorized = authorizeLinkSession(input.storage, session, input.nowMs, input.publicEditRelease);
+  if (!authorized) return null;
   return {
     session,
     shareId: authorized.share.shareId,
@@ -259,6 +246,20 @@ export function validateLinkCapability(input: {
     access: authorized.effectiveSelector.access,
     effectiveSelector: authorized.effectiveSelector,
   };
+}
+
+// What a link session may read now. Link requests and an app published through
+// the link both admit the session through this check.
+export function authorizeLinkSession(
+  storage: Parameters<typeof authorizeLinkShareAction>[0]["storage"],
+  session: SyncRelayLinkSessionRow,
+  nowMs: number,
+  publicEditRelease: PublicEditRelease | undefined,
+) {
+  if (session.expiresAtMs <= nowMs) return null;
+  const authorized = authorizeLinkShareAction({ storage, grantId: session.grantId, action: "read" });
+  return authorized.ok && authorized.grant.generation === session.generation &&
+    servableFiles(authorized.effectiveSelector, publicEditRelease) ? authorized : null;
 }
 
 // A link serves the access its files carry: its own, or a Group folder's.

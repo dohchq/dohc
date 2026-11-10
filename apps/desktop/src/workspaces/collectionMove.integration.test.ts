@@ -64,7 +64,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
   relay.storage.createShare({ share: { shareId: "team", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["items"], versionId: null }), createdAtMs: 1 },
     grant: { grantId: "team-grant", shareId: "team", principalKind: "user", principalUserId: "teammate", principalEmail: null, access: "edit",
       generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null } });
-  const relayHost = await relay.storage.createDatasetHost({ directory: relayDirectory, limits: relayLimits, compileOperations: compileDatasetOperations,
+  const relayHost = await relay.storage.createDatasetHost({ publicEditRelease: undefined, directory: relayDirectory, limits: relayLimits, compileOperations: compileDatasetOperations,
     onShutdownError(error) { throw error; } }); hosts.push(relayHost);
   const handler = createSyncRelayHandler({ storage: relay.storage, datasetHost: relayHost, appPublicationLimits: relayLimits,
     resolveActor(request, workspaceId) {

@@ -58,7 +58,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 const SEND = id(9);
 async function fixture(actionAccess?: "helper" | "owner") {
   const base = baseFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-automations-"));
-  const host = await createRelayDatasetHost({ storage: base.storage, directory, limits, onShutdownError: error => { throw error; } });
+  const host = await createRelayDatasetHost({publicEditRelease: undefined,  storage: base.storage, directory, limits, onShutdownError: error => { throw error; } });
   const lifetime = new AbortController();
   cleanups.push(async () => { lifetime.abort(); await host.close(); await rm(directory, { recursive: true, force: true }); });
   const approvedDefinition: DatasetDefinition = actionAccess === undefined ? definition : { ...definition, operations: [...definition.operations,
