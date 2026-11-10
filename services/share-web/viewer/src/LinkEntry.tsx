@@ -3,13 +3,14 @@ import { shareLinkSummary } from "../../src/shareSummary";
 import type { ViewMeta } from "./model";
 import "./LinkEntry.css";
 
-export function LinkEntry({ meta, hasFiles, canEditFile }: {
+export function LinkEntry({ meta, secret, hasFiles, canEditFile }: {
   meta: ViewMeta;
+  secret?: string | null;
   hasFiles: boolean;
   canEditFile: boolean;
 }) {
   const summary = shareLinkSummary(meta);
-  const mcpAddress = `${location.origin}/mcp/s/<secret>`;
+  const mcpAddress = `${location.origin}/mcp/s/${secret ?? "<secret>"}`;
   return (
     <section className="link-entry" aria-labelledby="link-entry-title">
       <h2 className="section-label" id="link-entry-title">About this link</h2>
@@ -26,9 +27,9 @@ export function LinkEntry({ meta, hasFiles, canEditFile }: {
         <p>Connect your agent's MCP client to this address.</p>
         <div className="link-agent-address">
           <code>{mcpAddress}</code>
-          <CopyAddress text={mcpAddress} />
+          <CopyAddress key={mcpAddress} text={mcpAddress} />
         </div>
-        <p>Replace &lt;secret&gt; with the text after # in the original share link. Anyone with the full address gets this link's access, so share it only as you share the link.</p>
+        <p>{!secret && <>Replace &lt;secret&gt; with the text after # in the original share link. </>}Anyone with the full address gets this link's access, so share it only as you share the link.</p>
         <p>Allow the agent when its client opens the sign-in page. The agent uses this link's access.</p>
         <p>It cannot access work outside this link or change its permissions.</p>
       </section>

@@ -26,8 +26,10 @@ Production operators must set five values:
 
 Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is the text after `#` in the share URL.
 The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
-The share page shows this address format beside a copy button after the link opens.
-Replace `<secret>` with the text after `#` in the original link. The viewer discards that secret after exchange.
+The share page shows and copies the full address after a successful exchange of the original link.
+The viewer keeps the secret in memory for that page only, and removes it from the address bar.
+After a reload or a session-only entry, the page shows the address format instead.
+Replace `<secret>` with the text after `#` in the original link in that case.
 The share page also advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
 An agent signs in with the standard MCP authorization (MCP 2025-06-18):
