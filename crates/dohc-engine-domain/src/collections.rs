@@ -823,8 +823,8 @@ fn parse_options(
     options
 }
 
-/// Keeps each valid color in its key's first position; a repeated key takes
-/// its last value, as `mapping_get` does.
+/// Reports each key at its first position; a repeated key takes its last
+/// value, as `mapping_get` does.
 fn parse_option_colors(
     raw: Option<&YamlOwned>,
     options: &[String],
@@ -840,6 +840,12 @@ fn parse_option_colors(
         return colors;
     };
     let known = options.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut last = HashMap::new();
+    for (key, value) in mapping {
+        if let Some(key) = yaml_key_text(key) {
+            last.insert(key, value);
+        }
+    }
     let mut seen = HashSet::new();
     for (key, _) in mapping {
         let Some(key) = yaml_key_text(key) else {
@@ -854,7 +860,7 @@ fn parse_option_colors(
             continue;
         }
         let color_path = property_path(path, &key);
-        let color = mapping_get(mapping, &key);
+        let color = last.get(&key).copied();
         if !known.contains(key.as_str()) {
             push_reason(
                 reasons,
