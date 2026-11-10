@@ -523,12 +523,12 @@ describe("limits", () => {
 
   it("refuse results nested too deeply", async () => {
     const nested = (depth: number) => `(() => { let v = 1; for (let i = 0; i < ${depth}; i++) v = [v]; return v; })()`;
-    const [deepest, tooDeep, crossing, crashing] = await evaluator.evaluate(scope, [64, 65, 3000, 12000].map(depth => expression(nested(depth))));
+    const [deepest, tooDeep, crashing] = await evaluator.evaluate(scope, [64, 65, 12000].map(depth => expression(nested(depth))));
     expect(deepest!.ok).toBe(true);
-    const tooDeepError = { code: "invalid_result", message: `The formula nested lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.` };
-    expect([tooDeep, crossing]).toEqual([{ ok: false, error: tooDeepError }, { ok: false, error: tooDeepError }]);
+    expect(tooDeep).toEqual({ ok: false, error: { code: "invalid_result", message: `The formula nested lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.` } });
     expect(crashing!.ok).toBe(false);
-    expect(await evaluator.runCode(scope, `return { output: ${nested(100)} };`)).toEqual({ ok: false, error: expect.objectContaining({ code: "invalid_result" }) });
+    // Serializing 3000 levels takes about a third of a formula's 100 ms on a fast idle machine, so a code step's 1 s checks it.
+    expect(await evaluator.runCode(scope, `return { output: ${nested(3000)} };`)).toEqual({ ok: false, error: expect.objectContaining({ code: "invalid_result" }) });
   });
 
   it("stop work that finishes past its limit without an interrupt", async () => {
