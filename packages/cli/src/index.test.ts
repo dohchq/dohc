@@ -30,14 +30,22 @@ it("stops sync through main without a caller-supplied workspace or identity", as
 });
 
 it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
-  const kept = { ok: true, keptEdits: [{ path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" }] };
+  const kept = { ok: true, keptEdits: [
+    { path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" },
+    { path: "note.md", reason: "restore-fenced", storedOn: "this-computer", incident: "old-1:delivery:0", recovery: "paused", saveOnly: true },
+    { path: "old.md", reason: "restore-fenced", storedOn: "server", incident: "earlier:0", recovery: "copied", earlier: true },
+  ] };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveKeptEdits" ? kept
       : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" }
         : verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
           : { ok: true, path: "plan.md" });
   expect(await executeCli({ argv: ["document", "kept-edits"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "plan.md · server · paused · outbox:delivery:0\n", stderr: "" });
+    .toEqual({ exitCode: 0, stdout: [
+      "plan.md · server · paused · outbox:delivery:0",
+      "note.md · this-computer · paused · saveOnly · old-1:delivery:0",
+      "old.md · server · copied · earlier · earlier:0",
+    ].join("\n") + "\n", stderr: "" });
   expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
   // An incident names exactly which kept edits to save.

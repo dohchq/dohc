@@ -55,6 +55,7 @@ import {
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
+  saveOnlyLiveDocuments,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
@@ -7754,6 +7755,7 @@ export function DesktopWorkspaceShell(props: {
           onStopPending={reportPendingLiveStop}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
+          setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}
           {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}
           onClose={() => setLiveDocumentsWorkspaceId(null)}
         />

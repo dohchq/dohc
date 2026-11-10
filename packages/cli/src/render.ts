@@ -429,7 +429,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "liveKeptEdits": {
       const { keptEdits } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
       if (keptEdits.length === 0) return "No document has kept edits.";
-      return keptEdits.map(row => `${lineSafe(row.path)} · ${row.storedOn} · ${row.recovery} · ${lineSafe(row.incident)}`).join("\n");
+      return keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
+        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")).join("\n");
     }
     case "saveRecoveryCopy": {
       const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;

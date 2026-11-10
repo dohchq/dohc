@@ -231,6 +231,18 @@ describe("edits the server refused", () => {
     expect(row.textContent).toContain("dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back.");
     expect(row.textContent).not.toContain("could not write them to your file");
   });
+  it("lists a restore queue in Live documents when the server's list cannot load", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, reason: "restore-fenced", saveOnly: true as const}));
+    bridge.listOwnerLiveDocuments = vi.fn(async () => { throw new Error("relay unreachable"); });
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await userEvent.setup().click(within(toast).getByRole("button", {name: "Open Live documents"}));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    const row = await within(dialog).findByTestId("live-document-row-notes/plan.md-outbox:delivery:0");
+    expect(within(dialog).getByText("dohc could not load the server's list. These edits are kept on this computer.")).toBeTruthy();
+    expect(within(row).getByRole("button", {name: "Save recovery copy of notes/plan.md"})).toBeTruthy();
+  });
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", objectId: "object-other", status: "ready", canResume: false},

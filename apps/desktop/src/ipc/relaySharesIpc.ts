@@ -8,6 +8,7 @@ import {
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
   type OwnerLiveQuarantine,
+  saveOnlyLiveDocuments,
   SaveOwnerLiveRecoveryCopyResult,
   type StopOwnerLiveDocumentResult,
   CreateRelayShareResult,
@@ -425,11 +426,8 @@ export function createRelaySharesIpcHandlers<
         if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
           ...(quarantine.earlier ? {earlier: true} : {})});
       }
-      const retained = quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId,
-        status: "paused",
-        canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true,
-        ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
-      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...retained], nextCursor: stopped.nextCursor});
+      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
+        nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
   };
 

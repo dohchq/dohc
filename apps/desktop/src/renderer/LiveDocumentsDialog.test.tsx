@@ -240,6 +240,24 @@ describe("LiveDocumentsDialog", () => {
     expect(retired.textContent).toContain("dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back.");
     expect(retired.textContent).not.toContain("could not write them to your file");
   });
+  it("lists the edits a restore set aside when it cannot read the server's list", async () => {
+    const h = harness();
+    const failure = new Error("relay unreachable");
+    h.load.mockRejectedValueOnce(failure).mockResolvedValueOnce(page([row("a.md")]));
+    const setAside = [row("note.md", {status: "paused", quarantine: "paused", saveOnly: true, storedOn: "this-computer", incident: "old-1"})];
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} setAside={setAside} />);
+    const kept = await screen.findByTestId("live-document-row-note.md-old-1");
+    expect(screen.getByText("dohc could not load the server's list. These edits are kept on this computer.")).toBeTruthy();
+    // The toast keeps the cause.
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith("dohc could not load the live documents for this workspace.", failure, expect.any(Function));
+    await userEvent.setup().click(within(kept).getByRole("button", {name: "Save recovery copy of note.md"}));
+    expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
+    // Once the server's list reads, it is the list, set-aside rows included.
+    await act(async () => { h.onError.mock.calls[0]![2](); });
+    expect(await screen.findByTestId("live-document-row-a.md")).toBeTruthy();
+    expect(screen.queryByTestId("live-document-row-note.md-old-1")).toBeNull();
+    expect(screen.queryByText("dohc could not load the server's list. These edits are kept on this computer.")).toBeNull();
+  });
   it.each([true, false])("uses IPC Resume availability on a ready row: %s", async canResume => {
     const h = harness();
     h.load.mockResolvedValue(page([row("a.md", {canResume})]));

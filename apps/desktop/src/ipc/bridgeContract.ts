@@ -505,6 +505,14 @@ export const OwnerLiveDocument = z.object({
   objectId: OwnerLiveQuarantine.shape.objectId,
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
+// Edits a restore set aside get a row each, apart from the server's document.
+// Sync status carries the same queues, so Live documents can list these rows
+// when it cannot read the server's list.
+export function saveOnlyLiveDocuments(quarantines: readonly OwnerLiveQuarantine[]): OwnerLiveDocument[] {
+  return quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId, status: "paused",
+    canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true,
+    ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
+}
 // What a Stop did with edits the server refused: wrote them into the file,
 // or kept them on this computer because it could not.
 export const StopOwnerLiveDocumentResult = z.object({
