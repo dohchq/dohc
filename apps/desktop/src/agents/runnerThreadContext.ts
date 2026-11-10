@@ -1,4 +1,3 @@
-import { readThreadDispatchState } from "./threadDispatchState";
 import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import type { CliShowThreadResult } from "@dohc/cli/protocol";
@@ -8,7 +7,7 @@ import type {
   LinkedChatStore,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
-import { cliGroupKind, FILES_GROUP } from "@dohc/workspace-operations/chats";
+import { cliGroupKind, FILES_GROUP, readThreadDispatchState } from "@dohc/workspace-operations/chats";
 
 // A run sees the message that asked for it and every message after it, since
 // its claim answers each request queued there. Older messages fill the rest

@@ -7,8 +7,14 @@ export class OperationError extends Error {
   }
 }
 
-export function failure(error: unknown, fallback: string) {
-  const reason = error instanceof Error ? error.message : fallback;
+// How much of a failure's own message its reason keeps. "full" keeps any
+// error's message, for a caller on the computer that runs the engine.
+// "operation-only" keeps only an operation's own refusals, so nothing the
+// engine says about its host reaches a caller elsewhere.
+export type ErrorDetail = "full" | "operation-only";
+
+export function failure(error: unknown, fallback: string, detail: ErrorDetail) {
+  const reason = error instanceof Error && (detail === "full" || error instanceof OperationError) ? error.message : fallback;
   return { ok: false as const, reason };
 }
 

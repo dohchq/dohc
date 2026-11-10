@@ -333,13 +333,18 @@ export type LiveObjectHostBindingResult =
   | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
   | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
+/** The live document now at `path` in the workspace's main version, or null when none is. */
+export function currentLiveDocument(storage: StorageContext, workspaceId: string, path: string): LiveDocumentKey | null {
+  const row = storage.db.prepare(`SELECT object_id,lineage_claim_id FROM sync_relay_live_documents
+    WHERE workspace_id=? AND main_version_id='main' AND current_path=? AND lineage_state='current'`).get(workspaceId, path);
+  return row ? {workspaceId, mainVersionId: "main", objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id)} : null;
+}
+
 /** Server-owned automation writes use owner standing, never a caller-supplied binding. */
 export function automationRecordBinding(storage: StorageContext, workspaceId: string, ownerUserId: string, path: string) {
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw new Error("Automation workspace ownership changed.");
-  const row = storage.db.prepare(`SELECT object_id,lineage_claim_id FROM sync_relay_live_documents
-    WHERE workspace_id=? AND main_version_id='main' AND current_path=? AND lineage_state='current'`).get(workspaceId, path);
-  if (!row) return null;
-  const document = {workspaceId, mainVersionId: "main", objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id)};
+  const document = currentLiveDocument(storage, workspaceId, path);
+  if (!document) return null;
   for (const {share} of storage.listSharesGrantedBy(ownerUserId)) {
     if (share.workspaceId !== workspaceId) continue;
     const current = resolveCurrentLiveDocumentBinding(storage, {document, actor: {kind: "owner", userId: ownerUserId, shareId: share.shareId}});

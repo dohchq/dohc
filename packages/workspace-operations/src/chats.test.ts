@@ -26,7 +26,7 @@ const provisioning: Array<[string, (host: ChatsHost) => Promise<unknown>]> = [
   ["groups", (host) => listGroups(host)],
   ["groupsFull", (host) => listGroupsWithThreads(host)],
   ["threads", (host) => listGroupThreads(host, { group: "trip", reader: null })],
-  ["show", (host) => showChat(host, { cwd: "/", actor: "human", target: "trip", peek: true })],
+  ["show", (host) => showChat(host, { target: "trip", peek: true })],
 ];
 
 describe("General", () => {
@@ -53,8 +53,8 @@ describe("General", () => {
     const { store } = tripStore();
     store.addThread({ id: "thread-a", channelId: "channel-trip" });
     const host = memoryHost(store, { files: { "notes/a.md": "object-a" } });
-    await readChat(host, { cwd: "/", actor: "agent", group: "trip" });
-    await readChat(host, { cwd: "/", actor: "agent", threadId: "thread-a" });
+    await readChat(host, { group: "trip" });
+    await readChat(host, { threadId: "thread-a" });
     await listFileChats(host, "notes/a.md", "darwin");
     expect(store.log).not.toContain("ensureGeneralChannel");
     expect(host.provisions).toEqual([]);
@@ -71,7 +71,7 @@ describe("General", () => {
     const again = tripStore();
     again.store.failing.set("listThreads", new Error("The workspace engine stopped."));
     const show = memoryHost(again.store);
-    await expect(showChat(show, { cwd: "/", actor: "human", target: "th_missing", peek: false }))
+    await expect(showChat(show, { target: "th_missing", peek: false }))
       .rejects.toThrow("The workspace engine stopped.");
     expect(show.provisions).toHaveLength(1);
   });
@@ -163,7 +163,7 @@ describe("group lists", () => {
 
     store.log.length = 0;
     store.failing.set("listMessages", new Error("Transport closed."));
-    expect(await readChat(host, { cwd: "/", actor: "agent", threadId: "thread-1" }))
+    expect(await readChat(host, { threadId: "thread-1" }))
       .toEqual({ ok: false, reason: "Transport closed." });
     expect(store.log.filter((method) => method === "listMessages")).toHaveLength(1);
   });
@@ -214,7 +214,7 @@ describe("chat", () => {
     store.addDecision(thread.id, { messageId: "message-1", state: "open", options: ["Fri", "Sat"] });
     const dispatch = { paused: "budget" as const, lastRun: null };
     const host = memoryHost(store, { files: { "notes/a.md": "object-a" }, dispatch });
-    const read = await readChat(host, { cwd: "/", actor: "agent", threadId: thread.id });
+    const read = await readChat(host, { threadId: thread.id });
     if (!read.ok || !("thread" in read)) throw new Error("expected a thread");
     expect(read.dispatch).toEqual(dispatch);
     expect(read.projection).toEqual({ path: "notes/a.md", readOnly: true, text: "The text of thread-file" });
@@ -229,20 +229,20 @@ describe("chat", () => {
     const store = new MemoryChatStore();
     store.addThread({ id: "thread-file", linkedFile: { objectId: "object-gone", linkedAtMs: 1 } });
     const host = memoryHost(store);
-    expect((await readChat(host, { cwd: "/", actor: "agent", threadId: "thread-file" })).ok).toBe(true);
+    expect((await readChat(host, { threadId: "thread-file" })).ok).toBe(true);
     expect(store.projections.at(-1)?.linkedFileAccess).toEqual({ kind: "unknown" });
     store.messages.set("thread-orphan", []);
-    expect(await readChat(host, { cwd: "/", actor: "agent", threadId: "thread-orphan" }))
+    expect(await readChat(host, { threadId: "thread-orphan" }))
       .toEqual({ ok: false, reason: "chat thread not found: thread-orphan" });
   });
 
   it("words a failed group read with the group it named", async () => {
     const { store } = tripStore();
     const host = memoryHost(store);
-    expect(await readChat(host, { cwd: "/", actor: "agent", group: "nowhere" }))
+    expect(await readChat(host, { group: "nowhere" }))
       .toEqual({ ok: false, reason: "dohc: no such group: nowhere" });
     store.failing.set("listGroupStream", 7);
-    expect(await readChat(host, { cwd: "/", actor: "agent", group: "trip" }))
+    expect(await readChat(host, { group: "trip" }))
       .toEqual({ ok: false, reason: "failed to read group: trip" });
   });
 });
@@ -263,7 +263,7 @@ describe("group streams", () => {
   it("pages show's stream in order under CLI handles, marking nothing read", async () => {
     const store = streamStore();
     const host = memoryHost(store, { writable: false });
-    const first = await showChat(host, { cwd: "/", actor: "human", target: "#trip", peek: false, limit: 2 });
+    const first = await showChat(host, { target: "#trip", peek: false, limit: 2 });
     if (!("stream" in first)) throw new Error("expected a stream");
     expect(first).not.toHaveProperty("read");
     expect(first.stream.group).toEqual({ id: "ch_trip", name: "Trip", slug: "trip", kind: "group", purpose: "Plan the trip" });
@@ -272,7 +272,7 @@ describe("group streams", () => {
       { createdAtMs: 30, lane: "chat", id: "msg_c" },
     ]);
     expect(first.stream.nextBefore).toEqual({ createdAtMs: 20, lane: "chat", id: "msg_b" });
-    const second = await showChat(host, { cwd: "/", actor: "human", target: "trip", peek: false, limit: 2, before: first.stream.nextBefore! });
+    const second = await showChat(host, { target: "trip", peek: false, limit: 2, before: first.stream.nextBefore! });
     if (!("stream" in second)) throw new Error("expected a stream");
     expect(second.stream.items.map((item) => [item.position.lane, item.position.id, item.threadId])).toEqual([
       ["chat", "msg_a", "th_chat"],
@@ -286,12 +286,12 @@ describe("group streams", () => {
   it("pages chat's stream in the same order under engine ids", async () => {
     const store = streamStore();
     const host = memoryHost(store);
-    const page = await readChat(host, { cwd: "/", actor: "agent", group: "Trip", limit: 3 });
+    const page = await readChat(host, { group: "Trip", limit: 3 });
     if (!page.ok || !("stream" in page)) throw new Error("expected a stream");
     expect(page.stream.group).toEqual({ id: "channel-trip", name: "Trip", kind: "group" });
     expect(page.stream.items.map((item) => item.position.id)).toEqual(["thread-post", "message-b", "message-c"]);
     expect(page.stream.items[0]?.message).toMatchObject({ id: "message-p", threadId: "thread-post", authorKind: "human" });
-    const rest = await readChat(host, { cwd: "/", actor: "agent", group: "trip", before: page.stream.nextBefore! });
+    const rest = await readChat(host, { group: "trip", before: page.stream.nextBefore! });
     if (!rest.ok || !("stream" in rest)) throw new Error("expected a stream");
     expect(rest.stream.items.map((item) => item.position.id)).toEqual(["message-a"]);
   });
@@ -299,7 +299,7 @@ describe("group streams", () => {
   it("refuses a page of a thread", async () => {
     const store = streamStore();
     const host = memoryHost(store, { writable: false });
-    await expect(showChat(host, { cwd: "/", actor: "human", target: "th_post", peek: true, limit: 5 }))
+    await expect(showChat(host, { target: "th_post", peek: true, limit: 5 }))
       .rejects.toThrow("dohc: --before and --limit page a group's stream; name a group");
   });
 });
@@ -320,7 +320,7 @@ describe("show", () => {
   it("counts the whole thread, shows the branch, and gives read places from the whole thread", async () => {
     const store = branchStore();
     const host = memoryHost(store, { writable: false });
-    const shown = shownThread(await showChat(host, { cwd: "/", actor: "agent", target: "msg_2", peek: false }));
+    const shown = shownThread(await showChat(host, { target: "msg_2", peek: false }));
     expect(shown.thread.thread).toEqual({
       id: "th_plan",
       title: "Plan",
@@ -346,7 +346,7 @@ describe("show", () => {
     store.addMessage({ id: "message-5", threadId: "thread-plan", createdAtMs: 130 });
     store.addMessage({ id: "message-0", threadId: "thread-plan", createdAtMs: 130 });
     const host = memoryHost(store, { writable: false });
-    const shown = shownThread(await showChat(host, { cwd: "/", actor: "human", target: "thread-plan", peek: false }));
+    const shown = shownThread(await showChat(host, { target: "thread-plan", peek: false }));
     expect(shown.thread.messages).toHaveLength(6);
     expect(shown.read).toEqual({ threadId: "thread-plan", messageCount: 6, latest: { createdAtMs: 130, messageId: "message-5" } });
   });
@@ -355,7 +355,7 @@ describe("show", () => {
     const { store } = tripStore();
     store.addThread({ id: "thread-empty", channelId: "channel-trip" });
     const host = memoryHost(store, { writable: false });
-    const shown = shownThread(await showChat(host, { cwd: "/", actor: "human", target: "th_empty", peek: false }));
+    const shown = shownThread(await showChat(host, { target: "th_empty", peek: false }));
     expect(shown.read).toEqual({ threadId: "thread-empty", messageCount: 0, latest: null });
     expect(shown.thread.thread.commentCount).toBe(0);
   });
@@ -369,7 +369,7 @@ describe("show", () => {
     store.addDecision(thread.id, { messageId: "message-2", state: "resolved", resolvedByMessageId: "message-2" });
     const dispatch = { paused: null, lastRun: { state: "failed" as const, failureReason: "no-reply", exitCode: 0 } };
     const host = memoryHost(store, { writable: false, dispatch });
-    const shown = shownThread(await showChat(host, { cwd: "/", actor: "human", target: "th_file", peek: true }));
+    const shown = shownThread(await showChat(host, { target: "th_file", peek: true }));
     expect(shown.thread.thread).toMatchObject({ group: FILES_GROUP, commentCount: 1, openDecisionCount: 1 });
     expect(shown.thread.dispatch).toEqual(dispatch);
     expect(shown.thread.messages[0]).toMatchObject({
@@ -383,9 +383,38 @@ describe("show", () => {
   it("refuses a target that names no thread or message, or several", async () => {
     const store = branchStore();
     const host = memoryHost(store, { writable: false });
-    await expect(showChat(host, { cwd: "/", actor: "human", target: "th_nothing", peek: true }))
+    await expect(showChat(host, { target: "th_nothing", peek: true }))
       .rejects.toThrow("dohc: no such thread or message: th_nothing");
-    await expect(showChat(host, { cwd: "/", actor: "human", target: "msg_", peek: true }))
+    await expect(showChat(host, { target: "msg_", peek: true }))
       .rejects.toThrow("dohc: ambiguous thread or message prefix 'msg_'");
+  });
+});
+
+describe("failure detail", () => {
+  const engineFailure = new Error("The engine could not open /srv/dohc/copies/trip/.dohc/engine/engine.db.");
+
+  it("keeps an engine's message for a host that reports it in full", async () => {
+    const { store } = tripStore();
+    store.failing.set("listChannelThreads", engineFailure);
+    expect(await listGroupsWithThreads(memoryHost(store))).toEqual({ ok: false, reason: engineFailure.message });
+  });
+
+  it("answers an engine failure with the operation's own reason for a host that reports operations only", async () => {
+    const { store, trip } = tripStore();
+    store.addThread({ id: "thread-a", channelId: trip.id });
+    const host = memoryHost(store, { writable: false, errorDetail: "operation-only", files: { "notes/a.md": "object-a" } });
+    for (const method of ["listChannelThreads", "listThreadsForFile", "listGroupStream", "listMessages"] as const) {
+      store.failing.set(method, engineFailure);
+    }
+    expect(await listGroupsWithThreads(host)).toEqual({ ok: false, reason: "failed to list groups" });
+    expect(await listFileChats(host, "notes/a.md", "darwin")).toEqual({ ok: false, reason: "failed to list chats for: notes/a.md" });
+    expect(await readChat(host, { group: "trip" })).toEqual({ ok: false, reason: "failed to read group: trip" });
+    expect(await readChat(host, { threadId: "thread-a" })).toEqual({ ok: false, reason: "failed to read chat: thread-a" });
+  });
+
+  it("keeps an operation's own refusal for a host that reports operations only", async () => {
+    const { store } = tripStore();
+    const host = memoryHost(store, { writable: false, errorDetail: "operation-only" });
+    expect(await readChat(host, { group: "nowhere" })).toEqual({ ok: false, reason: "dohc: no such group: nowhere" });
   });
 });

@@ -230,6 +230,21 @@ export const documentEditTextSchema = z
 const documentReadArgsSchema = z
   .object({ ...argsBase, path: documentPathArg })
   .strict();
+
+// The reads a server's copy of a workspace answers, with the CLI's arguments
+// less who is calling: the server knows that from the credential. These
+// reads never mark a thread read, so `show` only peeks.
+const callerArgs = { cwd: true, actor: true, agentId: true } as const;
+export const serverOperationArgsSchemas = {
+  groups: groupsArgsSchema.omit(callerArgs).strict(),
+  threads: threadsArgsSchema.omit(callerArgs).strict(),
+  groupsFull: groupsFullArgsSchema.omit(callerArgs).strict(),
+  fileChats: fileChatsArgsSchema.omit(callerArgs).strict(),
+  chat: z.union([chatArgsSchema.options[0].omit(callerArgs).strict(), chatArgsSchema.options[1].omit(callerArgs).strict()]),
+  show: showArgsSchema.omit(callerArgs).extend({ peek: z.literal(true) }).strict(),
+  documentRead: documentReadArgsSchema.omit(callerArgs).strict(),
+};
+export type ServerOperation = keyof typeof serverOperationArgsSchemas;
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.

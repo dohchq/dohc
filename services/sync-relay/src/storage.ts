@@ -570,6 +570,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.automationRecordBinding(this, workspaceId, ownerUserId, path);
   }
 
+  currentLiveDocument(workspaceId: string, path: string): LiveDocumentKey | null {
+    return liveDocumentAuthorityStorage.currentLiveDocument(this, workspaceId, path);
+  }
+
   /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */
   automationRecordJournalCursor(binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding): number {
     return Number(this.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal

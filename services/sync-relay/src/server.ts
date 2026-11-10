@@ -55,6 +55,8 @@ import {
   type ServerRuns,
 } from "./automationServerRoutes";
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
+import { createAccountOperationRateLimiter, createAccountOperationRoute } from "./accountOperationRoutes";
+import type { ServerCopies } from "./serverCopies";
 import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -198,6 +200,10 @@ export interface CreateSyncRelayHandlerOptions {
   serverRuns?: () => ServerRuns | undefined;
   // The routes a signed-in account reads its workspaces through (DOHC_ACCOUNT_API). They need resolveAccountSession.
   accountApi?: boolean;
+  // This server's copies of workspaces, which the account routes read through; undefined until they start.
+  serverCopies?: () => ServerCopies | undefined;
+  // An account's reads through those copies, keyed by sign-in.
+  accountOperationRateLimiter?: TokenBucketLimiter;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -281,6 +287,8 @@ export function createSyncRelayHandler({
   pressDataset,
   serverRuns = () => undefined,
   accountApi = false,
+  serverCopies = () => undefined,
+  accountOperationRateLimiter = createAccountOperationRateLimiter(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
@@ -480,6 +488,8 @@ export function createSyncRelayHandler({
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const respondToAccountWorkspaces = accountApi && resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
+  const respondToAccountOperation = accountApi && resolveAccountSession
+    ? createAccountOperationRoute({ storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter }) : undefined;
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -1030,6 +1040,10 @@ export function createSyncRelayHandler({
         if (!respondToAccountWorkspaces) throw notFound();
         return await respondToAccountWorkspaces(request, route);
       }
+      if (route.route === "account-operation") {
+        if (!respondToAccountOperation) throw notFound();
+        return await respondToAccountOperation(request, route);
+      }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -1219,13 +1233,14 @@ export function createSyncRelayHandler({
 
 /**
  * The routes whose handlers authenticate before they read the body, and bound
- * its size and receipt time: recovery imports and direct writes. Classified by
+ * its size and receipt time: recovery imports, direct writes, and an
+ * account's reads through this server's copies. Classified by
  * the same parse as dispatch, so every spelling of the path streams.
  */
 export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes" || route.route === "link-collection-writes";
+      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation";
   } catch { return false; }
 }

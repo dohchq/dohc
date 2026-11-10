@@ -18,6 +18,8 @@ export function initializeAccountWorkspaceSchema(db: SqliteDb): void {
 /** One workspace as its owner's account lists it. */
 export interface AccountWorkspace {
   workspaceId: string;
+  /** The name its owner's computer last sent, or null before one did. */
+  name: string | null;
   /** It has a sync identity, so the server can make a copy of it. */
   canOpen: boolean;
   showOnPhone: boolean;
@@ -26,12 +28,12 @@ export interface AccountWorkspace {
 /** The workspaces this account owns, by workspace ID. */
 export function listAccountWorkspaces(storage: StorageContext, ownerUserId: string): AccountWorkspace[] {
   return storage.readTx(() => storage.db.prepare(
-    `SELECT w.workspace_id, w.replication_epoch IS NOT NULL AS can_open,
+    `SELECT w.workspace_id, w.display_name, w.replication_epoch IS NOT NULL AS can_open,
        NOT EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
          WHERE h.workspace_id = w.workspace_id AND h.owner_user_id = w.owner_user_id) AS show_on_phone
      FROM sync_relay_workspaces w WHERE w.owner_user_id = ? ORDER BY w.workspace_id`,
   ).all(ownerUserId).map((row) => ({
-    workspaceId: String(row.workspace_id), canOpen: Boolean(row.can_open), showOnPhone: Boolean(row.show_on_phone),
+    workspaceId: String(row.workspace_id), name: row.display_name === null ? null : String(row.display_name), canOpen: Boolean(row.can_open), showOnPhone: Boolean(row.show_on_phone),
   })));
 }
 

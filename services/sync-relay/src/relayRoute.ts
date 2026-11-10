@@ -1,3 +1,4 @@
+import {parseAccountOperationRoute, type AccountOperationRoute} from "./accountOperationRoutes";
 import {parseAccountRoute, type AccountWorkspaceRoute} from "./accountWorkspaceRoutes";
 import type {AgentChatRoute} from "./agentChatRoutes";
 import type {AgentConnectionRoute} from "./agentConnectionRoutes";
@@ -31,6 +32,7 @@ import {MAX_ORIGIN_ID_CHARS} from "./wireLimits";
 import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bound";
 
 type SyncRelayRoute =
+  | AccountOperationRoute
   | AccountWorkspaceRoute
   | AgentConnectionRoute
   | WorkReferenceRoute
@@ -263,6 +265,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     }
     throw notFound();
   }
+  if (parts.length === 4 && parts[2] === "ops") return parseAccountOperationRoute(parts);
   const workspaceId = parseWorkspaceId(parts[1]);
   if (parts[2] === "datasets") {
     if (parts.length === 3) return {route:"dataset", workspaceId, action:"list"};

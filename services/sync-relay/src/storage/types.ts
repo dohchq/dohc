@@ -793,6 +793,8 @@ export interface SyncRelayStorage {
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
     authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
   automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
+  /** The live document now at `path` in the workspace's main version, or null when none is. */
+  currentLiveDocument(workspaceId: string, path: string): LiveDocumentKey | null;
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
