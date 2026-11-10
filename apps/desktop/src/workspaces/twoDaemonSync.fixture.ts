@@ -1500,22 +1500,37 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
       const startedAt = new Date().toISOString();
       await unlink(join(rootA, oldPath));
       pages.observeFileEvents([{ path: oldPath, operation: "delete" }]);
-      const retired = await expect.poll(deletesOfA, { timeout: 30_000, interval: 250 }).toBeGreaterThan(0).then(() => true, () => false);
+      await pages.flush();
+      if (kind === "file-manager-capture") {
+        await expect.poll(deletesOfA, { timeout: 30_000, interval: 250 }).toBe(1);
+      }
+      const retired = await deletesOfA() > 0;
       observe({ startedAt, headBefore, retired, deletesOfA: await deletesOfA(), headAfter: headOfA(), onDisk: await onDisk(), ownerA: ownerRowsOfA() });
       await newAndChanged();
       const perPass: Array<{ pass: number; deletesOfA: number; head: ReturnType<typeof headOfA>; onDisk: boolean; refusalLines: number }> = [];
       // Every Notices row the passes produced, as the desktop titles them (NoticeCenter.tsx).
       const noticeRows = new Map<string, { title: string; body: string }>();
       let published: Observed | undefined;
+      const externalArrived = (relay: Relay) => relay.a === (kind === "file-manager") && relay.b && relay.cChanged;
       for (let pass = 1; pass <= 6; pass++) {
-        published = await settle(1, arrived);
+        published = await settle(1, externalArrived);
         for (const entry of published.pending ?? []) {
           noticeRows.set(`owner-admission-pending-${entry.originId}-${entry.originSeq}`, { title: "Saved locally · Pending share",
             body: `Your edits to "${entry.path}" are saved on this device. The shared file update is pending.` });
         }
         perPass.push({ pass, deletesOfA: await deletesOfA(), head: headOfA(), onDisk: await onDisk(), refusalLines: refusalLines.length });
-        if (arrived(published.relay) && published.pending?.length === 0) break;
+        if (externalArrived(published.relay) && published.pending?.length === 0
+          && published.relay.bText === published.owner.b && published.relay.cText === published.owner.c) break;
       }
+      expectPublished("after external deletion", published!, kind === "file-manager");
+      const deletesBeforeReplay = await deletesOfA();
+      const replay = await syncPass();
+      const replayed = await relayHas();
+      expect(replay.pushes).toEqual([expect.objectContaining({pushed: 0,hasMore: false})]);
+      expect(replay.pull).toMatchObject({fetched: 0});
+      expect(replayed.pulled).toMatchObject({fetched: 0});
+      expect(await deletesOfA()).toBe(deletesBeforeReplay);
+      expectPublished("after replay", {relay: replayed,pending: replay.pending,owner: await ownerFiles()}, kind === "file-manager");
       observe({ startedAt, endedAt: new Date().toISOString(), headBefore, perPass, refusalLines, noticeRows: [...noticeRows.values()],
         firstPending: published?.pending?.[0] ?? null, ownerA: ownerRowsOfA(),
         bAndCPublished: published!.relay.b && published!.relay.cChanged && published!.pending?.length === 0 });

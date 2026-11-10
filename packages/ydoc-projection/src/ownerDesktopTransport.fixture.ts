@@ -563,14 +563,22 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
     await attempt(() => restoreTrustedRoots?.());
     await attempt(() => renderer?.destroy());
     await attempt(() => ipc?.shutdown());
+    const captureReplies: unknown[] = [];
+    const sendRequest = singleton.sendRequest.bind(singleton);
+    const captureRequests = vi.spyOn(singleton,"sendRequest").mockImplementation(async (...args) => {
+      const reply = await sendRequest(...args);
+      if (["capture.flush","watcher.status"].includes(args[0].method)) captureReplies.push({method: args[0].method,reply});
+      return reply;
+    });
     await attempt(() => capture.stop());
+    captureRequests.mockRestore();
     await attempt(() => sessions.closeAll());
     await attempt(() => lifecycle.stop());
     await attempt(() => deployment?.storage.close());
     const describe = (error: unknown) => error instanceof Error ? error.stack ?? error.message : String(error);
     if (failed || cleanupErrors.length) {
       writeFileSync(join(root,"result.json"),JSON.stringify({passed: false,standalone,link,binary,
-        error: failed ? describe(failure) : null,cleanupErrors: cleanupErrors.map(describe)},null,2));
+        error: failed ? describe(failure) : null,cleanupErrors: cleanupErrors.map(describe),captureReplies},null,2));
     }
     const output = process.env.DOHC_QA_OUTPUT;
     if (output) await attempt(() => {

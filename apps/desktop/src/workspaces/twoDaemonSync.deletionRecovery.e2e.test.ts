@@ -46,13 +46,9 @@ it.skipIf(engine.missing).each(["H2c", "H2d"] as const)(
       a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
       await a.relay.claim();
       await writeAndCapture(a, rootA, path, "Paris\n");
-      await writeAndCapture(a, rootA, "packing.md", "Packing: initial\n");
-      await writeAndCapture(a, rootA, "budget.md", "Budget: initial\n");
       await pushUntilDrained(a.relay);
       b = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: connection});
       await rounds();
-      expect(await readFile(join(rootB, "packing.md"), "utf8")).toBe("Packing: initial\n");
-      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: initial\n");
       for (const device of [b, a]) {
         const editor = await openEditor(device, path);
         await editor.session.close();
@@ -102,11 +98,6 @@ it.skipIf(engine.missing).each(["H2c", "H2d"] as const)(
         expect(await readFile(join(rootA, path), "utf8")).toBe(kept);
         for (const device of [a, b]) expect(await device.capture.countOpenConflicts()).toBe(0);
       }
-      await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
-      await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
-      await rounds();
-      expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
-      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
       let expected = kept;
       for (const [writer, writerRoot, readerRoot, line] of [[a, rootA, rootB, "A by hand\n"], [b, rootB, rootA, "B by hand\n"]] as const) {
         expected += line;

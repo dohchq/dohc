@@ -544,19 +544,19 @@ it("persists a generated owner rewrite with two retained native updates and refu
   } finally {if (!closed) f.close();reopened?.close();}
 });
 
-it.each([
-  {actorKind: "unknown", chainDepth: 0}, {actorKind: "agent", chainDepth: 65},
-  {actorKind: "agent", chainDepth: null}, {actorKind: null, chainDepth: 0},
-  {actorKind: null, chainDepth: null, onBehalfOf: "owner"},
-])("refuses native provenance outside the engine contract: %j", patch => {
+it("refuses native provenance outside the engine contract without saving a proposal", () => {
   const f = contentProposalFixture("owner", "device", true);
   try {
-    const receipt = structuredClone(f.receipt), native = receipt.nativeSources[0]!;
-    Object.assign(native.source.origin, patch);
-    native.appendKey = `adopted-local:${jsonHash(native.source)}`;
-    receipt.nativeSourceManifestDigest = jsonHash([receipt.fence, receipt.nativeSources]);
-    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input)).toThrow();
-    expect(proposalRows(f).proposals).toEqual([]);
+    for (const patch of [{actorKind: "unknown", chainDepth: 0}, {actorKind: "agent", chainDepth: 65},
+      {actorKind: "agent", chainDepth: null}, {actorKind: null, chainDepth: 0},
+      {actorKind: null, chainDepth: null, onBehalfOf: "owner"}]) {
+      const receipt = structuredClone(f.receipt), native = receipt.nativeSources[0]!;
+      Object.assign(native.source.origin, patch);
+      native.appendKey = `adopted-local:${jsonHash(native.source)}`;
+      receipt.nativeSourceManifestDigest = jsonHash([receipt.fence, receipt.nativeSources]);
+      expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input), JSON.stringify(patch)).toThrow();
+      expect(proposalRows(f).proposals, JSON.stringify(patch)).toEqual([]);
+    }
   } finally {f.close();}
 });
 
@@ -692,11 +692,12 @@ it("refuses a second proposal for the operation and bounded or foreign reads wit
 it("checks stored proposal length before materializing an oversized saved payload on read or replay", async () => {
   const f = contentProposalFixture();
   try {
-    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
-    f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(?)`).run(f.input.maxBytes + 1);
+    const input = {...f.input,maxBytes: 64 * 1024};
+    await f.store.recordStopRestoreProposal(input, f.encoded, restore, 200);
+    f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(?)`).run(input.maxBytes + 1);
     const before = proposalRows(f), prepare = vi.spyOn(f.context.db, "prepare");
-    await expect(f.store.readStopRestoreProposal(f.input, restore)).rejects.toThrow(/bounds/);
-    await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 201)).rejects.toThrow();
+    await expect(f.store.readStopRestoreProposal(input, restore)).rejects.toThrow(/bounds/);
+    await expect(f.store.recordStopRestoreProposal(input, f.encoded, restore, 201)).rejects.toThrow();
     const proposalReads = prepare.mock.calls.map(([sql]) => sql).filter(sql => sql.includes(`FROM ${proposalTable}`));
     expect(proposalReads).toHaveLength(2);
     expect(proposalReads.every(sql => sql.includes("length(proposal_bytes)"))).toBe(true);
@@ -1619,14 +1620,16 @@ const corruptNativeReceipts: [string, (receipt: NativeRestoreFenceReceipt) => vo
   ["head sequence", r => {r.localHeadSequence = -1;}],
   ["recorded time", r => {r.recordedAtMs = Number.MAX_SAFE_INTEGER + 1;}],
 ];
-it.each(corruptNativeReceipts)("refuses changed native %s without phase, receipt, or quota mutation", (_name, corrupt) => {
+it("refuses changed native receipts without phase, receipt, or quota mutation", () => {
   const f = readyNativeFence("bootstrap", "device");
   try {
     const before = f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), usage = f.journalRows().usage;
-    const changed = structuredClone(f.receipt); corrupt(changed);
-    expect(() => f.store.acknowledgeStopRestoreFence(f.lookup, changed)).toThrow();
-    expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual(before);
-    expect(f.journalRows().usage).toBe(usage);
+    for (const [name,corrupt] of corruptNativeReceipts) {
+      const changed = structuredClone(f.receipt); corrupt(changed);
+      expect(() => f.store.acknowledgeStopRestoreFence(f.lookup, changed), name).toThrow();
+      expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), name).toEqual(before);
+      expect(f.journalRows().usage, name).toBe(usage);
+    }
   } finally {f.close();}
 });
 

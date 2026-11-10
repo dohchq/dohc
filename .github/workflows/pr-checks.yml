@@ -286,11 +286,6 @@ jobs:
           - 8
           - 9
           - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -443,10 +438,6 @@ jobs:
           - 9
           - 10
           - 11
-          - 12
-          - 13
-          - 14
-          - 15
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'

@@ -1065,20 +1065,33 @@ it.skipIf(engine.missing)("finishes a written but unadopted creation on native r
   await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/collection.yaml", text: "name: Tasks\nfields: {Status: {type: text}}\n", publish: true, metadata: { origin: "api" } });
   const replica = { workspaceId: WORKSPACE, client: server.client, workspace: server.workspace, signal: server.lifetime };
   const native = replicaRecordEngine(replica);
-  let deduped = false;
+  let deduped = false, written = false, adoptionLookups = 0;
   const write = native.adapter.writeTextFile.bind(native.adapter);
-  native.adapter.writeTextFile = async input => { const result = await write(input); deduped ||= result.deduped === true; return result; };
-  const context = replicaRecordEditContext(replica, native, new AbortController().signal);
+  native.adapter.writeTextFile = async input => { const result = await write(input); written = true; deduped ||= result.deduped === true; return result; };
+  const firstAttempt = new AbortController();
+  const lookup = native.adapter.getCollectionRecord.bind(native.adapter);
+  native.adapter.getCollectionRecord = async input => {
+    try {return await lookup(input);}
+    finally {
+      if (written && input.recordId === TWO && !firstAttempt.signal.aborted) {
+        adoptionLookups++;
+        firstAttempt.abort();
+      }
+    }
+  };
+  const context = replicaRecordEditContext(replica, native, firstAttempt.signal);
   const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"));
   db.exec("PRAGMA busy_timeout=10000");
   db.exec("CREATE TRIGGER block_adoption BEFORE INSERT ON collection_records WHEN NEW.file_path = 'Tasks/made.md' BEGIN SELECT RAISE(FAIL, 'test adoption failure'); END");
   const input = { collectionPath: "Tasks", name: "made", recordId: TWO, fields: { Status: "New" }, author: AUTOMATION, idempotencyKeyPrefix: "unadopted" };
   try {
-    await expect(createCollectionRecord(context, input)).resolves.toMatchObject({ kind: "partial" });
+    await expect(createCollectionRecord(context, input)).resolves.toMatchObject({ kind: "partial",failedStage: "index" });
+    expect(adoptionLookups).toBeGreaterThan(0);
     expect((await adapter.readTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/made.md" }))?.text).toContain(TWO);
     expect(db.prepare("SELECT count(*) AS n FROM collection_records WHERE record_id = ?").get(TWO)?.n).toBe(0);
     db.exec("DROP TRIGGER block_adoption");
-    await expect(createCollectionRecord(context, input)).resolves.toEqual({ path: "Tasks/made.md", recordId: TWO });
+    const retry = replicaRecordEditContext(replica, native, new AbortController().signal);
+    await expect(createCollectionRecord(retry, input)).resolves.toEqual({ path: "Tasks/made.md", recordId: TWO });
     expect(deduped).toBe(true);
     expect((await adapter.getCollectionRecord({ collectionPath: "Tasks", recordId: TWO, historyLimit: 1 })).record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "New" }));
   } finally { db.exec("DROP TRIGGER IF EXISTS block_adoption"); db.close(); }
