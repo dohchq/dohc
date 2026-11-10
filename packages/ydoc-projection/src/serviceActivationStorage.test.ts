@@ -71,6 +71,8 @@ function fixture(note='Original',large=false,clientID?:number){
       sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin','2'].join('\0')))}`,
       sourceDigest:validated.evidence.projectedMarkdownSha256,sourceByteLength:validated.evidence.projectedMarkdownByteLength,
       nativeHeadSequence:2,fullStateDigest:hash(fullState),fullStateByteLength:fullState.length}}
+  // Every test opens this fixture, so its rows share one commit rather than a disk flush each.
+  raw.exec('BEGIN')
   raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')")
   raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',0,'moment.append',?,0)")
     .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'original-moment',path:'docs/a.md',operation:'write',
@@ -85,6 +87,7 @@ function fixture(note='Original',large=false,clientID?:number){
   raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
     .run(base.evidence.projectedMarkdownSha256,base.evidence.projectedMarkdownByteLength)
   raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)").run(JSON.stringify({paths:['docs'],versionId:null}))
+  raw.exec('COMMIT')
   storage.provisionLiveHostControl({...host,updatedAtMs:1,guard(){}})
   const prepare=(readBounds=bounds,validate=validateActivation)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validate,bounds:readBounds})
   return {storage,raw,store,history,capture,document,prepare,path,close(){raw.close();storage.close();rmSync(root,{recursive:true,force:true})}}
@@ -562,7 +565,10 @@ it.each([
 // interval refuses for this pass instead of stalling the writer.
 it('charges a long unrelated interval before a stale settlement artifact to the proof budget',async()=>{
   const f=fixture();try{
+    // One commit: a disk flush per row, not the budget check, would dominate the test.
+    f.raw.exec('BEGIN')
     for(let seq=0;seq<300;seq++)append(f,'other',seq,'moment.append',otherWrite({momentId:`unrelated-${seq}`,padding:'p'.repeat(4096)}))
+    f.raw.exec('COMMIT')
     staleArtifact(f)
     await expect(verify(f)).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')
     expect(await verify(f,{...bounds,maxBytesPerDrain:4_000_000})).toEqual({verified:true})
@@ -574,8 +580,10 @@ it('charges a long unrelated interval before a stale settlement artifact to the 
 // relay order without one.
 it('charges the walk back over a long losing-lineage interval to an artifact origin\'s nearest row',async()=>{
   const f=fixture(),loser=losingDevice(f);try{
+    f.raw.exec('BEGIN')
     for(let seq=2;seq<300;seq++)append(f,'losing-device',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,
       updateBlobSha256:hash(Buffer.from(`losing-${seq}`)),padding:'p'.repeat(4096)}))
+    f.raw.exec('COMMIT')
     staleArtifact(f,'other-device',0)
     const context=f.storage as StorageContext,prepare=vi.spyOn(context.db,'prepare')
     await expect(verify(f)).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')

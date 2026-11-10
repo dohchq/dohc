@@ -12,6 +12,7 @@ import {
   missingSourcesWords,
 } from "./EngineHistory";
 import { chatAuthorLabel } from "./chatMessages";
+import { resetChosenColorsForTests, setPersonalAgents } from "./chosenColors";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
   return {
@@ -98,6 +99,20 @@ describe("momentDescription", () => {
 });
 
 describe("engineMomentSourceLabel", () => {
+  it("names your personal agent from your roster, and keeps a claimed id's own name", () => {
+    const grok = `p-${"g".repeat(26)}`;
+    setPersonalAgents([{ agentId: grok, name: "Grok Bot", hue: "teal" }]);
+    try {
+      const edit = (self: boolean) => moment({ id: `edit-${self}`, agentAuthorName: "Old name", authors: [{ kind: "agent", agentId: grok }],
+        authorPresentations: [{ group: "agent", hue: null, self }] });
+      expect(engineMomentSourceLabel(edit(true))).toBe("Grok Bot");
+      // Another account can write your agent's id on its own edit.
+      expect(engineMomentSourceLabel(edit(false))).toBe("Old name");
+    } finally {
+      resetChosenColorsForTests();
+    }
+  });
+
   it("names a person the owner shared with, not the sync that carried their change", () => {
     expect(engineMomentSourceLabel(moment({ id: "named", origin: "sync", namedAuthor: { userId: "user_ana", label: "ana@example.com (Edit)" } })))
       .toBe("ana@example.com (Edit)");

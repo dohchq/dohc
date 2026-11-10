@@ -3,7 +3,16 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
-import type { AgentsListeningEvent, ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
+import type {
+  AgentsListeningEvent,
+  ChatDispatchPausedEvent,
+  PersonalAgent,
+  PersonalAgentChange,
+  PersonalAgentChangeResult,
+  PersonalAgentsAccount,
+  PersonalAgentsEvent,
+  RunnerSelfTestResult,
+} from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
@@ -12,6 +21,7 @@ import { agentListRows } from "./agentRemoval";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
+let personalListener: ((event: PersonalAgentsEvent) => void) | null = null;
 const bridgeMock = {
   getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
@@ -28,6 +38,13 @@ const bridgeMock = {
     listeningListener = listener;
     return () => { listeningListener = null; };
   }),
+  readPersonalAgents: vi.fn(async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] })),
+  onPersonalAgents: vi.fn((listener: (event: PersonalAgentsEvent) => void) => {
+    personalListener = listener;
+    return () => { personalListener = null; };
+  }),
+  changePersonalAgent: vi.fn(async (_payload: { accountKey: string; agentId: string; change: PersonalAgentChange }): Promise<PersonalAgentChangeResult> => (
+    { ok: true, personalAgents: { accounts: [] } })),
   runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }): Promise<RunnerSelfTestResult> => ({ ok: true, detail: "Runner self-test passed." })),
   detectAgentTools: vi.fn(async (_payload: { workspaceId: string }): Promise<AgentToolsResult> => ({
     workingDirectory: "C:\\Work",
@@ -51,6 +68,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   pausedListener = null;
   listeningListener = null;
+  personalListener = null;
 });
 afterEach(cleanup);
 
@@ -61,7 +79,7 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
   const onOrder = vi.fn(async (_order: readonly string[]) => true);
   const onNotice = vi.fn((_message: string, _undo?: () => void) => undefined);
   const list = (more: Partial<Parameters<typeof AgentList>[0]> = {}) => (
-    <AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
+    <AgentList workspaceId="ws-1" workspaceName="Trip" settings={SETTINGS} config={null} sessionRecorderOn
       onSave={onSave} onOrder={onOrder} onError={onError} onNotice={onNotice} onOpenSettingsFile={onOpenSettingsFile} {...fields} {...more} />
   );
   const { rerender, unmount } = render(list());
@@ -100,7 +118,7 @@ async function check(name: string) {
 }
 
 const sheet = () => within(screen.getByTestId("agent-add-sheet"));
-const runsWith = (id: "claude" | "codex" | "mcp") => screen.getByTestId<HTMLButtonElement>(`agent-runs-with-${id}`);
+const runsWith = (id: "claude" | "codex" | "mcp" | "link") => screen.getByTestId<HTMLButtonElement>(`agent-runs-with-${id}`);
 async function openAdd() {
   await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
   return sheet();
@@ -323,12 +341,13 @@ it("puts every agent in one list, with Pause and Add agent beside the title", ()
   expect(screen.queryByRole("button", { name: "Copy MCP config" })).toBeNull();
 });
 
-it("shows Pause only while there is an agent dohc starts, and says when there are no agents", () => {
+it("shows Pause only while there is an agent dohc starts, and says when there are no agents", async () => {
   const { rerender } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly } } });
   expect(screen.queryByRole("button", { name: "Pause all agents" })).toBeNull();
   expect(ids()).toEqual(["terminal"]);
   rerender({ settings: { ...SETTINGS, agents: {} } });
-  expect(screen.getByTestId("agents-empty").textContent).toBe("No agents yet.");
+  // It says so once it knows you have no personal agents either.
+  expect((await screen.findByTestId("agents-empty")).textContent).toBe("No agents yet.");
 });
 
 it("copies an MCP config that runs dohc's MCP server as the agent you run", async () => {
@@ -1232,4 +1251,452 @@ it("starts one check for a double click, without asking main first", async () =>
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
   expect(bridgeMock.readWorkspaceTrust).not.toHaveBeenCalled();
   await act(async () => answer.resolve({ ok: true, detail: "ok" }));
+});
+
+
+const GROK_ID = `p-${"b".repeat(26)}`;
+const NOVA_ID = `p-${"n".repeat(26)}`;
+const GROK: PersonalAgent = {
+  agentId: GROK_ID, name: "Grok Bot", hue: "teal", reportedProduct: "Grok", reportedVersion: "4.1", status: "active",
+  createdAtMs: Date.UTC(2026, 10, 2), signedInAtMs: Date.UTC(2026, 10, 3, 10, 42), lastActionAtMs: null,
+  reach: [{ workspaceId: "ws-2", level: "view" }, { workspaceId: "ws-1", level: "comment" }],
+};
+const NOVA: PersonalAgent = {
+  agentId: NOVA_ID, name: "Nova", hue: "plum", reportedProduct: null, reportedVersion: null, status: "signed_out",
+  createdAtMs: Date.UTC(2026, 10, 3), signedInAtMs: null, lastActionAtMs: null, reach: [],
+};
+const ACCOUNT_KEY = "https://server.test#https://relay.test#user-1";
+function account(agents: readonly PersonalAgent[] = [{ ...GROK, lastActionAtMs: Date.now() - 120_000 }, NOVA]): PersonalAgentsAccount {
+  return {
+    accountKey: ACCOUNT_KEY,
+    host: "relay.test",
+    agentLinkOrigin: "https://relay.test",
+    roster: { revision: 3, agents: [...agents], workspaces: [{ workspaceId: "ws-1", name: "Trip" }, { workspaceId: "ws-2", name: "Budget" }] },
+    failure: null,
+  };
+}
+const personalIds = () => screen.queryAllByTestId("agent-row").filter((element) => element.dataset.personal !== undefined).map((element) => element.dataset.agentId);
+
+async function renderServer(fields: Partial<Parameters<typeof AgentList>[0]> = {}, agents?: readonly PersonalAgent[]) {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account(agents)] });
+  const rendered = renderList(fields);
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+  return rendered;
+}
+const menuItems = async (name: string) => {
+  await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
+  return screen.getAllByRole("menuitem").map((item) => item.textContent);
+};
+
+it("lists each personal agent in the one list, after the agents here, through its agent link", async () => {
+  await renderServer();
+  expect(bridgeMock.readPersonalAgents).toHaveBeenCalledWith({ refresh: true });
+  expect(ids()).toEqual(["default", "codex", "terminal", GROK_ID, NOVA_ID]);
+  // No section per server: the host is on each row.
+  expect(screen.queryByRole("heading", { name: "relay.test" })).toBeNull();
+  expect(state("Grok Bot")).toBe("Through agent link·relay.test·Active 2m ago");
+  // A signed-out agent stays, dimmed.
+  expect(state("Nova")).toBe("Through agent link·relay.test·Signed out");
+  expect(row("Nova").querySelector(`span[title="Nova"]`)!.getAttribute("class")).toContain("opacity-50");
+  expect(row("Grok Bot").querySelector(`span[title="Grok Bot"]`)!.getAttribute("class")).not.toContain("opacity-50");
+  // An agent that has done nothing yet says it signed in.
+  act(() => personalListener!({ accounts: [account([GROK, NOVA])] }));
+  expect(state("Grok Bot")).toBe("Through agent link·relay.test·Signed in");
+});
+
+it("waits for your personal agents before it says there are no agents", async () => {
+  const roster = deferred<PersonalAgentsEvent>();
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(roster.promise);
+  renderList({ settings: { ...SETTINGS, agents: {} } });
+  expect(screen.queryByTestId("agents-empty")).toBeNull();
+  await act(async () => roster.resolve({ accounts: [account([NOVA])] }));
+  expect(ids()).toEqual([NOVA_ID]);
+  expect(screen.queryByTestId("agents-empty")).toBeNull();
+});
+
+it("copies this workspace's agent link from Add agent, where the agent gets no name", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+  const { onSave } = await renderServer();
+  await user.click(screen.getByRole("button", { name: "Add agent" }));
+  expect(within(runsWith("link")).getByText("relay.test")).toBeTruthy();
+  await user.click(runsWith("link"));
+  expect(runsWith("link").getAttribute("aria-checked")).toBe("true");
+  // The agent names itself when it signs in.
+  expect(sheet().queryByTestId("agent-add-name")).toBeNull();
+  expect(sheet().queryByText("Color")).toBeNull();
+  expect(sheet().getByTestId("agent-add-link-name").textContent).toBe("You name it when it signs in.");
+  expect(sheet().getByTestId("agent-add-link").textContent).toBe("Triprelay.test");
+  expect(sheet().queryByTestId("agent-add-confirm")).toBeNull();
+  const copy = sheet().getByTestId<HTMLButtonElement>("agent-add-link-copy");
+  expect(copy.disabled).toBe(false);
+  expect(copy.textContent).toBe("Copy agent link");
+  await user.click(copy);
+  expect(writeText).toHaveBeenCalledWith("https://relay.test/mcp/agent/w/ws-1");
+  expect(onSave).not.toHaveBeenCalled();
+  writeText.mockRestore();
+});
+
+it("can't copy an agent link for a workspace that doesn't sync to the server, and says why", async () => {
+  await renderServer({ workspaceId: "ws-3" });
+  await openAdd();
+  await userEvent.click(runsWith("link"));
+  expect(sheet().getByTestId<HTMLButtonElement>("agent-add-link-copy").disabled).toBe(true);
+  expect(sheet().getByTestId("agent-add-link").textContent).toBe("TripNot synced");
+  expect(sheet().getByTestId("agent-add-link-note").textContent).toBe("Sync this workspace to relay.test to give an agent a link.");
+});
+
+it("dims Agent link when this computer is signed in to no server", async () => {
+  renderList();
+  await openAdd();
+  expect(await within(runsWith("link")).findByText("Not signed in to a server")).toBeTruthy();
+  expect(runsWith("link").disabled).toBe(true);
+  expect(runsWith("link").title).toBe("Sign in to a server to give an agent a link.");
+});
+
+it("shows a personal agent's color, reach, activity and Sign out on its page", async () => {
+  await renderServer();
+  const grok = await openAgent("Grok Bot");
+  expect(grok.getByTestId("agent-page-subtitle").textContent).toBe("@GrokBot·Through agent link·relay.test");
+  expect(grok.getByTestId("personal-agent-color")).toBeTruthy();
+  // Every workspace on the server, at its level, in the server's order.
+  expect(grok.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripComment", "BudgetView"]);
+  const activity = within(grok.getByTestId("personal-agent-activity"));
+  expect(activity.getByText("Signed in")).toBeTruthy();
+  expect(grok.getByTestId("personal-agent-activity").querySelector("time")!.getAttribute("datetime")).toBe(new Date(GROK.signedInAtMs!).toISOString());
+  expect(activity.getByText("2m ago")).toBeTruthy();
+  expect(activity.getByText("Grok 4.1", { exact: false }).textContent).toBe("Grok 4.1 as reported");
+  expect(grok.getByTestId("personal-agent-sign-out").textContent).toBe("Sign out");
+  // A personal agent never wakes automations, and Remove waits for sign-out.
+  expect(await menuItems("Grok Bot")).toEqual(["Rename"]);
+  expect(screen.queryByText("Use for automations")).toBeNull();
+});
+
+it("shows only what a product reported, and nothing when it reported neither", async () => {
+  await renderServer({}, [{ ...GROK, reportedVersion: null }, { ...NOVA, status: "active", reach: [] }]);
+  expect(within((await openAgent("Grok Bot")).getByTestId("personal-agent-activity")).getByText("Grok", { exact: false }).textContent).toBe("Grok as reported");
+  const nova = await openAgent("Nova");
+  expect(nova.queryByText("as reported")).toBeNull();
+  expect(within(nova.getByTestId("personal-agent-activity")).getByText("None yet")).toBeTruthy();
+  // The relay has no sign-in time for it.
+  expect(nova.getByTestId("personal-agent-activity").querySelector("time")).toBeNull();
+  expect(nova.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripNone", "BudgetNone"]);
+});
+
+it("changes what an agent can reach from its sheet", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  expect(dialog.getAllByTestId("personal-agent-reach-row").map((element) => element.querySelector("span")!.textContent)).toEqual(["Trip", "Budget"]);
+  expect(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" }).querySelector("[aria-checked='true']")!.textContent).toBe("Comment");
+  await userEvent.click(within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Budget" })).getByRole("radio", { name: "None" }));
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }] },
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
+  const { onError } = await renderServer();
+  bridgeMock.changePersonalAgent.mockResolvedValueOnce({ ok: false, error: "relay.test could not change Grok Bot right now. Try again shortly." });
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  await userEvent.click(within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Budget" })).getByRole("radio", { name: "Comment" }));
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  const alert = await dialog.findByTestId("personal-agent-reach-error");
+  expect(alert.textContent).toBe("relay.test could not change Grok Bot right now. Try again shortly.");
+  // The reason sits right above Cancel and Save reach.
+  expect(alert.nextElementSibling!.contains(dialog.getByRole("button", { name: "Save reach" }))).toBe(true);
+  expect(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Budget" }).querySelector("[aria-checked='true']")!.textContent).toBe("Comment");
+  expect(dialog.getByRole<HTMLButtonElement>("button", { name: "Save reach" }).disabled).toBe(false);
+  // The sheet shows its own failure; no toast while it is open.
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("closes the reach sheet on Cancel without changing anything", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  await userEvent.click(within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" })).getByRole("radio", { name: "None" }));
+  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(bridgeMock.changePersonalAgent).not.toHaveBeenCalled();
+  expect(page().getAllByTestId("personal-agent-reach-entry")[0]!.textContent).toBe("TripComment");
+});
+
+it("signs an agent out after asking, and its page dims with no reach", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByTestId("personal-agent-sign-out"));
+  const dialog = within(screen.getByRole("dialog", { name: "Sign out Grok Bot?" }));
+  expect(dialog.getByText("Its posts and changes stay in History.")).toBeTruthy();
+  await userEvent.click(dialog.getByRole("button", { name: "Sign out" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY, agentId: GROK_ID, change: { kind: "sign-out" },
+  });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  act(() => personalListener!({ accounts: [account([{ ...GROK, status: "signed_out", reach: [] }, NOVA])] }));
+  expect(screen.getByTestId("agent-page").dataset.status).toBe("signed_out");
+  expect(page().getByTestId("agent-page-subtitle").textContent).toBe("@GrokBot·Through agent link·relay.test·Signed out");
+  expect(page().getByTestId("agent-page-subtitle").parentElement!.getAttribute("class")).toContain("opacity-50");
+  expect(page().queryByTestId("personal-agent-reach-list")).toBeNull();
+  expect(page().queryByTestId("personal-agent-sign-out")).toBeNull();
+  expect(await menuItems("Grok Bot")).toEqual(["Rename", "Remove"]);
+});
+
+it("says why a sign-out failed in a toast, with Try again", async () => {
+  const { onError } = await renderServer();
+  bridgeMock.changePersonalAgent.mockResolvedValueOnce({ ok: false, error: "relay.test could not change Grok Bot right now. Try again shortly." });
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByTestId("personal-agent-sign-out"));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Sign out Grok Bot?" })).getByRole("button", { name: "Sign out" }));
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("relay.test could not change Grok Bot right now. Try again shortly.", undefined, expect.any(Function)));
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledTimes(2);
+});
+
+it("copies the agent link that signs a signed-out agent in again", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+  await renderServer();
+  const nova = await openAgent("Nova");
+  expect(nova.queryByTestId("personal-agent-reach-list")).toBeNull();
+  expect(nova.getByText("Sign in again")).toBeTruthy();
+  expect(screen.queryByTestId("personal-agent-link-reason")).toBeNull();
+  await user.click(nova.getByTestId("personal-agent-link-copy"));
+  expect(writeText).toHaveBeenCalledWith("https://relay.test/mcp/agent/w/ws-1");
+  writeText.mockRestore();
+});
+
+it("can't sign an agent in again from a workspace that doesn't sync to the server", async () => {
+  await renderServer({ workspaceId: "ws-3" });
+  const nova = await openAgent("Nova");
+  expect(nova.getByTestId<HTMLButtonElement>("personal-agent-link-copy").disabled).toBe(true);
+  expect(nova.getByTestId("personal-agent-link-reason").textContent).toBe("Sync this workspace to relay.test to give an agent a link.");
+});
+
+it("removes a signed-out agent, and Undo brings it back signed out", async () => {
+  const { onNotice } = await renderServer();
+  await chooseAction("Nova", "Remove");
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Nova.", expect.any(Function)));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY, agentId: NOVA_ID, change: { kind: "remove" },
+  });
+  // Its page goes with it, and focus goes to the Agents heading.
+  act(() => personalListener!({ accounts: [account([GROK])] }));
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  expect(personalIds()).toEqual([GROK_ID]);
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+  act(() => onNotice.mock.calls[0]![1]!());
+  await waitFor(() => expect(bridgeMock.changePersonalAgent).toHaveBeenLastCalledWith({
+    accountKey: ACCOUNT_KEY, agentId: NOVA_ID, change: { kind: "restore" },
+  }));
+  act(() => personalListener!({ accounts: [account([GROK, NOVA])] }));
+  expect(state("Nova")).toBe("Through agent link·relay.test·Signed out");
+});
+
+it("marks this computer's agent whose handle a personal agent has", async () => {
+  await renderServer({}, [{ ...GROK, name: "codex" }]);
+  expect(within(row("Codex")).getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
+  expect(within(row("Claude Code")).queryByTestId("agent-problem")).toBeNull();
+});
+
+it("won't name an agent here like a personal agent, even a signed-out one", async () => {
+  await renderServer();
+  await chooseAction("Codex", "Rename");
+  const input = screen.getByTestId("agent-name-input");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Nova");
+  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
+});
+
+it("gives a new agent a name no personal agent has", async () => {
+  await renderServer({}, [{ ...GROK, name: "Agent" }]);
+  await openAdd();
+  await userEvent.click(runsWith("mcp"));
+  expect(sheet().getByTestId<HTMLInputElement>("agent-add-name").value).toBe("Agent 2");
+});
+
+it("renames a personal agent on its server, to a name no other agent has", async () => {
+  await renderServer();
+  await chooseAction("Grok Bot", "Rename");
+  const input = screen.getByTestId("agent-name-input");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Codex");
+  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Grok{Enter}");
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY, agentId: GROK_ID, change: { kind: "name", name: "Grok" },
+  });
+});
+
+it("opens the page of the personal agent a notice names once the roster answers", async () => {
+  const roster = deferred<PersonalAgentsEvent>();
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(roster.promise);
+  renderList({ openAgent: { agentId: GROK_ID } });
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  // Main lists the account before its first read answers.
+  act(() => personalListener!({ accounts: [{ ...account(), roster: null }] }));
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  act(() => personalListener!({ accounts: [account()] }));
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot"));
+  expect(document.activeElement).toBe(screen.getByTestId("agent-back"));
+  await act(async () => roster.resolve({ accounts: [account()] }));
+  expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot");
+});
+
+it("opens the agent a notice names on a page of its own, with that agent's reach", async () => {
+  const irisId = `p-${"c".repeat(26)}`;
+  const iris: PersonalAgent = { ...GROK, agentId: irisId, name: "Iris", hue: "plum", reach: [{ workspaceId: "ws-2", level: "comment" }] };
+  const { rerender } = await renderServer({}, [GROK, iris]);
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const grok = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  await userEvent.click(within(grok.getByRole("radiogroup", { name: "What Grok Bot can do in Budget" })).getByRole("radio", { name: "Comment" }));
+  // Open on Iris's sign-in toast.
+  rerender({ openAgent: { agentId: irisId } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Iris"));
+  // Grok's sheet closed with Grok's page.
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await userEvent.click(page().getByRole("button", { name: "Change what Iris can reach" }));
+  const irisSheet = within(screen.getByRole("dialog", { name: "Change what Iris can reach" }));
+  expect(irisSheet.getByRole("radiogroup", { name: "What Iris can do in Trip" }).querySelector("[aria-checked='true']")!.textContent).toBe("None");
+  await userEvent.click(irisSheet.getByRole("button", { name: "Save reach" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY, agentId: irisId, change: { kind: "reach", reach: [{ workspaceId: "ws-2", level: "comment" }] },
+  });
+});
+
+it("opens a personal agent's page after it was renamed on another computer", async () => {
+  // The notice said "Grok Bot signed in as your agent"; the roster now calls it Grok.
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account([{ ...GROK, name: "Grok" }, NOVA])] });
+  renderList({ openAgent: { agentId: GROK_ID } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok"));
+});
+
+it("shows the list when the roster no longer holds the agent a notice names", async () => {
+  await renderServer({ openAgent: { agentId: `p-${"i".repeat(26)}` } });
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
+});
+
+it("goes back to the list from another agent's page when the roster no longer holds the agent a notice names", async () => {
+  const { rerender } = await renderServer();
+  await chooseAction("Grok Bot", "Rename");
+  // A name another agent has keeps the rename open.
+  const input = screen.getByTestId("agent-name-input");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Codex");
+  rerender({ openAgent: { agentId: `p-${"i".repeat(26)}` } });
+  await waitFor(() => expect(screen.queryByTestId("agent-page")).toBeNull());
+  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+  // The rename ended with its page.
+  await openAgent("Grok Bot");
+  expect(screen.queryByTestId("agent-name-input")).toBeNull();
+});
+
+it("ends a rename when a notice opens another agent's page", async () => {
+  const { rerender } = await renderServer();
+  await chooseAction("Grok Bot", "Rename");
+  const input = screen.getByTestId("agent-name-input");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Codex");
+  rerender({ openAgent: { agentId: NOVA_ID } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe(NOVA.name));
+  // A later notice for Grok opens its page, not the rename it left.
+  rerender({ openAgent: { agentId: GROK_ID } });
+  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot"));
+  expect(screen.queryByTestId("agent-name-input")).toBeNull();
+});
+
+it("says in the list that the account's agents couldn't be listed, with the cause in a toast", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({
+    accounts: [{ ...account(), roster: null, failure: "dohc could not reach relay.test. Check your connection." }],
+  });
+  const { onError } = renderList();
+  expect((await screen.findByTestId("personal-agents-retry")).textContent).toContain("dohc could not list your agents on relay.test.");
+  expect(onError).toHaveBeenCalledWith("dohc could not reach relay.test. Check your connection.", undefined, expect.any(Function), undefined,
+    `personal-agents:${ACCOUNT_KEY}`);
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account()] });
+  await userEvent.click(within(screen.getByTestId("personal-agents-retry")).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(personalIds()).toEqual([GROK_ID, NOVA_ID]));
+  expect(bridgeMock.readPersonalAgents).toHaveBeenLastCalledWith({ refresh: true });
+  expect(screen.queryByTestId("personal-agents-retry")).toBeNull();
+});
+
+it("reports again when Try again on the toast can't list the account's agents again, in the account's one row", async () => {
+  const failure = "dohc could not reach relay.test. Check your connection.";
+  const failing = (): PersonalAgentsEvent => ({ accounts: [{ ...account(), roster: null, failure }] });
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce(failing());
+  // Notices as the shell keeps them: a report replaces the row of its
+  // identity, and Try again takes its row back as the read starts.
+  const notices = new Map<string, () => Promise<void>>();
+  const onError = vi.fn((message: string, _cause?: unknown, retry?: () => Promise<void>, _details?: unknown, identity?: string) => {
+    notices.set(identity ?? message, retry!);
+  });
+  renderList({ onError });
+  const identity = `personal-agents:${ACCOUNT_KEY}`;
+  await waitFor(() => expect(notices.has(identity)).toBe(true));
+  const tryAgain = notices.get(identity)!;
+  notices.delete(identity);
+  // Still offline: main pushes the same words, then answers with them.
+  bridgeMock.readPersonalAgents.mockImplementationOnce(async () => {
+    personalListener!(failing());
+    return failing();
+  });
+  await act(tryAgain);
+  expect([...notices.keys()]).toEqual([identity]);
+  expect(onError).toHaveBeenCalledTimes(2);
+  expect(onError).toHaveBeenLastCalledWith(failure, undefined, expect.any(Function), undefined, identity);
+  // A push for another reason reports nothing.
+  act(() => personalListener!(failing()));
+  expect(onError).toHaveBeenCalledTimes(2);
+});
+
+it("reports an account's failure once while you open one of its agents and come back", async () => {
+  const failure = "dohc could not reach relay.test. Check your connection.";
+  // The last roster stays while the next read fails.
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [{ ...account(), failure }] });
+  const { onError } = renderList();
+  const reports = () => onError.mock.calls.filter(([message]) => message === failure);
+  await waitFor(() => expect(reports()).toHaveLength(1));
+  await openAgent("Grok Bot");
+  await back();
+  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
+  expect(reports()).toHaveLength(1);
+});
+
+it("reports an account's failure again when it ends and comes back while a page is open", async () => {
+  const failure = "dohc could not reach relay.test. Check your connection.";
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [{ ...account(), failure }] });
+  const { onError } = renderList();
+  const reports = () => onError.mock.calls.filter(([message]) => message === failure);
+  await waitFor(() => expect(reports()).toHaveLength(1));
+  await openAgent("Claude Code");
+  // Elsewhere the account signs out, signs in again, and its first read fails the same way.
+  act(() => personalListener!({ accounts: [] }));
+  act(() => personalListener!({ accounts: [{ ...account(), roster: null, failure: null }] }));
+  act(() => personalListener!({ accounts: [{ ...account(), roster: null, failure }] }));
+  await back();
+  await waitFor(() => expect(reports()).toHaveLength(2));
+});
+
+it("reports again when Try again on the toast can't read your personal agents again", async () => {
+  bridgeMock.readPersonalAgents.mockRejectedValueOnce(new Error("main went away"));
+  const { onError } = renderList();
+  const reports = () => onError.mock.calls.filter(([message]) => message === "dohc could not read your personal agents.");
+  await waitFor(() => expect(reports()).toHaveLength(1));
+  expect(screen.getByTestId("personal-agents-retry").textContent).toContain("dohc could not read your personal agents.");
+  bridgeMock.readPersonalAgents.mockRejectedValueOnce(new Error("main went away"));
+  await act(() => (reports()[0]![2] as () => Promise<void>)());
+  expect(reports()).toHaveLength(2);
+  expect(bridgeMock.readPersonalAgents).toHaveBeenLastCalledWith({ refresh: true });
 });

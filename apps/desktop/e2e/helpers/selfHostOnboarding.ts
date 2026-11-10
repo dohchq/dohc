@@ -150,10 +150,14 @@ function delayedStream(delayMs: number): Transform {
   return stream;
 }
 
-/** `delayMs` delays every request, response, upgrade and socket chunk by that much each way. */
+/**
+ * `delayMs` delays every request, response, upgrade and socket chunk by that much each way.
+ * `answer` replies for the upstream with a JSON body when it returns one.
+ */
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
   refuse?(method: string, path: string): boolean;
+  answer?(method: string, path: string): { status: number; body: unknown } | undefined;
   delayMs?: number;
 } = {}) {
   let delayMs = options.delayMs ?? 0;
@@ -179,6 +183,12 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
     if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
+    const answered = options.answer?.(incoming.method ?? "GET", path);
+    if (answered) {
+      body.resume();
+      outgoing.writeHead(answered.status, { "content-type": "application/json" }).end(JSON.stringify(answered.body));
+      return;
+    }
     const hostedWorkspace = incoming.method === "GET"
       ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
     const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace

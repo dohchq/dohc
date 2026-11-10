@@ -83,20 +83,25 @@ export type RelayPostAuthor =
     agentConnectionId: string;
   };
 
+/** Where a new thread goes: a channel, or a file by its object, with the file's current path to show. */
+export type RelayThreadPlace = { channelWireId: string } | { linkedObjectId: string; linkedPathHint: string };
+
 // The operations every desktop accepts for a post the relay writes. A link
 // post names the link grant and link principal, the agent connection when an
 // agent posted, and no account. A personal agent's post names the account,
-// the agent, and the connection it signed in with.
+// the agent, and the connection it signed in with. A new thread in a channel
+// is in its chat; one on a file is a Comment, which has no lane.
 export function linkPostOps(storage: StorageContext, input: {
   workspaceId: string; originId: string; messageId: string; threadId: string; createThread: boolean;
-  channelWireId: string; body: string; createdAtMs: number; author: RelayPostAuthor;
+  place: RelayThreadPlace; body: string; createdAtMs: number; author: RelayPostAuthor;
 }) {
-  const { createdAtMs, threadId } = input;
+  const { createdAtMs, threadId, place } = input;
   const firstOriginSeq = maxOriginSeq(storage, input.workspaceId, input.originId) + 1;
   return [
-    ...(input.createThread ? [{ opKind: "chat.thread.create", payload: {
-      threadId, title: "", channelWireId: input.channelWireId, lane: "chat", createdAtMs,
-    } }] : []),
+    ...(input.createThread ? [{ opKind: "chat.thread.create", payload: "channelWireId" in place
+      ? { threadId, title: "", channelWireId: place.channelWireId, lane: "chat", createdAtMs }
+      : { threadId, title: "", createdAtMs, linkedObjectId: place.linkedObjectId, linkedAtMs: createdAtMs, linkedPathHint: place.linkedPathHint },
+    }] : []),
     { opKind: "chat.message.append", payload: { messageId: input.messageId, threadId, body: input.body, ...input.author, createdAtMs } },
   ].map((op, index) => ({ originSeq: firstOriginSeq + index, opKind: op.opKind,
     payloadJson: JSON.stringify(op.payload), recordedAtMs: createdAtMs }));
@@ -176,7 +181,7 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     const { originId, messageId, threadId } = ids(principalId);
     const committedName = principal?.displayName ?? claimedName;
     const ops = linkPostOps(storage, { workspaceId, originId, messageId, threadId, createThread: input.threadId === null,
-      channelWireId: input.channelWireId, body, createdAtMs,
+      place: { channelWireId: input.channelWireId }, body, createdAtMs,
       author: { authorKind: "link", authorDisplayName: committedName ?? "Anonymous", linkGrantId: input.grantId, linkPrincipalId: principalId } });
     const addedBytes = (principal ? 0 : linkPrincipalStorageBytes(principalId, input.grantId, input.profileTokenHash)) +
       ops.reduce((bytes, op) => bytes + Buffer.byteLength(op.payloadJson), 0);
@@ -254,7 +259,7 @@ export function appendAgentChatPost(storage: StorageContext, input: {
     const limited = linkPostLimitRefusal(storage, { workspaceId, shareId, principalId: principal.principalId, createdAtMs });
     if (limited) return { ok: false, reason: limited };
     const ops = linkPostOps(storage, { workspaceId, originId, messageId, threadId, createThread: input.threadId === null,
-      channelWireId, body, createdAtMs, author: {
+      place: { channelWireId }, body, createdAtMs, author: {
         authorKind: "link", authorDisplayName: agentName(connection.reportedName),
         linkGrantId: connection.grantId, linkPrincipalId: principal.principalId, agentConnectionId: connection.connectionId,
       } });

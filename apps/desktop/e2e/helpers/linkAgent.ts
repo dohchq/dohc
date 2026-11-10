@@ -180,7 +180,9 @@ export async function signInLinkAgent(input: {
     const page = await context.newPage();
     await page.goto(authorize.href);
     await expect(page.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
-    await expect(page.getByText(input.clientName === undefined ? "The agent reported no name" : "Name reported by the agent")).toBeVisible();
+    // The page quotes the name the agent gave, and says nothing when it gave none.
+    if (input.clientName === undefined) await expect(page.getByText("is the name the agent gave")).toHaveCount(0);
+    else await expect(page.getByText(`"${input.clientName}" is the name the agent gave.`)).toBeVisible();
     // Allow posts the form, and the browser follows the 303 to the listener.
     await page.getByRole("button", { name: "Allow", exact: true }).click();
     await page.waitForURL((url) =>

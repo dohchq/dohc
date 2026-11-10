@@ -6,6 +6,7 @@ import * as SchemaGetter from "effect/SchemaGetter";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
+  OPTION_COLORS,
   type CollectionGetParams as CollectionGetContractParams,
   type CollectionGetRecordParams as CollectionGetRecordContractParams,
   type CollectionGetRecordResult as CollectionGetRecordContractResult,
@@ -858,6 +859,7 @@ const CollectionFieldDefinitionSchema = Schema.Union([
     name: Schema.String,
     type: Schema.Literals(["select", "multi-select"]),
     options: Schema.mutable(Schema.Array(Schema.String)),
+    colors: Schema.optionalKey(Schema.Record(Schema.String, Schema.mutableKey(Schema.Literals(OPTION_COLORS)))),
   }),
   mutableStruct({
     name: Schema.String,

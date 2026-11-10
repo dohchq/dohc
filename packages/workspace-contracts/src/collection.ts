@@ -1,3 +1,5 @@
+import { IDENTITY_HUES } from "./agentHues";
+
 export const COLLECTION_SCHEMA_FILENAME = "collection.yaml";
 export const RECORD_ID_FRONTMATTER_KEY = "id";
 
@@ -18,10 +20,16 @@ interface ScalarFieldDefinition {
   type: "text" | "number" | "checkbox" | "date" | "person" | "url";
 }
 
+/** The colors an option can take. Each names one of the app's identity hues. */
+export const OPTION_COLORS = ["gray", ...IDENTITY_HUES] as const;
+export type OptionColor = (typeof OPTION_COLORS)[number];
+
 interface SelectFieldDefinition {
   name: string;
   type: "select" | "multi-select";
   options: string[];
+  /** Colors chosen for some options, keyed by option. Absent when none are chosen. */
+  colors?: Record<string, OptionColor>;
 }
 
 export interface RelationFieldDefinition {
@@ -35,6 +43,14 @@ export interface RelationFieldDefinition {
 interface ButtonFieldDefinition {
   name: string;
   type: "button";
+}
+
+/** The color chosen for an option, if any. Own keys only, so an option named "constructor" has none. */
+export function chosenOptionColor(
+  colors: Readonly<Record<string, OptionColor>> | undefined,
+  option: string,
+): OptionColor | undefined {
+  return colors !== undefined && Object.hasOwn(colors, option) ? colors[option] : undefined;
 }
 
 export type FieldDefinition =
@@ -91,6 +107,8 @@ export const COLLECTION_SCHEMA_REASON_CODES = [
   "schema-collection-limit-exceeded",
   "record-too-large-for-adoption",
   "unsupported-field-reference",
+  "unknown-option-color",
+  "unknown-option-reference",
 ] as const;
 
 type CollectionSchemaReasonCode =

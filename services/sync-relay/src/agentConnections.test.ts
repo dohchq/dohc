@@ -611,10 +611,11 @@ describe("agent sign-in for share links", () => {
     const registered = await registerClient(f);
     await expectRefused(await register({ registration: "metadata-document", clientId: registered, clientName: "Impostor" }));
     expect(f.storage.registerAgentClient({
-      clientId: registered, registration: "registered", reportedName: "Impostor", redirectUris: [OTHER_REDIRECT], nowMs: f.now.value,
+      clientId: registered, registration: "registered", reportedName: "Impostor", reportedVersion: null, redirectUris: [OTHER_REDIRECT],
+      nowMs: f.now.value,
     })).toBe(false);
     expect(f.storage.getAgentClient(registered)).toEqual({
-      clientId: registered, registration: "registered", reportedName: "Test agent", redirectUris: [REDIRECT],
+      clientId: registered, registration: "registered", reportedName: "Test agent", reportedVersion: null, redirectUris: [REDIRECT],
     });
   });
 

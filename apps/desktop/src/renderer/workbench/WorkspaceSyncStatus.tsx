@@ -88,6 +88,14 @@ export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined)
   return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable";
 }
 
+// The server said it is busy, and dohc syncs again by itself, so the title
+// bar shows a ring rather than a failure that needs the person.
+function syncWaitsOnBusyServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+  return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-busy";
+}
+const SERVER_BUSY_LABEL = "Server busy";
+const SERVER_BUSY_DESCRIPTION = "Server busy. dohc keeps trying to sync.";
+
 // The title bar says "Server unreachable". Features that need the server
 // then add no indicator, toast or row of their own, since the server's
 // report covers them. A failed save or a required update takes the title
@@ -98,10 +106,12 @@ export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefi
 }
 
 // A file that couldn't save outranks every state but those that stop sync
-// for the whole workspace, which keep the title bar.
+// for the whole workspace, which keep the title bar. A busy server does not
+// stop sync.
 function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: number): string | null {
   if (failedSaves === 0 || syncStatus?.updateRequired) return null;
-  if (syncStatus?.state === "conflict" || syncStatus?.state === "sync-failed") return null;
+  if (syncStatus?.state === "conflict") return null;
+  if (syncStatus?.state === "sync-failed" && !syncWaitsOnBusyServer(syncStatus)) return null;
   return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
 }
 
@@ -116,12 +126,15 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
   // A failed sync names the server when the server is what failed.
+  const busy = syncWaitsOnBusyServer(syncStatus);
   const stateLabel =
     state === "sync-failed" && syncNamesServer(syncStatus)
       ? "Server unreachable"
-      : state
-        ? SYNC_LABEL[state]
-        : null;
+      : busy
+        ? SERVER_BUSY_LABEL
+        : state
+          ? SYNC_LABEL[state]
+          : null;
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
@@ -131,12 +144,15 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     : state === "syncing" && syncStatus?.claimingIdentity
       ? "Setting up sync…"
       : label);
-  const description = (shownLabel === label && state ? SYNC_DESCRIPTION[state] : undefined) ?? shownLabel;
+  const stateDescription = busy ? SERVER_BUSY_DESCRIPTION : state ? SYNC_DESCRIPTION[state] : undefined;
+  const description = (shownLabel === label ? stateDescription : undefined) ?? shownLabel;
   const dot: DotKind = saveFailed || syncStatus?.updateRequired
     ? "attention"
-    : state
-      ? SYNC_DOT[state]
-      : "waiting";
+    : busy
+      ? "working"
+      : state
+        ? SYNC_DOT[state]
+        : "waiting";
   // A state that needs the person, or waits on the person to connect, says
   // so in words beside the mark.
   const worded = dot === "attention" || dot === "off";

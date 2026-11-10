@@ -1133,7 +1133,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): void {
+  }): boolean {
     return sharesStorage.createShare(this, input);
   }
 
@@ -1685,6 +1685,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchChatMessages(this, input);
   }
 
+  fetchCommentMessages(input: Parameters<typeof logStorage.fetchCommentMessages>[1]): ReturnType<typeof logStorage.fetchCommentMessages> {
+    return logStorage.fetchCommentMessages(this, input);
+  }
+
+  fetchThreadMessages(input: Parameters<typeof logStorage.fetchThreadMessages>[1]): ReturnType<typeof logStorage.fetchThreadMessages> {
+    return logStorage.fetchThreadMessages(this, input);
+  }
+
   fetchChatMessage(input: Parameters<typeof logStorage.fetchChatMessage>[1]): SyncRelayLogRow | null {
     return logStorage.fetchChatMessage(this, input);
   }
@@ -1791,6 +1799,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return personalAgentStorage.listPersonalAgents(this, ownerUserId);
   }
 
+  personalRosterRevision(ownerUserId: string): number {
+    return personalAgentStorage.personalRosterRevision(this, ownerUserId);
+  }
+
   changePersonalAgent(input: Parameters<typeof personalAgentStorage.changePersonalAgent>[1]): personalAgentStorage.PersonalAgentChangeResult {
     return personalAgentStorage.changePersonalAgent(this, input);
   }
@@ -1821,6 +1833,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   readPersonalReach(credential: personalAgentChatStorage.PersonalCredential, workspaceId: string, nowMs: number): personalAgentStorage.PersonalReach | null {
     return personalAgentChatStorage.readPersonalReach(this, credential, workspaceId, nowMs);
+  }
+
+  readPersonalWorkspaces(credential: personalAgentChatStorage.PersonalCredential, nowMs: number): personalAgentChatStorage.PersonalWorkspaces | null {
+    return personalAgentChatStorage.readPersonalWorkspaces(this, credential, nowMs);
   }
 
   appendPersonalChatPost(input: Parameters<typeof personalAgentChatStorage.appendPersonalChatPost>[1]): personalAgentChatStorage.AppendPersonalChatPostResult {

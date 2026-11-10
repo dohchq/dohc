@@ -304,6 +304,14 @@ describe("table gestures while the note changes", () => {
     editor.view.dispatch(editor.state.tr.insertText("New text ", 1));
   }
 
+  function editCell(editor: Editor, label: string) {
+    let text = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text === label) text = pos;
+    });
+    editor.view.dispatch(editor.state.tr.insertText("x", text));
+  }
+
   function expectNoDragChrome(editor: Editor) {
     expect(editor.view.dom.querySelector(
       ".is-reordering, .is-dragging, .is-drop-target, .dohc-table-drag-source, .dohc-table-drop-before, .dohc-table-drop-after, [aria-grabbed='true']",
@@ -313,14 +321,14 @@ describe("table gestures while the note changes", () => {
       .toBe("Table reorder cancelled.");
   }
 
-  it.each([
+  const gestures = [
     { band: "row", origin: "synced" },
     { band: "column", origin: "synced" },
     { band: "row", origin: "local" },
     { band: "column", origin: "local" },
-  ])("cancels a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
-    const { editor, collaborator } = await setup();
-    const before = tableTextGrid(editor);
+  ];
+
+  function startGripDrag(editor: Editor, band: string) {
     const selector = `.dohc-table-grip--${band === "column" ? "col" : "row"}`;
     const grips = editor.view.dom.querySelectorAll(selector);
     const source = grips[0]!;
@@ -330,9 +338,36 @@ describe("table gestures while the note changes", () => {
     dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
     expect(source.getAttribute("aria-grabbed")).toBe("true");
     expect(document.body.querySelector(".dohc-table-drop-indicator.is-visible")).not.toBeNull();
+    return { selector, source };
+  }
+
+  it.each(gestures)("finishes a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
+    const { editor, collaborator } = await setup();
+    const before = tableTextGrid(editor);
+    const { selector, source } = startGripDrag(editor, band);
 
     editAbove(origin === "synced" ? collaborator : editor);
     expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    expect(source.getAttribute("aria-grabbed")).toBe("true");
+    elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
+    dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(errors).toEqual([]);
+    const moved = band === "row"
+      ? [before[1]!, before[2]!, before[0]!]
+      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+    expect(tableTextGrid(editor)).toEqual(moved);
+    expect(tableTextGrid(collaborator)).toEqual(moved);
+    expect(source.getAttribute("aria-grabbed")).toBe("false");
+  });
+
+  it.each(gestures)("cancels a $band grip drag after a $origin edit in its table", async ({ band, origin }) => {
+    const { editor, collaborator } = await setup();
+    const { selector, source } = startGripDrag(editor, band);
+
+    editCell(origin === "synced" ? collaborator : editor, "C3");
+    const before = tableTextGrid(editor);
+    expect(before[2]![2]).toBe("xC3");
     expectNoDragChrome(editor);
     elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
     dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
@@ -377,15 +412,15 @@ describe("table gestures while the note changes", () => {
     return tableNode(editor).content?.map((row) => row.content?.map((cell) => cell.attrs?.colwidth ?? null));
   }
 
-  it("cancels a column width resize after a synced edit invalidates its handle", async () => {
+  it("cancels a column width resize after a synced edit in its table", async () => {
     const { editor, collaborator } = await setup();
-    const before = tableNode(editor);
     const table = editor.view.dom.querySelector("table")!;
     const beforeSize = [table.style.width, table.style.minWidth];
     startColumnResize(editor);
 
-    editAbove(collaborator);
-    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    editCell(collaborator, "C3");
+    const before = tableNode(editor);
+    expect(tableTextGrid(editor)[2]![2]).toBe("xC3");
     mouse(window, "mousemove", 259);
     mouse(window, "mouseup", 259);
 
@@ -399,13 +434,14 @@ describe("table gestures while the note changes", () => {
     expect(editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle")).toBeNull();
   });
 
-  it("finishes a column width resize on the same column after a local edit above the table", async () => {
+  it.each(["synced", "local"])("finishes a column width resize on the same column after a %s edit above the table", async (origin) => {
     const { editor, collaborator } = await setup();
     const before = tableTextGrid(editor);
     const handle = startColumnResize(editor);
 
-    editAbove(editor);
+    editAbove(origin === "synced" ? collaborator : editor);
     expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle + "New text ".length);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
     mouse(window, "mousemove", 259);
     mouse(window, "mouseup", 259);
 
@@ -414,6 +450,24 @@ describe("table gestures while the note changes", () => {
     expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
     expect(widths(collaborator)).toEqual(widths(editor));
     expect(tableTextGrid(editor)).toEqual(before);
+  });
+
+  it("finishes a column width resize after a synced change that leaves the note as it was", async () => {
+    const { editor, collaborator } = await setup();
+    const handle = startColumnResize(editor);
+
+    // A synced change replaces the whole document with new nodes, even when
+    // nothing in it changed.
+    const same = editor.state.schema.nodeFromJSON(editor.state.doc.toJSON());
+    editor.view.dispatch(editor.state.tr.replaceWith(0, editor.state.doc.content.size, same.content));
+    expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
   });
 
   function deleteColumnOf(editor: Editor, label: string) {
@@ -477,17 +531,35 @@ describe("table gestures while the note changes", () => {
       .toBe("A2");
   });
 
-  it("cancels a row height resize after a synced edit above the table", async () => {
-    const { editor, collaborator } = await setup();
-    const before = tableNode(editor);
+  function startRowResize(editor: Editor) {
     const row = editor.view.dom.querySelector("tr")!;
     const handle = editor.view.dom.querySelector(".dohc-table-row-resize")!;
     vi.spyOn(row, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 300, 40));
     dispatchPointer(handle, "pointerdown", { clientY: 100 });
     dispatchPointer(handle, "pointermove", { clientY: 134 });
     expect(row.style.height).toBe("74px");
+    return { row, handle };
+  }
+
+  it("finishes a row height resize after a synced edit above the table", async () => {
+    const { editor, collaborator } = await setup();
+    startRowResize(editor);
 
     editAbove(collaborator);
+    dispatchPointer(editor.view.dom, "pointermove", { clientY: 150 });
+    dispatchPointer(editor.view.dom, "pointerup", { clientY: 150 });
+
+    expect(errors).toEqual([]);
+    expect(tableNode(editor).content?.map((row) => row.attrs?.height ?? null)).toEqual([90, null, null]);
+    expect(tableNode(collaborator)).toEqual(tableNode(editor));
+  });
+
+  it("cancels a row height resize after a synced edit in its table", async () => {
+    const { editor, collaborator } = await setup();
+    const { row, handle } = startRowResize(editor);
+
+    editCell(collaborator, "C3");
+    const before = tableNode(editor);
     dispatchPointer(editor.view.dom, "pointermove", { clientY: 150 });
     dispatchPointer(editor.view.dom, "pointerup", { clientY: 150 });
 

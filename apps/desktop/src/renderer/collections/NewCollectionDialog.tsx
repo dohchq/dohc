@@ -11,7 +11,7 @@ import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/
 import { draftToField, emptyFieldDraft, fieldDraftError, FieldDraftRow, inputClass, parseOptionsText, selectClass, type FieldDraft } from "./FieldForm";
 import { serializeCollectionSchema } from "./schemaAuthoring";
 import { CollectionCreationPreview, CollectionKindShape } from "./CreationPreview";
-import { FieldTypeIcon } from "./FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 import { datasetDefinitionFromDrafts, type TransactionalFieldDraft } from "./datasetDefinitionFromDrafts";
 
 type DataDraft = { name: string; type: TransactionalFieldDraft["type"]; required: boolean; unique: boolean; options: string; hasDefault: boolean; defaultText: string };

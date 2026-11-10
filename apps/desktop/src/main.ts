@@ -200,6 +200,7 @@ import {
   agentRunStateOperations,
   chatDispatchPauseOperations,
   agentsListeningOperations,
+  personalAgentsOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -230,7 +231,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
-import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
+import { currentWindowSession, windowShowsWorkspace } from "./window/workspaceWindowReuse";
 import { createOldWindows } from "./window/oldWindows";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
@@ -567,6 +568,7 @@ import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } f
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
+import { createPersonalAgentRoster } from "./agents/personalAgentRoster";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -903,7 +905,7 @@ function notifyWorkspaceWindows(workspaceId: string, channel: string, details: R
 
 const shareDirectWriteDelivery = createShareDirectWriteDelivery<WebContents>({
   targets: () => BrowserWindow.getAllWindows().map(window => window.webContents),
-  currentSession: sender => rendererWorkspaceSessions.current(sender),
+  currentSession: sender => currentWindowSession(rendererWorkspaceSessions.current(sender), workspaceAuthorities),
   isSharedView: workspaceId => shareViewIsPresent(findWorkspace(workspaceId)?.shareView),
 });
 
@@ -1127,6 +1129,42 @@ let ownerDeliveryCredentialLifetime = new AbortController();
 // across physical workspaces in the same session, and clear it whenever that
 // credential session ends or changes.
 const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
+// The signed-in account's personal agents, which Settings › Agents, the @
+// picker, and chat names read. Sign-in, each notice pull, and Settings ›
+// Agents opening refresh it.
+const personalAgentRoster = createPersonalAgentRoster({
+  session: async () => {
+    await warmCredentialCache();
+    const { credentials, generation } = credentialSessionCache.snapshot();
+    if (!credentials?.relayUrl) return null;
+    return {
+      key: chatShareSessionKey(credentials)!,
+      // Server discovery accepts a server only when its relay and share-web share one origin.
+      origin: new URL(credentials.relayUrl).origin,
+      relay: {
+        baseUrl: credentials.relayUrl,
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+      },
+      isCurrent: () => credentialSessionCache.snapshot().generation === generation,
+      unauthorized: async () => {
+        await handleRelayUnauthorized({
+          requestCredentials: credentials,
+          currentCredentials: cachedCredentials,
+          clearCachedCredentials: () => clearCachedCredentials(),
+          notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+          notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+          invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
+        });
+      },
+    };
+  },
+  onChanged: (personalAgents) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      sendIfOpen(window, CHANNELS.personalAgents, personalAgents);
+    }
+  },
+});
 const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot, settled) => {
     ownerDeliveryCredentialLifetime.abort();
@@ -1136,6 +1174,7 @@ const credentialSessionCache =
     credentialCacheGeneration = snapshot.generation;
     receivedShareCredentialsChanged?.(cachedCredentials, settled);
     if (buttonAccountChanged) {
+      personalAgentRoster.accountChanged();
       refreshSharedButtonInspections(() => clearButtonInspections?.(),
         activity.listOpenWorkspaceIds().filter(workspaceId => sharedViewOf(workspaceId) !== null),
         notifyCollectionAutomationsChanged);
@@ -1223,6 +1262,7 @@ function noticeStore(): NoticeStore {
     session: noticeSession,
     installId: localInstallationId,
     onChanged: notifyNoticesChanged,
+    onPersonalAgentsRevision: (account, revision) => personalAgentRoster.revisionSeen(account.key, revision),
     ...createWorkspaceRefusalNotices({
       sessions: () => desktopEngine.sessions,
       workspaces: listWorkspaces,
@@ -2172,7 +2212,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), stateDir: stateDir(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
-  remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
+  remove: async (binding, cleanup) => { await removePhysicalWorkspace(binding, cleanup, undefined, { keepDrafts: true }); },
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
   closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
@@ -7773,6 +7813,11 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, agentsListeningOperations, {
     readAgentsListening: () => ({ agentIds: agentWaits.listening() }),
+  });
+
+  registerOperations(operationBoundary, personalAgentsOperations, {
+    readPersonalAgents: ({ refresh }) => personalAgentRoster.read(refresh),
+    changePersonalAgent: ({ accountKey, agentId, change }) => personalAgentRoster.change(accountKey, agentId, change),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {

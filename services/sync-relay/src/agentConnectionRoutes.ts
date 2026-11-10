@@ -64,13 +64,10 @@ const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/u;
 const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 const connectionCursor = cursorCodec<AgentConnectionCursor>({ ms: "ms", id: "id" }, "cursor");
-const PASSWORD_CHAR_LIMIT = 1_024;
 // Refusals a signed-in person or a waiting agent can act on. Every other refusal is the same bytes.
 const ANSWERED_REFUSALS = new Set<string>([
   RELAY_ERRORS.link_read_rate_limited.code,
   RELAY_ERRORS.personal_agent_unavailable.code,
-  RELAY_ERRORS.password_incorrect.code,
-  RELAY_ERRORS.password_rate_limited.code,
   RELAY_ERRORS.sign_in_again.code,
 ]);
 
@@ -197,13 +194,14 @@ export function createAgentConnectionRoutes(input: {
   }
 
   function registerClient(body: Record<string, unknown>): Response {
-    fields(body, ["registration", "redirectUris"], ["clientId", "clientName"]);
+    fields(body, ["registration", "redirectUris"], ["clientId", "clientName", "clientVersion"]);
     if (!Array.isArray(body.redirectUris) || body.redirectUris.length === 0 ||
         body.redirectUris.length > AGENT_REDIRECT_URI_LIMIT) {
       throw new Refused();
     }
     const redirectUris = [...new Set(body.redirectUris.map(redirectUri))];
     const reportedName = optionalText(body.clientName, AGENT_CLIENT_NAME_LIMIT);
+    const reportedVersion = optionalText(body.clientVersion, AGENT_CLIENT_NAME_LIMIT);
     const registration = body.registration;
     let clientId: string;
     if (registration === "registered") {
@@ -222,7 +220,7 @@ export function createAgentConnectionRoutes(input: {
     } else {
       throw new Refused();
     }
-    if (!storage.registerAgentClient({ clientId, registration, reportedName, redirectUris, nowMs: nowMs() })) {
+    if (!storage.registerAgentClient({ clientId, registration, reportedName, reportedVersion, redirectUris, nowMs: nowMs() })) {
       throw new Refused();
     }
     return jsonResponse({ ok: true, clientId });
@@ -243,7 +241,7 @@ export function createAgentConnectionRoutes(input: {
       if (!input.linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
       const workspaceId = personalWorkspaceFromResource(resource);
       const requestId = newLinkBearer();
-      // Personal sign-in needs the fence store, which consent checks the password against.
+      // Personal sign-in needs the fence store, which consent checks the browser's session against.
       const begun = workspaceId !== null && input.personalAgents.fence !== undefined && storage.beginPersonalAuthorization({
         authorizationId: newId(),
         requestHash: hash("request", requestId),
@@ -338,7 +336,9 @@ export function createAgentConnectionRoutes(input: {
   }
 
   // The signed-in account owns the workspace the link was copied from, and
-  // its password hasn't changed since this browser signed in.
+  // this browser signed in at or after the account's last password change.
+  // A sign-in that read the old hash before a reset and inserts its session
+  // after the reset commits begins after the change, so it passes.
   async function personalConsentContext(request: Request, requestId: string) {
     const { fence } = input.personalAgents;
     const pending = storage.readPersonalAuthorization(hash("request", requestId), nowMs());
@@ -392,24 +392,7 @@ export function createAgentConnectionRoutes(input: {
     return { kind: "existing", agentId: choice.agentId };
   }
 
-  // A wrong password counts against the account, as sign-in counts it. An
-  // account checks one password at a time, so guesses sent together can't
-  // all start before the first wrong one is counted.
-  const checkingPassword = new Set<string>();
-  async function checkPassword(userId: string, passwordHash: string | null, password: string): Promise<void> {
-    const { fence, passwordLimiter } = input.personalAgents;
-    if (checkingPassword.has(userId) || !passwordLimiter.has(userId, nowMs())) throw relayError("password_rate_limited");
-    checkingPassword.add(userId);
-    try {
-      if (passwordHash !== null && await fence!.verifyPassword(passwordHash, password)) return;
-      passwordLimiter.allow(userId, nowMs());
-    } finally {
-      checkingPassword.delete(userId);
-    }
-    throw relayError("password_incorrect");
-  }
-
-  // Allow records the fence epoch read with the password hash, so a password
+  // Allow records the fence epoch read with the session check, so a password
   // changed after that read fails redemption.
   async function decidePersonal(request: Request, body: Record<string, unknown>): Promise<Response> {
     if (body.decision === "cancel") {
@@ -418,17 +401,12 @@ export function createAgentConnectionRoutes(input: {
       if (!cancelled) throw new Refused();
       return jsonResponse({ ok: true, redirectUri: cancelled.redirectUri, state: cancelled.state });
     }
-    fields(body, ["requestId", "decision", "password", "agent", "reach"]);
+    fields(body, ["requestId", "decision", "agent", "reach"]);
     const requestId = text(body.requestId, 64);
     const agent = personalAgentChoice(body.agent);
     const reach = parsePersonalReach(body.reach);
-    const password = body.password;
-    if (body.decision !== "allow" || !reach || reach.length === 0 ||
-        typeof password !== "string" || password.length === 0 || password.length > PASSWORD_CHAR_LIMIT) {
-      throw new Refused();
-    }
+    if (body.decision !== "allow" || !reach || reach.length === 0) throw new Refused();
     const { session, credentials } = await personalConsentContext(request, requestId);
-    await checkPassword(session.userId, credentials.passwordHash, password);
     const code = newLinkBearer();
     const allowed = storage.allowPersonalAuthorization({
       requestHash: hash("request", requestId),

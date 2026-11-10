@@ -441,9 +441,43 @@ export function hasRefusedSettlement(storage: StorageContext, input: {
 export const CHAT_HISTORY_SCAN_WINDOW = 2_000;
 export const CHAT_HISTORY_SCAN_BYTES = 4 * 1024 * 1024;
 
-export function fetchChatMessages(storage: StorageContext, input: {
-  workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+export interface ChatPageInput {
+  workspaceId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+}
+
+/** A page of the messages in a channel's threads: those whose first create names the channel. */
+export function fetchChatMessages(storage: StorageContext, input: ChatPageInput & {
+  channelWireId: string;
 }): FetchLogPageResult & {latestCursor: number} {
+  return fetchPlacedMessages(storage, input, {
+    sql: "json_extract(create_json, '$.channelWireId') = ?", params: [input.channelWireId],
+  });
+}
+
+/**
+ * A page of the messages in a file's Comment threads: those whose first
+ * create binds the file's object, or its path. The caller checks each
+ * thread's binding again.
+ */
+export function fetchCommentMessages(storage: StorageContext, input: ChatPageInput & {
+  objectId: string; path: string;
+}): FetchLogPageResult & {latestCursor: number} {
+  return fetchPlacedMessages(storage, input, {
+    sql: "(json_extract(create_json, '$.linkedObjectId') = ? OR json_extract(create_json, '$.linkedPath') = ?)",
+    params: [input.objectId, input.path],
+  });
+}
+
+/** A page of one thread's messages. The caller checks where the thread is. */
+export function fetchThreadMessages(storage: StorageContext, input: ChatPageInput & {
+  threadId: string;
+}): FetchLogPageResult & {latestCursor: number} {
+  return fetchPlacedMessages(storage, input, { sql: "thread_id = ?", params: [input.threadId] });
+}
+
+// The messages of one scan window whose thread's first create matches `place`.
+function fetchPlacedMessages(storage: StorageContext, input: ChatPageInput, place: { sql: string; params: string[] }):
+  FetchLogPageResult & {latestCursor: number} {
   const older = input.direction === "older";
   const coordinates = storage.db.prepare(`SELECT relay_seq, octet_length(payload_json) AS payload_bytes FROM sync_relay_log
     WHERE workspace_id = ? ${input.cursor === null ? "" : `AND relay_seq ${older ? "<" : ">"} ?`}
@@ -466,17 +500,19 @@ export function fetchChatMessages(storage: StorageContext, input: {
         AND m.op_kind = 'chat.message.append' AND json_valid(m.payload_json)
     ), window_threads AS MATERIALIZED (
       SELECT DISTINCT json_extract(payload_json, '$.threadId') AS thread_id FROM window_messages
-    ), channel_threads AS MATERIALIZED (
-      SELECT w.thread_id FROM window_threads w
-      WHERE json_extract((SELECT t.payload_json FROM sync_relay_log t
+    ), thread_creates AS MATERIALIZED (
+      SELECT w.thread_id, (SELECT t.payload_json FROM sync_relay_log t
         WHERE t.workspace_id = ? AND t.op_kind = 'chat.thread.create' AND json_valid(t.payload_json)
           AND json_extract(t.payload_json, '$.threadId') = w.thread_id
-        ORDER BY t.relay_seq LIMIT 1), '$.channelWireId') = ?
+        ORDER BY t.relay_seq LIMIT 1) AS create_json
+      FROM window_threads w
+    ), placed_threads AS MATERIALIZED (
+      SELECT thread_id FROM thread_creates WHERE ${place.sql}
     )
     SELECT * FROM window_messages
-    WHERE json_extract(payload_json, '$.threadId') IN (SELECT thread_id FROM channel_threads)
+    WHERE json_extract(payload_json, '$.threadId') IN (SELECT thread_id FROM placed_threads)
     ORDER BY relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
-    .all(input.workspaceId, Math.min(first, edge), Math.max(first, edge), input.workspaceId, input.channelWireId, input.limit + 1);
+    .all(input.workspaceId, Math.min(first, edge), Math.max(first, edge), input.workspaceId, ...place.params, input.limit + 1);
   const rows = matches.slice(0, input.limit).map(rowToLogRow);
   const truncated = matches.length > input.limit;
   return {rows, nextCursor: truncated ? rows[rows.length - 1]!.relaySeq : edge,

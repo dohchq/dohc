@@ -25,6 +25,10 @@ const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
   "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
+// The ghost recipe at the default button height, for a page's toolbar beside
+// a PrimaryButton. Pressed, it takes the selected fill, as an active row does.
+const toolbarGhostButtonClass =
+  "inline-flex h-8 items-center gap-2 whitespace-nowrap rounded-md px-2 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle aria-pressed:bg-selected aria-pressed:text-ink";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
@@ -84,9 +88,10 @@ export const SecondaryButton = forwardRef<HTMLButtonElement, SecondaryButtonProp
 
 /** Quiet action with no border and no fill until hover, such as Change beside
  * a path. An icon can lead its label. */
-export const GhostButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
-  function GhostButton({ className, type, ...rest }, ref) {
-    return <button ref={ref} type={type ?? "button"} className={cx(ghostButtonClass, className)} {...rest} />;
+export const GhostButton = forwardRef<HTMLButtonElement, NativeButtonProps & { size?: "default" | "toolbar" }>(
+  function GhostButton({ className, type, size, ...rest }, ref) {
+    const sized = size === "toolbar" ? toolbarGhostButtonClass : ghostButtonClass;
+    return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
   },
 );
 

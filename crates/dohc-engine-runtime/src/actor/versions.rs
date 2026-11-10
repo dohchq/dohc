@@ -330,21 +330,63 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
     std::fs::symlink_metadata(root_dir.join(path)).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// The previous version's paths of both kinds, read the first time a switch
+/// write meets a real folder, which few switches do.
+struct PreviousPaths<'v> {
+    workspace_id: &'v str,
+    version_id: &'v str,
+    paths: Option<Vec<String>>,
+}
+
+impl<'v> PreviousPaths<'v> {
+    fn new(workspace_id: &'v str, version_id: &'v str) -> Self {
+        Self {
+            workspace_id,
+            version_id,
+            paths: None,
+        }
+    }
+
+    fn get(&mut self, store: &EngineStore) -> Result<&[String], RuntimeError> {
+        if self.paths.is_none() {
+            let (workspace_id, version_id) = (self.workspace_id, self.version_id);
+            self.paths = Some(store.read_with(|connection| {
+                connection
+                    .prepare_cached(
+                        "SELECT path FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 \
+                         UNION ALL SELECT path FROM secret_files \
+                         WHERE workspace_id = ?1 AND version_id = ?2",
+                    )
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map(params![workspace_id, version_id], |row| row.get(0))?
+                            .collect::<Result<Vec<String>, _>>()
+                    })
+                    .map_err(StorageError::corrupt_public)
+            })?);
+        }
+        Ok(self.paths.as_deref().unwrap_or_default())
+    }
+}
+
 /// Whether a switch writing a file at `path` may replace a real folder there:
-/// one of the `previous` paths lies inside that folder.
+/// one of the `listed` paths, or one of the previous version's paths of
+/// either kind, lies inside that folder. So a folder holding only secrets
+/// can give way to a plaintext file, and the reverse.
 /// [`keep_folder_writes_the_switch_clears`] then decides.
 fn replaces_folder<'a>(
+    store: &EngineStore,
     root_dir: &std::path::Path,
     path: &str,
-    previous: impl IntoIterator<Item = &'a str>,
-) -> bool {
+    listed: impl IntoIterator<Item = &'a str>,
+    previous: &mut PreviousPaths<'_>,
+) -> Result<bool, RuntimeError> {
     if !is_folder(root_dir, path) {
-        return false;
+        return Ok(false);
     }
     let folder = path_key(path);
-    previous
-        .into_iter()
-        .any(|inner| is_inside(&path_key(inner), &folder))
+    let inside = |inner: &str| is_inside(&path_key(inner), &folder);
+    Ok(listed.into_iter().any(inside) || previous.get(store)?.iter().any(|inner| inside(inner)))
 }
 
 /// Keep a switch write that replaces a real folder only when the switch
@@ -807,6 +849,7 @@ fn plan_plaintext_switch(
         previous_paths.iter().map(|(path, _)| path.as_str()),
         &target_paths,
     );
+    let mut previous_inner = PreviousPaths::new(workspace_id, previous_version_id);
     let mut projections = Vec::new();
     if !policy.is_degraded() {
         for snapshot in &target {
@@ -831,19 +874,22 @@ fn plan_plaintext_switch(
             } else {
                 probe_target(probe, &snapshot.path, ProjectionTargetKind::Plaintext)
             };
-            let Some(preimage) = held
+            let preimage = match held
                 .map(|(_, hold)| hold.preimage.clone())
                 .or_else(|| projection_preimage(&state))
-                .or_else(|| {
-                    replaces_folder(
-                        root_dir,
-                        &snapshot.path,
-                        previous_paths.iter().map(|(path, _)| path.as_str()),
-                    )
-                    .then_some(Preimage::Absent)
-                })
-            else {
-                continue;
+            {
+                Some(preimage) => preimage,
+                None if replaces_folder(
+                    store,
+                    root_dir,
+                    &snapshot.path,
+                    previous_paths.iter().map(|(path, _)| path.as_str()),
+                    &mut previous_inner,
+                )? =>
+                {
+                    Preimage::Absent
+                }
+                None => continue,
             };
             let (desired_sha256, inline_content) = match &snapshot.content {
                 SnapshotContent::Text { text } => {
@@ -991,6 +1037,7 @@ fn plan_secret_switch(
         previous.iter().map(|stat| stat.path.as_str()),
         &target_paths,
     );
+    let mut previous_inner = PreviousPaths::new(workspace_id, previous_version_id);
     let mut projections = Vec::new();
     for stat in &target {
         if token.is_cancelled() {
@@ -1005,19 +1052,22 @@ fn plan_secret_switch(
         } else {
             probe_target(probe, &stat.path, ProjectionTargetKind::Secret)
         };
-        let Some(preimage) = held
+        let preimage = match held
             .map(|(_, hold)| hold.preimage.clone())
             .or_else(|| projection_preimage(&state))
-            .or_else(|| {
-                replaces_folder(
-                    root_dir,
-                    &stat.path,
-                    previous.iter().map(|file| file.path.as_str()),
-                )
-                .then_some(Preimage::Absent)
-            })
-        else {
-            continue;
+        {
+            Some(preimage) => preimage,
+            None if replaces_folder(
+                store,
+                root_dir,
+                &stat.path,
+                previous.iter().map(|file| file.path.as_str()),
+                &mut previous_inner,
+            )? =>
+            {
+                Preimage::Absent
+            }
+            None => continue,
         };
         if secret_key.is_none() {
             *secret_key = Some(load_projection_secret_key(store)?);

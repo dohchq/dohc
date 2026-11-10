@@ -14,7 +14,7 @@ import { relativeTime } from "../relativeTime";
 import { computerInSentence, shownScheduleHost } from "../scheduleHost";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { EmptyState, IconButton, SecondaryButton } from "../ui/controls";
+import { EmptyState, GhostButton, IconButton, SecondaryButton } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
@@ -110,7 +110,21 @@ export function automationsFileMade(file: ListCollectionAutomationsResult | null
 }
 
 /** The ⚡ Automations button at the top of a Collection, with how many it has. */
-export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void }) {
+export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void; toolbar?: boolean }) {
+  if (props.toolbar) {
+    return (
+      <GhostButton
+        size="toolbar"
+        data-testid="collection-automations-button"
+        aria-pressed={props.open}
+        onClick={props.onClick}
+      >
+        <Zap size={14} strokeWidth={1.9} aria-hidden />
+        Automations
+        {props.count > 0 ? <span className="text-[12px] tabular-nums text-subtle">{props.count}</span> : null}
+      </GhostButton>
+    );
+  }
   return (
     <SecondaryButton
       data-testid="collection-automations-button"

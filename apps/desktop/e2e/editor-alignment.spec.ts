@@ -35,6 +35,10 @@ A paragraph before a list that starts at ten.
 
 10. Two-digit item text
 
+A paragraph before a list that starts at a hundred.
+
+100. Three-digit item text
+
 - [ ] Task item text
 - [x] Done task text
 
@@ -114,6 +118,7 @@ async function measure(page: import("@playwright/test").Page): Promise<BlockEdge
       boxes: {
         hr: box(q(":scope > hr")),
         pre: box(q(":scope > pre")),
+        toolbar: box(q(":scope > .dohc-code-block-toolbar")),
         table: box(q("table")),
         callout: box(q(".dohc-callout")),
         checkbox: box(taskItems[0]?.querySelector("input[type='checkbox']") ?? null),
@@ -123,14 +128,31 @@ async function measure(page: import("@playwright/test").Page): Promise<BlockEdge
 }
 
 // The hover +/⋮ cluster before each block that reaches left of its text into
-// the gutter. Outside list markers draw no box, so the bullet's and numbers'
-// left edges are measured: Inter at 15px puts a bullet's or one digit's ink
-// 17px left of the text, and two digits' 26.5px. A table's mark is its
-// leftmost row grip or ⋯ button, which stay laid out while hidden.
+// the gutter. Outside list markers draw no box, so a bullet's left edge is
+// measured: Inter at 15px puts its ink 17px left of the text. A number's
+// marker is its digits, a period and a space, in the list's font. A table's
+// mark is its leftmost row grip or ⋯ button, which stay laid out while hidden.
 async function measureClusters(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     const editor = document.querySelector(".dohc-notion-editor");
     if (!editor) throw new Error("editor not mounted");
+    // The marker's longhands, since its `font` shorthand reads back empty
+    // (a marker sets its digits with tabular figures).
+    const numberMark = (list: Element | null) => {
+      const item = list?.querySelector(":scope > li");
+      if (!list || !item) return null;
+      const probe = document.createElement("span");
+      probe.textContent = `${list.getAttribute("start") ?? "1"}. `;
+      probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+      const marker = getComputedStyle(item, "::marker");
+      for (const name of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontVariantNumeric"] as const) {
+        probe.style[name] = marker[name];
+      }
+      document.body.append(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return item.getBoundingClientRect().left - width;
+    };
     const cluster = (block: Element | null) => {
       let node = block?.previousElementSibling ?? null;
       while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
@@ -144,11 +166,18 @@ async function measureClusters(page: import("@playwright/test").Page) {
     const callout = editor.querySelector(":scope > .dohc-callout");
     const table = editor.querySelector(":scope > .tableWrapper");
     const tableChrome = [...(table?.querySelectorAll(".dohc-table-grip--row, .dohc-table-menu-btn") ?? [])];
+    const ordered = editor.querySelector(":scope > ol:not([start])");
+    const twoDigits = editor.querySelector(":scope > ol[start='10']");
+    const threeDigits = editor.querySelector(":scope > ol[start='100']");
     return {
       editorLeft: editor.getBoundingClientRect().left,
       bullet: cluster(editor.querySelector(":scope > ul:not(:has(> li[data-checked]))")),
-      ordered: cluster(editor.querySelector(":scope > ol:not([start])")),
-      twoDigits: cluster(editor.querySelector(":scope > ol[start='10']")),
+      ordered: cluster(ordered),
+      orderedLeft: numberMark(ordered),
+      twoDigits: cluster(twoDigits),
+      twoDigitsLeft: numberMark(twoDigits),
+      threeDigits: cluster(threeDigits),
+      threeDigitsLeft: numberMark(threeDigits),
       task: cluster(tasks),
       checkboxLeft: left(tasks?.querySelector("input[type='checkbox']")),
       quote: cluster(quote),
@@ -166,12 +195,17 @@ async function measureClusters(page: import("@playwright/test").Page) {
 }
 
 // Every cluster ends 6px (with subpixel slack) left of its block's mark,
-// inside the editor.
-function expectClustersClear(clusters: Awaited<ReturnType<typeof measureClusters>>, edge: number) {
+// inside the editor. The bullet's mark is Inter's at 15px.
+function expectClustersClear(
+  clusters: Awaited<ReturnType<typeof measureClusters>>,
+  edge: number,
+  { bullet = true } = {},
+) {
   const marks = {
-    bullet: edge - 17,
-    ordered: edge - 17,
-    twoDigits: edge - 26.5,
+    ...(bullet ? { bullet: edge - 17 } : {}),
+    ordered: clusters.orderedLeft,
+    twoDigits: clusters.twoDigitsLeft,
+    threeDigits: clusters.threeDigitsLeft,
     task: clusters.checkboxLeft,
     quote: clusters.barLeft,
     code: clusters.codeLeft,
@@ -187,10 +221,25 @@ function expectClustersClear(clusters: Awaited<ReturnType<typeof measureClusters
   }
 }
 
-// A task list's checkboxes and a table's frame start on the edge. Task text
-// follows one 15px checkbox and its 8px gap; a cell's text follows the
-// table's 1px border and the cell's 10px padding.
-function expectOnEdge({ edges, boxes }: BlockEdges, edge: number) {
+// Text-bearing blocks put their first glyph on the edge. Code and callout
+// frames reach one block inset (16px) past it. A task list's checkboxes and a
+// table's frame start on the edge. Task text follows one 15px checkbox and its
+// 8px gap; a cell's text follows the table's 1px border and the cell's 10px
+// padding.
+function expectTextOnEdge({ edges, boxes }: BlockEdges, edge: number) {
+  for (const key of ["h1", "h2", "h3", "bullet", "ordered", "blockquote", "callout", "code"] as const) {
+    expect(edges[key], `${key} must render text`).not.toBeNull();
+    expect.soft(Math.abs(edges[key]! - edge), `${key} text must sit on the content edge`).toBeLessThanOrEqual(1.5);
+  }
+  for (const key of ["pre", "callout"] as const) {
+    expect(boxes[key], `${key} frame must render`).not.toBeNull();
+    expect.soft(Math.abs(edge - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`).toBeLessThanOrEqual(1.5);
+  }
+  // The code block's toolbar spans its frame.
+  expect(boxes.toolbar, "code toolbar must render").not.toBeNull();
+  for (const side of ["left", "right"] as const) {
+    expect.soft(Math.abs(boxes.toolbar![side] - boxes.pre![side]), `code toolbar's ${side} edge meets its frame's`).toBeLessThanOrEqual(1.5);
+  }
   for (const [key, left] of [
     ["checkbox", boxes.checkbox?.left],
     ["table", boxes.table?.left],
@@ -219,8 +268,7 @@ test("every block type's text sits on one shared left content edge", async () =>
     const { app, page } = desktop;
 
     // Wide enough that the editor pane (window minus explorer + history rails)
-    // clears measure + 2 insets + padding, so the framed-block overhang is
-    // actually in effect.
+    // centers the column with more than the side margin beside it.
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.setSize(1800, 950);
     });
@@ -233,27 +281,10 @@ test("every block type's text sits on one shared left content edge", async () =>
     await expect(page.locator(".dohc-callout")).toBeVisible({ timeout: 10_000 });
 
     const { paneWidth, edges, boxes } = await measure(page);
-    expect(paneWidth).toBeGreaterThan(864); // measure(720) + 2*inset(16) + 2*pad(56)
+    expect(paneWidth).toBeGreaterThan(856); // measure(720) + 2 * side margin (68 at Inter 15px)
 
     const edge = edges.paragraph;
     expect(edge).not.toBeNull();
-
-    // Text-bearing blocks: first glyph on the shared edge (subpixel slack).
-    for (const key of [
-      "h1",
-      "h2",
-      "h3",
-      "bullet",
-      "ordered",
-      "blockquote",
-      "callout",
-      "code",
-    ] as const) {
-      expect(edges[key], `${key} must render text`).not.toBeNull();
-      expect
-        .soft(Math.abs(edges[key]! - edge!), `${key} text must sit on the content edge`)
-        .toBeLessThanOrEqual(1.5);
-    }
 
     // Nested list items keep their 24px relative indent off the edge.
     expect(edges.nestedBullet).not.toBeNull();
@@ -263,19 +294,12 @@ test("every block type's text sits on one shared left content edge", async () =>
     expect(boxes.hr).not.toBeNull();
     expect(Math.abs(boxes.hr!.left - edge!)).toBeLessThanOrEqual(1.5);
 
-    expectOnEdge({ paneWidth, edges, boxes }, edge!);
-
-    // Code and callout frames extend one block inset (16px) into both gutters.
-    for (const key of ["pre", "callout"] as const) {
-      expect(boxes[key], `${key} frame must render`).not.toBeNull();
-      expect
-        .soft(Math.abs(edge! - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`)
-        .toBeLessThanOrEqual(1.5);
-    }
-
+    expectTextOnEdge({ paneWidth, edges, boxes }, edge!);
     expectClustersClear(await measureClusters(page), edge!);
 
-    // A narrow pane leaves only the editor's 56px padding for the gutter.
+    // A narrow pane has only the editor's side margin left of the text. The
+    // same blocks line up there, and the table's wrapper still reaches 22px
+    // into the margin, so the frame, not the row grips, stays on the edge.
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.setSize(1000, 950);
     });
@@ -283,10 +307,36 @@ test("every block type's text sits on one shared left content edge", async () =>
     const narrow = await measure(page);
     const narrowEdge = narrow.edges.paragraph;
     expect(narrowEdge).not.toBeNull();
-    // The table's wrapper still reaches 22px into the padding, so the frame,
-    // not the row grips, stays on the edge.
-    expectOnEdge(narrow, narrowEdge!);
+    expectTextOnEdge(narrow, narrowEdge!);
     expectClustersClear(await measureClusters(page), narrowEdge!);
+
+    // The margin makes room for a three-digit number in every editor font
+    // and size. theme.ts sets these from the settings file.
+    for (const [font, size, suffix] of [
+      ["var(--font-sans)", 24, null],
+      ["var(--font-serif)", 24, null],
+      ["var(--font-mono)", 15, "2"],
+      ["var(--font-mono)", 24, "2"],
+    ] as const) {
+      await test.step(`${font} at ${size}px`, async () => {
+        await page.evaluate(async ([font, size, suffix]) => {
+          const style = document.documentElement.style;
+          style.setProperty("--dohc-editor-font", font);
+          style.setProperty("--dohc-editor-font-size", `${size}px`);
+          if (suffix) style.setProperty("--dohc-editor-number-suffix", suffix);
+          else style.removeProperty("--dohc-editor-number-suffix");
+          await document.fonts.ready;
+        }, [font, size, suffix] as const);
+        const sized = await measure(page);
+        expectTextOnEdge(sized, sized.edges.paragraph!);
+        expectClustersClear(await measureClusters(page), sized.edges.paragraph!, { bullet: false });
+      });
+    }
+    await page.evaluate(() => {
+      for (const name of ["--dohc-editor-font", "--dohc-editor-font-size", "--dohc-editor-number-suffix"]) {
+        document.documentElement.style.removeProperty(name);
+      }
+    });
 
     // There the cluster stacks + above ⋮, and a one-item list's ⋮ runs below
     // its line, over the next block's hidden cluster. The shown ⋮ takes the

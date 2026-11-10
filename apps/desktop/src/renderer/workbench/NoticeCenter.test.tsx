@@ -11,6 +11,7 @@ import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "../orphanedDrafts";
+import { resetChosenColorsForTests, setPersonalAgents } from "./chosenColors";
 
 it("offers Discard as a separate toast action without dismissing the Notice",()=>{
   const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
@@ -2318,6 +2319,33 @@ describe("notices sent to you", () => {
     expect(shape("automation")?.getAttribute("class")).not.toMatch(/rounded|border/);
     expect(screen.getByTestId("sent-notice-automation").textContent).toContain("From an automation");
     expect(screen.getByTestId("sent-notice-agent").textContent).toContain("From an agent");
+  });
+
+  it("marks a personal agent's sign-in in that agent's color while its roster holds it", async () => {
+    const grok = `p-${"g".repeat(26)}`;
+    const iris = `p-${"i".repeat(26)}`;
+    setPersonalAgents([{ agentId: grok, name: "Grok Bot", hue: "teal" }]);
+    try {
+      const signedIn = (id: string, name: string, agent: string) => sentRow(id, {
+        senderKind: "agent", senderLabel: name, kind: "personal-agent-signed-in",
+        title: `${name} signed in as your agent`, body: "", target: { settings: "agents", agent },
+      });
+      renderNotices({ sentNotices: [signedIn("grok", "Grok Bot", grok), signedIn("gone", "Iris", iris)] });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const shape = (id: string) =>
+        screen.getByTestId(`sent-notice-${id}`).querySelector("[data-sender-shape]");
+      expect(shape("grok")?.getAttribute("class")).toContain("text-hue-teal");
+      expect(shape("grok")?.getAttribute("data-sender-shape")).toBe("square");
+      // An agent the roster no longer holds keeps the plain agent mark.
+      expect(shape("gone")?.getAttribute("class")).toContain("text-agent");
+      act(() => setPersonalAgents([{ agentId: grok, name: "Grok Bot", hue: "rose" }]));
+      expect(shape("grok")?.getAttribute("class")).toContain("text-hue-rose");
+      // Renamed on another computer, it keeps its color: the notice names it by id.
+      act(() => setPersonalAgents([{ agentId: grok, name: "Grok", hue: "rose" }]));
+      expect(shape("grok")?.getAttribute("class")).toContain("text-hue-rose");
+    } finally {
+      resetChosenColorsForTests();
+    }
   });
 
   describe("an agent run that didn't start", () => {

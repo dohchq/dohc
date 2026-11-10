@@ -33,6 +33,7 @@ import {
   TOOLBAR_BUTTON,
   chatAuthorLabel,
   continuesRun,
+  usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
@@ -517,6 +518,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 }) {
   // Long messages parse in the chat's worker; start it before they need it.
   useEffect(retainChatParser, []);
+  // Personal agents' names come from the roster, so a rename repaints the thread.
+  usePersonalAgentNames();
   const {
     nav,
     channelLabel,
@@ -673,7 +676,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ) : (
               <AgentColorAvatar>
                 <ChatAvatar presentation={comment.presentation}
-                  name={comment.authorDisplayName}
+                  name={chatAuthorLabel(comment)}
                   kind={comment.authorKind} linkAgent={comment.linkAgent === true}
                   size="comment"
                 />
@@ -855,7 +858,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </p>
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
-            name={openingMessage.authorDisplayName}
+            name={chatAuthorLabel(openingMessage)}
             kind={openingMessage.authorKind} linkAgent={openingMessage.linkAgent === true}
             size="row"
           />

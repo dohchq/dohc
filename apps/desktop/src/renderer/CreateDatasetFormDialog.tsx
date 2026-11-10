@@ -6,7 +6,7 @@ import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { FileCode2, LockKeyhole } from "lucide-react";
 import { DatasetFormPreview } from "./collections/CreationPreview";
-import { FieldTypeIcon } from "./collections/FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";

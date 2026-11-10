@@ -19,10 +19,22 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function userProjection(value: unknown): { id: string; name: string } | null {
+function userProjection(value: unknown, withEmail: boolean): { id: string; name: string; email?: string } | null {
   if (!record(value) || typeof value.id !== "string" || value.id.length === 0 ||
       typeof value.name !== "string") return null;
-  return { id: value.id, name: value.name };
+  if (!withEmail) return { id: value.id, name: value.name };
+  return typeof value.email === "string" && value.email.length > 0 ? { id: value.id, name: value.name, email: value.email } : null;
+}
+
+// share-web's own session reads that may see the account's email, such as an
+// agent's sign-in page. A browser's request is never one, so a page on the
+// viewer origin never learns it.
+const emailReads = new WeakSet<Request>();
+
+/** Marks share-web's own session read, so its answer names the account's email. */
+export function readsAccountEmail(request: Request): Request {
+  emailReads.add(request);
+  return request;
 }
 
 export function createAccountAuthHandler(options: AccountAuthOptions) {
@@ -156,7 +168,7 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         if (!record(result) || result.success !== true) return refuse(503);
         output = { ok: true };
       } else {
-        const user = record(result) ? userProjection(result.user) : null;
+        const user = record(result) ? userProjection(result.user, operation === "session" && emailReads.has(request)) : null;
         if (!user || !record(result)) return refuse(503);
         if (operation === "sign-in" && result.redirect !== false) return refuse(503);
         if (operation === "session" &&
