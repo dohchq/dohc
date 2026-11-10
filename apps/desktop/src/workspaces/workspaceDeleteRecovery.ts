@@ -82,7 +82,7 @@ async function prune(workspace: LocalStateWorkspace): Promise<void> {
   await readOwnedLocalStateFolder(workspace.rootPath, "trash", async (dir) => {
     if (dir === null || dir === "unusable") return;
     for (const name of await readdir(dir)) {
-      if (!/^(?:delete|move|replace)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
+      if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
       try {
         const path = join(dir, name), entry = await lstat(path);
         if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
@@ -131,9 +131,9 @@ async function recordIn(dir: string | null | "unusable", id: string, kind: "dele
   if (dir === "unusable") return { status: "untrusted" };
   return readRecoveryFileText(join(dir, recordName(id, kind)));
 }
-async function readRecoveryFileText(path: string): Promise<RecoveryRecordRead> {
+async function readRecoveryFileText(path: string, maxAge = MAX_RECORD_AGE): Promise<RecoveryRecordRead> {
   const entry = await info(path);
-  if (!entry || Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return { status: "missing" };
+  if (!entry || Date.now() - entry.mtimeMs > maxAge) return { status: "missing" };
   const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(() => null);
   if (read?.status === "missing") return { status: "missing" };
   return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
@@ -146,7 +146,8 @@ export async function listRecoveryRecordTexts(root: string, kind: "delete" | "mo
     for (const name of await readdir(dir)) {
       if (!recordPattern.test(name)) continue;
       try {
-        const read = await readRecoveryFileText(join(dir, name));
+        // A move dohc stopped during waits for an open, however late; prune skips it too.
+        const read = await readRecoveryFileText(join(dir, name), kind === "replace" ? Infinity : MAX_RECORD_AGE);
         if (read.status === "read") records.push({name, text: read.text});
       } catch { /* One unavailable record does not prevent other moves from resuming. */ }
     }

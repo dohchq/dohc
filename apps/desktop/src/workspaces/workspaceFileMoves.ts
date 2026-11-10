@@ -665,8 +665,9 @@ export async function putBackStoppedMoves(workspace: PathChangeWorkspace, markCh
       const from = join(root, record.from), to = join(root, record.to), place = join(root, record.place);
       const identity = (path: string) => lstat(path, { bigint: true }).then(at => `${at.dev}:${at.ino}`, () => undefined);
       // A stop between its link and unlink leaves the moved file at both names.
+      // Its folder may lead outside the workspace now, under the same path.
       const movedStays = async () => record.moved !== undefined && await identity(to) === record.moved &&
-        [undefined, record.moved].includes(await identity(from));
+        [undefined, record.moved].includes(await identity(from)) && await checkPlacement(root, to).then(() => true, () => false);
       if (name !== undefined) {
         // The moved entry keeps a visible name throughout, so a stop here hides nothing.
         if (await movedStays()) {

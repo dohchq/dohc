@@ -2,7 +2,7 @@ import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles
 import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import * as fsPromises from "node:fs/promises";
-import { lstat, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1004,6 +1004,9 @@ describe("agent moves and deletes", () => {
     const record = { operationId: `dohc-operation:${randomUUID()}`, from: "a.txt", to: "b.txt", place: "b.txt", staged: `${Date.now()}-${randomUUID()}-` };
     await saveRecoveryRecord(workspace, record, "replace");
     await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "b.txt"), record.staged);
+    // An unfinished move does not expire like an Undo offer.
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
+    for (const name of await f.workspaceTrash()) if (name.startsWith("replace-")) await utimes(join(f.rootPath, ".dohc/local/trash", name), old, old);
     const open = () => resumeWorkspaceLinkRewrites(workspace, { workspaceId: workspace.workspaceId, history: { rewriteHistoryLinks: vi.fn() } });
     // A disk that refuses the first open leaves the record for the next one.
     faults.mutate = syscall => { if (syscall === "link" || syscall === "copyFile") throw new Error("The disk is busy"); };
@@ -1035,6 +1038,25 @@ describe("agent moves and deletes", () => {
     expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("mine");
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("theirs");
     expect(await f.workspaceTrash()).toEqual([]);
+  });
+
+  it("leaves a moved file alone when a link now leads its folder outside the workspace", async () => {
+    const f = await fixture();
+    const workspace = f.operation.workspace;
+    const staged = `${Date.now()}-${randomUUID()}-`;
+    await write(f.rootPath, "dir/b.txt", "theirs");
+    await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "dir/b.txt"), staged);
+    await write(f.rootPath, "dir/b.txt", "mine");
+    const at = await lstat(join(f.rootPath, "dir/b.txt"), { bigint: true });
+    const record = { operationId: `dohc-operation:${randomUUID()}`, from: "a.txt", to: "dir/b.txt", place: "dir/b.txt", staged, moved: `${at.dev}:${at.ino}` };
+    await saveRecoveryRecord(workspace, record, "replace");
+    // While dohc is stopped, the folder leaves the workspace and a link takes its name.
+    const outside = await createTestScratch("dohc-file-moves-outside-");
+    await rename(join(f.rootPath, "dir"), join(outside, "dir"));
+    await symlink(join(outside, "dir"), join(f.rootPath, "dir"), process.platform === "win32" ? "junction" : "dir");
+    await putBackStoppedMoves(workspace, () => undefined);
+    expect(await readFile(join(outside, "dir/b.txt"), "utf8")).toBe("mine");
+    expect(existsSync(join(f.rootPath, "a.txt"))).toBe(false);
   });
 
   it("leaves a finished replacing move alone at the next open", async () => {
