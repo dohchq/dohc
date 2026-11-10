@@ -4310,7 +4310,7 @@ export function DesktopWorkspaceShell(props: {
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
-    async (collectionPath: string) => {
+    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void) => {
       const prefix = `${collectionPath}/`;
       const scopedFiles = files
         .filter((file) => file.path.startsWith(prefix))
@@ -4345,8 +4345,8 @@ export function DesktopWorkspaceShell(props: {
             if (workspaceSelection.current !== selection) return;
             const restricted = shareView && !shareViewWritableRef.current;
             const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
-            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath));
-          }
+            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created));
+          } else created?.(result);
           openFile(result.path);
         } catch (error) {
           if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();

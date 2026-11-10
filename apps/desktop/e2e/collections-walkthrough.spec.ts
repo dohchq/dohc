@@ -353,7 +353,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // header count is what tells the user the rest exist. After the drag
     // the Doing column holds both records.
     await expect(
-      boardColumn(page, "Doing").locator("> div").first().locator("span.font-mono"),
+      boardColumn(page, "Doing").getByTestId("board-column-count"),
     ).toHaveText("2");
     // The md file IS the record: the grouped-field write settles into its
     // frontmatter on disk.

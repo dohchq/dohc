@@ -8,6 +8,8 @@ import {
   type FieldDefinition,
   type FieldValueReasonCode,
   type FieldValueValidation,
+  OPTION_COLORS,
+  type OptionColor,
   type ViewDefinition,
   type ViewKind,
   type ViewSort,
@@ -248,6 +250,41 @@ function parseOptions(
   return options;
 }
 
+const OPTION_COLOR_SET: ReadonlySet<string> = new Set(OPTION_COLORS);
+
+// Keeps each valid color in its key's first position; a repeated key takes
+// its last value, as every YAML mapping read here does.
+function parseOptionColors(
+  raw: unknown,
+  options: readonly string[],
+  path: string,
+  reasons: CollectionSchemaReason[],
+): Record<string, OptionColor> | null {
+  if (raw === undefined) return null;
+  if (!isMapping(raw)) {
+    reason(reasons, "expected-mapping", path);
+    return null;
+  }
+  const known = new Set(options);
+  const seen = new Set<string>();
+  const colors: [string, OptionColor][] = [];
+  for (const key of YAML_MAPPING_KEYS.get(raw) ?? Object.keys(raw)) {
+    if (key === null) {
+      reason(reasons, "expected-text", propertyPath(path, "<non-text-key>"));
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const color = raw[key];
+    const colorPath = propertyPath(path, key);
+    if (!known.has(key)) reason(reasons, "unknown-option-reference", colorPath);
+    else if (typeof color !== "string") reason(reasons, "expected-text", colorPath);
+    else if (!OPTION_COLOR_SET.has(color)) reason(reasons, "unknown-option-color", colorPath);
+    else colors.push([key, color as OptionColor]);
+  }
+  return colors.length > 0 ? Object.fromEntries(colors) : null;
+}
+
 function parseFields(
   raw: unknown,
   reasons: CollectionSchemaReason[],
@@ -306,12 +343,10 @@ function parseFields(
     }
 
     if (rawType === "select" || rawType === "multi-select") {
-      reportUnknownProperties(field, new Set(["type", "options"]), path, reasons);
-      fields.push({
-        name,
-        type: rawType,
-        options: parseOptions(field.options, `${path}/options`, reasons),
-      });
+      reportUnknownProperties(field, new Set(["type", "options", "colors"]), path, reasons);
+      const options = parseOptions(field.options, `${path}/options`, reasons);
+      const colors = parseOptionColors(field.colors, options, `${path}/colors`, reasons);
+      fields.push({ name, type: rawType, options, ...(colors ? { colors } : {}) });
       continue;
     }
 

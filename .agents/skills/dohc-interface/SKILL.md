@@ -425,7 +425,7 @@ Position:
 | Panel content | Starts 8 px under the header |
 | Section in a panel | `mt-4` (16 px) before it, except the first. Its label row is `h-6 px-3`, and the first row follows directly. |
 | Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. Inside a line of text, use a plain `button` at `size-4` (16 px), so the line keeps its height. Give it `align-top` and a `text-muted` glyph, as on the Try again beside a count in Versions. `IconButton` stays 24 px even when given `size-4`. |
-| Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. |
+| Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. In a page toolbar beside a `PrimaryButton`, it takes `size="toolbar"`: `h-8 text-[13px]`, and the selected fill while pressed. |
 | Card | `p-3`, with `gap-2` inside |
 | Popover | `p-3`. A menu's frame is `p-1`, because its rows bring their own `px-2`. |
 | Dialog | `p-6` and `gap-6` between its parts. The title uses the page and dialog title role; its one-line description follows with `gap-1`. A section label sits 8 px over its fields. The buttons end the dialog, right-aligned, `gap-2` apart. No header or footer band. |

@@ -65,6 +65,36 @@ impl CollectionFieldType {
     }
 }
 
+/// The colors an option can take. Each names one of the app's identity hues.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OptionColor {
+    Gray,
+    Rust,
+    Amber,
+    Teal,
+    Blue,
+    Indigo,
+    Plum,
+    Rose,
+}
+
+impl OptionColor {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "gray" => Some(Self::Gray),
+            "rust" => Some(Self::Rust),
+            "amber" => Some(Self::Amber),
+            "teal" => Some(Self::Teal),
+            "blue" => Some(Self::Blue),
+            "indigo" => Some(Self::Indigo),
+            "plum" => Some(Self::Plum),
+            "rose" => Some(Self::Rose),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum FieldDefinition {
@@ -83,10 +113,14 @@ pub enum FieldDefinition {
     Select {
         name: String,
         options: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        colors: BTreeMap<String, OptionColor>,
     },
     MultiSelect {
         name: String,
         options: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        colors: BTreeMap<String, OptionColor>,
     },
     Person {
         name: String,
@@ -230,6 +264,8 @@ reason_code!(CollectionSchemaReasonCode {
     SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
     UnsupportedFieldReference,
+    UnknownOptionColor,
+    UnknownOptionReference,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -787,6 +823,72 @@ fn parse_options(
     options
 }
 
+/// Reports each key at its first position; a repeated key takes its last
+/// value, as `mapping_get` does.
+fn parse_option_colors(
+    raw: Option<&YamlOwned>,
+    options: &[String],
+    path: &str,
+    reasons: &mut Vec<CollectionSchemaReason>,
+) -> BTreeMap<String, OptionColor> {
+    let mut colors = BTreeMap::new();
+    let Some(raw) = raw else {
+        return colors;
+    };
+    let Some(mapping) = raw.as_mapping() else {
+        push_reason(reasons, CollectionSchemaReasonCode::ExpectedMapping, path);
+        return colors;
+    };
+    let known = options.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut last = HashMap::new();
+    for (key, value) in mapping {
+        if let Some(key) = yaml_key_text(key) {
+            last.insert(key, value);
+        }
+    }
+    let mut seen = HashSet::new();
+    for (key, _) in mapping {
+        let Some(key) = yaml_key_text(key) else {
+            push_reason(
+                reasons,
+                CollectionSchemaReasonCode::ExpectedText,
+                property_path(path, "<non-text-key>"),
+            );
+            continue;
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let color_path = property_path(path, &key);
+        let color = last.get(&key).copied();
+        if !known.contains(key.as_str()) {
+            push_reason(
+                reasons,
+                CollectionSchemaReasonCode::UnknownOptionReference,
+                color_path,
+            );
+        } else if let Some(color) = color.and_then(YamlOwned::as_str) {
+            match OptionColor::parse(color) {
+                Some(color) => {
+                    colors.insert(key, color);
+                }
+                None => push_reason(
+                    reasons,
+                    CollectionSchemaReasonCode::UnknownOptionColor,
+                    color_path,
+                ),
+            }
+        } else {
+            push_reason(
+                reasons,
+                CollectionSchemaReasonCode::ExpectedText,
+                color_path,
+            );
+        }
+    }
+    colors
+}
+
 fn parse_fields(
     raw: Option<&YamlOwned>,
     reasons: &mut Vec<CollectionSchemaReason>,
@@ -876,17 +978,29 @@ fn parse_fields(
 
         match field_type {
             CollectionFieldType::Select | CollectionFieldType::MultiSelect => {
-                report_unknown_properties(field, &["type", "options"], &path, reasons);
+                report_unknown_properties(field, &["type", "options", "colors"], &path, reasons);
                 let options = parse_options(
                     mapping_get(field, "options"),
                     &format!("{path}/options"),
                     reasons,
                 );
+                let colors = parse_option_colors(
+                    mapping_get(field, "colors"),
+                    &options,
+                    &format!("{path}/colors"),
+                    reasons,
+                );
                 fields.push(match field_type {
-                    CollectionFieldType::Select => FieldDefinition::Select { name, options },
-                    CollectionFieldType::MultiSelect => {
-                        FieldDefinition::MultiSelect { name, options }
-                    }
+                    CollectionFieldType::Select => FieldDefinition::Select {
+                        name,
+                        options,
+                        colors,
+                    },
+                    CollectionFieldType::MultiSelect => FieldDefinition::MultiSelect {
+                        name,
+                        options,
+                        colors,
+                    },
                     _ => unreachable!("match arm only admits select Field types"),
                 });
             }
@@ -6881,7 +6995,7 @@ mod attribution_tests {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     use std::time::{Duration, Instant};
 
     use rusqlite::Connection;
@@ -6997,6 +7111,7 @@ mod tests {
         let field = FieldDefinition::MultiSelect {
             name: "labels".to_owned(),
             options,
+            colors: BTreeMap::new(),
         };
         let started = Instant::now();
         let validation = validate_field_value(&field, &values);
