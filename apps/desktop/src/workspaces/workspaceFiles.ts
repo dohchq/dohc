@@ -1072,9 +1072,10 @@ export async function importDroppedPaths(
 
 // Whether a real path is inside any `.dohc` folder, registered or not. What
 // such a folder holds, such as a protected file's kept change, is workspace
-// data and never lands as an ordinary file.
+// data and never lands as an ordinary file. Only Windows separates folders
+// with a backslash; elsewhere it is part of a name.
 function inDohcFolder(realPath: string): boolean {
-  return realPath.split(/[\\/]/).some((part) => part.toLowerCase() === ".dohc");
+  return realPath.split(process.platform === "win32" ? /[\\/]/ : "/").some((part) => part.toLowerCase() === ".dohc");
 }
 
 // The import dialog's picks are the person's own choice, so they copy as the
