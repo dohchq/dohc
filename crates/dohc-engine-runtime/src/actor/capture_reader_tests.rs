@@ -517,6 +517,9 @@ fn outside_reader_fold_inline_grammar_and_structural_refusals_need_reader() {
         "    **indented**",
         "a\rb",
         "heading\n===",
+        "heading\n--",
+        "heading\n----",
+        "heading\n-- ",
         "---\ntitle: frontmatter\n---",
     ] {
         assert!(needs_reader(source), "false native admission: {source:?}");
@@ -961,6 +964,8 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
         .expect("outside-fold reader deadline bounds the capture wait");
         assert!(folds.is_empty());
         assert_eq!(reader.dispatch_count(), 1);
+        // Only a missed deadline sets the reader aside (#2585).
+        assert_eq!(reader_ready(&actor), crash);
         let result = actor
             .capture_ingest(
                 input(source),
@@ -970,6 +975,15 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
             )
             .await;
         assert!(matches!(result, Err(RuntimeError::CaptureFileHeld { .. })));
+        if !crash {
+            assert_eq!(
+                reader.dispatch_count(),
+                1,
+                "the next capture waited on the hung reader again"
+            );
+            *hung_until(&actor) = Some(std::time::Instant::now());
+            assert!(reader_ready(&actor), "the reader stays set aside");
+        }
         supervisor.close(&db).unwrap();
     }
 }
