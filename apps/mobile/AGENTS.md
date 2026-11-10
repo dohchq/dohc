@@ -44,11 +44,14 @@ live in one store per sign-in and workspace, which stops when either changes, so
 workspace's screen. A 404 for the workspace, as when another device hides it from the phone, clears and stops its
 store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`). If the list still shows it and
 the server can open it, it stays open as a failed read until Try again; otherwise the phone opens the next one. The
-phone opens only workspaces the list marks `canOpen`. The read cache keeps a copy on disk, one file per server,
-account and workspace in Caches (`src/server/cacheFiles.ts`), so a relaunch shows what was read last. A store with
-nothing in memory shows the loading state until it has read its file. The cache empties, files too, when the sign-in
-changes or ends, and loses a workspace when the phone hides it or the server answers 404. Deletes run after any write
-in flight. Raise `CACHE_FORMAT` when a view's value changes shape. Ending a token deletes it from the keychain first,
+phone opens only workspaces the list marks `canOpen`. The read cache keeps a copy on disk in Caches
+(`src/server/cacheFiles.ts`): one file per server, account and workspace, and one for the account's workspace list, so
+a relaunch opens the last workspace from disk before the server answers. A store with nothing in memory shows the
+loading state until it has read its file. In the foreground, a workspace's file is written at most once every 30 s;
+going to the background writes at once. The cache empties, files too, when the sign-in changes or ends. It loses a
+workspace when the phone hides it, the server answers 404 for it, or the server's list no longer has it as one the
+phone can open. Deletes run after any write in flight, and a delete overtakes a file still being read. Raise
+`CACHE_FORMAT` when a view's value changes shape. Ending a token deletes it from the keychain first,
 then revokes its session, so a phone closed between the two keeps no token.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to

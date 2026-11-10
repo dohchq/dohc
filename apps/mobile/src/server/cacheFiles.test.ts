@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAccount, type StoredSignIn } from "./account";
-import { CACHE_FORMAT, createCacheFiles, fileName, SCOPE_MAX_BYTES, WRITE_DELAY_MS, WRITE_MAX_DELAY_MS, type CacheFiles, type SavedView } from "./cacheFiles";
+import { CACHE_FORMAT, createCacheFiles, fileName, leastJsonBytes, SCOPE_MAX_BYTES, WRITE_DELAY_MS, WRITE_INTERVAL_MS, WRITE_MAX_DELAY_MS, type CacheFiles, type SavedView } from "./cacheFiles";
 import { createServerClient } from "./client";
 import { createOpenWorkspace } from "./openWorkspace";
 import { memoryStore, testServer, type Answer } from "./testServer";
@@ -162,14 +162,14 @@ describe("a scope's file", () => {
     const after = [saved("files", [{ path: "b.md", objectId: "object-b", page: true }], "0.7.1")];
     files.write(SCOPE_A, () => after);
     const writing = files.flush();
-    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.tmp`));
+    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.json.tmp`));
     // Half the new file is on disk, and a read finds only the whole last one.
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(before);
     release();
     await writing;
     expect(names()).toEqual([`${fileName(SCOPE_A)}.json`]);
     expect(disk.log.filter(line => line.startsWith("write") || line.startsWith("move")).slice(-2))
-      .toEqual([`write ${fileName(SCOPE_A)}.tmp`, `move ${fileName(SCOPE_A)}.tmp ${fileName(SCOPE_A)}.json`]);
+      .toEqual([`write ${fileName(SCOPE_A)}.json.tmp`, `move ${fileName(SCOPE_A)}.json.tmp ${fileName(SCOPE_A)}.json`]);
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(after);
   });
 
@@ -186,7 +186,7 @@ describe("a scope's file", () => {
 
     // A partial file a closed app left, for a scope with no whole file: no read finds it, and the next write deletes it.
     disk.failWrites = false;
-    place(pathOf(SCOPE_B, "tmp"), fileText(SCOPE_B, [saved("files", [])]).slice(0, 20));
+    place(pathOf(SCOPE_B, "json.tmp"), fileText(SCOPE_B, [saved("files", [])]).slice(0, 20));
     await expect(files.read(SCOPE_B)).resolves.toEqual([]);
     files.write(SCOPE_A, () => before);
     await files.flush();
@@ -195,7 +195,7 @@ describe("a scope's file", () => {
 });
 
 describe("writing the files", () => {
-  it("waits for changes to stop, saves them together, and waits no longer than its cap", async () => {
+  it("waits for a new scope's changes to stop, saves them together, and waits no longer than its cap", async () => {
     vi.useFakeTimers();
     try {
       const { files } = launch({ now: Date.now });
@@ -209,12 +209,47 @@ describe("writing the files", () => {
       expect(writes()).toBe(2);
       await expect(files.read(SCOPE_A)).resolves.toEqual([saved("chats", [])]);
 
-      // A change every half of the delay never lets it go quiet: the write lands at the cap anyway.
+      // A change every half of the delay never lets a new scope go quiet: the write lands at the cap anyway.
+      const scopeC = JSON.stringify(["https://dohc.example.com", "u-1", "ws-c"]);
       for (let elapsed = 0; elapsed < WRITE_MAX_DELAY_MS; elapsed += WRITE_DELAY_MS / 2) {
-        files.write(SCOPE_A, () => [saved("files", [])]);
+        files.write(scopeC, () => [saved("files", [])]);
         await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS / 2);
       }
       expect(writes()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes a scope at most once every 30 s in the foreground, and at once when the app goes to the background", async () => {
+    vi.useFakeTimers();
+    try {
+      const { files } = launch({ now: Date.now });
+      const writes = () => disk.log.filter(line => line.startsWith("write")).length;
+      const reply = (length: number) => [saved("thread:t-1", { kind: "thread", id: "t-1", title: "", messages: [], body: "x".repeat(length) })];
+      files.write(SCOPE_A, () => reply(0));
+      await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
+      expect(writes()).toBe(1);
+
+      // A reply streams in: a change every 250 ms for most of the next 30 s writes nothing more.
+      let length = 0;
+      for (let elapsed = 0; elapsed < WRITE_INTERVAL_MS - 2 * WRITE_DELAY_MS; elapsed += 250) {
+        const now = ++length;
+        files.write(SCOPE_A, () => reply(now));
+        await vi.advanceTimersByTimeAsync(250);
+      }
+      expect(writes()).toBe(1);
+      await vi.advanceTimersByTimeAsync(2 * WRITE_DELAY_MS);
+      expect(writes()).toBe(2);
+      await expect(files.read(SCOPE_A)).resolves.toEqual(reply(length));
+
+      files.write(SCOPE_A, () => reply(length + 1));
+      await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
+      expect(writes()).toBe(2);
+      // Going to the background saves at once.
+      await files.flush();
+      expect(writes()).toBe(3);
+      await expect(files.read(SCOPE_A)).resolves.toEqual(reply(length + 1));
     } finally {
       vi.useRealTimers();
     }
@@ -267,7 +302,7 @@ describe("deleting the files", () => {
     const release = hold("heldWrites");
     files.write(SCOPE_A, () => [saved("files", [])]);
     const writing = files.flush();
-    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.tmp`));
+    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.json.tmp`));
     files.write(SCOPE_B, () => [saved("chats", [])]);
     const removing = files.removeAll();
     release();
@@ -284,7 +319,7 @@ describe("deleting the files", () => {
     const release = hold("heldWrites");
     files.write(SCOPE_A, () => [saved("files", [])]);
     const writing = files.flush();
-    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.tmp`));
+    await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.json.tmp`));
     const removing = files.remove(SCOPE_A);
     release();
     await writing;
@@ -462,7 +497,7 @@ describe("wiping the files", () => {
     a.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(a.state(views.files).value).toHaveLength(1));
     const writing = files.flush();
-    await vi.waitFor(() => expect(names()).toContain(`${fileName(cacheScope(signIn, "ws-a"))}.tmp`));
+    await vi.waitFor(() => expect(names()).toContain(`${fileName(cacheScope(signIn, "ws-a"))}.json.tmp`));
 
     await account.signOut();
     release();
@@ -535,5 +570,201 @@ describe("wiping the files", () => {
     await files.flush();
     expect(names()).toEqual([]);
     workspace.stop();
+  });
+});
+
+describe("a restore that a delete overtakes", () => {
+  /** Files whose read the test answers; the cache's continuation then runs after anything the test does next. */
+  function heldFiles() {
+    let answer!: (views: readonly SavedView[]) => void;
+    const read = new Promise<readonly SavedView[]>(done => { answer = done; });
+    const files: CacheFiles = {
+      read: () => read, write: () => {}, flush: async () => {}, remove: async () => {}, removeAll: async () => {},
+      keep: async () => {}, readList: async () => null, writeList: async () => {},
+    };
+    return { files, answer };
+  }
+  const SAVED_FILES = saved("files", A_FILES);
+
+  it("adds nothing when the scope is dropped after the file is read", async () => {
+    const { files, answer } = heldFiles();
+    const cache = createReadCache(files);
+    const restoring = cache.restore(SCOPE_A);
+    answer([SAVED_FILES]);
+    cache.drop(SCOPE_A);
+    await restoring;
+    expect(cache.entries(SCOPE_A)).toEqual([]);
+  });
+
+  it("adds nothing when the cache is cleared after the file is read", async () => {
+    const { files, answer } = heldFiles();
+    const cache = createReadCache(files);
+    const restoring = cache.restore(SCOPE_A);
+    answer([SAVED_FILES]);
+    cache.clear();
+    await restoring;
+    expect(cache.entries(SCOPE_A)).toEqual([]);
+  });
+
+  it("leaves a store that was waiting on the file with nothing restored, reading from the server", async () => {
+    const server = serverWithA();
+    const { files, answer } = heldFiles();
+    const cache = createReadCache(files);
+    const data = open(server, cache);
+    data.subscribe(views.files, () => {});
+    answer([{ ...SAVED_FILES, value: [{ path: "old.md", objectId: "object-old", page: true }] }]);
+    cache.drop(cacheScope(signInTo(server), "ws-a"));
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
+    expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
+  });
+});
+
+describe("a view too large for its scope's cap", () => {
+  it("is left out without being written out in full", async () => {
+    const { files } = launch();
+    const body = "x".repeat(1024 * 1024);
+    const items = Array.from({ length: 100 }, (_, i) => ({
+      message: { id: `m-${i}`, threadId: "t-1", authorKind: "human", authorName: "Maya Chen", body, createdAtMs: 1 }, replyCount: 0, lastReplyAtMs: null,
+    }));
+    const stream = saved("stream:g-1", { kind: "stream", name: "General", groupKind: "group", items });
+    files.write(SCOPE_A, () => [saved("files", A_FILES), stream]);
+    const stringify = vi.spyOn(JSON, "stringify");
+    let longest = 0;
+    try {
+      await files.flush();
+      longest = Math.max(...stringify.mock.results.map(result => typeof result.value === "string" ? result.value.length : 0));
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(longest).toBeLessThan(1024);
+    expect((await files.read(SCOPE_A)).map(view => view.id)).toEqual(["files"]);
+  });
+
+  it("is measured by a floor that never passes its real size", () => {
+    for (const value of [
+      { kind: "missing", last: undefined }, { kind: "page", markdown: "line\n\"quoted\"\\ \u0001 é 中文 😀" }, [], {}, [null, 1.5, true, "x"],
+      { items: [{ message: { body: "", createdAtMs: 0 }, lastReplyAtMs: null }] }, [undefined],
+    ]) {
+      expect(leastJsonBytes(value, Infinity), JSON.stringify(value)).toBeLessThanOrEqual(Buffer.byteLength(JSON.stringify(value), "utf8"));
+    }
+  });
+});
+
+describe("the saved workspace list", () => {
+  const SIGN_IN_SCOPE = JSON.stringify(["https://dohc.example.com", "u-1"]);
+  const LIST_FILE = `${fileName(SIGN_IN_SCOPE)}.list`;
+  const entry = (workspaceId: string, showOnPhone = true) => ({ workspaceId, name: workspaceId, canOpen: true, showOnPhone });
+  const listAnswer = (...workspaces: ReturnType<typeof entry>[]): Answer => ({ status: 200, body: { ok: true, workspaces } });
+
+  /** One launch of the app's account side: the list, with its saved copy, and the open workspace. */
+  function launchAccount(server: ReturnType<typeof testServer>, signIn = signInTo(server)) {
+    const { files, cache } = launch();
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    workspace.subscribe(() => {});
+    workspace.resume();
+    list.reload();
+    return { files, cache, list, workspace, signIn };
+  }
+
+  /** A first launch that lists A and B, and reads the files of each. */
+  async function readBoth(server: ReturnType<typeof testServer>) {
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
+    const first = launchAccount(server);
+    await vi.waitFor(() => expect(first.workspace.state().currentWorkspaceId).toBe("ws-a"));
+    first.workspace.state().data!.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(first.cache.entries(cacheScope(first.signIn, "ws-a"))).toHaveLength(1));
+    first.workspace.choose("ws-b");
+    first.workspace.state().data!.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(first.cache.entries(cacheScope(first.signIn, "ws-b"))).toHaveLength(1));
+    first.workspace.choose("ws-a");
+    await first.files.flush();
+    first.workspace.stop();
+    expect(names()).toEqual([`${fileName(cacheScope(first.signIn, "ws-a"))}.json`, `${fileName(cacheScope(first.signIn, "ws-b"))}.json`, LIST_FILE].sort());
+  }
+
+  it("opens the last workspace from the cache after a relaunch, while the server's list is still on its way", async () => {
+    const server = serverWithA();
+    await readBoth(server);
+    server.on("GET", "/sync/account/workspaces", held);
+    const listReads = count(server, "/sync/account/workspaces");
+    const reads = count(server, "/sync/ws-a/ops/listFiles");
+
+    const { list, workspace } = launchAccount(server);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    const data = workspace.state().data!;
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
+    expect(list.state()).toMatchObject({ status: "ready", problem: null });
+    expect(count(server, "/sync/account/workspaces")).toBe(listReads + 1);
+    expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(reads);
+    workspace.stop();
+  });
+
+  it("shows the saved list with the problem when the server's list fails", async () => {
+    const server = serverWithA();
+    await readBoth(server);
+    server.on("GET", "/sync/account/workspaces", "offline");
+    const { list, workspace } = launchAccount(server);
+    await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready", problem: "offline" }));
+    expect(workspace.state().currentWorkspaceId).toBe("ws-a");
+    workspace.stop();
+  });
+
+  it("lets the server's list decide: a workspace it drops goes, with its file, and one hidden elsewhere loses its file", async () => {
+    const server = serverWithA();
+    await readBoth(server);
+    let answer!: (value: Answer) => void;
+    server.on("GET", "/sync/account/workspaces", () => new Promise<Answer>(done => { answer = done; }));
+    const { files, cache, list, workspace, signIn } = launchAccount(server);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    workspace.state().data!.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(cache.entries(cacheScope(signIn, "ws-a"))).toHaveLength(1));
+
+    // A has gone from the account, and B was hidden on the desktop while the phone was closed.
+    answer(listAnswer(entry("ws-b", false), entry("ws-c")));
+    await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready", workspaces: [{ workspaceId: "ws-b" }, { workspaceId: "ws-c" }] }));
+    expect(workspace.state().currentWorkspaceId).toBe("ws-c");
+    expect(cache.entries(cacheScope(signIn, "ws-a"))).toEqual([]);
+    await files.flush();
+    expect(names()).toEqual([LIST_FILE]);
+    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([entry("ws-b", false), entry("ws-c")]);
+    workspace.stop();
+  });
+
+  it("saves a Show on phone change made on this phone", async () => {
+    const server = serverWithA();
+    await readBoth(server);
+    server.on("PATCH", "/sync/account/workspaces/ws-b", { status: 200, body: { ok: true, workspaceId: "ws-b", showOnPhone: false } });
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")), listAnswer(entry("ws-a"), entry("ws-b", false)));
+    const { files, list, workspace: open } = launchAccount(server);
+    await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready" }));
+    await vi.waitFor(() => expect(count(server, "/sync/account/workspaces")).toBe(2));
+    open.setShowOnPhone("ws-b", false);
+    await vi.waitFor(() => expect(list.state()).toMatchObject({ pending: new Set() }));
+    await files.flush();
+    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([entry("ws-a"), entry("ws-b", false)]);
+    expect(names()).not.toContain(`${fileName(SCOPE_B)}.json`);
+    open.stop();
+  });
+
+  it("is deleted at sign-out", async () => {
+    const server = serverWithA();
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a")));
+    const { files, cache } = launch();
+    const account = createAccount({ store: memoryStore({ origin: server.origin, token: "tok-1", userId: "u-1", email: "ice@example.com" }).store, fetch: server.fetch });
+    cache.follow(account);
+    await account.restore();
+    const state = account.state();
+    if (state.status !== "signed-in") throw new Error("expected signed-in");
+    const list = createWorkspaceList(state.signIn, cache.savedList(state.signIn));
+    list.reload();
+    await vi.waitFor(() => expect(list.state().status).toBe("ready"));
+    await files.flush();
+    expect(names()).toEqual([LIST_FILE]);
+
+    await account.signOut();
+    await files.flush();
+    expect(names()).toEqual([]);
   });
 });

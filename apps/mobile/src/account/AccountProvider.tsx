@@ -45,12 +45,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => void account.restore(), [account]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
-  const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn), [signIn]);
-  const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
-  useEffect(() => list?.reload(), [list]);
-
   const [cache] = useState(() => createReadCache(createCacheFiles()));
   useEffect(() => cache.follow(account), [account, cache]);
+
+  // The saved list shows until the server's answers, so a relaunch opens the last workspace from the cache.
+  const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn, cache.savedList(signIn)), [signIn, cache]);
+  const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
+  useEffect(() => list?.reload(), [list]);
   // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
   // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
   const open = useMemo(() => signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null, [signIn, list, cache]);
