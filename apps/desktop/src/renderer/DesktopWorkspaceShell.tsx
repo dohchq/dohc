@@ -259,7 +259,7 @@ import {
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
 import { WhatsNewPage } from "./workbench/WhatsNewPage";
-import { takeUnseenWhatsNew } from "./whatsNew";
+import { claimUnseenWhatsNew } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -1750,6 +1750,18 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // After the saved tabs return, What's new opens over them once per release.
+  // It shows at once, so a restored file it covers no longer holds back the
+  // restored-surface phase.
+  const openUnseenWhatsNew = async () => {
+    const id = workspaceIdRef.current;
+    if (!(await claimUnseenWhatsNew()) || workspaceIdRef.current !== id) return;
+    openVirtualTab(WHATS_NEW_TAB_PATH);
+    if (restoredActiveFileSurface.current !== null && markCurrentSwitchPhase("restored-active-surface-ready")) {
+      restoredActiveFileSurface.current = null;
+    }
+  };
+
   // A failed read is read again once the workspace opens (useSavedTabsReread).
   const layoutReadStartedAt = useRef(0);
   const [layoutReadFailure, setLayoutReadFailure] = useState<{
@@ -1793,7 +1805,7 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
-        if (takeUnseenWhatsNew()) openVirtualTab(WHATS_NEW_TAB_PATH);
+        void openUnseenWhatsNew();
       },
       onError: (error) => {
         restoredActiveFileSurface.current = null;
@@ -1827,6 +1839,7 @@ export function DesktopWorkspaceShell(props: {
       writeWb({ ...shown });
     }
     uiStateLoaded.current = true;
+    void openUnseenWhatsNew();
   }, [writeWb]);
   useSavedTabsReread({
     workspaceId,

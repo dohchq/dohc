@@ -62,3 +62,13 @@ export function takeUnseenWhatsNew(storage: Pick<Storage, "getItem" | "setItem">
     return false;
   }
 }
+
+// Windows open together after a restart; the lock lets only one of them
+// take the new release.
+export async function claimUnseenWhatsNew(): Promise<boolean> {
+  try {
+    return await navigator.locks.request(SEEN_KEY, () => takeUnseenWhatsNew());
+  } catch {
+    return false;
+  }
+}
