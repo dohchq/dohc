@@ -1,5 +1,6 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSessions, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import type { AccountFeedWaits } from "./accountFeed";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { notFound, relayError } from "./errors";
 import { accountIsFenced } from "./storage/accountDeletion";
@@ -8,6 +9,9 @@ import type { SyncRelayStorage } from "./storage";
 export type AccountSessionRoute =
   | { route: "account-sessions" }
   | { route: "account-session-revoke"; sessionId: string };
+
+/** A client sends its user agent with no length limit, so the list shows this many characters of it. */
+export const ACCOUNT_SESSION_CLIENT_MAX_CHARS = 256;
 
 /** Parses `/sync/account/sessions/...` after its first two segments. */
 export function parseAccountSessionRoute(parts: readonly string[]): AccountSessionRoute {
@@ -26,6 +30,7 @@ export function createAccountSessionRoutes(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
   sessions: AccountSessions;
+  feedWaits: Pick<AccountFeedWaits, "wakeAccount">;
 }) {
   const { storage, sessions } = options;
 
@@ -35,6 +40,8 @@ export function createAccountSessionRoutes(options: {
     if (route.route === "account-session-revoke") {
       // The store deletes the row only while the caller's own session is current. Revoking that session signs it out.
       if (!await sessions.revoke({ userId: caller.userId, callerSessionId: caller.sessionId, sessionId: route.sessionId })) throw notFound();
+      // A feed held under the revoked session checks it now, instead of at the end of its hold.
+      options.feedWaits.wakeAccount(caller.userId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
     }
     const listed = await sessions.list(caller.userId);
@@ -44,7 +51,7 @@ export function createAccountSessionRoutes(options: {
     return jsonResponse({ ok: true, sessions: listed.map(session => ({
       sessionId: session.sessionId,
       createdAtMs: session.createdAtMs,
-      client: session.userAgent,
+      client: session.userAgent === null ? null : [...session.userAgent].slice(0, ACCOUNT_SESSION_CLIENT_MAX_CHARS).join(""),
       current: session.sessionId === caller.sessionId,
     })) });
   };

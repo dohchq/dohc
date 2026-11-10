@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { UnauthorizedError, type AccountSessions, type AccountSessionSummary, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
+import { ACCOUNT_SESSION_CLIENT_MAX_CHARS } from "./accountSessionRoutes";
+import { DiscussionActivityHub } from "./discussionActivity";
 import type { StorageContext } from "./storage/context";
-import { closeTestStorages, denialBytes, json, testHandler, testStorage, type HandlerOverrides } from "./testing";
+import { claimWorkspace, closeTestStorages, denialBytes, json, testHandler, testStorage, type HandlerOverrides } from "./testing";
 
 afterEach(closeTestStorages);
 
@@ -35,8 +37,9 @@ async function relay(options: { accountApi?: boolean } = {}) {
     { userId: "ben", sessionId: "ben-phone", token: "token-ben-phone", createdAtMs: 1_500, userAgent: "dohc-mobile/1 (Android)" },
   ];
   const storage = await testStorage() as StorageContext;
-  const h = testHandler(storage, { accountApi: options.accountApi ?? true, ...sessionTable(rows) });
-  return { rows, storage, h };
+  const activity = new DiscussionActivityHub();
+  const h = testHandler(storage, { accountApi: options.accountApi ?? true, discussionActivity: activity, ...sessionTable(rows) });
+  return { rows, storage, activity, h };
 }
 
 const as = (token: string, init: RequestInit = {}) => {
@@ -59,6 +62,14 @@ describe("the account's sessions", () => {
       { sessionId: "ana-desktop", createdAtMs: 1_000, client: null, current: false },
     ] });
     expect(text).not.toContain("token");
+  });
+
+  it("shows at most the first 256 characters of a client's user agent", async () => {
+    const { rows, h } = await relay();
+    rows[0]!.userAgent = `${"a".repeat(ACCOUNT_SESSION_CLIENT_MAX_CHARS - 1)}😀${"b".repeat(1_000)}`;
+    const [phone] = (await json(await h(list(as("token-ana-phone"))))).sessions as Array<{ client: string }>;
+    expect(ACCOUNT_SESSION_CLIENT_MAX_CHARS).toBe(256);
+    expect(phone!.client).toBe(`${"a".repeat(ACCOUNT_SESSION_CLIENT_MAX_CHARS - 1)}😀`);
   });
 
   it("is not served while the account API is off", async () => {
@@ -105,6 +116,18 @@ describe("revoking a session", () => {
     expect((await h(revoke("ana-phone", as("token-ana-phone")))).status).toBe(200);
     expect((await h(list(as("token-ana-phone")))).status).toBe(401);
     expect((await h(list(as("token-ana-desktop")))).status).toBe(200);
+  });
+
+  it("ends a change feed held under the revoked session at once", async () => {
+    const { activity, h } = await relay();
+    await claimWorkspace(h, "ana", "trip");
+    const held = h(new Request("http://relay.test/sync/trip/ops/changes?since=0.0.0&hold=30000", as("token-ana-phone")));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const revokedAtMs = Date.now();
+    expect((await h(revoke("ana-phone", as("token-ana-desktop")))).status).toBe(200);
+    expect((await held).status).toBe(401);
+    expect(Date.now() - revokedAtMs).toBeLessThan(5_000);
+    expect(activity.stats().waiters).toBe(0);
   });
 
   it("answers another account's session, a missing one, and an impossible ID with the same bytes", async () => {

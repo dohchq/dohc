@@ -662,6 +662,43 @@ describeWithPostgres("an account's sessions", () => {
     expect(await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: phoneId! })).toBe(true);
     expect(await sessionOf(anaPhone.token)).toBeUndefined();
   });
+
+  it("lists newest first, breaking a tie by ID", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    await pool.query('delete from "session" where "userId" = $1', [user.id]);
+    for (const userAgent of ["one", "two", "three"]) await signIn(email, userAgent);
+    const ids = (await pool.query<{ id: string }>('select "id" from "session" where "userId" = $1', [user.id])).rows.map(row => row.id).sort();
+    const at = (id: string, createdAt: string) => pool.query('update "session" set "createdAt" = $2 where "id" = $1', [id, createdAt]);
+    // The newest has the greatest ID, so ordering by ID alone would put it last.
+    await at(ids[2]!, "2026-11-10T12:00:00Z");
+    await at(ids[1]!, "2026-11-10T11:00:00Z");
+    await at(ids[0]!, "2026-11-10T11:00:00Z");
+    expect((await createPostgresAccountSessions(pool).list(user.id)).map(session => [session.sessionId, session.createdAtMs])).toEqual([
+      [ids[2], Date.parse("2026-11-10T12:00:00Z")],
+      [ids[0], Date.parse("2026-11-10T11:00:00Z")],
+      [ids[1], Date.parse("2026-11-10T11:00:00Z")],
+    ]);
+  });
+
+  it("neither lists nor revokes an expired session, and an expired caller revokes nothing", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    await pool.query('delete from "session" where "userId" = $1', [user.id]);
+    const sessions = createPostgresAccountSessions(pool);
+    const current = await signIn(email, "current");
+    const expired = await signIn(email, "expired");
+    const idOf = async (token: string) => (await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [token])).rows[0]!.id;
+    const [currentId, expiredId] = [await idOf(current.token), await idOf(expired.token)];
+    await pool.query(`update "session" set "expiresAt" = now() - interval '1 minute' where "id" = $1`, [expiredId]);
+    const exists = async (id: string) => (await pool.query('select 1 from "session" where "id" = $1', [id])).rowCount === 1;
+
+    expect((await sessions.list(user.id)).map(session => session.sessionId)).toEqual([currentId]);
+    expect(await sessions.revoke({ userId: user.id, callerSessionId: currentId, sessionId: expiredId })).toBe(false);
+    expect(await exists(expiredId)).toBe(true);
+    expect(await sessions.revoke({ userId: user.id, callerSessionId: expiredId, sessionId: currentId }), "an expired caller").toBe(false);
+    expect(await exists(currentId)).toBe(true);
+  });
 });
 
 describeWithPostgres("browser cookie sessions (web client)", () => {

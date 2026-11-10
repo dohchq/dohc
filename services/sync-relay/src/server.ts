@@ -494,9 +494,9 @@ export function createSyncRelayHandler({
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const respondToAccountWorkspaces = accountApi && resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
-  const respondToAccountSessions = accountApi && resolveAccountSession && accountSessions
-    ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions }) : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
+  const respondToAccountSessions = accountApi && resolveAccountSession && accountSessions
+    ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions, feedWaits: accountFeedWaits }) : undefined;
   const respondToAccountOperation = accountApi && resolveAccountSession
     ? createAccountOperationRoute({
       storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter, feedWaits: accountFeedWaits,
