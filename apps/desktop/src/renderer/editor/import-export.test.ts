@@ -401,7 +401,7 @@ describe('desktop editor markdown round-trip', () => {
           },
         ]),
       ),
-    ).toBe('![split]()')
+    ).toBe('![split]()\n')
     // Backslash traversal (a Windows-style `..\secret\pic.png`) stays blocked:
     // backslashes are folded to '/' before the check and a `..` backslash path
     // is never legitimate authored markdown (unlike a forward-slash `../`,
@@ -421,7 +421,7 @@ describe('desktop editor markdown round-trip', () => {
           },
         ]),
       ),
-    ).toBe('![backslash]()')
+    ).toBe('![backslash]()\n')
   })
 
   // SHARED CONTRACT TABLE. sanitizeImageSrc lives once, in
@@ -472,7 +472,7 @@ describe('desktop editor markdown round-trip', () => {
             },
           ]),
         ),
-      ).toBe(markdown)
+      ).toBe(`${markdown}\n`)
     }
   })
 
@@ -665,7 +665,7 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('round-trips a callout nested inside a list item without dropping it', () => {
-    const input = ['- item', '  > [!note] In list', '  > body'].join('\n')
+    const input = ['- item', '  > [!note] In list', '  > body', ''].join('\n')
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
     const twice = yDocToMarkdown(markdownToYDoc(once))

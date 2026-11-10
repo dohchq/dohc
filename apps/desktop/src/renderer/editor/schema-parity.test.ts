@@ -525,8 +525,9 @@ describe("desktop editor schema parity", () => {
     const ref = createRef<MarkdownEditorHandle>();
     const sourceBody = parseFrontmatter(item.source).body;
     const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
+    // The editor serializes the body without the saved file's final newline.
     const canonicalBody = parseFrontmatter(expected).body
-      .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
+      .replaceAll('\r\n', '\n').replace(/^\n+/u, '').replace(/\n$/u, '');
     const projected = 'projected' in item && item.projected
       ? markdownToYDoc(item.source, { reading: "projection" })
       : undefined;
@@ -686,7 +687,7 @@ describe("desktop editor schema parity", () => {
       const projected = projectYDocToMarkdown(doc);
       expect(yDocToMarkdown(doc)).toBe(projected);
       expect(projected.startsWith(EDGE_FRONTMATTER)).toBe(true);
-      expect(serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON())).trimEnd()).toBe(
+      expect(`${serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON())).trimEnd()}\n`).toBe(
         projected.slice(EDGE_FRONTMATTER.length),
       );
 
