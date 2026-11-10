@@ -254,6 +254,27 @@ it("keeps a slot for live edits while an activation validates", async () => {
   held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
 }, 60_000);
 
+// Issue #1967: a busy activation's wait for capacity ended on any slot's release, so a host waking on it would
+// capture again each time a live edit finished while the auxiliary slot stayed taken.
+// Proves: the wait outlasts a live edit's completion and ends only once the auxiliary child has exited, when an activation runs.
+it("keeps a busy activation waiting through live edits until the auxiliary slot frees", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000), activate = pool.ordinaryActivation(policy);
+  const work = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
+  // The held job receives no IPC input.
+  const held = new AbortController(), running = holdDispatch(() => Promise.resolve(activate(work, held.signal))).catch((error: unknown) => error);
+  const busy = await activate(work);
+  if (busy.kind !== "retry") throw Error("Expected busy auxiliary slot");
+  let woke = false;
+  const waiting = busy.waitForCapacity().then(() => {woke = true;});
+  expect((await validate(input)).kind).toBe("accepted");
+  // Everything the edit's completion set off has run.
+  await new Promise(setImmediate);
+  expect(woke).toBe(false);
+  held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
+  await waiting;
+  expect(await activate({...work, baselineBytes: input.checkpoint})).toMatchObject({kind: "accepted"});
+}, 60_000);
+
 /** A restore point at `checkpoint`, with no stored artifacts. */
 function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
   return {binding: {...input.document, currentPath: input.currentPath}, checkpoint: {bytes: checkpoint}, events: [],

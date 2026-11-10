@@ -621,14 +621,18 @@ it("gives several unfinished targets in one workspace one catch-up pull a pass",
 const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 type DrainLimits = {maxEntriesPerDrain?: number; maxBytesPerDrain?: number};
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// How the host reaches the relay's first open, and the clock, jitter and timer its retries use.
+type FirstOpenOptions = {fetch: typeof fetch; nowMs?: () => number; random?: () => number; schedule?: (atMs: number, fire: () => void) => () => void};
 
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 // With `firstOpen`, the host asks the relay to start documents with no lineage through its `fetch`.
+// `pollIntervalMs` replaces the pause between passes.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
+  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; pollIntervalMs?: number; firstOpen?: FirstOpenOptions; selfHosted?: boolean;
+  restore?: boolean} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -690,7 +694,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const target ={workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
   await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: options.passDeadlineMs ?? 10_000, validation: policy,
-    ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
+    ...(options.pollIntervalMs ? {pollIntervalMs: options.pollIntervalMs} : options.empty || options.polling ? {pollIntervalMs: 20} : {}),
     ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {}), ...options.limits});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
@@ -1334,7 +1338,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
+  limits?: DrainLimits; passDeadlineMs?: number; pollIntervalMs?: number; firstOpen?: FirstOpenOptions; selfHosted?: boolean; restore?: boolean} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -5603,8 +5607,9 @@ const checkedCandidate = (input: FirstOpenCandidateInput): FirstOpenNativeCheck 
 // each request before the relay does; `onCheck` runs once the engine checked a
 // base, before the relay writes it. The workspace's credential is its
 // service-host credential, or with `credential: "other"`, a well-formed one
-// the relay never derived.
-async function neverOpenedHost(options: {passDeadlineMs?: number; nowMs?: () => number; credential?: "service-host" | "other"; onCheck?: () => void;
+// the relay never derived. `rewrite` writes the note again under a new source id.
+async function neverOpenedHost(options: {passDeadlineMs?: number; pollIntervalMs?: number; maxDocumentsPerPass?: number; nowMs?: () => number;
+  random?: () => number; schedule?: FirstOpenOptions["schedule"]; credential?: "service-host" | "other"; onCheck?: () => void;
   answer?: (request: Request, relay: (request: Request) => Promise<Response>) => Promise<Response>} = {}) {
   let relay!: (request: Request) => Promise<Response>;
   // Each request, its signal, and the signal of the pass whose capture started it.
@@ -5617,12 +5622,17 @@ async function neverOpenedHost(options: {passDeadlineMs?: number; nowMs?: () => 
     statuses.push(response.status);
     return response;
   });
-  const o = await emptyServiceHost({passDeadlineMs: options.passDeadlineMs, firstOpen: {fetch: fetcher, nowMs: options.nowMs}});
-  const text = new TextEncoder().encode("# Plan\n\nBring snacks.\n"), digest = sha256(text);
-  o.f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: text, createdAtMs: 1});
-  o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "agent", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
-    payloadJson: JSON.stringify({momentId: "plain-moment", objectId: neverOpened.objectId, versionId: "main", operation: "write", path: neverOpened.path,
-      payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
+  const o = await emptyServiceHost({passDeadlineMs: options.passDeadlineMs, pollIntervalMs: options.pollIntervalMs, maxDocumentsPerPass: options.maxDocumentsPerPass,
+    firstOpen: {fetch: fetcher, nowMs: options.nowMs, random: options.random, schedule: options.schedule}});
+  let writes = 0;
+  const rewrite = (id: string, markdown: string) => {
+    const text = new TextEncoder().encode(markdown), digest = sha256(text);
+    o.f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: text, createdAtMs: 1});
+    o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "agent", ops: [{originSeq: writes++, opKind: "moment.append", recordedAtMs: 1,
+      payloadJson: JSON.stringify({momentId: id, objectId: neverOpened.objectId, versionId: "main", operation: "write", path: neverOpened.path,
+        payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
+  };
+  rewrite("plain-moment", "# Plan\n\nBring snacks.\n");
   const enrollment = o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: neverOpened.path,
     nowMs: 10, guard() {}});
   const namespace = o.f.history.namespace;
@@ -5638,7 +5648,7 @@ async function neverOpenedHost(options: {passDeadlineMs?: number; nowMs?: () => 
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.refuseCaptureAt(neverOpened.path, withoutLineage());
   await o.host.update({workspaces: [workspace], documents: [o.sibling, neverOpened], ...stay});
-  return {...o, workspace, bearer, requests, statuses, fetcher, builds, checks,
+  return {...o, workspace, bearer, requests, statuses, fetcher, builds, checks, rewrite,
     captures: () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === neverOpened.path).length,
     bases: () => o.raw.prepare("SELECT payload_json FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").all()};
 }
@@ -5909,6 +5919,211 @@ it("asks again about a source whose first-open answer said it was stale", async 
   await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
   expect(o.statuses).toEqual([200, 200]);
   expect(o.builds).toHaveBeenCalledOnce();
+});
+
+// The pause a host given this interval takes between passes, which only a wake, or `run` below, ends in a test.
+const HELD_POLL_MS = 3_600_000;
+// Watches the activation loop's pauses; start it before the host. `run` ends the pause the loop waits in and
+// resolves once the pass after it ends. `until` runs passes so, at most five, until `done` holds.
+function heldPolls() {
+  const timers = vi.spyOn(globalThis, "setTimeout"), cleared = vi.spyOn(globalThis, "clearTimeout"), ended = new Set<unknown>();
+  cleanup.push(async () => {timers.mockRestore(); cleared.mockRestore();});
+  const waiting = () => {
+    for (let index = timers.mock.calls.length - 1; index >= 0; index--) {
+      if (timers.mock.calls[index]![1] !== HELD_POLL_MS) continue;
+      const timer: unknown = timers.mock.results[index]?.value;
+      if (ended.has(timer) || cleared.mock.calls.some(call => call[0] === timer)) return undefined;
+      return {timer, end: timers.mock.calls[index]![0] as () => void};
+    }
+    return undefined;
+  };
+  // A wake may end the pause first, and the pass it runs counts: the loop waited in the pause when `passed` began.
+  const run = async (f: {passEnds: Set<() => void>}) => {
+    let passed: Promise<void> | undefined;
+    const pause = await vi.waitFor(() => {const pause = waiting(); expect(pause).toBeDefined(); passed = afterPasses(f, 0); return pause!;});
+    ended.add(pause.timer);
+    pause.end();
+    await passed;
+  };
+  return {run, async until(f: {passEnds: Set<() => void>}, done: () => boolean) {for (let pass = 0; pass < 5 && !done(); pass++) await run(f);}};
+}
+
+// A first-open retry clock with no jitter, which moves only when the test advances it, and the timers the host sets on it.
+function retryClock() {
+  let now = 0;
+  const timers: {atMs: number; fire: () => void; over: boolean}[] = [];
+  return {nowMs: () => now, random: () => 0,
+    schedule(atMs: number, fire: () => void) {const timer = {atMs, fire, over: false}; timers.push(timer); return () => {timer.over = true;};},
+    // The deadlines the host's timers wait for now.
+    armed: () => timers.filter(timer => !timer.over).map(timer => timer.atMs),
+    // Moves the clock to `atMs` and fires each timer that fell due.
+    advance(atMs: number) {
+      now = atMs;
+      for (const timer of timers) if (!timer.over && timer.atMs <= atMs) {timer.over = true; timer.fire();}
+    }};
+}
+
+// The source a first-open request asks about.
+const sourceOf = async (request: Request) => {
+  const body = await request.clone().json() as {objectId: string; path: string; sourceMomentId: string; sourceDigest: string};
+  return {workspaceId: "workspace", objectId: body.objectId, path: body.path, sourceMomentId: body.sourceMomentId, sourceDigest: body.sourceDigest};
+};
+// The relay's answer to a first-open request, for the source it asked about.
+const answerWith = async (request: Request, answer: Parameters<typeof firstOpenOutcome>[1]) =>
+  Response.json({ok: true, outcome: firstOpenOutcome(await sourceOf(request), answer)});
+const plainNote = {workspaceId: "workspace", objectId: neverOpened.objectId};
+
+// Issue #1967: a first open's answer waited for the next 250 ms pass to pull and capture the note.
+// Proves: with periodic passes held, the base a first open published wakes a pass that pulls the relay,
+// then captures the note again.
+it("pulls and captures a note again once its first open publishes, with no periodic pass", async () => {
+  const polls = heldPolls();
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2});
+  // Whether the base was written yet at each pull, and how often the note was captured by then.
+  const pulls: {bases: number; captures: number}[] = [];
+  o.requestListeners.add(method => {if (method === "sync.pullHosted") pulls.push({bases: o.bases().length, captures: o.captures()});});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  await vi.waitFor(() => expect(o.captures()).toBe(2), {timeout: 5_000});
+  expect(pulls).toContainEqual({bases: 1, captures: 1});
+  expect(o.fetcher).toHaveBeenCalledOnce();
+});
+
+// Issue #1967: a capture whose validation found no free slot was captured again on every pass until one was free.
+// Proves: with periodic passes held, the note is captured once while validation stays busy, however many passes
+// run, and the slot coming free wakes the pass that captures it again.
+it("captures a note whose validation was busy again only once a slot may be free", async () => {
+  const free = deferred<void>(), validations: string[] = [], waits: (AbortSignal | undefined)[] = [];
+  let busy = true;
+  const validation = vi.spyOn(liveValidation, "ordinaryActivation").mockImplementation(() => async () => {
+    validations.push(busy ? "retry" : "refused");
+    return busy ? {kind: "retry", reason: "admission-unavailable", waitForCapacity: async (signal?: AbortSignal) => {waits.push(signal); await free.promise;}}
+      : {kind: "refused", message: "Activation history is invalid."};
+  });
+  cleanup.push(async () => validation.mockRestore());
+  const polls = heldPolls();
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, onCheck: () => o.refuseCaptureAt(neverOpened.path, undefined)});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  // The capture after the base meets busy validation, whether the base's wake or a held pass runs it.
+  await polls.until(o.f, () => validations.length > 0);
+  expect(validations).toEqual(["retry"]);
+  const captured = o.captures();
+  for (let pass = 0; pass < 20; pass++) await polls.run(o.f);
+  console.info(`Captures while validation stayed busy, over 20 passes: ${o.captures() - captured}`);
+  expect(o.captures()).toBe(captured);
+  expect(validations).toEqual(["retry"]);
+  expect(waits.map(signal => signal?.aborted)).toEqual([false]);
+  busy = false;
+  free.resolve();
+  await vi.waitFor(() => expect(o.host.blocked(plainNote)).toBe("refused"), {timeout: 5_000});
+  expect(o.captures()).toBe(captured + 1);
+  expect(validations).toEqual(["retry", "refused"]);
+});
+
+// Issue #1967: a first open asked again at its deadline only if a 250 ms pass happened to run after it.
+// Proves: with periodic passes held, a note the relay answered with build deadlines is asked about again at each
+// retry time the host set, from that time's timer, and no pass asks before one. The third deadline answer stops
+// it with no timer left. Try again then waits for the relay's own wait, and asks once that ends.
+it("asks again at each build deadline's retry time with no periodic pass, and stops at the third", async () => {
+  const clock = retryClock(), polls = heldPolls();
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, nowMs: clock.nowMs, random: clock.random, schedule: clock.schedule,
+    answer: request => answerWith(request, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 1_000})});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(clock.armed()).toEqual([60_000]));
+  expect(o.requests).toHaveLength(1);
+  clock.advance(59_999);
+  for (let pass = 0; pass < 20; pass++) await polls.run(o.f);
+  console.info(`First-open requests before their deadline, over 20 passes: ${o.requests.length - 1}`);
+  expect(o.requests).toHaveLength(1);
+  clock.advance(60_000);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(2));
+  await vi.waitFor(() => expect(clock.armed()).toEqual([180_000]));
+  clock.advance(179_999);
+  await polls.run(o.f);
+  expect(o.requests).toHaveLength(2);
+  clock.advance(180_000);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(3));
+  const source = await sourceOf(o.requests[0]!.request);
+  await vi.waitFor(() => expect(o.host.firstOpenStatus(plainNote, () => source)).toMatchObject({reason: "retry-stopped", deadlineAnswers: 3}));
+  expect(clock.armed()).toEqual([]);
+  await polls.run(o.f);
+  expect(o.requests).toHaveLength(3);
+  // The relay's wait after the third deadline ends at 181 s.
+  expect(o.host.unblock(plainNote)).toBe(true);
+  expect(clock.armed()).toEqual([181_000]);
+  await polls.run(o.f);
+  expect(o.requests).toHaveLength(3);
+  clock.advance(181_000);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(4));
+});
+
+// Proves: Try again during a first-open request that does not end at its abort asks nothing more while that
+// request runs. Its late answer counts for nothing, and its end wakes the pass that asks again, with no
+// periodic pass.
+it("asks again once the request Try again replaced ends, and discards its late answer", async () => {
+  const late = deferred<void>(), polls = heldPolls();
+  let answered = 0;
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, nowMs: () => 0, answer: async (request, relay) => {
+    if (answered++ > 0) return relay(request);
+    await late.promise;
+    return answerWith(request, {kind: "refused", reason: "deletion"});
+  }});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const source = await sourceOf(o.requests[0]!.request);
+  expect(o.host.unblock(plainNote)).toBe(true);
+  expect(o.requests[0]!.signal.aborted).toBe(true);
+  // The pass Try again wakes captures the note again, and no pass asks while the replaced request runs.
+  await vi.waitFor(() => expect(o.captures()).toBe(2), {timeout: 5_000});
+  await polls.run(o.f);
+  expect(o.requests).toHaveLength(1);
+  late.resolve();
+  await vi.waitFor(() => expect(o.requests).toHaveLength(2), {timeout: 5_000});
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  expect(o.host.firstOpenStatus(plainNote, () => source)).toBeUndefined();
+});
+
+// Proves: a first-open request that ends because its note left the host wakes a pass, which asks nothing, and
+// nothing asks about the note again once its retry falls due.
+it("asks nothing more after a note's departure ends its first-open request", async () => {
+  const clock = retryClock(), polls = heldPolls();
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, nowMs: clock.nowMs, random: clock.random, schedule: clock.schedule,
+    answer: request => new Promise((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => reject(request.signal.reason), {once: true});
+    })});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  expect(o.requests[0]!.signal.aborted).toBe(true);
+  await vi.waitFor(() => expect(passes).toBeGreaterThan(0), {timeout: 5_000});
+  clock.advance(10_000);
+  await polls.run(o.f);
+  expect(clock.armed()).toEqual([]);
+  expect(o.requests).toHaveLength(1);
+});
+
+// Proves: a note written again while its first-open request ran is asked about under its new source as soon as
+// the request for the old one answers, with no periodic pass.
+it("asks about a note's new source once the request for its old source answers", async () => {
+  const old = deferred<void>(), polls = heldPolls(), sources: string[] = [];
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, nowMs: () => 0, answer: async (request, relay) => {
+    sources.push((await sourceOf(request)).sourceMomentId);
+    if (sources.length > 1) return relay(request);
+    await old.promise;
+    return answerWith(request, {kind: "unavailable", reason: "busy"});
+  }});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(sources).toEqual(["plain-moment"]));
+  o.rewrite("plain-rewritten", "# Plan\n\nBring snacks and water.\n");
+  await polls.run(o.f);
+  expect(sources).toEqual(["plain-moment"]);
+  old.resolve();
+  await vi.waitFor(() => expect(sources).toEqual(["plain-moment", "plain-rewritten"]), {timeout: 5_000});
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,

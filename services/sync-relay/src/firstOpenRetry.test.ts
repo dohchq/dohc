@@ -173,6 +173,40 @@ it("asks again at once for a source its stale answer named", async () => {
   expect(f.retry.state(source)?.retryAtMs).toBe(Infinity);
 });
 
+// Issue #1967: a host asked again only when a later 250 ms pass found the deadline passed.
+// Proves: the next deadline is the earliest finite one still ahead, with no request running for its source. A stop, a running
+// request and a passed deadline name none, Try again names the relay's own wait, and forgetting the document drops its deadline.
+it("names the next finite retry deadline", async () => {
+  const f = fixture(0), other = {...source, workspaceId: "other"};
+  expect(f.retry.next()).toBeUndefined();
+  await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "busy"}));
+  await f.retry.attempt(other, async () => deadline(other, 90_000));
+  expect([f.retry.state(source)?.retryAtMs, f.retry.state(other)?.retryAtMs]).toEqual([1_000, 90_000]);
+  expect(f.retry.next()).toBe(1_000);
+  f.advance(1_000);
+  expect(f.retry.next()).toBe(90_000);
+  let answer!: (outcome: ReturnType<typeof deadline>) => void;
+  const running = f.retry.attempt(source, () => new Promise(resolve => {answer = resolve;}));
+  expect(f.retry.next()).toBe(90_000);
+  answer(deadline());
+  await running;
+  expect(f.retry.next()).toBe(61_000);
+  f.retry.forget(other);
+  expect(f.retry.next()).toBe(61_000);
+  f.advance(60_000);
+  await f.retry.attempt(source, async () => deadline());
+  expect(f.retry.next()).toBe(181_000);
+  f.advance(120_000);
+  await f.retry.attempt(source, async () => deadline(source, 5_000));
+  expect(f.retry.stopped(source)).toBe(true);
+  expect(f.retry.next()).toBeUndefined();
+  f.advance(10);
+  expect(f.retry.retry(source)).toBe(true);
+  expect(f.retry.next()).toBe(186_000);
+  f.advance(4_990);
+  expect(f.retry.next()).toBeUndefined();
+});
+
 it("resets transient backoff on another answer, a new source, and explicit retry, honoring retry-after", async () => {
   const f = fixture(0);
   const busy = (s = source) => firstOpenOutcome(s, {kind: "unavailable", reason: "busy"});
