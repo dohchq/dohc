@@ -1,0 +1,251 @@
+[
+  {
+    "name": "dohc_list_files",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_list_groups",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_list_workspaces",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_post_channel",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "channel": {
+          "description": "A channel id from dohc_list_workspaces or dohc_list_groups, to start a thread in that channel.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "threadId": {
+          "description": "A threadId from dohc_read_channel or dohc_wait_for_messages, to reply in that thread.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "body": {
+          "type": "string",
+          "description": "Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed."
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[\\x20-\\x7e]+$",
+          "description": "Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."
+        }
+      },
+      "required": [
+        "workspace",
+        "body",
+        "idempotencyKey"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_post_discussion",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "path": {
+          "description": "The file's path exactly as dohc_list_files lists paths, to start a thread on it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "threadId": {
+          "description": "A threadId from dohc_read_discussion or dohc_wait_for_messages, to reply in that thread.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "body": {
+          "type": "string",
+          "description": "Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed."
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[\\x20-\\x7e]+$",
+          "description": "Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."
+        }
+      },
+      "required": [
+        "workspace",
+        "body",
+        "idempotencyKey"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_read_channel",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A channel id: your dmChannel from dohc_list_workspaces, a Group's channel from dohc_list_groups, or a message's channel."
+        },
+        "before": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "workspace",
+        "channel"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_read_discussion",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "path": {
+          "description": "The file's path exactly as dohc_list_files lists paths, to read every thread on it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "threadId": {
+          "description": "A message's threadId, to read that thread on a file.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "before": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_read_file",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "blobSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "workspace",
+        "blobSha256"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_wait_for_messages",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "description": "The cursor the last call returned. Omit it to start from when you signed in.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "timeoutMs": {
+          "description": "How long to wait, in milliseconds, at most 25000. The default is 25000.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 25000
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  }
+]

@@ -8,6 +8,12 @@ import type { AgentHue, IdentityHue } from "@dohc/workspace-contracts/agent-hues
 // Until the first settings read, `agents` is null: no agent reads as removed before then.
 type Chosen = { human: IdentityHue | null; agent: IdentityHue | null; agents: ReadonlyMap<string, IdentityHue | null> | null };
 let chosen: Chosen = { human: null, agent: null, agents: null };
+// Your personal agents, by id, as main caches them. Null until a roster is
+// read, so no personal agent reads as removed before then.
+type Personal = ReadonlyMap<string, { name: string; hue: IdentityHue | null }>;
+let personal: Personal | null = null;
+// Rises with each roster change, for the lists that show personal agents' names.
+let personalVersion = 0;
 const listeners = new Set<() => void>();
 
 const chosenAgentHue = (hue: AgentHue): IdentityHue | null => hue === "olive" ? null : hue;
@@ -35,13 +41,47 @@ export function chosenHue(kind: "human" | "agent"): IdentityHue | null {
   return chosen[kind];
 }
 
-/** The hue Settings gives this agent, null for olive, or undefined once Settings no longer has it. Olive before the first read. */
+/**
+ * The hue Settings gives this agent, null for olive, or undefined once Settings no longer has it. Olive before the first read.
+ * A personal agent's hue comes from your account's roster instead.
+ */
 export function settingsAgentHue(agentId: string): IdentityHue | null | undefined {
+  if (isPersonalAgentId(agentId)) return personal === null ? null : personal.get(agentId)?.hue;
   return chosen.agents === null ? null : chosen.agents.get(agentId);
+}
+
+export function isPersonalAgentId(agentId: string): boolean {
+  return agentId.startsWith("p-");
+}
+
+/** Your personal agents' names and hues, or null when no roster has been read. */
+export function setPersonalAgents(agents: readonly { agentId: string; name: string; hue: AgentHue }[] | null): void {
+  const next: Personal | null = agents === null ? null
+    : new Map(agents.map((agent) => [agent.agentId, { name: agent.name, hue: chosenAgentHue(agent.hue) }] as const));
+  const same = next === null ? personal === null
+    : personal !== null && personal.size === next.size && [...next].every(([id, entry]) => {
+      const held = personal?.get(id);
+      return held !== undefined && held.name === entry.name && held.hue === entry.hue;
+    });
+  if (same) return;
+  personal = next;
+  personalVersion += 1;
+  for (const listener of listeners) listener();
+}
+
+/** A personal agent's current name, or null when the roster doesn't hold it. */
+export function personalAgentName(agentId: string): string | null {
+  return personal?.get(agentId)?.name ?? null;
+}
+
+export function personalAgentsVersion(): number {
+  return personalVersion;
 }
 
 /** Forgets the settings read, as at startup. Only tests call it. */
 export function resetChosenColorsForTests(): void {
   chosen = { human: null, agent: null, agents: null };
+  personal = null;
+  personalVersion += 1;
   for (const listener of listeners) listener();
 }

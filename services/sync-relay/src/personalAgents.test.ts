@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { accountDeletionIdentity } from "@dohc/workspace-auth/accountDeletion";
+import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type {
   ConsentCredentials,
   CredentialFence,
@@ -8,16 +10,20 @@ import type {
   CredentialFenceListener,
 } from "@dohc/workspace-auth/credentialFence";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
+import type { AutomationReplica } from "./automationReplicas";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
 import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
-import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, PERSONAL_PASSWORD_ATTEMPTS, type PersonalRunningEntry } from "./personalAgents";
+import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, type PersonalRunningEntry } from "./personalAgents";
 import { personalAgentOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
+import { ACCOUNT_VISITS_PER_CALLER, startServerCopies, type ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import { AGENT_AUTHORIZATION_CODE_TTL_MS } from "./storage/agentConnections";
 import type { StorageContext } from "./storage/context";
 import { CHAT_HISTORY_SCAN_BYTES, CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
 import { PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT } from "./storage/personalAgents";
@@ -54,14 +60,11 @@ const OTHER = "other-account";
 const WS_A = "workspace-a";
 const WS_B = "workspace-b";
 const OTHER_WS = "workspace-other";
-const PASSWORD = "owner password";
-const NEW_PASSWORD = "owner new password";
-const OTHER_PASSWORD = "other password";
 const REDIRECT = "http://127.0.0.1:43110/callback";
 const VERIFIER = "agent-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
 const DELETION_KEY = "personal-agent-deletion-key-at-least-32-bytes";
-// "owner-new-session" began after the owner's last password change; the fake
-// marks a session older than a change through `staleSessions`.
+// A session began before any password change unless a test starts it with
+// `startSession`, as a browser that signs in again does.
 const SESSIONS: Record<string, string> = {
   "owner-session": OWNER,
   "owner-new-session": OWNER,
@@ -90,20 +93,20 @@ type Signed = {
   fenceEpoch: number;
 };
 
-/** The Postgres fence as the relay sees it: epochs, password hashes, and the notification channel. */
+/** The Postgres fence as the relay sees it: epochs, when sessions began, and the notification channel. */
 class FakeFence implements CredentialFence {
   readonly epochs = new Map<string, number>();
-  readonly passwords = new Map<string, string>([[OWNER, PASSWORD], [OTHER, OTHER_PASSWORD]]);
-  /** Sessions that began before their account's last password change. */
-  readonly staleSessions = new Set<string>();
   readonly changes: CredentialFenceChange[] = [];
   readonly changedSinceCalls: number[] = [];
   down = false;
   listener: CredentialFenceListener | undefined;
   /** A commit that lands just after consent's read. */
   afterConsentRead: (() => void) | undefined;
-  verifyGate: Promise<void> | undefined;
   private clock = 1_000;
+  /** The order each account's last password change and each session's start committed in. */
+  private order = 0;
+  private readonly lastChange = new Map<string, number>();
+  private readonly sessionStarts = new Map<string, number>();
 
   async readEpoch(userId: string): Promise<number> {
     this.assertUp();
@@ -112,21 +115,14 @@ class FakeFence implements CredentialFence {
 
   async readConsentCredentials(userId: string, sessionId: string): Promise<ConsentCredentials | null> {
     this.assertUp();
-    const password = this.passwords.get(userId);
     const read = {
-      passwordHash: password === undefined ? null : `hash:${password}`,
       epoch: this.epochs.get(userId) ?? 0,
-      sessionCurrent: !this.staleSessions.has(sessionId),
+      sessionCurrent: (this.sessionStarts.get(sessionId) ?? 0) >= (this.lastChange.get(userId) ?? 0),
     };
     const commit = this.afterConsentRead;
     this.afterConsentRead = undefined;
     commit?.();
     return read;
-  }
-
-  async verifyPassword(passwordHash: string, password: string): Promise<boolean> {
-    await this.verifyGate;
-    return passwordHash === `hash:${password}`;
   }
 
   async changedSince(positionMs: number): Promise<CredentialFenceChange[]> {
@@ -145,13 +141,18 @@ class FakeFence implements CredentialFence {
   }
 
   /** A password change commits. Its notification is the test's to deliver. */
-  changePassword(userId: string, password: string, changedAtMs?: number): CredentialFenceChange {
+  changePassword(userId: string, changedAtMs?: number): CredentialFenceChange {
     this.clock += 1_000;
     const change = { userId, epoch: (this.epochs.get(userId) ?? 0) + 1, changedAtMs: changedAtMs ?? this.clock };
     this.epochs.set(userId, change.epoch);
-    this.passwords.set(userId, password);
+    this.lastChange.set(userId, ++this.order);
     this.changes.push(change);
     return change;
+  }
+
+  /** A browser signs in, so its session begins after every change so far. */
+  startSession(sessionId: string): void {
+    this.sessionStarts.set(sessionId, ++this.order);
   }
 
   private assertUp(): void {
@@ -167,8 +168,10 @@ const resolveSession: ResolveAccountSession = async (incoming) => {
 };
 
 const handlers: Handler[] = [];
+const cleanup: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  for (const close of cleanup.splice(0)) await close();
   await Promise.all(handlers.splice(0).map((h) => h.dispose()));
   await closeTestStorages();
 });
@@ -248,8 +251,8 @@ function internal(f: Fixture, path: string, body: unknown, headers: Record<strin
   return f.h(forwarded);
 }
 
-async function registerClient(f: Fixture): Promise<string> {
-  const body = await ok(await internal(f, "agent-clients", { registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent" }));
+async function registerClient(f: Fixture, reported: { clientName?: string; clientVersion?: string } = { clientName: "Test agent" }): Promise<string> {
+  const body = await ok(await internal(f, "agent-clients", { registration: "registered", redirectUris: [REDIRECT], ...reported }));
   return String(body.clientId);
 }
 
@@ -273,12 +276,11 @@ function consent(f: Fixture, requestId: string, session = "owner-session"): Prom
 }
 
 function allow(f: Fixture, requestId: string, input: {
-  agent?: AgentChoice; reach?: Reach; password?: string; session?: string;
+  agent?: AgentChoice; reach?: Reach; session?: string;
 } = {}): Promise<Response> {
   return internal(f, "agent-authorizations/personal-decision", {
     requestId,
     decision: "allow",
-    password: input.password ?? PASSWORD,
     agent: input.agent ?? { kind: "new", name: "Helper" },
     reach: input.reach ?? [{ workspaceId: WS_A, level: "view" }],
   }, cookie(input.session ?? "owner-session"));
@@ -286,7 +288,7 @@ function allow(f: Fixture, requestId: string, input: {
 
 /** A code the owner approved; not yet redeemed. */
 async function approve(f: Fixture, input: {
-  clientId: string; workspaceId?: string; agent?: AgentChoice; reach?: Reach; password?: string; session?: string;
+  clientId: string; workspaceId?: string; agent?: AgentChoice; reach?: Reach; session?: string;
 }): Promise<{ code: string; resource: string }> {
   const workspaceId = input.workspaceId ?? WS_A;
   const requestId = await beginRequest(f, input.clientId, workspaceId);
@@ -322,7 +324,7 @@ function agentRequest(accessToken: string, resource: string): Request {
 }
 
 async function signIn(f: Fixture, input: {
-  clientId?: string; workspaceId?: string; agent?: AgentChoice; reach?: Reach; password?: string; session?: string;
+  clientId?: string; workspaceId?: string; agent?: AgentChoice; reach?: Reach; session?: string;
 } = {}): Promise<Signed> {
   const clientId = input.clientId ?? await registerClient(f);
   const { code, resource } = await approve(f, { ...input, clientId });
@@ -358,7 +360,10 @@ function owner(f: Fixture, path: string, init: { method: string; body?: unknown 
 async function roster(f: Fixture, userId = OWNER) {
   return await ok(await owner(f, "", { method: "GET" }, userId)) as {
     revision: number;
-    agents: { agentId: string; name: string; hue: string; status: string; reportedProduct: string | null; reach: Reach }[];
+    agents: {
+      agentId: string; name: string; hue: string; status: string; reportedProduct: string | null; reportedVersion: string | null;
+      createdAtMs: number; signedInAtMs: number | null; lastActionAtMs: number | null; reach: Reach;
+    }[];
     workspaces: { workspaceId: string; name: string | null }[];
   };
 }
@@ -429,7 +434,7 @@ describe("personal agent sign-in", () => {
     });
     // Another account signed in to the browser can't read or answer it.
     await expectRefused(await consent(f, requestId, "other-session"));
-    await expectRefused(await allow(f, requestId, { session: "other-session", password: OTHER_PASSWORD }));
+    await expectRefused(await allow(f, requestId, { session: "other-session" }));
     // No session is a sign-in, not a refusal.
     expect((await internal(f, "agent-authorizations/personal-consent", { requestId })).status).toBe(401);
 
@@ -462,17 +467,19 @@ describe("personal agent sign-in", () => {
     await ok(await redeem(f, { clientId, ...owned }));
   });
 
-  it("creates the agent with its reach, name, color, and reported product", async () => {
+  it("creates the agent with its reach, name, color, sign-in time, and reported product and version", async () => {
     const f = await fixture();
-    const signed = await signIn(f, { reach: [{ workspaceId: WS_B, level: "comment" }, { workspaceId: WS_A, level: "view" }] });
+    const clientId = await registerClient(f, { clientName: "Test agent", clientVersion: "2.1.0" });
+    const signed = await signIn(f, { clientId, reach: [{ workspaceId: WS_B, level: "comment" }, { workspaceId: WS_A, level: "view" }] });
     expect(signed.agentId).toMatch(/^p-[a-z2-7]{26}$/u);
     expect(await roster(f)).toEqual({
       ok: true,
       revision: 1,
-      agents: [expect.objectContaining({
-        agentId: signed.agentId, name: "Helper", hue: "olive", status: "active", reportedProduct: "Test agent",
+      agents: [{
+        agentId: signed.agentId, name: "Helper", hue: "olive", status: "active", reportedProduct: "Test agent", reportedVersion: "2.1.0",
+        createdAtMs: f.now.value, signedInAtMs: f.now.value, lastActionAtMs: f.now.value,
         reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "comment" }],
-      })],
+      }],
       workspaces: [{ workspaceId: WS_A, name: null }, { workspaceId: WS_B, name: null }],
     });
     // The next agent takes the next free color. The roster lists agents oldest first.
@@ -481,27 +488,36 @@ describe("personal agent sign-in", () => {
     expect((await roster(f)).agents.map((agent) => agent.hue)).toEqual(["olive", "blue"]);
   });
 
-  it("counts wrong passwords per account, as sign-in does", async () => {
+  it("records each sign-in's time and the product and version its client reported, in place of the last ones", async () => {
     const f = await fixture();
-    const clientId = await registerClient(f);
-    const requestId = await beginRequest(f, clientId);
-    for (let attempt = 0; attempt < PERSONAL_PASSWORD_ATTEMPTS; attempt++) {
-      await expectCode(await allow(f, requestId, { password: "guess" }), 403, "password_incorrect");
-    }
-    await expectCode(await allow(f, requestId, { password: PASSWORD }), 429, "password_rate_limited");
-    const elsewhere = await beginRequest(f, clientId, OTHER_WS);
-    await ok(await allow(f, elsewhere, { session: "other-session", password: OTHER_PASSWORD, reach: [{ workspaceId: OTHER_WS, level: "view" }] }));
+    const createdAtMs = f.now.value;
+    const first = await signIn(f, { clientId: await registerClient(f, { clientName: "Test agent", clientVersion: "1.2.0" }) });
+    f.now.value += 60_000;
+    const again = await signIn(f, {
+      clientId: await registerClient(f, { clientName: "Other agent" }), agent: { kind: "existing", agentId: first.agentId },
+    });
+    expect(again.agentId).toBe(first.agentId);
+    expect((await roster(f)).agents).toEqual([expect.objectContaining({
+      agentId: first.agentId, reportedProduct: "Other agent", reportedVersion: null, createdAtMs, signedInAtMs: f.now.value,
+    })]);
+
+    f.now.value += 60_000;
+    await signIn(f, { clientId: await registerClient(f, {}), agent: { kind: "existing", agentId: first.agentId } });
+    expect((await roster(f)).agents).toEqual([expect.objectContaining({
+      agentId: first.agentId, reportedProduct: null, reportedVersion: null, createdAtMs, signedInAtMs: f.now.value,
+    })]);
   });
 
-  it("checks one password at a time per account", async () => {
+  it("refuses a reported version with a control character or over 100 characters", async () => {
     const f = await fixture();
-    const requestId = await beginRequest(f, await registerClient(f));
-    let open!: () => void;
-    f.fence.verifyGate = new Promise<void>((resolve) => { open = resolve; });
-    const first = allow(f, requestId, { password: "guess" });
-    await expectCode(await allow(f, requestId, { password: "guess" }), 429, "password_rate_limited");
-    open();
-    await expectCode(await first, 403, "password_incorrect");
+    for (const clientVersion of ["1.0\n", "v".repeat(101), ""]) {
+      await expectRefused(await internal(f, "agent-clients", {
+        registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent", clientVersion,
+      }));
+    }
+    await ok(await internal(f, "agent-clients", {
+      registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent", clientVersion: "v".repeat(100),
+    }));
   });
 });
 
@@ -643,10 +659,11 @@ describe("revocation", () => {
 
     const beforeReset = await approve(f, { clientId: agent.clientId, agent: existing });
     const newAgentBeforeReset = await approve(f, { clientId: agent.clientId });
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
+    f.fence.changePassword(OWNER);
     await expectRefused(await redeemIt(beforeReset));
     await expectRefused(await redeemIt(newAgentBeforeReset));
-    await ok(await redeemIt(await approve(f, { clientId: agent.clientId, agent: existing, password: NEW_PASSWORD, session: "owner-new-session" })));
+    f.fence.startSession("owner-new-session");
+    await ok(await redeemIt(await approve(f, { clientId: agent.clientId, agent: existing, session: "owner-new-session" })));
   });
 
   it("signing in again ends the agent's old connections, and its reach becomes the new choice", async () => {
@@ -722,7 +739,7 @@ describe("revocation", () => {
     await expect(f.h.linkAuthority.freshPersonal(authority)).resolves.toMatchObject({ connectionId: agent.connectionId });
     const pending = await approve(f, { clientId: agent.clientId });
 
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
+    f.fence.changePassword(OWNER);
     await expectPersonal(f, agent).rejects.toMatchObject({ code: "not_found" });
     await expect(f.h.linkAuthority.freshPersonal(authority)).rejects.toMatchObject({ code: "not_found" });
     await expectRefused(await redeem(f, { clientId: agent.clientId, ...pending }));
@@ -731,36 +748,37 @@ describe("revocation", () => {
     expect(connectionTokens(f, agent.connectionId)).toBe(2);
   });
 
-  it("accepts consent only with the password at the current fence", async () => {
+  it("accepts consent only from a session that began at or after the last password change", async () => {
     const f = await fixture();
     const clientId = await registerClient(f);
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
-    f.fence.staleSessions.add("owner-session");
+    f.fence.changePassword(OWNER);
 
     // A session from before the change signs in again first.
     const fromOldSession = await beginRequest(f, clientId);
     await expectCode(await consent(f, fromOldSession), 403, "sign_in_again");
-    await expectCode(await allow(f, fromOldSession, { password: PASSWORD }), 403, "sign_in_again");
-    // A session made after the change, including a sign-in that read the old hash, still needs the new password.
-    await expectCode(await allow(f, fromOldSession, { password: PASSWORD, session: "owner-new-session" }), 403, "password_incorrect");
-    const code = String((await ok(await allow(f, fromOldSession, { password: NEW_PASSWORD, session: "owner-new-session" }))).code);
+    await expectCode(await allow(f, fromOldSession), 403, "sign_in_again");
+    // A session made after the change consents, and its code holds the new fence.
+    f.fence.startSession("owner-new-session");
+    const code = String((await ok(await allow(f, fromOldSession, { session: "owner-new-session" }))).code);
     const tokens = await ok(await redeem(f, { clientId, code, resource: resourceFor(WS_A) }));
     await expectPersonal(f, { accessToken: String(tokens.accessToken), resource: resourceFor(WS_A) }).resolves.toMatchObject({ fenceEpoch: 1 });
 
     // A reset committed just after consent's read: the code holds the older fence and fails redemption.
     const raced = await beginRequest(f, clientId);
-    f.fence.afterConsentRead = () => f.fence.changePassword(OWNER, "owner third password");
-    const racedCode = String((await ok(await allow(f, raced, { password: NEW_PASSWORD, session: "owner-new-session" }))).code);
+    f.fence.afterConsentRead = () => f.fence.changePassword(OWNER);
+    const racedCode = String((await ok(await allow(f, raced, { session: "owner-new-session" }))).code);
     await expectRefused(await redeem(f, { clientId, code: racedCode, resource: resourceFor(WS_A) }));
+    // That reset also asks the session to sign in again.
+    await expectCode(await allow(f, await beginRequest(f, clientId), { session: "owner-new-session" }), 403, "sign_in_again");
   });
 
   it("asks a session that kept its sign-in through a password change to sign in again", async () => {
     const f = await fixture();
     const clientId = await registerClient(f);
     const requestId = await beginRequest(f, clientId);
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
-    f.fence.staleSessions.add("owner-session");
+    f.fence.changePassword(OWNER);
     await expectCode(await consent(f, requestId), 403, "sign_in_again");
+    f.fence.startSession("owner-new-session");
     await ok(await consent(f, requestId, "owner-new-session"));
   });
 
@@ -769,8 +787,9 @@ describe("revocation", () => {
     const wake = vi.spyOn(f.activity, "wakeLog");
     const old = await signIn(f, { reach: [{ workspaceId: WS_B, level: "view" }] });
     const oldStream = running(f, old, [WS_B]);
-    const change = f.fence.changePassword(OWNER, NEW_PASSWORD);
-    const current = await signIn(f, { password: NEW_PASSWORD, session: "owner-new-session" });
+    const change = f.fence.changePassword(OWNER);
+    f.fence.startSession("owner-new-session");
+    const current = await signIn(f, { session: "owner-new-session" });
     expect(current.fenceEpoch).toBe(1);
     const currentLive = running(f, current, [WS_A], "live");
     const currentStream = running(f, current, [WS_A]);
@@ -794,14 +813,15 @@ describe("revocation", () => {
     ]));
   });
 
-  it("signs out each agent a password change left with nothing to sign in with, once", async () => {
+  it("signs out each agent a password change left with no connection, once", async () => {
     const f = await fixture();
     const left = await signIn(f);
     const again = await signIn(f);
     const waiting = await signIn(f);
-    const change = f.fence.changePassword(OWNER, NEW_PASSWORD);
+    const change = f.fence.changePassword(OWNER);
     // After the change, one agent signs in again, and the owner approves another's sign-in that it hasn't redeemed.
-    const newSignIn = { password: NEW_PASSWORD, session: "owner-new-session" };
+    f.fence.startSession("owner-new-session");
+    const newSignIn = { session: "owner-new-session" };
     await signIn(f, { ...newSignIn, clientId: again.clientId, agent: { kind: "existing", agentId: again.agentId } });
     const code = await approve(f, { ...newSignIn, clientId: waiting.clientId, agent: { kind: "existing", agentId: waiting.agentId } });
     const before = (await roster(f)).revision;
@@ -812,7 +832,7 @@ describe("revocation", () => {
     expect(new Map(after.agents.map((agent) => [agent.agentId, agent.status]))).toEqual(new Map([
       [left.agentId, "signed_out"],
       [again.agentId, "active"],
-      [waiting.agentId, "active"],
+      [waiting.agentId, "signed_out"],
     ]));
 
     // The same notice again changes nothing.
@@ -820,6 +840,28 @@ describe("revocation", () => {
     expect((await roster(f)).revision).toBe(after.revision);
     // The approved sign-in still redeems: its agent kept its epoch.
     await ok(await redeem(f, { clientId: waiting.clientId, ...code }));
+    expect((await roster(f)).agents.find((agent) => agent.agentId === waiting.agentId)?.status).toBe("active");
+  });
+
+  it("shows an agent signed out once its connection ends, though a sign-in approved for it expires unredeemed", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const existing = { kind: "existing" as const, agentId: agent.agentId };
+    const status = async () => (await roster(f)).agents.find((row) => row.agentId === agent.agentId)?.status;
+    const expiring = await approve(f, { clientId: agent.clientId, agent: existing });
+    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+    // The used refresh token comes back, which ends the only connection.
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+    expect(await status()).toBe("signed_out");
+
+    f.now.value += AGENT_AUTHORIZATION_CODE_TTL_MS;
+    await expectRefused(await redeem(f, { clientId: agent.clientId, ...expiring }));
+    expect(await status()).toBe("signed_out");
+
+    // A sign-in redeemed in time makes it active again.
+    const inTime = await approve(f, { clientId: agent.clientId, agent: existing });
+    await ok(await redeem(f, { clientId: agent.clientId, ...inTime }));
+    expect(await status()).toBe("active");
   });
 
   it("ends running work while the notification channel is down, and keeps checking the fence directly", async () => {
@@ -834,7 +876,7 @@ describe("revocation", () => {
     expect(thrown(() => running(f, agent, [WS_A], "wait"))).toMatchObject({ code: "personal_agent_unavailable", statusCode: 503 });
     await expectPersonal(f, agent).resolves.toMatchObject({ connectionId: agent.connectionId });
 
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
+    f.fence.changePassword(OWNER);
     await expectPersonal(f, agent).rejects.toMatchObject({ code: "not_found" });
 
     // Back up: catch-up reads the change it missed before new work starts.
@@ -865,7 +907,7 @@ describe("revocation", () => {
   it("catches up from the stored position at startup and deletes stale credentials", async () => {
     const f = await fixture();
     const agent = await signIn(f);
-    f.fence.changePassword(OWNER, NEW_PASSWORD, 40_000);
+    f.fence.changePassword(OWNER, 40_000);
     f.storage.advanceCredentialFencePosition(70_000);
 
     await f.h.dispose();
@@ -913,6 +955,33 @@ describe("revocation", () => {
 
     await expectPersonal(reopened, agent).resolves.toMatchObject({ agentId: agent.agentId, connectionId: agent.connectionId });
     await ok(await refresh(reopened, agent.clientId, agent.refreshToken, agent.resource));
+  });
+
+  it("adds the version and sign-in columns to a relay without them, and fills them at the next sign-in", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await f.h.dispose();
+    closeTestStorage(f.storage);
+    const db = inspectDatabase(f.dbPath);
+    db.exec(`ALTER TABLE sync_relay_agent_clients DROP COLUMN reported_version;
+      ALTER TABLE sync_relay_personal_agents DROP COLUMN reported_version;
+      ALTER TABLE sync_relay_personal_agents DROP COLUMN signed_in_at_ms;
+      DELETE FROM sync_relay_migrations WHERE migration_id = 'personal-agent-activity-v1';`);
+    db.close();
+    const storage = reopenTestStorage(f.dbPath);
+    const reopened = { ...f, storage, h: handler(storage, f) };
+
+    expect((await roster(reopened)).agents).toEqual([expect.objectContaining({
+      agentId: agent.agentId, reportedProduct: "Test agent", reportedVersion: null, signedInAtMs: null,
+    })]);
+    f.now.value += 1_000;
+    await signIn(reopened, {
+      clientId: await registerClient(reopened, { clientName: "Test agent", clientVersion: "1.0" }),
+      agent: { kind: "existing", agentId: agent.agentId },
+    });
+    expect((await roster(reopened)).agents).toEqual([expect.objectContaining({
+      agentId: agent.agentId, reportedProduct: "Test agent", reportedVersion: "1.0", signedInAtMs: f.now.value,
+    })]);
   });
 });
 
@@ -984,6 +1053,91 @@ describe("the owner's controls", () => {
 
     await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
     expect(inA).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the owner's notice page", () => {
+  async function notices(f: Fixture, userId = OWNER): Promise<RelayNoticePage> {
+    return await ok(await f.h(request(userId, "/sync/notices"))) as unknown as RelayNoticePage;
+  }
+
+  function signedIn(page: RelayNoticePage) {
+    return page.notices.filter((notice) => notice.kind === "personal-agent-signed-in");
+  }
+
+  it("carries the roster revision, which each sign-in and owner change raises once, and only for its account", async () => {
+    const f = await fixture();
+    const revision = async (userId = OWNER) => (await notices(f, userId)).personalAgentsRevision;
+    expect(await revision()).toBe(0);
+    const agent = await signIn(f);
+    expect(await revision()).toBe(1);
+
+    const changes: [string, { method: string; body?: unknown }][] = [
+      ["name", { method: "PUT", body: { name: "Research" } }],
+      ["hue", { method: "PUT", body: { hue: "teal" } }],
+      ["reach", { method: "PUT", body: { reach: [{ workspaceId: WS_B, level: "comment" }] } }],
+      ["sign-out", { method: "POST" }],
+      ["remove", { method: "POST" }],
+      ["restore", { method: "POST" }],
+    ];
+    for (const [index, [change, init]] of changes.entries()) {
+      await ok(await owner(f, `/${agent.agentId}/${change}`, init));
+      expect(await revision(), change).toBe(index + 2);
+    }
+    await signIn(f, { clientId: agent.clientId, agent: { kind: "existing", agentId: agent.agentId } });
+    expect(await revision()).toBe(8);
+    // A refused change raises nothing.
+    expect((await owner(f, `/${agent.agentId}/hue`, { method: "PUT", body: { hue: "neon" } })).status).toBe(400);
+    expect(await revision()).toBe(8);
+
+    // Another account's agent signs in and changes; this account's revision stays.
+    expect(await revision(OTHER)).toBe(0);
+    const theirs = await signIn(f, {
+      workspaceId: OTHER_WS, reach: [{ workspaceId: OTHER_WS, level: "view" }], session: "other-session",
+    });
+    await ok(await owner(f, `/${theirs.agentId}/name`, { method: "PUT", body: { name: "Theirs" } }, OTHER));
+    expect(await revision(OTHER)).toBe(2);
+    expect(await revision()).toBe(8);
+    expect((await roster(f)).revision).toBe(8);
+  });
+
+  it("tells the owner each time an agent signs in as theirs, and opens that agent's page in Settings › Agents", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_B, level: "view" }] });
+    expect(signedIn(await notices(f))).toEqual([{
+      noticeId: `personal-agent-signed-in:${agent.connectionId}`,
+      changeSeq: 1,
+      // The address the agent signed in at.
+      workspaceId: WS_A,
+      recipientShareId: null,
+      kind: "personal-agent-signed-in",
+      senderKind: "agent",
+      senderUserId: OWNER,
+      senderLabel: "Helper",
+      title: "Helper signed in as your agent",
+      body: "",
+      target: { settings: "agents", agent: agent.agentId },
+      originInstallId: "relay",
+      createdAtMs: f.now.value,
+      readAtMs: null,
+      dismissedAtMs: null,
+      removed: false,
+    }]);
+    expect((await notices(f, OTHER)).notices).toEqual([]);
+
+    // A refresh isn't a sign-in. Signing in again is, under the agent's current name and the same id.
+    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
+    const again = await signIn(f, { clientId: agent.clientId, agent: { kind: "existing", agentId: agent.agentId } });
+    expect(signedIn(await notices(f)).map((notice) => [notice.noticeId, notice.senderLabel, notice.title, notice.target])).toEqual([
+      [`personal-agent-signed-in:${agent.connectionId}`, "Helper", "Helper signed in as your agent", { settings: "agents", agent: agent.agentId }],
+      [`personal-agent-signed-in:${again.connectionId}`, "Research", "Research signed in as your agent", { settings: "agents", agent: agent.agentId }],
+    ]);
+    // A new agent's notice names its own page.
+    const other = await signIn(f, { agent: { kind: "new", name: "Second" } });
+    expect(other.agentId).not.toBe(agent.agentId);
+    expect(signedIn(await notices(f)).at(-1)?.target).toEqual({ settings: "agents", agent: other.agentId });
+    expect((await notices(f, OTHER)).notices).toEqual([]);
   });
 });
 
@@ -1176,7 +1330,7 @@ describe("a personal agent's posts", () => {
     // A person's DM, as a new thread there or a reply in one of its threads.
     await expectRefused(await post(f, agent, { channelWireId: "wire-person" }));
     await expectRefused(await post(f, agent, { threadId: "thread-person", idempotencyKey: "post-person" }));
-    // A thread on a file has no channel to post in.
+    // A Comment on a file the relay never saw.
     await expectRefused(await post(f, agent, { threadId: "thread-file", idempotencyKey: "post-file" }));
     expect(logOf(f, WS_A)).toHaveLength(before);
     // Another agent's DM, as a new thread there or a reply in one of its threads.
@@ -1188,6 +1342,217 @@ describe("a personal agent's posts", () => {
 
     await ok(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b" }));
     await ok(await post(f, agent, { channelWireId: agentChannelWireId(agent.agentId), idempotencyKey: "post-4" }));
+  });
+
+  it("starts a Comment on a current file and replies in Comments, as the file's discussion reads back", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" }),
+      moment("notes/other.md", "plan", { originSeq: 1, objectId: "object-other" }),
+    ]);
+    fromComputer(f, WS_A, [
+      fileThread("thread-person", { linkedObjectId: "object-plan", linkedPathHint: "notes/plan.md" }),
+      ownerSays("question", "thread-person", "what does this mean?"),
+      fileThread("thread-other", { linkedObjectId: "object-other" }),
+      ownerSays("elsewhere", "thread-other", "about another file"),
+    ]);
+    const before = logOf(f, WS_A).length;
+
+    const started = (await ok(await post(f, agent, { filePath: "notes/plan.md", body: "a comment" }))).message as Record<string, unknown>;
+    expect(started).toMatchObject({
+      workspaceId: WS_A, channelWireId: null, filePath: "notes/plan.md", authorKind: "agent", authorDisplayName: "Helper", body: "a comment",
+    });
+    expect(String(started.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX)).toBe(true);
+    expect(String(started.threadId).startsWith(PERSONAL_THREAD_ID_PREFIX)).toBe(true);
+    const [thread, appended] = logOf(f, WS_A).slice(before);
+    expect(thread).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.thread.create" });
+    expect(payloadOf(thread!)).toEqual({
+      threadId: started.threadId, title: "", createdAtMs: f.now.value,
+      linkedObjectId: "object-plan", linkedAtMs: f.now.value, linkedPathHint: "notes/plan.md",
+    });
+    expect(appended).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.message.append" });
+    expect(payloadOf(appended!)).toMatchObject({
+      messageId: started.messageId, threadId: started.threadId, authorKind: "agent", authorUserId: OWNER, authorAgentId: agent.agentId,
+    });
+
+    // A retry answers the same Comment; the same key with another body is a conflict.
+    expect((await ok(await post(f, agent, { filePath: "notes/plan.md", body: "a comment" }))).message).toMatchObject({
+      messageId: started.messageId, threadId: started.threadId, filePath: "notes/plan.md",
+    });
+    await expectCode(await post(f, agent, { filePath: "notes/plan.md", body: "another comment" }), 409, "conflict");
+    expect(logOf(f, WS_A)).toHaveLength(before + 2);
+
+    // A reply in a person's Comment, and in its own.
+    const answered = (await ok(await post(f, agent, { threadId: "thread-person", idempotencyKey: "post-2", body: "an answer" })))
+      .message as Record<string, unknown>;
+    expect(answered).toMatchObject({ threadId: "thread-person", channelWireId: null, filePath: "notes/plan.md" });
+    const followed = (await ok(await post(f, agent, { threadId: started.threadId, idempotencyKey: "post-3", body: "and more" })))
+      .message as Record<string, unknown>;
+    expect(followed).toMatchObject({ threadId: started.threadId, channelWireId: null, filePath: "notes/plan.md" });
+    expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
+
+    const read = (fields: Record<string, unknown>) => tool(f, agent, "discussion", { workspaceId: WS_A, filePath: "notes/plan.md", ...fields });
+    const page = await ok(await read({ limit: 2 })) as ChatPage & Record<string, unknown>;
+    expect(page).toMatchObject({ ok: true, workspaceId: WS_A, filePath: "notes/plan.md" });
+    expect(ids(page)).toEqual([followed.messageId, answered.messageId]);
+    expect(page.messages[0]).not.toHaveProperty("authorUserId");
+    expect(page.olderCursor).toEqual(expect.any(Number));
+    const older = await ok(await read({ limit: 2, before: page.olderCursor })) as ChatPage;
+    expect(ids(older)).toEqual([started.messageId, "question"]);
+    expect(older.olderCursor).toBeNull();
+    expect(ids(await ok(await tool(f, agent, "discussion", { workspaceId: WS_A, filePath: "notes/other.md" })) as ChatPage))
+      .toEqual(["elsewhere"]);
+  });
+
+  it("refuses a Comment at View, on a secret file, a new one on a gone file, on another workspace's file, and out of reach", async () => {
+    const f = await fixture();
+    await claimWorkspace(f.h, OWNER, "workspace-c");
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] });
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/a.md", "plan", { originSeq: 0, objectId: "object-a" }),
+      moment("config/.env", "plan", { originSeq: 1, objectId: "object-env" }),
+      moment("notes/gone.md", "plan", { originSeq: 2, objectId: "object-gone" }),
+      moment("notes/gone.md", "", {
+        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
+        afterPath: null, afterContent: null,
+      }),
+    ]);
+    await putBlob(f.h, OWNER, WS_B, "in b");
+    await appendLog(f.h, OWNER, WS_B, [moment("notes/b.md", "in b", { originSeq: 0, objectId: "object-b" })]);
+    await putBlob(f.h, OWNER, "workspace-c", "in c");
+    await appendLog(f.h, OWNER, "workspace-c", [moment("notes/c.md", "in c", { originSeq: 0, objectId: "object-c" })]);
+    fromComputer(f, WS_A, [
+      fileThread("thread-a", { linkedObjectId: "object-a" }),
+      fileThread("thread-env", { linkedObjectId: "object-env" }),
+    ]);
+    fromComputer(f, WS_B, [fileThread("thread-b", { linkedObjectId: "object-b" })]);
+    const before = logOf(f, WS_A).length;
+    const read = (workspaceId: string, filePath: string) => tool(f, agent, "discussion", { workspaceId, filePath });
+
+    // Exactly one place.
+    expect((await post(f, agent, { filePath: "notes/a.md", threadId: "thread-a" })).status).toBe(400);
+    expect((await post(f, agent, {})).status).toBe(400);
+
+    // A secret file, by its path or a Comment on it.
+    await expectRefused(await post(f, agent, { filePath: "config/.env" }));
+    await expectRefused(await post(f, agent, { threadId: "thread-env" }));
+    await expectRefused(await read(WS_A, "config/.env"));
+    // A file that is gone, by its path. Its Comments read and take replies by thread.
+    await expectRefused(await post(f, agent, { filePath: "notes/gone.md" }));
+    await expectRefused(await read(WS_A, "notes/gone.md"));
+    // Another workspace's file, by its path or a Comment on it.
+    await expectRefused(await post(f, agent, { filePath: "notes/b.md" }));
+    await expectRefused(await post(f, agent, { threadId: "thread-b" }));
+    await expectRefused(await read(WS_A, "notes/b.md"));
+    expect(logOf(f, WS_A)).toHaveLength(before);
+    await ok(await post(f, agent, { filePath: "notes/a.md" }));
+    await ok(await post(f, agent, { threadId: "thread-a", idempotencyKey: "post-2" }));
+    await ok(await read(WS_A, "notes/a.md"));
+
+    // View reads a file's discussion but doesn't comment.
+    await expectCode(await post(f, agent, { workspaceId: WS_B, filePath: "notes/b.md", idempotencyKey: "post-b" }), 403,
+      "personal_agent_view_only");
+    await expectCode(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b", idempotencyKey: "post-b" }), 403,
+      "personal_agent_view_only");
+    await ok(await read(WS_B, "notes/b.md"));
+    // An owned workspace out of reach.
+    await expectCode(await post(f, agent, { workspaceId: "workspace-c", filePath: "notes/c.md", idempotencyKey: "post-c" }), 403,
+      "personal_agent_out_of_reach");
+    await expectCode(await read("workspace-c", "notes/c.md"), 403, "personal_agent_out_of_reach");
+
+    await ok(await setReach(f, agent, [
+      { workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "comment" }, { workspaceId: "workspace-c", level: "view" },
+    ]));
+    await ok(await post(f, agent, { workspaceId: WS_B, filePath: "notes/b.md", idempotencyKey: "post-b" }));
+    await ok(await read("workspace-c", "notes/c.md"));
+  });
+
+  it("reads and replies in a Comment thread by its id, on a current or deleted file, never on a secret path", async () => {
+    const f = await fixture();
+    await claimWorkspace(f.h, OWNER, "workspace-c");
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] });
+    const deleted = (path: string, originSeq: number, objectId: string) => moment(path, "", {
+      originSeq, objectId, operation: "delete", beforePath: path, beforeContent: "plan", afterPath: null, afterContent: null,
+    });
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" }),
+      moment("notes/gone.md", "plan", { originSeq: 1, objectId: "object-gone" }),
+      moment("notes/hidden.md", "plan", { originSeq: 2, objectId: "object-hidden" }),
+      deleted("notes/gone.md", 3, "object-gone"),
+      // Moved to a secret path, then deleted there: its last path is secret.
+      moment("config/prod.env", "plan", {
+        originSeq: 4, objectId: "object-hidden", operation: "rename", beforePath: "notes/hidden.md", beforeContent: "plan",
+      }),
+      deleted("config/prod.env", 5, "object-hidden"),
+    ]);
+    await putBlob(f.h, OWNER, WS_B, "plan");
+    await appendLog(f.h, OWNER, WS_B, [
+      moment("notes/b.md", "plan", { originSeq: 0, objectId: "object-b" }),
+      deleted("notes/b.md", 1, "object-b"),
+    ]);
+    await putBlob(f.h, OWNER, "workspace-c", "plan");
+    await appendLog(f.h, OWNER, "workspace-c", [moment("notes/c.md", "plan", { originSeq: 0, objectId: "object-c" })]);
+    fromComputer(f, WS_A, [
+      fileThread("thread-plan", { linkedObjectId: "object-plan" }),
+      ownerSays("on-plan", "thread-plan", "a note"),
+      fileThread("thread-gone", { linkedObjectId: "object-gone" }),
+      ownerSays("first", "thread-gone", "what about this?"),
+      ownerSays("second", "thread-gone", "and this?"),
+      fileThread("thread-hidden", { linkedObjectId: "object-hidden" }),
+      ownerSays("on-hidden", "thread-hidden", "about the secret"),
+      chatChannelCreate("wire-team"),
+      chatThreadCreate("thread-team", "wire-team"),
+    ]);
+    fromComputer(f, WS_B, [fileThread("thread-b", { linkedObjectId: "object-b" }), ownerSays("on-b", "thread-b", "in b")]);
+    fromComputer(f, "workspace-c", [fileThread("thread-c", { linkedObjectId: "object-c" })]);
+    const read = (fields: Record<string, unknown>) => tool(f, agent, "discussion", { workspaceId: WS_A, ...fields });
+
+    // A deleted file's thread reads a page at a time, with the path the file last had.
+    const page = await ok(await read({ threadId: "thread-gone", limit: 1 })) as ChatPage & Record<string, unknown>;
+    expect(page).toMatchObject({ ok: true, workspaceId: WS_A, threadId: "thread-gone", filePath: "notes/gone.md" });
+    expect(ids(page)).toEqual(["second"]);
+    const older = await ok(await read({ threadId: "thread-gone", limit: 1, before: page.olderCursor })) as ChatPage;
+    expect(ids(older)).toEqual(["first"]);
+    expect(older.olderCursor).toBeNull();
+    // A reply lands in that thread at Comment, and reads back there.
+    const replied = (await ok(await post(f, agent, { threadId: "thread-gone", body: "an answer" }))).message as Record<string, unknown>;
+    expect(replied).toMatchObject({ threadId: "thread-gone", channelWireId: null, filePath: "notes/gone.md", body: "an answer" });
+    expect(ids(await ok(await read({ threadId: "thread-gone" })) as ChatPage)).toEqual([replied.messageId, "second", "first"]);
+    // A current file's thread answers the same way, with only its own messages.
+    expect(await ok(await read({ threadId: "thread-plan" }))).toEqual({
+      ok: true, workspaceId: WS_A, threadId: "thread-plan", filePath: "notes/plan.md",
+      messages: [expect.objectContaining({ messageId: "on-plan" })], olderCursor: null,
+    });
+
+    // Exactly one of a file and a thread.
+    expect((await read({ filePath: "notes/plan.md", threadId: "thread-plan" })).status).toBe(400);
+    expect((await read({})).status).toBe(400);
+    // A thread whose last path is secret, an unknown thread, and another workspace's thread are not found.
+    const before = logOf(f, WS_A).length;
+    for (const threadId of ["thread-hidden", "thread-none", "thread-b"]) {
+      await expectRefused(await read({ threadId }));
+      await expectRefused(await post(f, agent, { threadId, idempotencyKey: `post-${threadId}` }));
+    }
+    expect(logOf(f, WS_A)).toHaveLength(before);
+    // A Group's thread reads through its channel, not as a file's discussion.
+    await expectRefused(await read({ threadId: "thread-team" }));
+
+    // View reads a deleted file's thread but doesn't reply.
+    expect(ids(await ok(await read({ workspaceId: WS_B, threadId: "thread-b" })) as ChatPage)).toEqual(["on-b"]);
+    await expectCode(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b", idempotencyKey: "post-b" }), 403,
+      "personal_agent_view_only");
+    // An owned workspace out of reach, from the start or once the owner narrows the reach.
+    await expectCode(await read({ workspaceId: "workspace-c", threadId: "thread-c" }), 403, "personal_agent_out_of_reach");
+    await expectCode(await post(f, agent, { workspaceId: "workspace-c", threadId: "thread-c", idempotencyKey: "post-c" }), 403,
+      "personal_agent_out_of_reach");
+    await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }]));
+    await expectCode(await read({ threadId: "thread-gone" }), 403, "personal_agent_out_of_reach");
+    await expectCode(await post(f, agent, { threadId: "thread-gone", idempotencyKey: "post-gone" }), 403,
+      "personal_agent_out_of_reach");
   });
 
   it("refuses a workspace out of reach, a post at View, and a workspace its account lost or deleted", async () => {
@@ -1223,7 +1588,7 @@ describe("a personal agent's posts", () => {
 
   const commitRaces: Array<[string, (f: Fixture, agent: Signed) => Promise<void>, string]> = [
     ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }, "not-authorized"],
-    ["a reset and its notification", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER, NEW_PASSWORD)); }, "not-authorized"],
+    ["a reset and its notification", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER)); }, "not-authorized"],
     ["account deletion", async (f) => { deleteAccountAtFence(f); }, "not-authorized"],
     ["narrowing", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "comment" }])); }, "out-of-reach"],
     ["lowering to View", async (f, agent) => { await ok(await setReach(f, agent, BOTH_VIEW)); }, "read-only"],
@@ -1259,15 +1624,18 @@ describe("a personal agent's posts", () => {
     await ok(await tool(f, agent, "post", arriving("post-1", () => {})));
     const before = logOf(f, WS_A).length;
     // No notification: the read of the fence after the body refuses.
-    await expectRefused(await tool(f, agent, "post", arriving("post-2", () => { f.fence.changePassword(OWNER, NEW_PASSWORD); })));
+    await expectRefused(await tool(f, agent, "post", arriving("post-2", () => { f.fence.changePassword(OWNER); })));
     expect(logOf(f, WS_A)).toHaveLength(before);
   });
 
-  it("refuses a chat or file read when a reset commits while its body is still arriving", async () => {
-    for (const action of ["chat", "files"] as const) {
+  it("refuses a chat, discussion or file read when a reset commits while its body is still arriving", async () => {
+    for (const action of ["chat", "discussion", "files"] as const) {
       const f = await fixture();
       const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-      const fields = action === "chat" ? { workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId) } : { workspaceId: WS_A };
+      await putBlob(f.h, OWNER, WS_A, "hello");
+      await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
+      const fields = action === "chat" ? { workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId) }
+        : action === "discussion" ? { workspaceId: WS_A, filePath: "notes/a.md" } : { workspaceId: WS_A };
       const arriving = (meanwhile: () => void) => new ReadableStream<Uint8Array>({
         pull(controller) {
           meanwhile();
@@ -1278,7 +1646,7 @@ describe("a personal agent's posts", () => {
 
       await ok(await tool(f, agent, action, arriving(() => {})));
       // No notification: the read of the fence after the body refuses.
-      await expectRefused(await tool(f, agent, action, arriving(() => { f.fence.changePassword(OWNER, NEW_PASSWORD); })));
+      await expectRefused(await tool(f, agent, action, arriving(() => { f.fence.changePassword(OWNER); })));
     }
   });
 });
@@ -1303,7 +1671,7 @@ describe("a personal agent's tools", () => {
   const revocations: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
     ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }],
     // No notification: the direct read of the fence refuses.
-    ["a reset", async (f) => { f.fence.changePassword(OWNER, NEW_PASSWORD); }],
+    ["a reset", async (f) => { f.fence.changePassword(OWNER); }],
     ["account deletion", async (f) => { deleteAccountAtFence(f); }],
   ];
 
@@ -1314,9 +1682,11 @@ describe("a personal agent's tools", () => {
     await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
     const dm = agentChannelWireId(agent.agentId);
     const calls: Array<[string, Record<string, unknown>]> = [
+      ["workspaces", {}],
       ["post", { workspaceId: WS_A, channelWireId: dm, body: "hello", idempotencyKey: "post-1" }],
       ["wait", { timeoutMs: 0 }],
       ["chat", { workspaceId: WS_A, channelWireId: dm }],
+      ["discussion", { workspaceId: WS_A, filePath: "notes/a.md" }],
       ["files", { workspaceId: WS_A }],
       ["blob", { workspaceId: WS_A, sha256: sha }],
     ];
@@ -1342,6 +1712,196 @@ describe("a personal agent's tools", () => {
     await expectCode(await tool(f, agent, "files", { workspaceId: WS_A }), 403, "personal_agent_out_of_reach");
     await expectCode(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: sha }), 403, "personal_agent_out_of_reach");
     expect(Object.keys((await waitOnce(f, agent)).cursor.seqs)).toEqual([WS_B]);
+  });
+
+  it("list the workspaces in reach with their names, levels and the agent's DM, leaving out one the account lost or deleted", async () => {
+    const f = await fixture();
+    await claimWorkspace(f.h, OWNER, "workspace-c");
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] });
+    expect(f.storage.setWorkspaceDisplayName({ workspaceId: WS_A, ownerUserId: OWNER, name: "Trip" })).toBe(true);
+    const listed = async () => (await ok(await tool(f, agent, "workspaces", {}))).workspaces;
+    const dmChannelWireId = agentChannelWireId(agent.agentId);
+
+    // An owned workspace out of reach and another account's stay out.
+    expect(await listed()).toEqual([
+      { workspaceId: WS_A, name: "Trip", level: "comment", dmChannelWireId },
+      { workspaceId: WS_B, name: null, level: "view", dmChannelWireId },
+    ]);
+    expect((await tool(f, agent, "workspaces", { workspaceId: WS_A })).status).toBe(400);
+
+    setOwner(f, WS_B, OTHER);
+    expect(await listed()).toEqual([{ workspaceId: WS_A, name: "Trip", level: "comment", dmChannelWireId }]);
+    setOwner(f, WS_B, OWNER);
+    const context = f.storage as StorageContext;
+    initializeAccountDeletion(context, DELETION_KEY);
+    context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
+      .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
+    expect(await listed()).toEqual([{ workspaceId: WS_B, name: null, level: "view", dmChannelWireId }]);
+
+    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
+    await expectRefused(await tool(f, agent, "workspaces", {}));
+  });
+
+  it("name the agent as its posts show it and people mention it, after a rename too", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    const named = async () => (await ok(await tool(f, agent, "workspaces", {}))).agent;
+    expect(await named()).toEqual({ agentId: agent.agentId, name: "Helper", handle: "Helper" });
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Trip planner" } }));
+    expect(await named()).toEqual({ agentId: agent.agentId, name: "Trip planner", handle: "Tripplanner" });
+  });
+
+  it("post in the agent's DM before any computer has written to the workspace", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    const [listed] = (await ok(await tool(f, agent, "workspaces", {}))).workspaces as Array<{ dmChannelWireId: string }>;
+    const sent = await ok(await post(f, agent, { channelWireId: listed!.dmChannelWireId }));
+    expect(sent.message).toMatchObject({ workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId), filePath: null });
+    expect((await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: listed!.dmChannelWireId }))).messages)
+      .toMatchObject([{ body: "from the agent" }]);
+  });
+});
+
+/**
+ * A relay with this server's copies of workspaces, each copy's engine an
+ * in-memory stand-in for its chats. Each workspace in `identified` has a sync
+ * identity, so a copy can open; by default every workspace the fixture claims
+ * does. Syncs can be held.
+ */
+async function withCopies(identified: readonly string[] = [WS_A, WS_B, OTHER_WS]) {
+  let copies: ServerCopies | undefined;
+  const f = await fixture({ serverCopies: () => copies });
+  for (const workspaceId of identified) {
+    f.storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch", streamIdentity: "stream" });
+  }
+  const engine = new ChatsLoopbackEngine();
+  const syncs: string[] = [];
+  let held: Promise<void> | null = null;
+  let requestId = 0;
+  const lifetime = new AbortController();
+  const started = await startServerCopies({
+    storage: f.storage, root: "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test",
+    startReplicas: async (hooks) => {
+      const open = new Map<string, AutomationReplica>();
+      const pass = () => {
+        const wanted = hooks.wanted();
+        for (const [workspaceId, reasons] of wanted) {
+          const row = f.storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
+          if (!row || open.has(workspaceId)) continue;
+          open.set(workspaceId, {
+            workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
+            root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: workspaceId, signal: lifetime.signal,
+            nextRequestId: () => ++requestId, withRecordWork: (work) => work(),
+            sync: async () => { syncs.push(workspaceId); await held; },
+          });
+          hooks.onChanged?.(workspaceId);
+        }
+        for (const workspaceId of [...open.keys()]) if (!wanted.has(workspaceId)) open.delete(workspaceId);
+      };
+      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => queueMicrotask(pass), deleteWorkspaces: async () => undefined,
+        failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+    },
+  });
+  copies = started;
+  cleanup.push(async () => { lifetime.abort(); await started.close(); });
+  return {
+    f, engine, syncs,
+    /** Holds every sync until the returned function is called. */
+    holdSyncs() {
+      let releaseSyncs!: () => void;
+      held = new Promise((resolve) => { releaseSyncs = resolve; });
+      return () => { held = null; releaseSyncs(); };
+    },
+  };
+}
+
+/** A Group with a purpose, a Group with no channel id, a DM between people, and the agent's DM, as the copy holds them. */
+function seedChats(engine: ChatsLoopbackEngine, workspace: string, agentId: string): void {
+  engine.seedChannel({ workspace, channelId: "channel-planning", name: "Planning", purpose: "Where we go", wireId: "wire-planning" });
+  engine.seedChannel({ workspace, channelId: "channel-drafts", name: "Drafts", wireId: null });
+  engine.seedChannel({ workspace, channelId: "channel-people", name: "Ada and Ben", kind: "dm", wireId: "wire-people" });
+  engine.seedChannel({ workspace, channelId: `personal-dm:${agentId}`, name: "Helper", kind: "agent", wireId: agentChannelWireId(agentId) });
+}
+
+describe("a personal agent's Groups", () => {
+  it("lists the workspace's Groups through the server's copy at View, and never a DM", async () => {
+    const { f, engine, syncs } = await withCopies();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    seedChats(engine, WS_A, agent.agentId);
+
+    expect(await ok(await tool(f, agent, "groups", { workspaceId: WS_A }))).toEqual({
+      ok: true, workspaceId: WS_A, groups: [{ channelWireId: "wire-planning", name: "Planning", purpose: "Where we go" }],
+    });
+    expect(syncs).toEqual([WS_A]);
+    // The listed Group is one the agent reads by its channel id.
+    fromComputer(f, WS_A, [chatChannelCreate("wire-planning")]);
+    await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-planning" }));
+
+    for (const body of [{}, { workspaceId: WS_A, group: "planning" }]) {
+      expect((await tool(f, agent, "groups", body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(syncs).toEqual([WS_A]);
+  });
+
+  it("refuses a workspace out of reach, and one its account lost, before it opens a copy", async () => {
+    const { f, engine, syncs } = await withCopies();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    seedChats(engine, WS_A, agent.agentId);
+    // An owned workspace out of reach, and another account's, answer the same.
+    for (const workspaceId of [WS_B, OTHER_WS]) {
+      await expectCode(await tool(f, agent, "groups", { workspaceId }), 403, "personal_agent_out_of_reach");
+    }
+    setOwner(f, WS_A, OTHER);
+    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 403, "personal_agent_out_of_reach");
+    expect(syncs).toEqual([]);
+  });
+
+  const midCall: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
+    ["the agent signs out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }],
+    ["the account loses the workspace", async (f) => { setOwner(f, WS_A, OTHER); }],
+    ["the workspace leaves its reach", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }])); }],
+  ];
+
+  it.each(midCall)("ends with not-found, and no Group, when %s while the copy syncs", async (_, revoke) => {
+    const { f, engine, holdSyncs, syncs } = await withCopies();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    seedChats(engine, WS_A, agent.agentId);
+    const release = holdSyncs();
+    const pending = tool(f, agent, "groups", { workspaceId: WS_A });
+    await vi.waitFor(() => expect(syncs).toEqual([WS_A]));
+    await revoke(f, agent);
+    release();
+    const response = await pending;
+    expect(await response.clone().text()).not.toContain("Planning");
+    await expectRefused(response);
+  });
+
+  it("says this server keeps no copies, only for a workspace in reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 404, "server_copies_off");
+    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_B }), 403, "personal_agent_out_of_reach");
+  });
+
+  it("answers not-found for a workspace with no sync identity yet, and opens no copy", async () => {
+    const { f, engine, syncs } = await withCopies([WS_B, OTHER_WS]);
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    seedChats(engine, WS_A, agent.agentId);
+    await expectRefused(await tool(f, agent, "groups", { workspaceId: WS_A }));
+    expect(syncs).toEqual([]);
+  });
+
+  it("answers server_busy past one connection's open visits, as the account's reads do", async () => {
+    const { f, engine, holdSyncs, syncs } = await withCopies();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    seedChats(engine, WS_A, agent.agentId);
+    const release = holdSyncs();
+    const held = Array.from({ length: ACCOUNT_VISITS_PER_CALLER }, () => tool(f, agent, "groups", { workspaceId: WS_A }));
+    await vi.waitFor(() => expect(syncs).toHaveLength(ACCOUNT_VISITS_PER_CALLER));
+    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 503, "server_busy");
+    release();
+    for (const response of await Promise.all(held)) expect(response.status).toBe(200);
+    await ok(await tool(f, agent, "groups", { workspaceId: WS_A }));
   });
 });
 
@@ -1427,7 +1987,7 @@ describe("a personal agent's wait", () => {
     expect(JSON.stringify(answer)).not.toContain("keys/");
   });
 
-  it("names a file's path after a rename, and leaves out a file that is gone or the relay never saw", async () => {
+  it("names a file's path after a rename and a deleted file's last path, and leaves out a file the relay never placed", async () => {
     const f = await fixture();
     const agent = await signIn(f);
     await putBlob(f.h, OWNER, WS_A, "plan");
@@ -1446,7 +2006,7 @@ describe("a personal agent's wait", () => {
       fileThread("thread-moved", { linkedObjectId: "object-moved", linkedPathHint: "notes/plan.md" }),
       fileThread("thread-gone", { linkedObjectId: "object-gone", linkedPathHint: "notes/gone.md" }),
       fileThread("thread-unknown", { linkedObjectId: "object-unknown", linkedPathHint: "notes/unknown.md" }),
-      // Bound by the path the file left.
+      // Bound by the path the file left: a path follows no file.
       fileThread("thread-old-path", { linkedPath: "notes/plan.md" }),
       // Bound by the path the file moved to.
       fileThread("thread-by-path", { linkedPath: "notes/moved.md" }),
@@ -1455,8 +2015,86 @@ describe("a personal agent's wait", () => {
 
     const answer = await waitOnce(f, agent);
     expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([
-      ["moved", "notes/moved.md"], ["by-path", "notes/moved.md"],
+      ["moved", "notes/moved.md"], ["gone", "notes/gone.md"], ["by-path", "notes/moved.md"],
     ]);
+    expect(JSON.stringify(answer)).not.toContain("notes/unknown.md");
+  });
+
+  it("wakes for a reply in its Comment on a file since deleted, never on one whose file moved to a secret path", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/gone.md", "plan", { originSeq: 0, objectId: "object-gone" }),
+      moment("notes/hidden.md", "plan", { originSeq: 1, objectId: "object-hidden" }),
+      moment("notes/hidden-gone.md", "plan", { originSeq: 2, objectId: "object-hidden-gone" }),
+    ]);
+    const comment = async (filePath: string, idempotencyKey: string) =>
+      String(((await ok(await post(f, agent, { filePath, idempotencyKey }))).message as Record<string, unknown>).threadId);
+    const gone = await comment("notes/gone.md", "post-gone");
+    const hidden = await comment("notes/hidden.md", "post-hidden");
+    const hiddenGone = await comment("notes/hidden-gone.md", "post-hidden-gone");
+    await appendLog(f.h, OWNER, WS_A, [
+      moment("notes/gone.md", "", {
+        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
+        afterPath: null, afterContent: null,
+      }),
+      moment("config/.env", "plan", {
+        originSeq: 4, objectId: "object-hidden", operation: "rename", beforePath: "notes/hidden.md", beforeContent: "plan",
+      }),
+      // Moved to a secret path, then deleted there: its last path is secret.
+      moment("config/prod.env", "plan", {
+        originSeq: 5, objectId: "object-hidden-gone", operation: "rename", beforePath: "notes/hidden-gone.md", beforeContent: "plan",
+      }),
+      moment("config/prod.env", "", {
+        originSeq: 6, objectId: "object-hidden-gone", operation: "delete", beforePath: "config/prod.env", beforeContent: "plan",
+        afterPath: null, afterContent: null,
+      }),
+    ]);
+    fromComputer(f, WS_A, [
+      ownerSays("on-gone", gone, "thanks"),
+      ownerSays("on-hidden", hidden, "thanks"),
+      ownerSays("on-hidden-gone", hiddenGone, "thanks"),
+    ]);
+
+    const answer = await waitOnce(f, agent);
+    expect(answer.messages.map((message) => [message.messageId, message.channelWireId, message.filePath])).toEqual([
+      ["on-gone", null, "notes/gone.md"],
+    ]);
+    expect(JSON.stringify(answer)).not.toContain("config/");
+    // The deleted file's Comment takes a reply. A Comment whose file moved to a secret path takes none.
+    expect((await ok(await post(f, agent, { threadId: gone, idempotencyKey: "post-again" }))).message).toMatchObject({
+      threadId: gone, channelWireId: null, filePath: "notes/gone.md",
+    });
+    await expectRefused(await post(f, agent, { threadId: hidden, idempotencyKey: "post-hidden-again" }));
+    await expectRefused(await post(f, agent, { threadId: hiddenGone, idempotencyKey: "post-hidden-gone-again" }));
+  });
+
+  it("leaves out a Comment whose file moves to a secret path after its scan, before the answer", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" })]);
+    const { message } = await ok(await post(f, agent, { filePath: "notes/plan.md" })) as { message: { threadId: string } };
+    fromComputer(f, WS_A, [ownerSays("reply", message.threadId, "thanks")]);
+    // The scan places the file, then it moves before the answer leaves.
+    const moved = moment("config/.env", "plan", {
+      originSeq: 0, objectId: "object-plan", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
+    });
+    const currentPath = f.storage.objectCurrentPath.bind(f.storage);
+    let placed = 0;
+    vi.spyOn(f.storage, "objectCurrentPath").mockImplementation((workspaceId, objectId) => {
+      const path = currentPath(workspaceId, objectId);
+      if (++placed === 1) {
+        f.storage.appendLogBatch({ workspaceId: WS_A, originId: "owner-mover", ops: [{
+          originSeq: moved.originSeq, opKind: moved.opKind, recordedAtMs: moved.recordedAtMs, payloadJson: JSON.stringify(moved.payload),
+        }] });
+      }
+      return path;
+    });
+
+    expect(ids(await waitOnce(f, agent))).toEqual([]);
+    expect(placed).toBeGreaterThan(1);
   });
 
   it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {
@@ -1653,7 +2291,7 @@ describe("a personal agent's wait", () => {
   ]> = [
     ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); },
       async (_f, _agent, response) => { await expectRefused(response); }],
-    ["a reset", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER, NEW_PASSWORD)); },
+    ["a reset", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER)); },
       async (_f, _agent, response) => { await expectRefused(response); }],
     ["account deletion", async (f) => { deleteAccountAtFence(f); },
       async (_f, _agent, response) => { await expectRefused(response); }],
@@ -1807,7 +2445,7 @@ describe("a personal agent's reads", () => {
     // A reset with its notification withheld: the next chunk reads the fence again and refuses.
     setOwner(f, WS_A, OWNER);
     const reset = await open();
-    f.fence.changePassword(OWNER, NEW_PASSWORD);
+    f.fence.changePassword(OWNER);
     await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
   });
 });

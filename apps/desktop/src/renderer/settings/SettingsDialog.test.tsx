@@ -136,6 +136,9 @@ const bridge = {
   onChatDispatchPaused: vi.fn(() => () => undefined),
   readAgentsListening: vi.fn(async () => ({ agentIds: [] })),
   onAgentsListening: vi.fn(() => () => undefined),
+  readPersonalAgents: vi.fn(async () => ({ accounts: [] })),
+  onPersonalAgents: vi.fn(() => () => undefined),
+  changePersonalAgent: vi.fn(async () => ({ ok: true, personalAgents: { accounts: [] } })),
   getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;

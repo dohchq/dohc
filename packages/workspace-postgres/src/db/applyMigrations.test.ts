@@ -150,6 +150,7 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
         "0003_crash_reports",
         "0004_account_deletion",
         "0005_credential_fences",
+        "0006_session_created_on_database_clock",
       ]);
 
       for (const table of RETIRED_TABLES) {

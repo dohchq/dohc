@@ -2,6 +2,7 @@ import { Check, Copy, TriangleAlert, type LucideIcon } from "lucide-react";
 import { useContext, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
+import { PrimaryButton } from "./controls";
 
 // The one copy control. It says what happened in place, says it again to a
 // screen reader, and hands a failure to the shell's error hook, so the toast
@@ -192,6 +193,8 @@ export function CopyButton(props: {
   icon?: LucideIcon | undefined;
   // The worded button's size. Default "row".
   size?: keyof typeof WORDS_SIZE;
+  // The primary of a surface whose action is the copy, such as Copy agent link.
+  primary?: boolean;
   // Marks the text secret, such as a share link, a share code or a sync
   // code: what it is called, and where to copy it again once Try again
   // cannot.
@@ -251,6 +254,26 @@ export function CopyButton(props: {
 
   const shown = feedback ? words[feedback] : label;
   const Icon = feedback ? ICON[feedback] : props.icon ?? Copy;
+  if (props.primary) {
+    return (
+      <>
+        <PrimaryButton
+          ref={props.ref}
+          data-testid={props.testId}
+          disabled={props.disabled}
+          aria-label={props.pinName ? label : undefined}
+          onClick={() => void action.current?.copy()}
+          className="inline-flex shrink-0 items-center gap-1.5"
+        >
+          <Icon size={13} aria-hidden />
+          {shown}
+        </PrimaryButton>
+        <span role="status" aria-live="polite" className="sr-only">
+          {announcement}
+        </span>
+      </>
+    );
+  }
   return (
     <>
       <button

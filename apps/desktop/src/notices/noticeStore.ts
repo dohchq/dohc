@@ -286,6 +286,7 @@ const RelayPage = z.object({
   nextCursor: z.string().min(1).max(64),
   hasMore: z.boolean(),
   replace: z.boolean(),
+  personalAgentsRevision: z.number().int().nonnegative(),
 });
 
 class RelayRefusal extends Error {
@@ -311,6 +312,9 @@ export function createNoticeStore(deps: {
   session(): Promise<NoticeSession | null>;
   installId(): string;
   onChanged(): void;
+  // A pull read the account's personal agents revision. The roster cache
+  // reads the roster again when it holds another.
+  onPersonalAgentsRevision?(account: NoticeAccount, revision: number): void;
   // Null keeps cached rows for a workspace whose engine could not be read.
   refusalNotices?(openedWorkspaceId?: string): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
   dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
@@ -629,6 +633,7 @@ export function createNoticeStore(deps: {
     if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(session);
 
     let changed = false;
+    let personalAgentsRevision: number | null = null;
     try {
       for (let more = true; more;) {
         const cursor = await locked(async () => (await loadAccount(account)).cursor);
@@ -652,7 +657,11 @@ export function createNoticeStore(deps: {
           await saveAccount(account, file);
           return merged;
         }) || changed;
+        personalAgentsRevision = page.personalAgentsRevision;
         more = page.hasMore;
+      }
+      if (personalAgentsRevision !== null && session.isCurrent()) {
+        deps.onPersonalAgentsRevision?.(account, personalAgentsRevision);
       }
       // Every sent post went out before this pull began, so the pull has
       // settled it: its row arrived, or the relay already had that notice.

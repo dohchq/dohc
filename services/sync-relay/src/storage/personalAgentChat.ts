@@ -1,6 +1,9 @@
 import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { personalAgentOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "../relayLogInputs";
+import { MAIN_VERSION_ID } from "../shareFilter";
 import type { AgentAccessCheck } from "./agentConnections";
 import type { StorageContext } from "./context";
 import { validLinkDiscussionIdempotencyKey } from "./discussion";
@@ -13,9 +16,10 @@ import {
   readPersonalAuthority,
   type PersonalConnectionRow,
   type PersonalReach,
+  type PersonalReachLevel,
 } from "./personalAgents";
-import { rowToLogRow } from "./rows";
-import type { SyncRelayLogRow } from "./types";
+import { nullableText, rowToLogRow } from "./rows";
+import type { SyncRelayLogRow, SyncRelayStorage } from "./types";
 import { workspaceUsageBytes } from "./workspaces";
 
 // A personal agent's chat: its posts, written by the relay from the agent's
@@ -54,6 +58,39 @@ export function readPersonalScope(storage: StorageContext, credential: PersonalC
   });
 }
 
+export interface PersonalWorkspace {
+  workspaceId: string;
+  /** The owner's name for the workspace, or null when it has none. */
+  name: string | null;
+  level: PersonalReachLevel;
+}
+
+export interface PersonalWorkspaces {
+  agentId: string;
+  /** The agent's current name, which its posts show and people mention. */
+  name: string;
+  workspaces: PersonalWorkspace[];
+}
+
+/** The agent's current name and the workspaces in its reach that its account still owns, with their names; null once any check fails. */
+export function readPersonalWorkspaces(storage: StorageContext, credential: PersonalCredential, nowMs: number): PersonalWorkspaces | null {
+  return storage.readTx(() => {
+    const connection = readPersonalAuthority(storage, credential.check, credential.fenceEpoch, nowMs);
+    if (!connection || connection.connectionId !== credential.connectionId) return null;
+    const agent = storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(connection.agentId);
+    const named = storage.db.prepare("SELECT display_name FROM sync_relay_workspaces WHERE workspace_id = ?");
+    return {
+      agentId: connection.agentId,
+      name: String(agent?.name),
+      workspaces: ownedPersonalReach(storage, connection).map(entry => ({
+        workspaceId: entry.workspaceId,
+        name: nullableText(named.get(entry.workspaceId)?.display_name),
+        level: entry.level,
+      })),
+    };
+  });
+}
+
 /** The agent's reach in one workspace its account still owns, read with its authority; null once any check fails. */
 export function readPersonalReach(storage: StorageContext, credential: PersonalCredential, workspaceId: string, nowMs: number): PersonalReach | null {
   return storage.readTx(() => {
@@ -62,10 +99,67 @@ export function readPersonalReach(storage: StorageContext, credential: PersonalC
   });
 }
 
-export type PersonalChatTarget = { channelWireId: string } | { threadId: string };
+// Every tracked path on main, as a file share reads it.
+const MAIN_FILES = { paths: [], versionId: MAIN_VERSION_ID } as const;
 
+// A path a Comment may name: tracked on main, and not secret by the rules the
+// relay reads its own disk by. The normalized path, or null.
+function commentPath(path: string): string | null {
+  return classifyEngineFilePathForRead(path, process.platform).kind === "secret" ? null : visibleSharePath(MAIN_FILES, path);
+}
+
+type FileIndex = Pick<SyncRelayStorage, "findThreadCreateFileBinding" | "objectCurrentPath" | "objectIdAtPath" | "objectLastKnownPath">;
+
+/** The file a Comment is on, by its object, with the path to show for it. A deleted file shows the path it last had. */
+export interface CommentFile {
+  objectId: string;
+  filePath: string;
+}
+
+/** The file at `path` now; null for a secret or untracked path, and for a path that holds no file. */
+export function currentFileAt(index: FileIndex, workspaceId: string, path: string): CommentFile | null {
+  const filePath = commentPath(path);
+  const objectId = filePath === null ? undefined : index.objectIdAtPath(workspaceId, filePath);
+  return filePath !== null && objectId !== undefined ? { objectId, filePath } : null;
+}
+
+/**
+ * The file a Comment thread is on, by the binding its first create names. A
+ * file in the workspace shows its current path, and a deleted one the path
+ * the relay's log last gave it. null for a thread on no file, a file whose
+ * current or last path is secret or untracked, and a file the relay never
+ * placed. A thread bound by a path follows no file, so it counts only while a
+ * file is at that path.
+ */
+export function commentFileOf(index: FileIndex, workspaceId: string, threadId: string): CommentFile | null {
+  const binding = index.findThreadCreateFileBinding(workspaceId, threadId);
+  if (!binding) return null;
+  if (binding.kind === "path") return currentFileAt(index, workspaceId, binding.path);
+  const { objectId } = binding;
+  const current = index.objectCurrentPath(workspaceId, objectId);
+  const path = typeof current === "string" ? current : index.objectLastKnownPath(workspaceId, objectId);
+  const filePath = path === undefined ? null : commentPath(path);
+  return filePath === null ? null : { objectId, filePath };
+}
+
+export type PersonalChatTarget = { channelWireId: string } | { threadId: string } | { filePath: string };
+
+// Where a post goes in the workspace: a Group or the agent's own DM, by a
+// channel or one of its threads, a current file by its path, or a Comment
+// thread on a current or deleted file. null for anywhere else.
+function postPlace(storage: StorageContext, workspaceId: string, target: PersonalChatTarget, agentId: string):
+  { channelWireId: string } | CommentFile | null {
+  if ("filePath" in target) return currentFileAt(storage, workspaceId, target.filePath);
+  const channelWireId = "threadId" in target ? findThreadCreateChannelWireId(storage, workspaceId, target.threadId) : target.channelWireId;
+  if (channelWireId === null && "threadId" in target) return commentFileOf(storage, workspaceId, target.threadId);
+  if (typeof channelWireId !== "string") return null;
+  const kind = findChannelCreateKind(storage, workspaceId, channelWireId);
+  return kind === "channel" || (kind === "agent" && agentIdForChannelWireId(channelWireId) === agentId) ? { channelWireId } : null;
+}
+
+/** A post's place is a channel, or for a Comment no channel and the file's current or last path. Exactly one is null. */
 export type AppendPersonalChatPostResult =
-  | { ok: true; replayed: boolean; channelWireId: string; row: SyncRelayLogRow }
+  | { ok: true; replayed: boolean; channelWireId: string | null; filePath: string | null; row: SyncRelayLogRow }
   | {
     ok: false;
     reason: "invalid-input" | "not-authorized" | "out-of-reach" | "not-found" | "read-only" | "idempotency-conflict" | "workspace-quota";
@@ -76,12 +170,14 @@ export type AppendPersonalChatPostResult =
  * its reach holds at Comment. The relay writes the operations from the
  * agent's own origin, naming the account, the agent, its current name, and
  * the connection the access token names. The caller names only the
- * workspace, a channel for a new thread or a thread to reply in, the body,
- * and a retry key. The connection, the account's fence, the reach, and
- * ownership are read again inside the transaction that writes the post, with
- * the clock read there too. A thread resolves only through its create in the
- * workspace's log. The post lands only in a Group or the agent's own DM, never
- * in a person's DM or another agent's.
+ * workspace, where the post goes, the body, and a retry key: a channel for a
+ * new thread, a thread to reply in, or a file's path for a new Comment. The
+ * connection, the account's fence, the reach, and ownership are read again
+ * inside the transaction that writes the post, with the clock read there too.
+ * A thread resolves only through its create in the workspace's log, and a
+ * new Comment's file only through the log's current files. The post lands
+ * only in a Group, the agent's own DM, or a Comment on a file whose current or
+ * last path isn't secret, never in a person's DM or another agent's.
  */
 export function appendPersonalChatPost(storage: StorageContext, input: PersonalCredential & {
   /** The relay's clock, read inside the write. */
@@ -92,8 +188,9 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
   idempotencyKey: string;
 }): AppendPersonalChatPostResult {
   const body = linkChatBody(input.body);
-  const replyTo = "threadId" in input.target ? input.target.threadId : null;
-  const named = replyTo ?? ("channelWireId" in input.target ? input.target.channelWireId : "");
+  const { target } = input;
+  const replyTo = "threadId" in target ? target.threadId : null;
+  const named = replyTo ?? ("channelWireId" in target ? target.channelWireId : target.filePath);
   if (body === null || !validLinkDiscussionIdempotencyKey(input.idempotencyKey) || !named || !named.isWellFormed()) {
     return { ok: false, reason: "invalid-input" };
   }
@@ -105,12 +202,10 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
     const reach = personalReachIn(storage, connection, workspaceId);
     if (!reach) return { ok: false, reason: "out-of-reach" };
     if (reach.level === "view") return { ok: false, reason: "read-only" };
-    const channelWireId = replyTo === null ? named : findThreadCreateChannelWireId(storage, workspaceId, replyTo);
-    if (typeof channelWireId !== "string") return { ok: false, reason: "not-found" };
-    const kind = findChannelCreateKind(storage, workspaceId, channelWireId);
-    if (kind !== "channel" && !(kind === "agent" && agentIdForChannelWireId(channelWireId) === connection.agentId)) {
-      return { ok: false, reason: "not-found" };
-    }
+    const place = postPlace(storage, workspaceId, target, connection.agentId);
+    if (!place) return { ok: false, reason: "not-found" };
+    const channelWireId = "channelWireId" in place ? place.channelWireId : null;
+    const filePath = "channelWireId" in place ? null : place.filePath;
 
     const key = sha256Hex(JSON.stringify([connection.agentId, input.idempotencyKey]));
     const originId = personalAgentOrigin(connection.agentId);
@@ -118,14 +213,18 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
     const threadId = replyTo ?? `${PERSONAL_THREAD_ID_PREFIX}${key}`;
     const replay = replayedLinkPost(storage, workspaceId, { originId, messageId, threadId }, body);
     if (replay) {
-      // A retry that started a thread names the same channel again.
-      return replay === "conflict" || findThreadCreateChannelWireId(storage, workspaceId, threadId) !== channelWireId
+      // A retry that started a thread names the same channel, or the same file, again.
+      const samePlace = "channelWireId" in place
+        ? findThreadCreateChannelWireId(storage, workspaceId, threadId) === place.channelWireId
+        : commentFileOf(storage, workspaceId, threadId)?.objectId === place.objectId;
+      return replay === "conflict" || !samePlace
         ? { ok: false, reason: "idempotency-conflict" }
-        : { ok: true, replayed: true, channelWireId, row: replay };
+        : { ok: true, replayed: true, channelWireId, filePath, row: replay };
     }
     const agent = storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(connection.agentId);
     const ops = linkPostOps(storage, {
-      workspaceId, originId, messageId, threadId, createThread: replyTo === null, channelWireId, body, createdAtMs,
+      workspaceId, originId, messageId, threadId, createThread: replyTo === null, body, createdAtMs,
+      place: "channelWireId" in place ? place : { linkedObjectId: place.objectId, linkedPathHint: place.filePath },
       author: {
         authorKind: "agent", authorDisplayName: String(agent?.name), authorUserId: connection.ownerUserId,
         authorAgentId: connection.agentId, agentConnectionId: connection.connectionId,
@@ -142,7 +241,7 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
       WHERE agent_id = ?`).run(createdAtMs, connection.agentId);
     const row = fetchChatMessage(storage, { workspaceId, originId, messageId });
     if (!row) throw new Error("appended personal agent post is missing");
-    return { ok: true, replayed: false, channelWireId, row };
+    return { ok: true, replayed: false, channelWireId, filePath, row };
   });
 }
 

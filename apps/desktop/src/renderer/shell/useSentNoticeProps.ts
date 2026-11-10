@@ -281,6 +281,11 @@ export function useSentNoticeProps(input: {
             return ACCESS_ENDED_NOTE;
           case "not-here":
             return NOT_HERE_NOTE;
+          case "agents-settings":
+            // A notice that names a personal agent opens its page.
+            return await openTarget(place.agent === null
+              ? { to: "agents-settings" }
+              : { to: "agents-settings", agent: place.agent }, signal);
           case "workspace": {
             const target = sentNoticeTarget(notice, place, controls);
             if (place.workspace.workspaceId !== workspaceId) {

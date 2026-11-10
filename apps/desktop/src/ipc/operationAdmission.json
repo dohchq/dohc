@@ -115,6 +115,8 @@
   "desktop:read-chat-dispatch-paused": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-chat-dispatch-paused": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-agents-listening": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:read-personal-agents": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:change-personal-agent": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },
   "desktop:choose-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },
   "desktop:take-over-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },

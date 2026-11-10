@@ -115,6 +115,7 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  usePersonalAgentNames,
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
@@ -644,6 +645,8 @@ export function ChatsView(props: {
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
+  // Feed posts by personal agents name them from the roster.
+  usePersonalAgentNames();
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
@@ -4098,7 +4101,7 @@ export function ChatsView(props: {
                       className="dohc-focus-row flex w-full cursor-pointer gap-3 rounded-md text-left"
                     >
                       <ChatAvatar presentation={item.message.presentation}
-                        name={item.message.authorDisplayName}
+                        name={chatAuthorLabel(item.message)}
                         kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
