@@ -141,7 +141,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
+  read: "documentRead", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
 };
 
@@ -225,6 +225,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_document: { cli: "documentRead" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
+  dohc_held_note_change: { cli: "heldNoteChange" },
   dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
   dohc_write_file: "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
   dohc_create_directory: "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
