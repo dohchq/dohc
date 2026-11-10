@@ -1,4 +1,5 @@
 import {parseAccountOperationRoute, type AccountOperationRoute} from "./accountOperationRoutes";
+import {parseAccountSessionRoute, type AccountSessionRoute} from "./accountSessionRoutes";
 import {parseAccountRoute, type AccountWorkspaceRoute} from "./accountWorkspaceRoutes";
 import type {AgentChatRoute} from "./agentChatRoutes";
 import type {AgentConnectionRoute} from "./agentConnectionRoutes";
@@ -34,6 +35,7 @@ import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bou
 
 type SyncRelayRoute =
   | AccountOperationRoute
+  | AccountSessionRoute
   | AccountWorkspaceRoute
   | AgentConnectionRoute
   | WorkReferenceRoute
@@ -182,7 +184,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     throw notFound();
   }
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
-  if (parts[1] === "account") return parseAccountRoute(parts);
+  if (parts[1] === "account") return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
   // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
   if (parts[1] === "notices") {
     if (parts.length === 2) return { route: "notices" };

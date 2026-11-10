@@ -347,6 +347,7 @@ describe("device verification page", () => {
     expect(body).toContain("Approve");
     expect(body).toContain("Deny");
     expect(body).toContain("ada@example.com");
+    expect(body).toContain("<p>Only approve this if you just started signing in on your phone.</p>");
   });
 
   it("explains an expired code and offers no decision", async () => {

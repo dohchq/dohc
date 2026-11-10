@@ -100,6 +100,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
+    // Its answer carries every session's token. The relay lists sessions without them.
+    disabledPaths: ["/list-sessions"],
     database: options.pool,
     emailAndPassword: {
       enabled: true,

@@ -181,6 +181,7 @@ export function devicePage(state: DeviceState): string {
       main: `<h1>Connect this device to dohc?</h1>
 <p class="code">${escapeHtml(state.userCode)}</p>
 <p>Connect the device showing this code as <span class="meta">${escapeHtml(state.email)}</span>. It will read and change your workspaces.</p>
+<p>Only approve this if you just started signing in on your phone.</p>
 <div class="actions" id="actions">
 <button type="button" id="approve">Approve</button>
 <button type="button" id="deny" class="secondary">Deny</button>

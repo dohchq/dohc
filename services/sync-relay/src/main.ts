@@ -1,7 +1,7 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createAccountSessionResolver, createSessionActorResolver, UnauthorizedError, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
+import { createAccountSessionResolver, createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type AccountSessions, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
 import { createPostgresCredentialFence, type CredentialFence } from "@dohc/workspace-auth/credentialFence";
 import { readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
@@ -301,7 +301,7 @@ let lookupUserDisplayName: (
 ) => Promise<string | null> | string | null;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
 // and no personal agent sign-in.
-const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; credentialFence?: CredentialFence} = testAuthSeam
+const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; sessions?: AccountSessions; credentialFence?: CredentialFence} = testAuthSeam
   ? {actor: createTestActorResolver()}
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
@@ -324,7 +324,7 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; c
       const credentialFence = createPostgresCredentialFence(pool, {
         verifyPassword: async input => (await auth.$context).password.verify(input),
       });
-      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth), credentialFence};
+      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth), sessions: createPostgresAccountSessions(pool), credentialFence};
   })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
@@ -421,6 +421,7 @@ const relayApplication = createSyncRelayHandler({
   storage,
   resolveActor,
   ...(resolveAccountSession ? {resolveAccountSession} : {}),
+  ...(accountResolvers.sessions ? {accountSessions: accountResolvers.sessions} : {}),
   ...(credentialFence ? {credentialFence} : {}),
   ...(pushVapidPublicKey ? {pushVapidPublicKey} : {}),
   ...(pushConfig ? {pushHosts: pushConfig.hosts} : {}),
