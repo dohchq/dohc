@@ -223,7 +223,8 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
   });
 
   server.registerTool("dohc_read_channel", {
-    description: "Read a channel in a workspace you can reach: your direct messages with your owner, or a Group's channel. " +
+    description: "Read any channel your owner can read, in a workspace you can reach: your direct messages with your owner, a Group's channel, " +
+      "or another channel a message names. " +
       "Each message from dohc_wait_for_messages names its channel. Messages come newest first: pass before=olderCursor for earlier ones. " +
       UNVERIFIED_LINK,
     inputSchema: z.object({
