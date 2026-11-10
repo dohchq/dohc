@@ -64,13 +64,18 @@ export function AddAgentSheet(props: {
   onAdd: (agent: NewAgent) => void;
   onCancel: () => void;
 }) {
-  const ready = (["claude", "codex"] as const).find((tool) => props.toolState(tool)?.status === "ready");
-  // Until the person picks, the choice is the first tool that is ready.
+  const tools = ["claude", "codex"] as const;
+  const looking = !props.detectionFailed && tools.some((tool) => props.toolState(tool) === null);
+  // The sheet shows no choice while dohc looks for the tools. Then it starts
+  // on the first tool that is ready, and only the person changes it.
+  const [initial, setInitial] = useState<RunsWith | null>(null);
+  const start = initial ?? (looking ? null : tools.find((tool) => props.toolState(tool)?.status === "ready") ?? "mcp");
+  if (initial === null && start !== null) setInitial(start);
   const [picked, setPicked] = useState<RunsWith | null>(null);
-  const choice = picked ?? ready ?? "mcp";
+  const choice = picked ?? start;
   // The name follows the choice until the person types one.
   const [typed, setTyped] = useState<string | null>(null);
-  const name = typed ?? newAgentName(props.agents, baseName(choice));
+  const name = typed ?? newAgentName(props.agents, baseName(choice ?? "mcp"));
   const [hue, setHue] = useState<AgentHue>(props.hue);
   const [enabled, setEnabled] = useState(true);
   const [shownError, setShownError] = useState(false);
@@ -78,7 +83,7 @@ export function AddAgentSheet(props: {
   const error = problem === "Another agent has this name." || shownError ? problem : null;
   const handle = problem ? "" : agentHandle(name.trim());
   const config = choice === "mcp" ? props.mcpConfig(props.mcpAgentId) : null;
-  const state = choice === "mcp" ? null : props.toolState(choice);
+  const state = choice === "mcp" || choice === null ? null : props.toolState(choice);
   const canAdd = !props.adding && problem === null && (choice === "mcp" || state?.status === "ready");
 
   const submit = () => {
@@ -90,7 +95,7 @@ export function AddAgentSheet(props: {
     const trimmed = preferredNameFromInput(name)!;
     if (choice === "mcp") {
       props.onAdd({ name: trimmed, hue, enabled: false, idBase: "agent" });
-    } else if (state?.status === "ready") {
+    } else if (choice !== null && state?.status === "ready") {
       props.onAdd({ name: trimmed, hue, enabled, launch: { tool: choice, executable: state.executable }, idBase: choice });
     }
   };
@@ -157,7 +162,7 @@ export function AddAgentSheet(props: {
         <div className="flex flex-col gap-1.5">
           <span id="agent-add-runs-with" className="text-[12px] text-muted">Runs with</span>
           <div role="radiogroup" aria-labelledby="agent-add-runs-with" className="grid grid-cols-3 gap-2 max-[560px]:grid-cols-1">
-            {(["claude", "codex"] as const).map((tool) => {
+            {tools.map((tool) => {
               const toolName = baseName(tool);
               const found = props.toolState(tool);
               return option(
@@ -192,7 +197,7 @@ export function AddAgentSheet(props: {
               <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
             ) : null}
           </div>
-        ) : (
+        ) : choice === null ? null : (
           <div className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
             <span id="agent-add-run-label" className="text-[13px] text-ink">Run on this computer</span>
             <span className="ml-auto">
@@ -202,7 +207,7 @@ export function AddAgentSheet(props: {
         )}
         <div className="flex items-center justify-end gap-2">
           <SecondaryButton type="button" disabled={props.adding} onClick={props.onCancel}>Cancel</SecondaryButton>
-          <PrimaryButton type="submit" data-testid="agent-add-confirm" disabled={props.adding || (choice !== "mcp" && state?.status !== "ready")}>
+          <PrimaryButton type="submit" data-testid="agent-add-confirm" disabled={props.adding || choice === null || (choice !== "mcp" && state?.status !== "ready")}>
             {props.adding ? "Adding…" : "Add agent"}
           </PrimaryButton>
         </div>

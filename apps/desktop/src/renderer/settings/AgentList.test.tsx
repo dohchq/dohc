@@ -619,6 +619,10 @@ it("says what each tool needs before it can be added, and offers another agent",
   renderList();
   await openAdd();
   expect(within(runsWith("claude")).getByLabelText("Looking for Claude Code")).toBeTruthy();
+  // Nothing is chosen while dohc looks, so the choice doesn't move under the person.
+  expect(within(screen.getByRole("radiogroup", { name: "Runs with" })).queryAllByRole("radio", { checked: true })).toHaveLength(0);
+  expect(screen.queryByTestId("agent-add-connect")).toBeNull();
+  expect(screen.getByTestId<HTMLButtonElement>("agent-add-confirm").disabled).toBe(true);
   await act(async () => found.resolve({
     workingDirectory: "C:\\Work",
     tools: [
@@ -693,11 +697,14 @@ it("says on each tool that dohc couldn't look for tools, and looks again from th
     expect(within(runsWith(tool)).getByText("Couldn't check")).toBeTruthy();
     expect(runsWith(tool).disabled).toBe(true);
   }
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
   const retry = onError.mock.calls[0]![2] as () => Promise<void>;
   await act(() => retry());
   expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(2);
   expect(within(runsWith("codex")).getByText("Ready")).toBeTruthy();
   expect(runsWith("codex").disabled).toBe(false);
+  // A tool found after the sheet showed its choice doesn't take it over.
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
   expect(within(runsWith("claude")).getByText("Not found")).toBeTruthy();
 });
 
