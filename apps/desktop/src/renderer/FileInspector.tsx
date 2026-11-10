@@ -589,8 +589,14 @@ export const FileInspector = memo(function FileInspector(
       refreshAfterConflict();
     } else if (convertedOpen && (session === "lossy"
       || (engine.headSha256 !== undefined && engine.headSha256 !== engine.lastSave?.sha256))) {
-      // The file changed outside dohc. Its own check decides from here.
+      // The file changed outside dohc, or a save's receipt was lost. Its own
+      // check decides from here, from a new read of the file: the open's
+      // read holds the bytes before Edit anyway.
       setConverted(null);
+      if (session !== "lossy") {
+        setStaleConsentRead({ open: lossyOpen, seq: readSeq });
+        refreshAfterConflict();
+      }
     }
   }, [consented, editingAnyway, conversionCommitted, convertedOpen, session,
     engine.headSha256, engine.lastSave, lossyOpen, readSeq, refreshAfterConflict]);
