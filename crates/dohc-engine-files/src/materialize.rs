@@ -7542,6 +7542,31 @@ mod tests {
         std::fs::remove_file(&target).expect("the owner may still delete the file");
     }
 
+    /// #3570: the desktop's Windows sync writes go through `files.replace`,
+    /// so a file another program holds is retried, as a job's is, and the
+    /// replace ends as `file-locked` while it stays held.
+    #[cfg(windows)]
+    #[test]
+    fn a_replace_of_a_held_file_ends_as_file_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        let scratch = Scratch::new("held-replace");
+        let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"old").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&target)
+            .unwrap();
+        let err = replace_file_whole(&scratch.root, "notes.md", ".dohc-write-1.tmp", b"new")
+            .expect_err("a held file can't be replaced");
+        assert_eq!(err.code(), "file-locked");
+        drop(held);
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(!scratch.root.join(".dohc-write-1.tmp").exists());
+    }
+
     struct Scratch {
         root: ScratchDir,
     }
