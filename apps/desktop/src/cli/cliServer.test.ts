@@ -1427,7 +1427,12 @@ describe("CLI socket server", () => {
   it("counts only validated successful commands, defaults missing labels to CLI and rejects unknown labels", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;
-    context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })) };
+    context.keptCopies = {
+      list: async () => ({ keptCopies: [], more: false }),
+      save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })),
+      restoreProtected: async () => ({ path: ".env", status: "restored" as const }),
+      discardProtected: async () => ({ path: ".env", status: "discarded" as const }),
+    };
     const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
     expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
     expect(recordSuccess).toHaveBeenLastCalledWith({ capabilityId: "file.kept.save", door: "cli" });
@@ -1512,7 +1517,12 @@ describe("CLI socket server", () => {
       serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
       const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
       const entered = deferred(); const release = deferred();
-      context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: async () => ({ status: "saved", path: "kept.md" }) };
+      context.keptCopies = {
+        list: async () => ({ keptCopies: [], more: false }),
+        save: async () => ({ status: "saved", path: "kept.md" }),
+        restoreProtected: async () => ({ path: ".env", status: "restored" }),
+        discardProtected: async () => ({ path: ".env", status: "discarded" }),
+      };
       await rawRequest({ ...request, door: "cli" });
       const save = context.keptCopies.save;
       context.keptCopies.save = async () => { entered.resolve(); await release.promise; return save(1); };
@@ -3147,6 +3157,8 @@ describe("CLI socket server", () => {
           ? { status: "saved", path: "notes/plan (kept copy).md" }
           : { status: "gone" };
       },
+      restoreProtected: async () => ({ path: ".env", status: "restored" }),
+      discardProtected: async () => ({ path: ".env", status: "discarded" }),
     };
 
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
@@ -3169,6 +3181,45 @@ describe("CLI socket server", () => {
       ok: false,
       reason: "kept copies are not available in this workspace",
     });
+  });
+
+  it("lists, restores and discards a protected file's kept change for an agent, the steps a person takes from Notices", async () => {
+    const id = "0b5c3f2e-8d41-4a8e-9f3c-2d7e6a1b4c90";
+    let copies: [string, string, number][] = [[".env", id, 10]];
+    const restoredBy: string[] = [];
+    const gone = () => new Error("This kept change is no longer available.");
+    context.keptCopies = {
+      list: async () => ({ keptCopies: [], more: false, protectedCopies: copies }),
+      save: async () => ({ status: "gone" }),
+      async restoreProtected(copyId, by) {
+        if (!copies.some((copy) => copy[1] === copyId)) throw gone();
+        restoredBy.push(by);
+        copies = copies.filter((copy) => copy[1] !== copyId);
+        return { path: ".env", status: "restored" };
+      },
+      async discardProtected(copyId) {
+        if (!copies.some((copy) => copy[1] === copyId)) throw gone();
+        copies = copies.filter((copy) => copy[1] !== copyId);
+        return { path: ".env", status: "discarded" };
+      },
+    };
+
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toMatchObject({ ok: true, protectedCopies: [[".env", id, 10]] });
+    await expect(invoke("restoreProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: true, status: "restored", path: ".env" });
+    expect(restoredBy).toEqual(["agent"]);
+    expect(calls.writes).toBe(1);
+    await expect(invoke("restoreProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: false, reason: "This kept change is no longer available." });
+
+    copies = [[".env", id, 20]];
+    await expect(invoke("discardProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: true, status: "discarded", path: ".env" });
+    await expect(invoke("discardProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: false, reason: "This kept change is no longer available." });
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "discardProtectedCopy", args: { cwd: workspaceRoot, actor: "agent", id: "../x" } }))
+      .toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
   });
 
   it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {

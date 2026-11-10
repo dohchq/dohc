@@ -1705,6 +1705,20 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return { present: true, text: result.text };
   }
 
+  async secretTextRecorded(input: {
+    workspaceId: string;
+    path: string;
+    text: string;
+  }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    const result = await this.request(VERSIONED_METHOD.secretsRecorded, {
+      workspaceId: input.workspaceId,
+      path: input.path,
+      text: input.text,
+    });
+    return result.recorded;
+  }
+
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
   }

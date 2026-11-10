@@ -276,6 +276,9 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.secretsMaterialize]: {
     requiredStrings: ["versionId", "path"],
   },
+  [VERSIONED_METHOD.secretsRecorded]: {
+    requiredStrings: ["workspaceId", "path", "text"],
+  },
   [VERSIONED_METHOD.secretsDelete]: {
     requiredStrings: [
       ...REQUIRED_SECRET_METADATA,
@@ -631,6 +634,7 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
       }
       break;
     case VERSIONED_METHOD.secretsMaterialize:
+    case VERSIONED_METHOD.secretsRecorded:
       if (!isSecretClassifiedPath(serdeRequiredParamString(params, "path"))) {
         throw new Error("not a secret path");
       }
@@ -1246,6 +1250,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
         );
       case VERSIONED_METHOD.secretsMaterialize:
         return this.secretMaterialize(state, params);
+      case VERSIONED_METHOD.secretsRecorded: {
+        // Any change in any version's History that left exactly this text.
+        const path = normalizedSecretPath(requiredString(params, "path", "secret text check"));
+        const text = requiredString(params, "text", "secret text check");
+        return {
+          recorded: [...state.secretMoments.values()].some((entry) => entry.wire.path === path && entry.after === text),
+        };
+      }
       case VERSIONED_METHOD.secretsDelete:
         return this.secretDelete(state, workspace, params, parsedSecretDelete!);
       case VERSIONED_METHOD.secretsFork:

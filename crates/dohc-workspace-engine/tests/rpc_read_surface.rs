@@ -504,6 +504,37 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert_eq!(big["text"], json!(big_secret));
 
+    // secrets.recorded answers only whether protected History holds a text.
+    for (path, text, held) in [
+        (".env", "TOKEN=rpc-read", true),
+        (".env", "TOKEN=rpc-gone", false),
+        ("big.env", "TOKEN=rpc-read", false),
+    ] {
+        id += 1;
+        let answer = call(
+            &transport,
+            &handle,
+            id,
+            "secrets.recorded",
+            json!({ "workspaceId": WORKSPACE_ID, "path": path, "text": text }),
+        )
+        .await;
+        assert_eq!(answer, json!({ "recorded": held }), "{path}");
+    }
+    id += 1;
+    let ordinary = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "secrets.recorded",
+                Some(handle.clone()),
+                json!({ "workspaceId": WORKSPACE_ID, "path": "notes/a.md", "text": "captured text" }),
+            ),
+        )
+        .await;
+    assert!(ordinary.is_err(), "an ordinary path is refused");
+
     // Fail closed: live secret state with a missing key file is
     // corrupt/misrestored — materialize must error, never read as empty.
     std::fs::remove_file(

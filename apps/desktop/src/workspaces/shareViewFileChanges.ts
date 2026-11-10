@@ -24,12 +24,12 @@ import {
   droppedEntryParent,
   importNameFor,
   ImportPathChangedError,
-  ImportSkips,
   movePath,
   nameSkip,
   openDroppedFile,
   resolveImportDestination,
   screenDroppedPaths,
+  screenPickedPaths,
   verifyDroppedFolder,
   type DroppedEntry,
   type DroppedFolderCheck,
@@ -652,7 +652,7 @@ async function applyShareViewFileImport(
   );
   const screened =
     input.screenAgainstRoots === null
-      ? { usable: input.absolutePaths, skips: new ImportSkips() }
+      ? await screenPickedPaths(input.absolutePaths)
       : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots, relDir);
   const skips = screened.skips;
   const landedPath = (path: string) => (relDir === "" ? path : `${relDir}/${path}`);

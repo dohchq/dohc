@@ -1159,6 +1159,35 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "leaves a picked file inside a .dohc folder out of a shared workspace's import",
+    async () => {
+      const view = await harness("dohc-share-import-metadata-", "edit");
+      const sourceDir = await createTestScratch("dohc-share-import-metadata-src-");
+      roots.push(sourceDir);
+      const kept = join(sourceDir, ".dohc", "local", "protected-copies");
+      await mkdir(kept, { recursive: true });
+      await writeFile(join(kept, "copy.json"), "{\"text\":\"SECRET\"}", "utf8");
+      await writeFile(join(sourceDir, "plain.md"), "plain\n", "utf8");
+
+      const outcome = await applyShareViewFileImport({
+        ...scope(view),
+        absolutePaths: [join(kept, "copy.json"), join(sourceDir, "plain.md")],
+        screenAgainstRoots: null,
+        targetDir: undefined,
+      });
+
+      expect(outcome).toEqual({
+        imported: ["plain.md"],
+        skipped: 1,
+        skippedSources: [{ path: "copy.json", reason: "workspace-data" }],
+      });
+      expect(await storePaths(view)).toEqual(["plain.md"]);
+      expect(await exists(join(view.rootPath, "copy.json"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "reserves an absent projection's store name without regard to case",
     async () => {
       const view = await harness("dohc-share-import-store-case-", "edit");

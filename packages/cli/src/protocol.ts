@@ -332,6 +332,13 @@ const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
   .strict();
+// A protected file's change a sync replaced, kept on this computer under a
+// UUID. Restore writes it back; Discard removes it for good.
+const protectedCopyIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+const restoreProtectedCopyArgsSchema = z
+  .object({ ...argsBase, id: protectedCopyIdSchema })
+  .strict();
+const discardProtectedCopyArgsSchema = restoreProtectedCopyArgsSchema;
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open. A delete takes at most 100 listed copies and must
 // accept that a program still using one may lose what it writes next.
@@ -642,6 +649,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("restoreProtectedCopy"), args: restoreProtectedCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("discardProtectedCopy"), args: discardProtectedCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
@@ -735,6 +744,8 @@ export const CLI_CAPABILITIES = {
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
+  restoreProtectedCopy: ["file.protected.restore"],
+  discardProtectedCopy: ["file.protected.discard"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
   liveKeptEdits: ["workspace.status"],
@@ -1514,6 +1525,9 @@ const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
     outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
+    // A protected file's change a sync replaced: [path, id, keptAtMs]. The
+    // text stays on this computer; no answer carries it.
+    protectedCopies: z.array(z.tuple([z.string(), z.string(), z.number().int().nonnegative()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),
@@ -1530,6 +1544,14 @@ const saveKeptCopyResultSchema = z.union([
   z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
   z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
   z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
+  rawFailureSchema,
+]);
+const restoreProtectedCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("restored"), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+const discardProtectedCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("discarded"), path: z.string().min(1) }).strict(),
   rawFailureSchema,
 ]);
 
@@ -1928,6 +1950,8 @@ export const cliResultSchemas = {
     rawFailureSchema,
   ]),
   saveKeptCopy: saveKeptCopyResultSchema,
+  restoreProtectedCopy: restoreProtectedCopyResultSchema,
+  discardProtectedCopy: discardProtectedCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
   liveKeptEdits: liveKeptEditsResultSchema,

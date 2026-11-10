@@ -2244,3 +2244,161 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
         "another workspace's same-named moment must be untouched"
     );
 }
+
+/// Seal `text` and append it as a synced change, as `secret_apply` does. When
+/// `wins`, it also becomes the tip.
+fn insert_synced_change(
+    store: &mut EngineStore,
+    key: &SecretDataKey,
+    id: &str,
+    text: &str,
+    at_ms: i64,
+    wins: bool,
+) {
+    let sealed = aead::seal(key, WS, ".env", text.as_bytes()).expect("seal");
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            let order: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(moment_order) + 1, 0) FROM secret_moments WHERE workspace_id = ?1",
+                    params![WS],
+                    |row| row.get(0),
+                )
+                .expect("next order");
+            tx.execute(
+                "INSERT INTO secret_moments (workspace_id, moment_order, moment_id, version_id, \
+                 path, recorded_at_ms, operation, metadata_origin, after_present, \
+                 after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
+                 after_byte_length, source_origin_id, source_origin_seq) \
+                 VALUES (?1, ?2, ?3, 'main', '.env', ?4, 'write', 'sync', 1, ?5, ?6, ?7, ?8, 'peer', ?2)",
+                params![
+                    WS,
+                    order,
+                    id,
+                    at_ms,
+                    sealed.iv_base64(),
+                    sealed.auth_tag_base64(),
+                    sealed.ciphertext_base64(),
+                    text.len() as i64
+                ],
+            )
+            .expect("synced change");
+            if wins {
+                tx.execute(
+                    "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
+                     auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms, latest_moment_id) \
+                     VALUES (?1, 'main', '.env', ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET \
+                     iv_base64 = excluded.iv_base64, auth_tag_base64 = excluded.auth_tag_base64, \
+                     ciphertext_base64 = excluded.ciphertext_base64, byte_length = excluded.byte_length, \
+                     updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id",
+                    params![
+                        WS,
+                        sealed.iv_base64(),
+                        sealed.auth_tag_base64(),
+                        sealed.ciphertext_base64(),
+                        text.len() as i64,
+                        at_ms,
+                        id
+                    ],
+                )
+                .expect("synced tip");
+            }
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .expect("append the synced change");
+}
+
+#[test]
+fn secret_text_held_matches_only_text_history_holds_for_that_path() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(&mut store, &key, ".env", "TOKEN=older", "rec-older", 10);
+    write(&mut store, &key, ".env", "TOKEN=newer", "rec-newer", 11);
+    write(
+        &mut store,
+        &key,
+        "other.env",
+        "TOKEN=elsewhere",
+        "rec-other",
+        12,
+    );
+    insert_synced_change(&mut store, &key, "rec-lost", "TOKEN=lost", 5, false);
+    // A row that does not open (sealed for another path) or does not decode
+    // counts as a different text, not a failure.
+    let foreign = aead::seal(&key, WS, "other.env", b"TOKEN=moved").expect("seal");
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO secret_moments (workspace_id, moment_order, moment_id, version_id, \
+                 path, recorded_at_ms, operation, metadata_origin, after_present, \
+                 after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
+                 after_byte_length) \
+                 VALUES (?1, 98, 'rec-foreign', 'main', '.env', 13, 'write', 'api', 1, ?2, ?3, ?4, 11), \
+                        (?1, 99, 'rec-broken', 'main', '.env', 14, 'write', 'api', 1, 'iv', 'tag', 'ct', 11)",
+                params![
+                    WS,
+                    foreign.iv_base64(),
+                    foreign.auth_tag_base64(),
+                    foreign.ciphertext_base64()
+                ],
+            )
+            .expect("unreadable rows");
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .unwrap();
+
+    let secrets = SecretFileStore::new(&mut store, &key);
+    let held = |text: &[u8]| secrets.secret_text_recorded(WS, ".env", text).unwrap();
+    assert!(held(b"TOKEN=older"));
+    assert!(held(b"TOKEN=newer"));
+    assert!(held(b"TOKEN=lost"));
+    assert!(!held(b"TOKEN=mine!"));
+    assert!(!held(b"TOKEN=moved"));
+    assert!(!held(b"TOKEN=olde"));
+    assert!(!held(b"TOKEN=elsewhere"));
+    assert!(!held(&vec![b'x'; aead::MAX_SECRET_FILE_BYTES + 1]));
+    let err = secrets
+        .secret_text_recorded(WS, "notes.md", b"TOKEN=older")
+        .unwrap_err();
+    assert_eq!(err.code(), "not-secret-path");
+}
+
+/// Undoing a Restore brings back the text it replaced, even when a synced
+/// change that lost last-writer-wins sits between them in History.
+#[test]
+fn secret_restore_skips_a_synced_change_that_lost() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(&mut store, &key, ".env", "TOKEN=saved", "undo-saved", 10);
+    insert_synced_change(&mut store, &key, "undo-theirs", "TOKEN=theirs", 30, true);
+    insert_synced_change(&mut store, &key, "undo-other", "TOKEN=other", 20, false);
+    write(&mut store, &key, ".env", "TOKEN=mine", "undo-mine", 40);
+
+    let restored = restore_secret_file_verbatim_with_metadata_and_after(
+        &mut store,
+        WS,
+        ".env",
+        "undo-mine",
+        "undo-restore",
+        "restore",
+        None,
+        None,
+        50,
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(restored.restored, "text");
+    let tip = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .unwrap()
+        .expect("tip");
+    assert_eq!(tip.as_bytes(), b"TOKEN=theirs");
+}

@@ -31,6 +31,7 @@ export const VERSIONED_METHOD = {
   secretsList: "secrets.list",
   secretsStateExists: "secrets.stateExists",
   secretsMaterialize: "secrets.materialize",
+  secretsRecorded: "secrets.recorded",
   secretsDelete: "secrets.delete",
   secretsFork: "secrets.fork",
   secretsCompare: "secrets.compare",
@@ -237,6 +238,12 @@ type SecretsListParams = JsonObject & {
 type SecretsMaterializeParams = JsonObject & {
   versionId: string;
   path: string;
+};
+
+type SecretsRecordedParams = JsonObject & {
+  workspaceId: string;
+  path: string;
+  text: string;
 };
 
 type SecretsDeleteParams = JsonObject & {
@@ -503,6 +510,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.secretsList]: SecretsListParams;
   [VERSIONED_METHOD.secretsStateExists]: WorkspaceOnlyParams;
   [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeParams;
+  [VERSIONED_METHOD.secretsRecorded]: SecretsRecordedParams;
   [VERSIONED_METHOD.secretsDelete]: SecretsDeleteParams;
   [VERSIONED_METHOD.secretsFork]: SecretsForkParams;
   [VERSIONED_METHOD.secretsCompare]: SecretsCompareParams;
@@ -547,6 +555,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.secretsList]: SecretsListResult;
   [VERSIONED_METHOD.secretsStateExists]: boolean;
   [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeResult;
+  [VERSIONED_METHOD.secretsRecorded]: typeof SecretsRecordedResultSchema.Type;
   [VERSIONED_METHOD.secretsDelete]: SecretDeleteResult;
   [VERSIONED_METHOD.secretsFork]: SecretsForkResult;
   [VERSIONED_METHOD.secretsCompare]: SecretCompareResult;
@@ -983,6 +992,7 @@ const SecretsMaterializeResultSchema = Schema.NullOr(
     }),
   ]),
 );
+const SecretsRecordedResultSchema = mutableStruct({ recorded: Schema.Boolean });
 const SecretDeleteResultSchema = mutableStruct({
   moment: Schema.NullOr(SecretMomentRecordSchema),
 });
@@ -1111,6 +1121,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.secretsList]: SecretsListResultSchema,
   [VERSIONED_METHOD.secretsStateExists]: Schema.Boolean,
   [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeResultSchema,
+  [VERSIONED_METHOD.secretsRecorded]: SecretsRecordedResultSchema,
   [VERSIONED_METHOD.secretsDelete]: SecretDeleteResultSchema,
   [VERSIONED_METHOD.secretsFork]: EmptyObjectSchema,
   [VERSIONED_METHOD.secretsCompare]: SecretCompareResultSchema,

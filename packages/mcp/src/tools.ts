@@ -82,6 +82,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_list_notices: ["notice.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_restore_protected_copy: ["file.protected.restore"],
+  dohc_discard_protected_copy: ["file.protected.discard"],
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
@@ -2368,6 +2370,15 @@ export async function listKeptCopies(ctx: ToolContext) {
 
 export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
+// A protected file's change a sync replaced, kept on this computer only.
+export async function restoreProtectedCopy(ctx: ToolContext, args: { id: string }) {
+  return requestCli(ctx, "restoreProtectedCopy", { id: args.id });
+}
+
+export async function discardProtectedCopy(ctx: ToolContext, args: { id: string }) {
+  return requestCli(ctx, "discardProtectedCopy", { id: args.id });
 }
 
 // A live document's edits the server refused, which dohc keeps on this

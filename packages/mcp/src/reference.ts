@@ -217,6 +217,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_kept_copies: { cli: "keptCopies" },
   dohc_list_notices: { cli: "notices" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
+  dohc_restore_protected_copy: { cli: "restoreProtectedCopy" },
+  dohc_discard_protected_copy: { cli: "discardProtectedCopy" },
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },

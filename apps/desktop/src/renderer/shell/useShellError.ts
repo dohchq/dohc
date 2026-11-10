@@ -42,6 +42,7 @@ export type ShellErrorKind =
   | "capture-recovery"
   | "capture-held"
   | "outside-copy-read"
+  | "protected-copy-read"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -1051,7 +1052,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     // retried goes, so a failure the retry has already reported again stays.
     // A share's collision-record row stays until a refresh completes.
     setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read" ||
-      target?.kind === "share-collision-record"
+      target?.kind === "protected-copy-read" || target?.kind === "share-collision-record"
       ? current
       : current.filter(error => error !== target));
   }, []);

@@ -293,8 +293,12 @@ export interface CliVersionsPort {
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][]; protectedCopies?: [string, string, number][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
+  // A protected file's change a sync replaced, kept on this computer. The
+  // same capture operations as the Notices row's Restore and Discard.
+  restoreProtected(id: string, restoredBy: "you" | "agent"): Promise<{ path: string; status: "restored" }>;
+  discardProtected(id: string): Promise<{ path: string; status: "discarded" }>;
 }
 
 // Live documents whose edits the server refused, which dohc keeps on this
@@ -2061,7 +2065,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2075,6 +2079,8 @@ async function dispatch(
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
+  // Protected copies stay on the computer of the workspace that kept them.
+  if (paths.shared && (request.verb === "restoreProtectedCopy" || request.verb === "discardProtectedCopy")) return keptCopiesUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2818,6 +2824,30 @@ async function dispatchWorkspace(
         return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
+      }
+    }
+
+    case "restoreProtectedCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        // Protected History names no author, so the summary says an agent
+        // restored it; every socket edit is an agent's.
+        const restored = await keptCopies.restoreProtected(request.args.id, "agent");
+        await notifyWrite(options, context);
+        return { ok: true as const, ...restored };
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not restore the kept change.");
+      }
+    }
+
+    case "discardProtectedCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.discardProtected(request.args.id)) };
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not discard the kept change.");
       }
     }
 

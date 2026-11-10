@@ -684,6 +684,57 @@ impl<'a> SecretFileStore<'a> {
         })
     }
 
+    /// Whether protected History for `path`, in any version, holds exactly
+    /// `text`. Answers only a boolean, so callers learn nothing they could not
+    /// already restore. A row that does not open counts as a different text,
+    /// so the caller keeps its own copy rather than stopping.
+    pub fn secret_text_recorded(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        text: &[u8],
+    ) -> Result<bool, DomainError> {
+        validate_identifier(workspace_id, "workspace_id")?;
+        let path = validate_secret_path(path)?;
+        if text.len() > aead::MAX_SECRET_FILE_BYTES {
+            return Ok(false);
+        }
+        let key = self.key;
+        self.store.read_with(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT after_iv_base64, after_auth_tag_base64, after_ciphertext_base64 \
+                     FROM secret_moments \
+                     WHERE workspace_id = ?1 AND path = ?2 AND after_present = 1 \
+                       AND after_byte_length = ?3 \
+                     ORDER BY moment_order DESC",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let mut rows = statement
+                .query(params![workspace_id, path, text.len() as i64])
+                .map_err(DomainError::sql_corrupt)?;
+            while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+                let iv: Option<String> = row.get(0).map_err(DomainError::sql_corrupt)?;
+                let tag: Option<String> = row.get(1).map_err(DomainError::sql_corrupt)?;
+                let ciphertext: Option<String> = row.get(2).map_err(DomainError::sql_corrupt)?;
+                let (Some(iv), Some(tag), Some(ciphertext)) = (iv, tag, ciphertext) else {
+                    continue;
+                };
+                let Ok(sealed) = SealedSecret::from_base64(&iv, &tag, &ciphertext, text.len())
+                else {
+                    continue;
+                };
+                let Ok(plaintext) = aead::open(key, workspace_id, &path, &sealed) else {
+                    continue;
+                };
+                if plaintext.as_bytes() == text {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
     // ---------------------------------------------------------------- reads
 
     /// List secret moments, newest first, optionally scoped to a version.
@@ -1290,12 +1341,28 @@ where
                 reason: "path does not match the protected history moment",
             });
         }
+        // The state to go back to is the tip that change replaced. A synced
+        // change that lost last-writer-wins (`secret_apply::remote_wins`: an
+        // earlier row ranks above it) never became the tip, so skip it.
         let previous = tx
             .query_row(
-                "SELECT after_present, after_iv_base64, after_auth_tag_base64, \
-                 after_ciphertext_base64, after_byte_length FROM secret_moments \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
-                   AND moment_order < ?4 ORDER BY moment_order DESC LIMIT 1",
+                "SELECT m.after_present, m.after_iv_base64, m.after_auth_tag_base64, \
+                 m.after_ciphertext_base64, m.after_byte_length FROM secret_moments m \
+                 WHERE m.workspace_id = ?1 AND m.version_id = ?2 AND m.path = ?3 \
+                   AND m.moment_order < ?4 \
+                   AND NOT (m.source_origin_id IS NOT NULL AND EXISTS ( \
+                     SELECT 1 FROM secret_moments e \
+                     WHERE e.workspace_id = m.workspace_id AND e.version_id = m.version_id \
+                       AND e.path = m.path AND e.moment_order < m.moment_order \
+                       AND (e.recorded_at_ms, e.after_present, \
+                            COALESCE(e.after_ciphertext_base64, ''), \
+                            COALESCE(e.after_iv_base64, ''), \
+                            COALESCE(e.after_auth_tag_base64, '')) \
+                         > (m.recorded_at_ms, m.after_present, \
+                            COALESCE(m.after_ciphertext_base64, ''), \
+                            COALESCE(m.after_iv_base64, ''), \
+                            COALESCE(m.after_auth_tag_base64, '')))) \
+                 ORDER BY m.moment_order DESC LIMIT 1",
                 params![workspace_id, before.version_id, before.path, before.moment_order],
                 |row| {
                     Ok((

@@ -13,6 +13,7 @@ import { existsSync, type PathLike } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
+import { protectedWriteCopies } from "./protectedWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
@@ -4167,6 +4168,37 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       else expect(existsSync(join(root, ".env"))).toBe(false);
       expect(await protectedCopyFiles(root)).toEqual([]);
       expect(notice).not.toHaveBeenCalled();
+    } finally { await engine.stop(); }
+  });
+
+  it("restores a kept protected change on top of History, keeps the synced text there, and discards another for good", async () => {
+    const { root, sessions, page } = await protectedPullFixture("write", ["TOKEN=saved\n"], "TOKEN=mine\n");
+    const engine = capture(root, { rustEngineSessions: sessions });
+    const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+    try {
+      await engine.runRelaySync(page(async () => undefined));
+      const { protectedCopies = [] } = await engine.listKeptCopies();
+      expect(protectedCopies).toEqual([[".env", expect.any(String), expect.any(Number)]]);
+      const id = protectedCopies[0]![1];
+
+      await expect(engine.restoreProtectedCopy(id)).resolves.toEqual({ path: ".env", status: "restored" });
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      const [tip] = await secretStore.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" });
+      const restored = await secretStore.getSecretMoment({ workspaceId: WORKSPACE_ID, momentId: tip!.latestMomentId });
+      expect(restored?.metadata).toMatchObject({ origin: "restore", summary: "Restored your change to .env" });
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: ".env", text: "TOKEN=theirs\n" })).toBe(true);
+      await expect(engine.restoreProtectedCopy(id)).rejects.toThrow("This kept change is no longer available.");
+
+      const elsewhere = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await elsewhere.keep(".env", "TOKEN=elsewhere\n", "trip");
+      const tripId = (await elsewhere.list())[0]![1];
+      await expect(engine.restoreProtectedCopy(tripId))
+        .rejects.toThrow("This moment belongs to a different version. Switch to that version to restore it.");
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+      await expect(engine.discardProtectedCopy(tripId)).resolves.toEqual({ path: ".env", status: "discarded" });
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      await expect(engine.discardProtectedCopy(tripId)).rejects.toThrow("This kept change is no longer available.");
     } finally { await engine.stop(); }
   });
 

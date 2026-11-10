@@ -1070,6 +1070,28 @@ export async function importDroppedPaths(
   return copyIntoWorkspace(rootPath, screened.usable, targetDir, screened.skips);
 }
 
+// The import dialog's picks are the person's own choice, so they copy as the
+// dialog names them, with one exception: a pick inside any `.dohc` folder,
+// such as a protected file's kept change, is workspace data and never lands
+// as an ordinary file. The check reads the real path, so a link above the
+// pick cannot hide it. A pick that cannot be resolved stays, and the copy
+// reports its own failure.
+export async function screenPickedPaths(
+  absolutePaths: readonly string[],
+): Promise<{ usable: string[]; skips: ImportSkips }> {
+  const usable: string[] = [];
+  const skips = new ImportSkips();
+  for (const source of absolutePaths) {
+    const real = await realpath(source).catch(() => source);
+    if (real.split(/[\\/]/).some((part) => part.toLowerCase() === ".dohc")) {
+      skips.add(basename(source) || source, "workspace-data");
+      continue;
+    }
+    usable.push(source);
+  }
+  return { usable, skips };
+}
+
 // The drag-in screen, exported because a share view's import needs the same
 // one before it writes its engine store — the destination differs, the trust
 // question does not. `relDir` is the validated destination folder, so each

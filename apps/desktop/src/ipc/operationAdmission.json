@@ -83,6 +83,8 @@
   "desktop:resolve-workspace-version-conflict": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-kept-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:save-kept-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:restore-protected-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:discard-protected-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-retained-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:delete-retained-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:search-workspace": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceSearchHandlers.withWorkspaceOperation" } },

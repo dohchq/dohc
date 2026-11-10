@@ -14,6 +14,9 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  // Protected copies stay on the computer that kept them.
+  "dohc_restore_protected_copy",
+  "dohc_discard_protected_copy",
   // Refused live edits are kept only in the original workspace.
   "dohc_save_recovery_copy",
   "dohc_retry_kept_edits",

@@ -43,6 +43,7 @@ import {
   prepareWorkspaceMove,
   prepareWorkspaceDelete,
   screenDroppedPaths,
+  screenPickedPaths,
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -1602,6 +1603,31 @@ describe("copyIntoWorkspace", () => {
       copyIntoWorkspace(root, [join(outside, "receipt.png")], "linked"),
     ).rejects.toThrow(/not a workspace folder/);
     expect(existsSync(join(elsewhere, "receipt.png"))).toBe(false);
+  });
+});
+
+describe("screenPickedPaths", () => {
+  it("leaves a picked file inside any .dohc folder out of the import, also through a link", async () => {
+    const work = join(root, "Other");
+    const kept = join(work, ".dohc", "local", "protected-copies");
+    await mkdir(kept, { recursive: true });
+    await writeFile(join(kept, "copy.json"), "{\"text\":\"SECRET\"}");
+    const link = join(root, "alias");
+    await symlink(kept, link, "junction");
+    await writeFile(join(root, "plain.md"), "plain");
+    const target = join(root, "target");
+    await mkdir(target);
+
+    const picked = await screenPickedPaths([join(kept, "copy.json"), join(link, "copy.json"), join(root, "plain.md")]);
+    expect(picked.usable).toEqual([join(root, "plain.md")]);
+    const outcome = await copyIntoWorkspace(target, picked.usable, undefined, picked.skips);
+
+    expect(outcome).toEqual({
+      imported: ["plain.md"],
+      skipped: 2,
+      skippedSources: [{ path: "copy.json", reason: "workspace-data" }, { path: "copy.json", reason: "workspace-data" }],
+    });
+    expect(existsSync(join(target, "copy.json"))).toBe(false);
   });
 });
 
