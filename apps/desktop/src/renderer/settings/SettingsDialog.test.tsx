@@ -766,20 +766,21 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(picker.value).toBe(palette.dark.accent));
   });
 
-  it("saves your colors, the accent, and the editor type", async () => {
+  it("saves your color from your profile in General", async () => {
     const user = userEvent.setup();
     bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "default" });
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
-        initialSection="appearance"
+        initialSection="general"
         onClose={() => {}}
       />,
     );
     const saved = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
 
     const yours = await screen.findByTestId("settings-row-your-color");
+    expect(screen.getByTestId("settings-row-preferred-name").contains(yours)).toBe(true);
     await user.click(within(yours).getByRole("radio", { name: "Teal" }));
     expect(saved()?.appearance.yourColor).toBe("teal");
     expect(within(yours).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
@@ -790,6 +791,22 @@ describe("SettingsDialog", () => {
     for (const radio of personHues) expect(radio.className).toContain("rounded-full");
     // Each agent's color is in its Details, under Agents.
     expect(screen.queryByText("Your agent's color")).toBeNull();
+  });
+
+  it("saves the accent and the editor type", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+    const saved = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
+    expect(await screen.findByTestId("settings-row-accent")).toBeTruthy();
+    // Your color is in your profile, under General.
+    expect(screen.queryByTestId("settings-row-your-color")).toBeNull();
 
     // The picker saves once, when it closes, not on each step of a drag.
     const picker = within(screen.getByTestId("settings-row-accent")).getByLabelText("Accent color");
@@ -815,7 +832,7 @@ describe("SettingsDialog", () => {
     expect(screen.queryByRole("button", { name: "Open settings file" })).toBeNull();
   });
 
-  it("shows a modified setting as a dot and resets it from an icon", async () => {
+  it("marks a modified setting with a bar and resets it from a labeled button", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
@@ -832,10 +849,10 @@ describe("SettingsDialog", () => {
 
     await user.click(within(row).getByRole("radio", { name: "Dark" }));
     await waitFor(() => expect(within(row).getByTitle("Modified")).toBeTruthy());
+    // The bar sits on the card's edge, outside the row's text.
+    expect(within(row).getByTitle("Modified").className).toContain("absolute");
     const reset = within(row).getByRole("button", { name: "Reset" });
-    // An icon, not a word: the name is for assistive technology and the tooltip.
-    expect(reset.textContent).toBe("");
-    expect(reset.querySelector("svg")).toBeTruthy();
+    expect(reset.textContent).toBe("Reset");
     await user.click(reset);
     expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
       base: expect.any(Object),
@@ -910,16 +927,21 @@ describe("SettingsDialog", () => {
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
     // Reset's place is the row item just before the controls.
-    const slots = () => [controls.previousElementSibling!, controls].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
-    // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
-    expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
+    const slots = () => [controls.previousElementSibling!, controls].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.textContent === "Reset" ? "reset" : "control"}`);
+    // Unchanged, the row keeps Reset's place left of the stepper, drawn
+    // invisible, so nothing moves or wraps when it appears.
+    expect(slots()).toEqual(["SPAN:hidden.reset", "DIV.control"]);
+    expect(controls.previousElementSibling!.className).toContain("invisible");
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
 
     // Reset takes that place, and the stepper keeps the right edge.
     await user.click(larger);
     await waitFor(() => expect(within(row).getByRole("button", { name: "Reset" })).toBeTruthy());
-    expect(slots()).toEqual(["BUTTON.24", "DIV.control"]);
-    // The dot hangs outside the title's line, so the title does not move either.
+    expect(slots()).toEqual(["BUTTON.reset", "DIV.control"]);
+    // Reset and its place are one footprint.
+    expect(within(row).getByRole("button", { name: "Reset" }).className.replace("invisible ", ""))
+      .toContain("h-6 shrink-0");
+    // The bar is outside the title's line, so the title does not move either.
     expect(within(row).getByTitle("Modified").className).toContain("absolute");
     // A second quick click still lands on +.
     await user.click(larger);
@@ -3080,6 +3102,25 @@ describe("SettingsDialog", () => {
     expect(row.dataset.highlighted).toBe("true");
     expect(document.activeElement).toBe(row);
     expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("appearance");
+  });
+
+  it("marks your profile, with your name and color, for chats", async () => {
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection={CUSTOMIZE_TARGETS.chats.section}
+        focus={CUSTOMIZE_TARGETS.chats}
+        onClose={() => {}}
+      />,
+    );
+
+    const profile = await screen.findByTestId("settings-row-preferred-name");
+    expect(profile.dataset.highlighted).toBe("true");
+    expect(document.activeElement).toBe(profile);
+    expect(screen.getByRole("group", { name: "Profile" })).toBe(profile);
+    expect(within(profile).getByRole("radiogroup", { name: "Your color" })).toBeTruthy();
+    expect(within(profile).getByLabelText("Your name")).toBeTruthy();
   });
 
   it("copies the settings file's path from beside it", async () => {
