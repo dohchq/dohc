@@ -9,7 +9,7 @@ import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
-import { ScreenFailure } from "../workspace/ListStates";
+import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { explanationOf, labelOf, LoadingLines, Mark, pageStyles as styles, Strip, type MarkKey } from "./pageParts";
@@ -81,7 +81,10 @@ function PageScreen({ path }: { path: string }) {
     title: pageTitle(path), properties: [], markdown, large: false, editable: false, textScale: PixelRatio.getFontScale(),
   })}; true;`;
 
-  const failure = state.value?.kind === "missing" && !deleted ? <ScreenFailure text={documentWords.noLongerAvailable} />
+  // No workspace open, as when another device hid the last one: the page says why, as Home and Chats do.
+  const gap = useWorkspaceGap();
+  const failure = gap ? <NoWorkspace />
+    : state.value?.kind === "missing" && !deleted ? <ScreenFailure text={documentWords.noLongerAvailable} />
     : state.value?.kind === "too-large" ? <ScreenFailure text={documentWords.tooLargeToOpen} />
     : markdown === null && state.problem === "restoring" ? <ScreenFailure text={documentWords.restoring} onRetry={retry} />
     : markdown === null && state.problem ? <ScreenFailure text={documentWords.couldntRead} cause={problemText(state.problem)} onRetry={retry} />

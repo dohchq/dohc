@@ -102,10 +102,14 @@ export const views = {
         const last = previous?.kind === "page" ? previous.markdown : previous?.kind === "missing" ? previous.last : undefined;
         return last === undefined ? next : { kind: "missing", last };
       },
+      // Any file change can put another object at the page's path: one deleted and another made there. The listing that
+      // would say so may not be read yet, so any file change reads the page again. A live edit, which changes no file,
+      // reads it again when it's to the object at its path, or to any page while the store doesn't know which that is.
       affectedBy(changes, known) {
-        if (changes.pages === undefined && changes.files === undefined) return false;
+        if (changes.files !== undefined) return true;
+        if (changes.pages === undefined) return false;
         const objectId = known.files?.find(file => file.path === path)?.objectId;
-        return objectId === undefined || [...changes.pages ?? [], ...changes.files ?? []].includes(objectId);
+        return objectId === undefined || changes.pages.includes(objectId);
       },
     };
   },

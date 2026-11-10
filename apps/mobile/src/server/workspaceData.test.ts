@@ -271,6 +271,30 @@ describe("the change feed", () => {
     ]));
   });
 
+  it("reads a page again when another object takes its path, before the file listing says so", async () => {
+    const server = testServer();
+    let now = "0.5.2";
+    const listing = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => ops(files(["a.md", "object-a"]), now), () => listing.promise);
+    server.on("POST", "/sync/ws-a/ops/documentRead", () => ops({ ok: true, path: "a.md", markdown: "A's text" }, now));
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => change.promise);
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "A's text" }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
+
+    // A is deleted and B made at a.md. The feed names only B, and the listing that would map a.md to B is still held.
+    now = "0.6.2";
+    server.on("POST", "/sync/ws-a/ops/documentRead", ops({ ok: true, path: "a.md", markdown: "B's text" }, now));
+    change.resolve(feed({ cursor: "0.6.2", changed: { files: ["object-b"], pages: ["object-b"] } }));
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "B's text" }));
+    expect(data.state(views.files).value).toEqual([{ path: "a.md", objectId: "object-a", page: true }]);
+    listing.resolve(ops(files(["a.md", "object-b"]), now));
+  });
+
   it("goes back to an older read's cursor, so it misses nothing made after that read", async () => {
     const server = testServer();
     server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));

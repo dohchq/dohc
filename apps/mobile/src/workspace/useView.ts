@@ -9,6 +9,7 @@ import { useNotices } from "../notices/NoticesState";
 import { useHideToast, useShowToast } from "../notices/Toast";
 import { serverName } from "../server/origin";
 import type { FeedState, ReadProblem, View, ViewState } from "../server/workspaceData";
+import { failureStep, type Reported } from "./failureReports";
 
 const NOTHING: ViewState<never> = { value: null, loading: false, problem: null, failures: 0 };
 const NO_FEED: FeedState = { problem: null, failures: 0 };
@@ -57,8 +58,9 @@ export function useProblemText(): (problem: ReadProblem) => string {
 
 /**
  * Reports each failure, of a view's read or of the feed, on a tab as a toast and as a row in Notices, both with Try
- * again. A repeat replaces the row; a later success takes back both. Both go when the screen does, with the workspace
- * they're about: Try again would have nothing left to start.
+ * again. A repeat replaces the row; a later success takes back both. The count is the open store's, so a new store's
+ * first failure is reported, and the last store's report goes with it (failureReports.ts). Both go when the screen
+ * does, with the workspace they're about: Try again would have nothing left to start.
  */
 export function useFailureNotice(id: string, title: string, state: { readonly problem: ReadProblem | null; readonly failures: number },
   retry: () => void) {
@@ -66,24 +68,24 @@ export function useFailureNotice(id: string, title: string, state: { readonly pr
   const hideToast = useHideToast();
   const { add, dismiss } = useNotices();
   const problemText = useProblemText();
-  const reported = useRef(0);
+  const instance = useAccount().data?.instance ?? 0;
+  const reported = useRef<Reported>({ instance, failures: 0 });
   const latest = useRef({ title, retry });
   latest.current = { title, retry };
   useEffect(() => {
-    if (state.failures === reported.current || state.problem === null) return;
-    reported.current = state.failures;
+    const step = failureStep(reported.current, instance, state);
+    reported.current = step.reported;
+    if (step.takeBack) {
+      hideToast(id);
+      dismiss(id);
+    }
+    if (!step.show || state.problem === null) return;
     const body = problemText(state.problem);
     const again = () => latest.current.retry();
     showToast({ id, tone: "failure", title: latest.current.title, body, action: { label: noticesWords.tryAgain, onPress: again } });
     add({ id, senderKind: null, senderLabel: "", title: latest.current.title, body, minutesAgo: 0, atMs: Date.now(), read: false,
       retry: true, onRetry: again, dismissible: true, failed: true });
-  }, [id, state.failures, state.problem, problemText, showToast, add]);
-  const recovered = state.problem === null && reported.current > 0;
-  useEffect(() => {
-    if (!recovered) return;
-    hideToast(id);
-    dismiss(id);
-  }, [id, recovered, hideToast, dismiss]);
+  }, [id, instance, state, problemText, showToast, hideToast, add, dismiss]);
   useEffect(() => () => {
     hideToast(id);
     dismiss(id);

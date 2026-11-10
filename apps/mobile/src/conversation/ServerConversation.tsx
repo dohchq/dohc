@@ -7,14 +7,14 @@ import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
 import { views, type ViewState } from "../server/workspaceData";
-import type { ChatGroupKind, ChatMessage, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
+import type { ChatGroupKind, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
-import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
+import { EmptyLine, HoldRow, NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { MessageRow } from "./MessageRow";
-import type { Author, Message } from "./sample";
+import type { Message } from "./sample";
+import { conversationItems, serverMessage } from "./serverMessages";
 
-type Item = { type: "day"; key: string; label: string } | { type: "message"; key: string; message: Message; continued: boolean; afterExtras: boolean };
 
 // A chat or a thread in a signed-in build, read-only, as the server holds it: oldest at the top, newest at the bottom.
 // A chat's posts open their threads. The phone writes nothing yet, so it has no composer. The view reads again when
@@ -28,8 +28,8 @@ function Stream({ groupId, name }: { groupId: string; name: string }) {
   const view = useMemo(() => views.stream(groupId), [groupId]);
   const { state, retry } = useView(view);
   const stream = state.value?.kind === "stream" ? state.value : null;
-  const messages = useMemo(() => stream?.items.map(item => message(item.message,
-    item.replyCount > 0 ? { count: item.replyCount, lastMs: item.lastReplyAtMs ?? item.message.createdAtMs } : null)) ?? null, [stream]);
+  const messages = useMemo(() => stream?.items.map(item => serverMessage(item.message,
+    item.replyCount > 0 ? { count: item.replyCount, lastMs: item.lastReplyAtMs ?? item.message.createdAtMs } : null, workspaceMarkFills)) ?? null, [stream]);
   return <Conversation title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)} state={state} messages={messages} retry={retry} />;
 }
 
@@ -37,7 +37,7 @@ function Thread({ threadId }: { threadId: string }) {
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const { state, retry } = useView(view);
   const thread = state.value?.kind === "thread" ? state.value : null;
-  const messages = useMemo(() => thread?.messages.map(entry => message(entry, null)) ?? null, [thread]);
+  const messages = useMemo(() => thread?.messages.map(entry => serverMessage(entry, null, workspaceMarkFills)) ?? null, [thread]);
   return <Conversation title={thread?.title || workspaceWords.thread} state={state} messages={messages} retry={retry} />;
 }
 
@@ -55,12 +55,15 @@ function Conversation({ title, state, messages, retry }: {
   const openReplies = useCallback((entry: Message) => {
     if (entry.threadId) router.push({ pathname: "/chat/[id]", params: { id: entry.threadId } });
   }, [router]);
+  const gap = useWorkspaceGap();
   const header = (
     <Stack.Screen options={{
       headerTitle: () => <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1} accessibilityRole="header">{title}</Text>,
       headerStyle: { backgroundColor: theme.bg }, headerShadowVisible: true, headerTintColor: theme.ink,
     }} />
   );
+  // No workspace open, as when another device hid the last one: the chat says why, as Home and Chats do.
+  if (gap) return <View style={[styles.screen, { backgroundColor: theme.bg }]}>{header}<NoWorkspace /></View>;
   if (state.value?.kind === "missing") return <View style={[styles.screen, { backgroundColor: theme.bg }]}>{header}<ScreenFailure text={workspaceWords.chatMissing} /></View>;
   if (!messages) {
     return (
@@ -97,50 +100,6 @@ function Conversation({ title, state, messages, retry }: {
 }
 
 const kindOf = (kind: ChatGroupKind): ChatKind => kind === "dm" ? "person" : kind;
-
-const timeOf = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-
-// The server keeps no colour for a person, so their mark takes a fill by their name, the same in every chat.
-function author(entry: ChatMessage): Author {
-  if (entry.authorKind === "agent") return { id: entry.authorName, name: entry.authorName, kind: "agent" };
-  const hash = [...entry.authorName].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
-  const initials = entry.authorName.split(/\s+/).filter(Boolean).slice(0, 2).map(word => [...word][0]?.toUpperCase() ?? "").join("");
-  return { id: entry.authorName, name: entry.authorName, kind: "person", initials, hue: workspaceMarkFills[hash % workspaceMarkFills.length]! };
-}
-
-function message(entry: ChatMessage, replies: { count: number; lastMs: number } | null): Message {
-  return {
-    id: entry.id, threadId: entry.threadId, author: author(entry), at: timeOf(entry.createdAtMs), minute: Math.floor(entry.createdAtMs / 60_000),
-    body: [{ text: entry.body }],
-    ...(replies ? { replies: { count: replies.count, last: timeOf(replies.lastMs), people: [] } } : {}),
-  };
-}
-
-const dayKey = (ms: number) => new Date(ms).toDateString();
-
-/** Messages under a line for each day, and each follow-up from the same author within 5 minutes without its byline. */
-export function conversationItems(messages: readonly Message[], nowMs: number): Item[] {
-  const today = dayKey(nowMs);
-  const yesterday = dayKey(nowMs - 86_400_000);
-  const items: Item[] = [];
-  let day: string | null = null;
-  for (const [index, entry] of messages.entries()) {
-    const at = entry.minute * 60_000;
-    const key = dayKey(at);
-    if (key !== day) {
-      day = key;
-      const label = key === today ? workspaceWords.today : key === yesterday ? workspaceWords.yesterday
-        : new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-      items.push({ type: "day", key: `day:${key}`, label });
-    }
-    const previous = index > 0 ? messages[index - 1] : undefined;
-    const continued = previous !== undefined && dayKey(previous.minute * 60_000) === key && previous.author.id === entry.author.id &&
-      entry.minute - previous.minute <= 5;
-    // A follow-up after a thread link sits a little further away, so it doesn't read as part of it.
-    items.push({ type: "message", key: entry.id, message: entry, continued, afterExtras: previous?.replies !== undefined });
-  }
-  return items;
-}
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },

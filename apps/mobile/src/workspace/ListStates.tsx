@@ -9,6 +9,7 @@ import { ProblemLine } from "../account/ProblemLine";
 import { DohcMark } from "../DohcMark";
 import { ActionPill } from "../notices/ActionPill";
 import { serverName } from "../server/origin";
+import { workspaceGap, type WorkspaceGap } from "../server/workspaceList";
 import { useTheme } from "../theme";
 
 // The states a list on a tab shows in its own place, as the desktop's Home and chat list do.
@@ -47,18 +48,24 @@ export function EmptyLine({ text }: { text: string }) {
   return <Text style={[styles.empty, { color: theme.muted }]}>{text}</Text>;
 }
 
+/** Why no workspace is open, once the account's list says (workspaceGap); null while it loads or one is open. */
+export function useWorkspaceGap(): WorkspaceGap | null {
+  const { workspaces, currentWorkspaceId } = useAccount();
+  return workspaceGap(workspaces, currentWorkspaceId);
+}
+
 /**
- * What a tab shows without a workspace open: why the account's list could not load, with Try again, or why no
- * workspace shows on the phone. Null while the list loads, or once a workspace is open.
+ * What a screen shows without a workspace open, a tab or a page or chat alike: why the account's list could not load,
+ * with Try again, or why no workspace shows on the phone. Null while the list loads, or once a workspace is open.
  */
 export function NoWorkspace() {
   const theme = useTheme();
-  const { workspaces: list, currentWorkspaceId, reloadWorkspaces } = useAccount();
+  const { reloadWorkspaces } = useAccount();
+  const gap = useWorkspaceGap();
   const server = serverName(useSignIn().origin);
-  if (list.status === "failed") return <View style={styles.message}><ProblemLine text={accountWords.problem(list.problem, server)} onRetry={reloadWorkspaces} /></View>;
-  if (list.status !== "ready" || currentWorkspaceId !== null) return null;
-  const text = list.workspaces.length === 0 ? accountWords.noWorkspaces(server)
-    : list.workspaces.some(entry => entry.showOnPhone) ? accountWords.noneSynced : accountWords.noneShown;
+  if (!gap) return null;
+  if (gap.kind === "failed") return <View style={styles.message}><ProblemLine text={accountWords.problem(gap.problem, server)} onRetry={reloadWorkspaces} /></View>;
+  const text = gap.kind === "no-workspaces" ? accountWords.noWorkspaces(server) : gap.kind === "none-synced" ? accountWords.noneSynced : accountWords.noneShown;
   return <View style={styles.message}><Text style={[styles.text, { color: theme.muted }]}>{text}</Text></View>;
 }
 

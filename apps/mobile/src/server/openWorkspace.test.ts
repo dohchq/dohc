@@ -4,7 +4,7 @@ import { createServerClient } from "./client";
 import { createOpenWorkspace } from "./openWorkspace";
 import { deferred, testServer, type Answer } from "./testServer";
 import { cacheScope, createReadCache, views } from "./workspaceData";
-import { createWorkspaceList } from "./workspaceList";
+import { createWorkspaceList, workspaceGap } from "./workspaceList";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 const A: AccountWorkspace = { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true };
@@ -31,7 +31,9 @@ function setup(...lists: Answer[]) {
   open.subscribe(() => {});
   open.resume();
   list.reload();
-  return { server, cache, open, scope: (workspaceId: string) => cacheScope(signIn, workspaceId) };
+  /** Why no workspace is open, as every screen, Home and Chats and a page or chat alike, shows it. */
+  const gap = () => workspaceGap(list.state(), open.state().currentWorkspaceId);
+  return { server, cache, open, gap, scope: (workspaceId: string) => cacheScope(signIn, workspaceId) };
 }
 
 /** Opens A's files, so A's store has read something and its feed is running. */
@@ -57,6 +59,7 @@ describe("a workspace hidden from the phone elsewhere", () => {
 
     answer.resolve(NOT_FOUND);
     await vi.waitFor(() => expect(context.open.state().currentWorkspaceId).toBe("ws-b"));
+    expect(context.gap()).toBeNull();
     expect(a.state(views.files).value).toBeNull();
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
     expect(context.server.paths().filter(path => path === "GET /sync/account/workspaces")).toHaveLength(2);
@@ -71,6 +74,8 @@ describe("a workspace hidden from the phone elsewhere", () => {
     answer.resolve(NOT_FOUND);
     await vi.waitFor(() => expect(context.server.paths().filter(path => path === "GET /sync/account/workspaces")).toHaveLength(2));
     await vi.waitFor(() => expect(context.open.state()).toEqual({ currentWorkspaceId: null, data: null }));
+    // A page or chat open over the tabs shows why, as Home and Chats do, instead of waiting on a store that's gone.
+    expect(context.gap()).toEqual({ kind: "none-shown" });
     expect(a.state(views.files).value).toBeNull();
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
   });
@@ -114,6 +119,7 @@ describe("a workspace the server can't open yet", () => {
     await vi.waitFor(() => expect(alone.server.paths()).toContain("GET /sync/account/workspaces"));
     await settledList();
     expect(alone.open.state()).toEqual({ currentWorkspaceId: null, data: null });
+    expect(alone.gap()).toEqual({ kind: "none-synced" });
     expect(alone.server.paths().some(path => path.startsWith("POST /sync/ws-a/"))).toBe(false);
   });
 });
