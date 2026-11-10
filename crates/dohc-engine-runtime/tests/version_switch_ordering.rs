@@ -9,6 +9,7 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, StorageError, TxnOutcome,
+    capture_file_holds::{self, CaptureFileHold},
 };
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::Connection;
@@ -1031,12 +1032,90 @@ async fn switch_leaves_the_same_bytes_alone_when_only_their_kind_differs() {
     assert_eq!(jobs, 0, "equal bytes need no switch write");
 }
 
-/// `main` has `plans/trip.md` on disk and `later` has a file at `plans`.
+/// `main` has `plans/trip.md` on disk and `later` has a file at `plans`,
+/// before the switch to `later`.
+struct FolderToFile {
+    scratch: ScratchDir,
+    database: PathBuf,
+    supervisor: WorkspaceSupervisor,
+    actor: dohc_engine_runtime::ActorHandle,
+    workspace_id: String,
+}
+
+impl FolderToFile {
+    fn plans(&self) -> PathBuf {
+        self.scratch.path().join("plans")
+    }
+
+    async fn switch(&self, faults: Arc<dyn FaultInjector>) -> Result<(), RuntimeError> {
+        self.actor
+            .set_active_version(
+                ActiveVersionSwitch {
+                    workspace_id: self.workspace_id.clone(),
+                    version_id: "later".to_owned(),
+                    root_dir: self.scratch.path().to_path_buf(),
+                    self_writes: Arc::new(()),
+                    now_ms: 5,
+                },
+                faults,
+                CancellationToken::new(),
+            )
+            .await
+            .map(drop)
+    }
+
+    /// Close the workspace, which releases the database to read its jobs.
+    fn close(&self) {
+        self.supervisor.close(&self.database).expect("close");
+    }
+
+    /// Open the closed workspace and replay every pending job, as at start.
+    async fn reopen_and_replay(&mut self, now_ms: i64) {
+        self.actor = self
+            .supervisor
+            .open(&self.database, now_ms)
+            .expect("reopen")
+            .actor;
+        self.actor
+            .materialize_replay_pending(
+                self.scratch.path().to_path_buf(),
+                self.workspace_id.clone(),
+                now_ms,
+            )
+            .await
+            .expect("replay");
+    }
+}
+
+/// The switch jobs at `path` still waiting to run.
+fn pending_switch_jobs(database: &std::path::Path, path: &str) -> i64 {
+    Connection::open(database)
+        .expect("sqlite")
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-*' AND target_path = ?1 \
+             AND status = 'pending'",
+            [path],
+            |row| row.get(0),
+        )
+        .expect("switch jobs")
+}
+
 /// Switch to `later`, with `untracked` also in the folder when given.
 async fn switch_folder_to_file(
     workspace_id: &str,
     untracked: Option<&str>,
 ) -> (ScratchDir, PathBuf) {
+    let fixture = folder_to_file(workspace_id).await;
+    if let Some(name) = untracked {
+        std::fs::write(fixture.plans().join(name), "mine\n").expect("untracked");
+    }
+    fixture.switch(Arc::new(NoFaults)).await.expect("switch");
+    fixture.close();
+    (fixture.scratch, fixture.database)
+}
+
+async fn folder_to_file(workspace_id: &str) -> FolderToFile {
     let scratch = ScratchDir::new().expect("scratch");
     let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
@@ -1080,25 +1159,13 @@ async fn switch_folder_to_file(
     }
     std::fs::create_dir_all(scratch.path().join("plans")).expect("plans folder");
     std::fs::write(scratch.path().join("plans/trip.md"), "trip\n").expect("trip");
-    if let Some(name) = untracked {
-        std::fs::write(scratch.path().join("plans").join(name), "mine\n").expect("untracked");
+    FolderToFile {
+        scratch,
+        database,
+        supervisor,
+        actor,
+        workspace_id: workspace_id.to_owned(),
     }
-    actor
-        .set_active_version(
-            ActiveVersionSwitch {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "later".to_owned(),
-                root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(()),
-                now_ms: 5,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("switch");
-    supervisor.close(&database).expect("close");
-    (scratch, database)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1194,13 +1261,15 @@ async fn finder_metadata_lets_its_folder_become_a_file_on_macos() {
 
 // The folder and the file need not be the same kind. Every path inside a
 // `.env` folder is a secret, but a folder named `deploy.env` can hold plain
-// files.
+// files. A stray file keeps the folder whatever the kinds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn switching_a_folder_to_a_same_named_file_of_either_kind_places_the_file() {
-    for (folder, folder_secret, inner, inner_secret) in [
-        (".env", true, ".env/trip", true),
-        ("keys", false, "keys/.env", true),
-        ("deploy.env", true, "deploy.env/notes.md", false),
+async fn a_folder_gives_way_to_a_file_of_either_kind_only_when_the_switch_clears_it() {
+    for (folder, folder_secret, inner, inner_secret, stray) in [
+        (".env", true, ".env/trip", true, false),
+        ("keys", false, "keys/.env", true, false),
+        ("deploy.env", true, "deploy.env/notes.md", false, false),
+        ("keys", false, "keys/.env", true, true),
+        ("deploy.env", true, "deploy.env/notes.md", false, true),
     ] {
         let scratch = ScratchDir::new().expect("scratch");
         let database = engine_db_path(&scratch).expect("database");
@@ -1279,6 +1348,10 @@ async fn switching_a_folder_to_a_same_named_file_of_either_kind_places_the_file(
         }
         std::fs::create_dir_all(scratch.path().join(folder)).expect("folder");
         std::fs::write(scratch.path().join(inner), "TRIP=main\n").expect("inner file");
+        let stray_file = scratch.path().join(folder).join("stray.txt");
+        if stray {
+            std::fs::write(&stray_file, "mine\n").expect("stray file");
+        }
         actor
             .set_active_version(
                 ActiveVersionSwitch {
@@ -1295,8 +1368,16 @@ async fn switching_a_folder_to_a_same_named_file_of_either_kind_places_the_file(
             .expect("switch");
         supervisor.close(&database).expect("close");
         let file = scratch.path().join(folder);
-        assert!(file.is_file(), "the folder {folder} gives way to the file");
-        assert_eq!(std::fs::read_to_string(file).expect(folder), "MODE=later\n");
+        if stray {
+            assert!(file.is_dir(), "a stray file keeps the folder {folder}");
+            assert_eq!(
+                std::fs::read_to_string(&stray_file).expect("stray"),
+                "mine\n"
+            );
+        } else {
+            assert!(file.is_file(), "the folder {folder} gives way to the file");
+            assert_eq!(std::fs::read_to_string(file).expect(folder), "MODE=later\n");
+        }
         let connection = Connection::open(&database).expect("sqlite");
         let pending: i64 = connection
             .query_row(
@@ -1309,4 +1390,275 @@ async fn switching_a_folder_to_a_same_named_file_of_either_kind_places_the_file(
             .expect("switch jobs");
         assert_eq!(pending, 0, "the write over {folder} does not wait");
     }
+}
+
+/// Crashes the first job that starts once `inner` is gone, which is the
+/// write of the file after the switch deleted what was in its folder.
+struct CrashOnceGone {
+    inner: PathBuf,
+    fired: AtomicBool,
+}
+
+impl FaultInjector for CrashOnceGone {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == FaultPoint::MaterializeAfterJobCommit
+            && !self.inner.exists()
+            && !self.fired.swap(true, Ordering::AcqRel)
+        {
+            FaultAction::Crash
+        } else {
+            FaultAction::Continue
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_between_the_folder_deletes_and_the_write_finishes_at_the_next_start() {
+    let mut fixture = folder_to_file("ws-folder-to-file-crash").await;
+    let plans = fixture.plans();
+    let faults = Arc::new(CrashOnceGone {
+        inner: plans.join("trip.md"),
+        fired: AtomicBool::new(false),
+    });
+    let error = fixture
+        .switch(faults.clone())
+        .await
+        .expect_err("the crash fails the switch");
+    assert!(
+        matches!(
+            error,
+            RuntimeError::ActiveVersionMaterializationIncomplete { .. }
+        ),
+        "{error:?}"
+    );
+    assert!(
+        faults.fired.load(Ordering::Acquire),
+        "the write starts after the deletes"
+    );
+    fixture.close();
+    assert!(
+        !plans.join("trip.md").exists(),
+        "the switch deleted main's file"
+    );
+    assert!(!plans.is_file(), "the file is not written yet");
+    assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 1);
+
+    fixture.reopen_and_replay(6).await;
+    fixture.close();
+    assert!(plans.is_file(), "the replay places the file");
+    assert_eq!(std::fs::read_to_string(&plans).expect("plans"), "target\n");
+    assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
+}
+
+// Content that lands in the folder after planning, with no hold over it,
+// keeps the file's write waiting. Each full replay, as at the next start,
+// checks again, and places the file once the folder clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_waiting_on_late_content_is_placed_by_the_next_full_replay() {
+    let mut fixture = folder_to_file("ws-folder-late-content").await;
+    let plans = fixture.plans();
+    let late = plans.join("late.txt");
+    // The first job is the delete of `plans/trip.md`.
+    let faults = Arc::new(RewriteAtJobStart::new(late.clone(), b"late\n"));
+    fixture.switch(faults.clone()).await.expect("switch");
+    assert!(
+        faults.fired.load(Ordering::Acquire),
+        "content lands after planning"
+    );
+    fixture.close();
+    assert!(plans.is_dir(), "late content keeps the folder");
+    assert_eq!(
+        pending_switch_jobs(&fixture.database, "plans"),
+        1,
+        "the write waits"
+    );
+
+    fixture.reopen_and_replay(6).await;
+    fixture.close();
+    assert_eq!(std::fs::read_to_string(&late).expect("late"), "late\n");
+    assert_eq!(
+        pending_switch_jobs(&fixture.database, "plans"),
+        1,
+        "still waiting"
+    );
+
+    std::fs::remove_file(&late).expect("move the late file away");
+    fixture.reopen_and_replay(7).await;
+    fixture.close();
+    assert!(plans.is_file(), "the replay places the file");
+    assert_eq!(std::fs::read_to_string(&plans).expect("plans"), "target\n");
+    assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
+}
+
+// A link never clears a folder. Windows gets a junction, which needs no
+// privilege to make.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_keeps_its_folder_and_the_file_unwritten() {
+    let fixture = folder_to_file("ws-folder-keeps-link").await;
+    // An empty target, so a switch that followed the link would find nothing
+    // there to keep the folder.
+    let elsewhere = fixture.scratch.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let link = fixture.plans().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link");
+    #[cfg(windows)]
+    assert!(
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&elsewhere)
+            .status()
+            .expect("mklink")
+            .success(),
+        "junction"
+    );
+    fixture.switch(Arc::new(NoFaults)).await.expect("switch");
+    fixture.close();
+    let plans = fixture.plans();
+    assert!(plans.is_dir(), "a folder with a link stays");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("link")
+            .file_type()
+            .is_symlink(),
+        "the link stays a link"
+    );
+    assert!(elsewhere.is_dir(), "the link's target stays");
+    assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
+}
+
+// A tracked file the switch leaves alone, here because policy no longer
+// tracks it, keeps its folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_switch_leaves_alone_keeps_its_folder() {
+    let fixture = folder_to_file("ws-folder-keeps-policy").await;
+    let dohc = fixture.scratch.path().join(".dohc");
+    std::fs::create_dir_all(&dohc).expect(".dohc");
+    std::fs::write(
+        dohc.join("files.toml"),
+        "version = 1\n[[rule]]\npath = \"plans/trip.md\"\ntracked = false\n",
+    )
+    .expect("policy");
+    fixture.switch(Arc::new(NoFaults)).await.expect("switch");
+    fixture.close();
+    let plans = fixture.plans();
+    assert!(plans.is_dir(), "the folder stays");
+    assert_eq!(
+        std::fs::read_to_string(plans.join("trip.md")).expect("trip"),
+        "trip\n"
+    );
+    assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
+}
+
+// A held plain file keeps its folder from a secret write, and the secret
+// write does not wait for the hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_plain_file_keeps_its_folder_from_a_secret_write() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "later".to_owned(),
+                name: "Later".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("later");
+    let key_dir = scratch.path().join(".dohc/engine");
+    create_key_file(&key_dir).expect("secret key");
+    let key = dohc_engine_crypto::load_key_file(&key_dir)
+        .expect("load key")
+        .expect("key exists");
+    write_secret(
+        &actor,
+        "later",
+        "deploy.env",
+        "MODE=later\n",
+        "held-folder-later",
+        3,
+        key,
+        SecretDiskIntent::Materialize,
+    )
+    .await;
+    let inner = "deploy.env/notes.md";
+    actor
+        .versioned_text_write(
+            write_for(WORKSPACE, "main", inner, "notes\n", "held-folder-main", 4),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main write");
+    supervisor.close(&database).expect("close");
+    // Capture holds the file: the bytes on disk are ones it could not record.
+    let outside = "edited outside\n";
+    let mut store = EngineStore::open(&database, 5).expect("store");
+    store
+        .write_with(&NoFaults, |tx| {
+            capture_file_holds::record_in(
+                tx,
+                &CaptureFileHold {
+                    workspace_id: WORKSPACE.to_owned(),
+                    source_version_id: "main".to_owned(),
+                    object_id: format!("switch-object-{WORKSPACE}-{inner}"),
+                    path: inner.to_owned(),
+                    observed_sha256: dohc_engine_storage::hex_sha256(outside.as_bytes()),
+                    observed_size: outside.len() as u64,
+                    reason: capture_file_holds::NOT_REPRESENTABLE.to_owned(),
+                    observed_at_ms: 5,
+                    attempt_count: 1,
+                    retry_requested: false,
+                },
+            )
+        })
+        .expect("hold");
+    drop(store);
+    let folder = scratch.path().join("deploy.env");
+    std::fs::create_dir_all(&folder).expect("folder");
+    std::fs::write(scratch.path().join(inner), outside).expect("held file");
+    let actor = supervisor.open(&database, 6).expect("reopen").actor;
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "later".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 7,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("switch");
+    supervisor.close(&database).expect("close");
+    assert!(folder.is_dir(), "the hold keeps the folder");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(inner)).expect("held file"),
+        outside
+    );
+    assert_eq!(
+        pending_switch_jobs(&database, "deploy.env"),
+        0,
+        "the secret write does not wait"
+    );
 }
