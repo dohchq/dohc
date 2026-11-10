@@ -4,14 +4,15 @@ import { ServerError, type ServerClient } from "./client";
 // The account routes the phone calls, each answer checked before the app uses it. An answer missing a field the
 // phone reads fails as a whole, so no screen shows half of one.
 
-type Fields = Readonly<Record<string, unknown>>;
+export type Fields = Readonly<Record<string, unknown>>;
 
-const isFields = (value: unknown): value is Fields => typeof value === "object" && value !== null && !Array.isArray(value);
-const okAnswer = (value: unknown): Fields | null => isFields(value) && value.ok === true ? value : null;
-const text = (value: unknown, max = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
+export const isFields = (value: unknown): value is Fields => typeof value === "object" && value !== null && !Array.isArray(value);
+export const okAnswer = (value: unknown): Fields | null => isFields(value) && value.ok === true ? value : null;
+export const text = (value: unknown, max = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
 const textOrNull = (value: unknown): value is string | null => value === null || text(value);
 
-function each<T>(value: unknown, read: (item: unknown) => T | null): T[] | null {
+/** Each item as `read` takes it, or null when any item fails. */
+export function each<T>(value: unknown, read: (item: unknown) => T | null): T[] | null {
   if (!Array.isArray(value)) return null;
   const items: T[] = [];
   for (const item of value) {
@@ -23,9 +24,9 @@ function each<T>(value: unknown, read: (item: unknown) => T | null): T[] | null 
 }
 
 /** One path segment. An ID that would be empty, or would step out of its path, is never sent. */
-function path(segment: string): string {
-  if (segment === "" || segment === "." || segment === "..") throw new ServerError("invalid");
-  return encodeURIComponent(segment);
+export function segment(value: string): string {
+  if (value === "" || value === "." || value === "..") throw new ServerError("invalid");
+  return encodeURIComponent(value);
 }
 
 // --- who is signed in ---------------------------------------------------------------------------------------------
@@ -62,7 +63,7 @@ export function listWorkspaces(client: ServerClient): Promise<AccountWorkspace[]
 
 /** Resolves the setting as the server stored it. */
 export async function setShowOnPhone(client: ServerClient, workspaceId: string, showOnPhone: boolean): Promise<boolean> {
-  return client.send("PATCH", `/sync/account/workspaces/${path(workspaceId)}`, body => {
+  return client.send("PATCH", `/sync/account/workspaces/${segment(workspaceId)}`, body => {
     const answer = okAnswer(body);
     return answer && typeof answer.showOnPhone === "boolean" ? answer.showOnPhone : null;
   }, { showOnPhone });
@@ -88,7 +89,7 @@ export function listSessions(client: ServerClient): Promise<AccountSession[]> {
 }
 
 export async function endSession(client: ServerClient, sessionId: string): Promise<true> {
-  return client.send("POST", `/sync/account/sessions/${path(sessionId)}/revoke`, body => okAnswer(body) ? true : null);
+  return client.send("POST", `/sync/account/sessions/${segment(sessionId)}/revoke`, body => okAnswer(body) ? true : null);
 }
 
 // --- personal agents ----------------------------------------------------------------------------------------------
@@ -132,7 +133,7 @@ export function listAgents(client: ServerClient): Promise<PersonalRoster> {
 
 /** Signs an agent out, removes a signed-out one, or restores a removed one. Resolves its status after. */
 export async function changeAgent(client: ServerClient, agentId: string, change: "sign-out" | "remove" | "restore"): Promise<PersonalAgentStatus> {
-  return client.send("POST", `/sync/personal-agents/${path(agentId)}/${change}`, body => {
+  return client.send("POST", `/sync/personal-agents/${segment(agentId)}/${change}`, body => {
     const agent = okAnswer(body)?.agent;
     return isFields(agent) && isStatus(agent.status) ? agent.status : null;
   });

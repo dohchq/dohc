@@ -6,6 +6,13 @@ export const shortAgo = (minutes: number, nowMs = Date.now()) => relativeTime(no
 /** The same in full for VoiceOver: "2 minutes ago". */
 export const spokenAgo = (minutes: number, nowMs = Date.now()) => spokenRelativeTime(nowMs - minutes * 60_000, nowMs);
 
+/** How long ago the notice arrived, in whole minutes. */
+export const ageMinutes = (notice: PhoneNotice, nowMs = Date.now()) =>
+  notice.atMs === undefined ? notice.minutesAgo : Math.max(0, Math.floor((nowMs - notice.atMs) / 60_000));
+
+/** What Copy puts on the clipboard, as the desktop copies a notice's details. */
+export const noticeDetails = (notice: PhoneNotice) => [notice.title, notice.body].filter(Boolean).join("\n");
+
 export interface RowHandlers { open?(): void; retry?(): void; copy(): void; dismiss(): void }
 
 /** The press handler behind each action a row offers: its pill and rotor action share it. */
@@ -25,7 +32,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): { label: string; ac
     { name: "copy", label: notice.failed ? noticesWords.copyErrorDetails : noticesWords.copyNoticeDetails },
     ...(notice.dismissible ? [{ name: "dismiss", label: noticesWords.dismissNotice }] : []),
   ];
-  const time = spokenAgo(notice.minutesAgo);
+  const time = spokenAgo(ageMinutes(notice));
   const label = [notice.read ? null : noticesWords.unread, notice.senderKind ? noticesWords.fromSender[notice.senderKind] : null,
     notice.title, notice.body, notice.folder ? `${time} · ${notice.folder}` : time].filter(Boolean).join(", ");
   return { label, actions };

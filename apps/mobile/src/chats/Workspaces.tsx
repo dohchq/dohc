@@ -4,7 +4,10 @@ import { useAccount } from "../account/AccountProvider";
 import type { AccountWorkspace } from "../server/api";
 import { sampleBuild } from "../sampleBuild";
 import { workspaceMarkFills } from "../theme";
-import { sampleWorkspaces, type PhoneWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./sample";
+
+// The sample's workspaces, in a sample build only (src/sampleBuild.ts).
+const sampleWorkspaces: readonly PhoneWorkspace[] = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? (require("./sample") as typeof import("./sample")).sampleWorkspaces : [];
 
 interface WorkspacesState {
   readonly current: PhoneWorkspace | null;
@@ -51,17 +54,17 @@ function ServerWorkspaces({ children }: { children: ReactNode }) {
 }
 
 /**
- * The account's workspaces that show on this phone, as the server lists them, and the one open. Chats, Home and pages
- * read nothing from them yet. The switcher sheet, outside the tabs, reads them here too.
+ * The account's workspaces that show on this phone, as the server lists them, and the one open. The switcher sheet,
+ * outside the tabs, reads them here too.
  */
 export function useShownWorkspaces(): WorkspacesState {
-  const { workspaces: list, chosenWorkspaceId, chooseWorkspace } = useAccount();
+  const { workspaces: list, currentWorkspaceId, chooseWorkspace } = useAccount();
   const workspaces = useMemo(() => list.status === "ready"
     ? list.workspaces.filter(entry => entry.showOnPhone).map(phoneWorkspace)
     : [], [list]);
   return useMemo(() => ({
-    current: workspaces.find(entry => entry.id === chosenWorkspaceId) ?? workspaces[0] ?? null, workspaces, choose: chooseWorkspace, forget: null,
-  }), [workspaces, chosenWorkspaceId, chooseWorkspace]);
+    current: workspaces.find(entry => entry.id === currentWorkspaceId) ?? null, workspaces, choose: chooseWorkspace, forget: null,
+  }), [workspaces, currentWorkspaceId, chooseWorkspace]);
 }
 
 /** The name a workspace shows under: its own, or the fallback before its computer sent one. */

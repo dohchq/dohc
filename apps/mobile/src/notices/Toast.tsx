@@ -14,6 +14,8 @@ import { copyText } from "../copy";
 import { demoMode } from "../demo";
 
 export interface ToastMessage {
+  /** Names what the toast is about, so a later success can take it back. */
+  readonly id?: string;
   readonly tone: "success" | "failure";
   readonly title: string;
   /** The title in full, when the one shown is cut to fit. Copy hands this out. */
@@ -30,6 +32,9 @@ export interface ToastMessage {
 // Any screen under the tabs shows a toast through this; the tabs layout owns the one on screen.
 export const ShowToast = createContext<(message: ToastMessage) => void>(() => {});
 export const useShowToast = () => useContext(ShowToast);
+/** Closes the toast on screen if it's the one with this id. */
+export const HideToast = createContext<(id: string) => void>(() => {});
+export const useHideToast = () => useContext(HideToast);
 
 // How long a success stays before it fades; failures stay until closed. Same as the desktop.
 const FADING_TOAST_MS = 6000;

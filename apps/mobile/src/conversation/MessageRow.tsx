@@ -4,15 +4,20 @@ import { useRouter } from "expo-router";
 import { memo, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withRepeat, withTiming } from "react-native-reanimated";
+import { workspaceWords } from "@dohc/interface-words/workspace";
 import { AgentMark } from "../AgentMark";
+import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
 import type { Author, Message, Segment } from "./sample";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
-export const MessageRow = memo(function MessageRow({ message, continued, afterExtras }: { message: Message; continued: boolean; afterExtras: boolean }) {
+export const MessageRow = memo(function MessageRow({ message, continued, afterExtras, onOpenReplies }: {
+  message: Message; continued: boolean; afterExtras: boolean; onOpenReplies?(message: Message): void;
+}) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
-  const agent = !continued && message.author.kind === "agent";
+  // An agent's mark and name open its card, which only the sample has yet.
+  const agent = sampleBuild && !continued && message.author.kind === "agent";
   const [name, setName] = useState<Box | null>(null);
   return (
     <View style={[styles.row, { paddingTop }]}>
@@ -46,10 +51,11 @@ export const MessageRow = memo(function MessageRow({ message, continued, afterEx
         ) : null}
         {message.replies ? (
           <Pressable style={styles.replies} hitSlop={{ top: 11, bottom: 11 }} accessibilityRole="button"
+            onPress={onOpenReplies ? () => onOpenReplies(message) : undefined}
             accessibilityLabel={`${message.replies.count} replies, last at ${message.replies.last}`}>
             <View style={styles.pile}>{message.replies.people.map(person => <Avatar key={person.id} author={person} theme={theme} size={20} />)}</View>
-            <Text style={[styles.repliesText, { color: theme.accent }]}>{message.replies.count} replies</Text>
-            <Text style={[styles.time, { color: theme.subtle }]}>Last reply {message.replies.last}</Text>
+            <Text style={[styles.repliesText, { color: theme.accent }]}>{workspaceWords.replies(message.replies.count)}</Text>
+            <Text style={[styles.time, { color: theme.subtle }]}>{workspaceWords.lastReply(message.replies.last)}</Text>
             <SymbolView name="chevron.right" size={11} weight="semibold" tintColor={theme.subtle} fallback={null} />
           </Pressable>
         ) : null}

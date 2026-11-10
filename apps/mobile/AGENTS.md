@@ -28,16 +28,20 @@ Android has been run since the host was added.
 
 The app shows its sample data only in a sample build: a development build, or one made with
 `EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`). Any other build signs in to a
-server first (`src/account/Connect.tsx`), then shows the account's workspaces, Settings, and a "Not built yet" state
-on every tab that reads nothing from the server yet, so an installable build never presents sample data as someone's
-work. A sample build may keep a control the server will drive later. A link can open any route, so a route for one
-kind of build exports its screen through `sampleOnly` or `signedInOnly` (`src/sampleOnly.tsx`), and
-`src/routes.test.ts` fails on a route that does neither. `src/notices/rowAccessibility.test.ts` holds that each action a Notices row offers
+server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a
+page (`src/server/workspaceData.ts`). Search shows "Not built yet". An installable build never presents sample data
+as someone's work, and its bundle holds none: a sample module (`sample.ts`, or a screen in `Sample*.tsx`) is imported
+elsewhere only as a type, or required behind the exact test `src/sampleBuild.ts` gives. A sample build may keep a
+control the server will drive later. A link can open any route, so a route for one kind of build exports its screen
+through `sampleOnly` or `signedInOnly` (`src/sampleOnly.tsx`), and `src/routes.test.ts` fails on a route that does
+neither, and on a sample module imported any other way. `src/notices/rowAccessibility.test.ts` holds that each action a Notices row offers
 has a handler.
 
 The server client (`src/server`) gives each sign-in a generation, which changes at sign-out, at a 401 and when
 another sign-in starts. A change aborts that sign-in's requests. Check `SignIn.isCurrent()` before applying anything
-a request answered, and use `requestGenerations()` for results that replace each other. Ending a token deletes it from
+a request answered, and use `requestGenerations()` for results that replace each other. The open workspace's reads
+live in one store per sign-in and workspace, which stops when either changes, so a late answer can't reach another
+workspace's screen. Its read cache is in memory and empties when the sign-in changes or ends. Ending a token deletes it from
 the keychain first, then revokes its session, so a phone closed between the two keeps no token.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to

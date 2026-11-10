@@ -7,10 +7,10 @@ import { StyleSheet, Text, View, type AccessibilityActionEvent } from "react-nat
 import ReanimatedSwipeable, { type SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useAccessibilityTextSize, useLineClamp } from "../textScale";
 import { useTheme } from "../theme";
-import { noticeDetails, type PhoneNotice } from "./sample";
+import type { PhoneNotice } from "./sample";
 import { copyText } from "../copy";
 import { ActionPill } from "./ActionPill";
-import { noticeRowAccessibility, noticeRowHandlers, shortAgo } from "./rowAccessibility";
+import { ageMinutes, noticeDetails, noticeRowAccessibility, noticeRowHandlers, shortAgo } from "./rowAccessibility";
 import { useRouter } from "expo-router";
 import { SenderMark } from "./SenderMark";
 import { TitleControls } from "./TitleControls";
@@ -39,10 +39,11 @@ export const NoticeRow = memo(function NoticeRow({ notice, onDismiss }: { notice
   const dismiss = () => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onDismiss(notice.id); };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
-  // Open goes where the phone can go (a chat). In this dev-only sample, Try again and an Open with nowhere to go
-  // need the server; an installable build hides them until they act.
+  // Open goes where the phone can go (a chat), and Try again does what the notice says failed. In the dev-only sample,
+  // Try again and an Open with nowhere to go need the server, so they do nothing.
   const handlers = noticeRowHandlers(notice, {
     open: notice.openChat ? () => router.push({ pathname: "/chat/[id]", params: notice.openChat ?? {} }) : undefined,
+    retry: notice.onRetry,
     copy: () => copyText(noticeDetails(notice)),
     dismiss,
   });
@@ -75,7 +76,7 @@ export const NoticeRow = memo(function NoticeRow({ notice, onDismiss }: { notice
             {roomy ? controls : null}
           </View>
         ) : null}
-        <Text style={[styles.meta, { color: theme.subtle }]}>{notice.folder ? `${shortAgo(notice.minutesAgo)} · ${notice.folder}` : shortAgo(notice.minutesAgo)}</Text>
+        <Text style={[styles.meta, { color: theme.subtle }]}>{notice.folder ? `${shortAgo(ageMinutes(notice))} · ${notice.folder}` : shortAgo(ageMinutes(notice))}</Text>
       </View>
     </View>
   );

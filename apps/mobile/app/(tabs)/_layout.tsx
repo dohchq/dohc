@@ -2,12 +2,12 @@ import { noticesWords } from "@dohc/interface-words/notices";
 import { usePathname } from "expo-router";
 import { NativeTabs } from "expo-router/native-tabs";
 import { File, Paths } from "expo-file-system";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { useWorkspaces, WorkspacesProvider } from "../../src/chats/Workspaces";
 import { demoMode } from "../../src/demo";
 import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
-import { ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
+import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
 import { useTheme } from "../../src/theme";
 
 const sampleToast: ToastMessage = {
@@ -33,8 +33,9 @@ function Tabs() {
   const unreadCount = (current?.sections ?? []).flatMap(section => section.rows).reduce((sum, row) => sum + (row.count ?? 0), 0);
   const pathname = usePathname();
   const [toast, setToast] = useState<ToastMessage | null>(demoMode === "toast" || demoMode === "toast-copied" ? sampleToast : null);
+  const hideToast = useCallback((id: string) => setToast(shown => shown?.id === id ? null : shown), []);
   return (
-    <ShowToast value={setToast}>
+    <ShowToast value={setToast}><HideToast value={hideToast}>
       <View style={{ flex: 1 }}>
         <NativeTabs tintColor={theme.accent}>
           <NativeTabs.Trigger name="(chats)">
@@ -58,6 +59,6 @@ function Tabs() {
         </NativeTabs>
         {toast && pathname !== "/notices" ? <Toast message={toast} onClose={() => setToast(null)} /> : null}
       </View>
-    </ShowToast>
+    </HideToast></ShowToast>
   );
 }
