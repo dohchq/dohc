@@ -120,6 +120,7 @@ describe("createOwnedWorkspaceReadPort", () => {
           join(root, "shared-with-me", "healthy", "missing.md"),
           "healthy needle\n",
         );
+        return new Set<string>();
       },
       onSearchSourceFailure: (source) => failures.push(shareId(source.target)),
     });
@@ -170,6 +171,7 @@ describe("createOwnedWorkspaceReadPort", () => {
       ],
       repairProjection: async () => {
         await writeFile(join(mountRoot, "restored.md"), "restored needle\n");
+        return new Set<string>();
       },
     });
 

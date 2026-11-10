@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -11,6 +11,7 @@ import { createShareViewFiles, type ShareViewFilesStore } from "./shareViewFiles
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const selector = { paths: [], versionId: "main", access: "view" } as const;
 const mount: ShareMountRecord = {
@@ -20,7 +21,10 @@ const mount: ShareMountRecord = {
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const unused = (): never => { throw new Error("Unexpected external operation"); };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  readLocalStateFrom(null);
+});
 
 async function fixture(mode: "local" | "standalone" | "mount" = "local") {
   const rootPath = await createTestScratch("desktop-workspace-reads-");
@@ -268,6 +272,50 @@ describe("desktop workspace reads", () => {
     expect(view.allowPath(test.path("missing.md"))).toBe(true);
     expect(view.listing?.files.map((file) => file.path)).toContain(test.path("missing.md"));
   });
+
+  // The view's collision record, readable as when the engine has opened it.
+  async function holdBack(test: Awaited<ReturnType<typeof fixture>>, paths: string[]) {
+    readLocalStateFrom({ currentBinding: () => ({ localStateReady: true }), localStateOpenAt: async () => ({ current: () => true }) });
+    const records = join(test.rootPath, test.path(".dohc/local/share-refresh"));
+    await mkdir(records, { recursive: true, mode: 0o700 });
+    await writeFile(join(records, "share-collision-record.json"), JSON.stringify({ shareId: mount.shareId, paths }), { mode: 0o600 });
+  }
+
+  // A held file waits on a person, so search leaves out that one file and
+  // finds the rest of the view (#2424).
+  it.each(["standalone", "mount"] as const)("searches a %s view around a file held behind a local one", async (mode) => {
+    const test = await fixture(mode);
+    test.canonical.set("held.md", { kind: "text", bytes: Buffer.from("shared text") });
+    test.canonical.set("other.md", { kind: "text", bytes: Buffer.from("other text") });
+    await test.disk(test.path("held.md"), "my own file");
+    await holdBack(test, ["held.md"]);
+    const view = await test.reads.ownedWorkspaceReadsFor(test.attached).prepareSearch();
+    const listed = view.listing?.files.map((file) => file.path);
+    expect(listed).toContain(test.path("other.md"));
+    expect(listed).not.toContain(test.path("held.md"));
+    expect(view.allowPath(test.path("other.md"))).toBe(true);
+    expect(view.allowPath(test.path("held.md"))).toBe(false);
+    expect(await readFile(join(test.rootPath, test.path("held.md")), "utf8")).toBe("my own file");
+  });
+
+  // On a disk that ignores case, Notes.md is held behind notes.md, which owns
+  // the one file and stays searchable.
+  it("searches a spelling's file while another spelling is held behind it", async (context) => {
+    const test = await fixture("standalone");
+    await test.disk("probe.md", "");
+    const ignoresCase = await readFile(join(test.rootPath, "PROBE.md")).then(() => true, () => false);
+    await rm(join(test.rootPath, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    test.canonical.set("notes.md", { kind: "text", bytes: Buffer.from("n\n") });
+    test.canonical.set("Notes.md", { kind: "text", bytes: Buffer.from("N\n") });
+    await test.disk("notes.md", "n\n");
+    await holdBack(test, ["Notes.md"]);
+    const view = await test.reads.ownedWorkspaceReadsFor(test.attached).prepareSearch();
+    const listed = view.listing?.files.map((file) => file.path);
+    expect(listed).toContain("notes.md");
+    expect(listed).not.toContain("Notes.md");
+    expect(view.allowPath("notes.md")).toBe(true);
+  });
 });
 
 it.each(["local", "standalone", "mount"] as const)("looks up exact %s owner files without the complete listing", async mode => {
@@ -287,7 +335,7 @@ it.each(["local", "standalone", "mount"] as const)("looks up exact %s owner file
 
 it.each(["standalone", "mount"] as const)("gets a %s app through bounded owner probes and only the selected source subtree", async mode => {
   const test = await fixture(mode);
-  const repair = vi.fn(async () => undefined);
+  const repair = vi.fn(async () => new Set<string>());
   test.repair.run = repair;
   await test.disk(test.path("app/index.html"), "<h1>app</h1>");
   await test.disk(test.path("unowned/package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
@@ -324,7 +372,7 @@ it("bounds shared lookup batches by UTF-8 bytes and pins the main version", asyn
 it("rejects a failed canonical mount lookup after repair rather than selecting the root app", async () => {
   const test = await fixture("mount");
   await test.disk("index.html", "<h1>root</h1>");
-  const repair = vi.fn(async () => undefined);
+  const repair = vi.fn(async () => new Set<string>());
   test.repair.run = repair;
   const error = Error("Canonical mount lookup failed");
   test.store.resolveFiles.mockRejectedValueOnce(error);
