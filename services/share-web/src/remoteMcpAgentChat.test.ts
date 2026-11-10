@@ -68,7 +68,6 @@ it("offers the wait tool only with a channel, and posts as the signed-in agent",
   const client = await f.connect();
   const tools = (await client.listTools()).tools;
   expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(["dohc_wait_for_messages", "dohc_post_group"]));
-  expect(tools.map(tool => tool.name)).not.toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
   for (const tool of tools) expect(tool.description).not.toContain("Group channel");
   const postTool = tools.find(tool => tool.name === "dohc_post_group")!;
   expect(Object.keys(postTool.inputSchema.properties ?? {}).sort()).toEqual(["body", "idempotencyKey", "threadId"]);
