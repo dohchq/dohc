@@ -734,6 +734,7 @@ where
                         "UPDATE ydoc_updates SET is_seed=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
                         rusqlite::params![key.workspace_id,key.version_id,key.object_id,outcome.seq],
                     ).map_err(map_sql)?;
+                    crate::author_coverage::forget_seed_in(tx, key, &update_sha, outcome.seq)?;
                 }
                 if seed_source_sha256.is_some() && outcome.seq == 1 {
                     crate::author_coverage::advance_in(tx, key, false)?;
@@ -2968,6 +2969,7 @@ pub fn close_session(
     }
     // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
+        crate::author_coverage::clear_native_in(tx, key)?;
         let removed_updates = tx
             .execute(
                 "DELETE FROM ydoc_updates \
@@ -3333,18 +3335,6 @@ fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, 
     .map(Option::flatten)
 }
 
-pub(crate) fn head_of(
-    conn: &Connection,
-    key: &DocKey,
-) -> Result<(i64, i64, LineageClaimStatus), CollabError> {
-    let marker = read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
-    Ok((
-        marker.head_update_seq,
-        marker.head_snapshot_seq,
-        marker.lineage_claim_status,
-    ))
-}
-
 /// The content-addressed dedup probe: the earliest un-folded log row already
 /// holding exactly these bytes. Both admission paths run it before the
 /// replay-parity gate: an in-log sha means the gate already admitted these
@@ -3406,8 +3396,19 @@ pub(crate) fn append_row(
     local_edit: bool,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
-    let (head, _, _) = head_of(conn, key)?;
-    let seq = head + 1;
+    let marker = read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
+    let seq = marker.head_update_seq + 1;
+    if let (Some(actor), Some(attribution)) = (actor_origin_id, attribution) {
+        crate::author_coverage::record_native_in(
+            conn,
+            key,
+            marker.lineage_claim_id.as_deref(),
+            sha,
+            seq,
+            actor,
+            attribution,
+        )?;
+    }
     conn.execute(
         "INSERT INTO ydoc_updates \
          (workspace_id, version_id, object_id, seq, update_blob_sha256, \

@@ -2601,7 +2601,9 @@ fn record_file_holds_head(
     let live_audit = live_audit.filter(|audit| !audit.is_empty());
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
-            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
+            "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]' \
+             AND NOT EXISTS(SELECT 1 FROM ydoc_native_authors n WHERE n.workspace_id = ?1 \
+             AND n.version_id = ?2 AND n.object_id = ?3 AND n.coverage = 'interval'), last_settled_sha FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),

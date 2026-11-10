@@ -378,8 +378,17 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
         panic!("an acknowledged seed needs no journal answer");
     };
     assert_eq!(adoption.unwrap().adoption_id, f.cut.adoption_id);
-    assert!(applications.is_empty() && !has_more_applications && !settle);
+    assert!(applications.is_empty() && !has_more_applications);
+    // The edit before adoption named no author, so the interval names the
+    // unknown author and the document parks only after a settlement.
+    assert!(settle, "the interval names the edit before adoption");
     assert_eq!(native_entries(&f)[0].2, Some(serde_json::to_string(&receipt).unwrap()));
+    let applied_past_settlement = |f: &Fixture| {
+        f.store
+            .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, Some(10)))
+            .unwrap()
+    };
+    assert!(!applied_past_settlement(&f), "an acknowledged seed applies nothing");
     apply_event(&mut f, seed_event).unwrap();
     let Reconciliation::Reconciled { applications, settle, .. } = reconcile(&mut f, 10, None, None).unwrap()
     else {
@@ -387,7 +396,7 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
     };
     assert_eq!(applications.len(), 1);
     assert_eq!(applications[0].delivery_id, receipt.delivery_id);
-    assert!(settle, "the application passed the last settlement");
+    assert!(settle && applied_past_settlement(&f), "the application passed the last settlement");
     // A page after the seed's own ACK is empty; F bounds every page.
     let Reconciliation::Reconciled { applications, .. } =
         reconcile(&mut f, 10, Some(&receipt), None).unwrap()
@@ -500,7 +509,8 @@ fn a_seed_the_journal_never_accepted_is_abandoned_once_and_recognized_after() {
     else {
         panic!("abandoned");
     };
-    assert!(adoption.is_some() && applications.is_empty() && !settle);
+    assert!(adoption.is_some() && applications.is_empty());
+    assert!(settle, "the interval names the edit before adoption");
     assert_eq!(
         native_entries(&f),
         vec![(seed.clone(), false, None, None, None, Some("activation-released".into()))]
@@ -1285,8 +1295,12 @@ fn retirement_host() -> ApplicationHostCoordinate {
 }
 
 /// The document as a hosted replica holds it: in its scope or departed
-/// from it, and parked or not.
+/// from it, and parked or not. It parks only with an empty interval, so a
+/// settlement took in what its interval named first.
 fn host_document(f: &mut Fixture, departed: bool, parked: bool) {
+    if parked {
+        settle_accepted_prefix(f);
+    }
     let sql = format!(
         "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms)
            VALUES ('workspace','origin','epoch','stream',0);
@@ -1390,7 +1404,8 @@ fn record_projection(
 }
 
 /// Write `text` as the settled file and record the settlement as `moment`,
-/// with `vector` the state vector digest of the document it projects.
+/// with `vector` the state vector digest of the document it projects. As the
+/// host's settlement does, it takes in the interval.
 fn record_text(
     store: &mut EngineStore,
     audit: &LiveSettlementAudit,
@@ -1398,6 +1413,7 @@ fn record_text(
     text: &str,
     vector: &str,
 ) -> Result<LiveSettlementResult, ApplicationError> {
+    let key = DocKey::new("workspace", "main", "object")?;
     let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
         let written = dohc_engine_domain::write_projected_text_in_tx(
             tx,
@@ -1422,6 +1438,12 @@ fn record_text(
             [&written.snapshot.blob_sha256],
         )
         .map_err(write_sql)?;
+        crate::author_coverage::advance_moment_in(
+            tx,
+            &key,
+            moment,
+            audit.accepted_prefix().is_some(),
+        )?;
         let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, vector, 30)?;
         Ok(audit.result(Some(id), moment.into(), written.snapshot.blob_sha256, false))
     })?;

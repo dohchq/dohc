@@ -181,6 +181,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "markdown_write_obligations",
     "markdown_write_obligation_notice_dismissals",
     "ydoc_updates",
+    "ydoc_native_authors",
+    "ydoc_native_interval_authors",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
     "ydoc_drain_reports",

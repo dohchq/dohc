@@ -1584,3 +1584,72 @@ fn tiny_identities_queue_settlement_before_the_count_bound() {
     assert!(covered.len() < author_coverage::MAX_INTERVAL_AUTHORS);
     assert!(covered.journal_bytes() < author_coverage::SETTLE_AUTHOR_BYTE_THRESHOLD);
 }
+
+/// Counts the SQLite steps one read of the store takes.
+fn read_steps(
+    store: &mut dohc_engine_storage::EngineStore,
+    read: impl FnOnce(&rusqlite::Connection) -> Result<(), CollabError>,
+) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let steps = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&steps);
+    store
+        .hooks_with(|conn| {
+            conn.progress_handler(
+                1,
+                Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+        })
+        .expect("count steps");
+    store.read_with(read).expect("read");
+    store
+        .hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+        .expect("stop counting");
+    steps.load(Ordering::Relaxed)
+}
+
+#[test]
+fn admission_reads_each_identity_once_however_many_updates_it_folded() {
+    let mut ts = fresh_store("admission-cost");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    let admission = |conn: &rusqlite::Connection| {
+        author_coverage::check_admission_in(conn, &key, Some("editor"), Some(&author("person")))
+            .map(|_| ())
+    };
+    let mut position = 0;
+    let mut steps = Vec::new();
+    for _ in 0..3 {
+        for _ in 0..80 {
+            record(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &doc.plaintext_insert(position, "a"),
+                "editor",
+                "person",
+            )
+            .expect("edit");
+            position += 1;
+        }
+        maybe_compact(&mut ts.store, &key, 0, &NoFaults, 2).expect("fold updates");
+        // The first read prepares its statements.
+        read_steps(&mut ts.store, admission);
+        steps.push(read_steps(&mut ts.store, admission));
+    }
+    // Every folded update keeps its author until a settlement names it.
+    assert_eq!(
+        interval_authors(&ts, &key, i64::MAX),
+        serde_json::json!([{"kind":"agent", "agentId":"editor", "onBehalfOf":"person"}])
+    );
+    // Admission after 240 folded updates costs what it cost after 80.
+    assert!(
+        steps[2] <= steps[0] + steps[0] / 10,
+        "admission steps grew with folded updates: {steps:?}"
+    );
+}

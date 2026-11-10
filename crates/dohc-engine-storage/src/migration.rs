@@ -3653,6 +3653,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_personal_agent_connection.sql"),
         sets_user_version: None,
     },
+    // Each live update keeps its own author until a settlement or its
+    // accepted delivery names that author.
+    Migration {
+        ordinal: 91,
+        id: "v2-ydoc-native-authors",
+        sql: include_str!("ydoc_native_authors.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5669,6 +5677,10 @@ mod tests {
                 "v2-chat-personal-agent-connection",
                 "d8165d91ddd8da01b9448db5be3279cfb3f8d3986423b19edbbaa23211b1d71d",
             ),
+            (
+                "v2-ydoc-native-authors",
+                "4dbc6be1c4f387be4941020723fc9c47de528cd262c7071dd544f39909d11e86",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6021,6 +6033,83 @@ mod tests {
             report
         );
         assert_eq!(messages(&conn), old_messages);
+    }
+
+    /// The upgrade keeps the author of each unsettled update, and counts each
+    /// identity those updates name once, with the bytes admission counts for
+    /// its entry. A settled, unattributed or seed update adds none.
+    #[test]
+    fn native_authors_upgrade_counts_each_unsettled_identity_once() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-ydoc-native-authors");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 91);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        // Each update has its own blob, which names its native row.
+        let blob = |seq: i64| seq.to_string().repeat(64);
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws', 'doc', 0);
+             INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, regime,
+                 lineage_claim_status, head_update_seq, head_snapshot_seq, settled_update_seq,
+                 updated_at_ms)
+               VALUES ('ws', 'main', 'doc', 'plaintext', 'local-only', 'unclaimed', 6, 0, 1, 0);",
+        )
+        .unwrap();
+        for (seq, actor, kind, on_behalf_of, depth, run, seed) in [
+            (1, Some("settled"), Some("human"), None, None, None, 0),
+            (2, Some("ada"), Some("human"), None, None, None, 0),
+            (
+                3,
+                Some("nova"),
+                Some("agent"),
+                Some("ada"),
+                Some(1),
+                Some("run-1"),
+                0,
+            ),
+            (4, Some("ada"), Some("human"), None, None, None, 0),
+            (5, None, None, None, None, None, 0),
+            (6, Some("seed"), Some("human"), None, None, None, 1),
+        ] {
+            conn.execute(
+                "INSERT INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, 1, x'01')",
+                [blob(seq)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq,
+                     update_blob_sha256, actor_origin_id, actor_kind, on_behalf_of, chain_depth,
+                     agent_run_id, is_seed, recorded_at_ms)
+                 VALUES ('ws', 'main', 'doc', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+                rusqlite::params![seq, blob(seq), actor, kind, on_behalf_of, depth, run, seed],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ydoc_native_authors", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 3);
+        // {"humanId":"ada","kind":"human"} is 32 bytes.
+        // {"agentId":"nova","agentRunId":"run-1","depth":1,"kind":"agent",
+        // "onBehalfOf":"ada"} is 83, and its depth may grow by one digit.
+        let totals: (i64, i64) = conn
+            .query_row(
+                "SELECT private_authors, private_author_bytes FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(totals, (2, 32 + 84));
     }
 
     /// The work reference tables arrive empty on an existing store, and refuse
