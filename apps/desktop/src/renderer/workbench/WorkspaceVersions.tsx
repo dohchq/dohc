@@ -21,10 +21,6 @@ import type {
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
 import {
-  MAX_ENGINE_CAPTURE_BINARY_BYTES,
-  MAX_ENGINE_CAPTURE_TEXT_BYTES,
-} from "../../workspaces/workspaceEngineCaptureLimits";
-import {
   exceedsUtf8Bytes,
   utf8ByteLength,
 } from "../../workspaces/workspaceTextLimits";
@@ -42,6 +38,7 @@ import {
   applyCombinedChange,
   conflictPreview,
 } from "./conflictPane";
+import { NewVersionDialog } from "./NewVersionDialog";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 import { versionDotClass } from "./versionHue";
 
@@ -232,15 +229,6 @@ export interface WorkspaceVersionsOptions {
   refreshKey?: number;
 }
 
-// How the name field that started a create hears how it went.
-export interface VersionNameField {
-  // dohc can't use the name. The field keeps it and shows why.
-  refuse(reason: ReactNode): void;
-  created(): void;
-  // A failure notice's Try again opens the field again with the name, then creates.
-  reopen(name: string): void;
-}
-
 // The workspace's versions and what changes them, shared by the titlebar menu
 // and the Versions page, so a switch, create or merge runs once whichever
 // surface started it, and both show it.
@@ -253,9 +241,11 @@ export interface WorkspaceVersions {
   loadFailed: boolean;
   reload(): void;
   requestSwitch(versionId: string): void;
-  create(name: string, field: VersionNameField): void;
+  // Opens the New version dialog.
+  openCreate(): void;
   openMerge(version: WorkspaceVersionRecord): void;
-  // The save-first prompt and the merge dialog. The shell renders them once.
+  // The save-first prompt, the New version dialog and the merge dialog. The
+  // shell renders them once.
   dialogs: ReactNode;
 }
 
@@ -265,6 +255,8 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
+  // The New version dialog's name and why dohc refused it, while it is open.
+  const [draft, setDraft] = useState<{ name: string; error: ReactNode } | null>(null);
   // The version the merge dialog is open for, and whether it merges as it
   // opens, for a notice's Try again.
   const [merge, setMerge] = useState<{ source: WorkspaceVersionRecord; runOnOpen: boolean } | null>(null);
@@ -330,6 +322,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
       setSnapshot(null);
       setBusy(null);
       setPendingSwitch(null);
+      setDraft(null);
       setMerge(null);
       setLoadFailed(false);
       return;
@@ -483,13 +476,14 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     [performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
   );
 
-  // A refused name stays in the field with its reason. Any other failure is
-  // a notice whose Try again reopens the field with the name and creates.
+  // A refused name stays in the dialog with its reason. Any other failure is
+  // a notice whose Try again opens the dialog with the name and creates.
   const performCreate = useCallback(
-    async (name: string, field: VersionNameField) => {
+    async (name: string) => {
       const trimmed = name.trim();
+      const refuse = (error: ReactNode) => setDraft({ name, error });
       if (trimmed.length === 0) {
-        field.refuse("Enter a name for the version.");
+        refuse("Enter a name for the version.");
         return;
       }
       if (operationRunning()) return;
@@ -510,19 +504,19 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         props.clearError(identity);
-        field.created();
+        setDraft(null);
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
         const refusal = versionNameRefusal(error);
         if (refusal !== null) {
-          field.refuse(refusal === "taken"
+          refuse(refusal === "taken"
             ? <>Another version is called <span className="font-medium">{trimmed}</span>. Choose another name.</>
             : "dohc can't use that name. Choose another name.");
           return;
         }
         props.onError(ipcErrorMessage(error, `dohc could not create the version ${trimmed}.`), error, () => {
-          field.reopen(trimmed);
-          void performCreate(trimmed, field);
+          setDraft({ name: trimmed, error: null });
+          void performCreate(trimmed);
         }, identity);
       } finally {
         releaseOperation?.();
@@ -532,7 +526,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     },
     [beginOperation, operationRunning, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
-  const create = useCallback((name: string, field: VersionNameField) => void performCreate(name, field), [performCreate]);
+  const openCreate = useCallback(() => setDraft({ name: "", error: null }), []);
 
   // The dialog shows a merge's answer while it is open. Closed first, by the
   // person or because capture stopped, the merge keeps going and its answer
@@ -554,6 +548,22 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   const activeName = active?.name ?? "Main";
   const dialogs = !enabled || snapshot === null ? null : (
     <>
+      {draft !== null ? (
+        <NewVersionDialog
+          workspaceId={workspaceId}
+          start={active}
+          name={draft.name}
+          error={draft.error}
+          busy={busy === "create"}
+          saveFirst={props.activeTabDirty}
+          onNameChange={(name) => setDraft({ name, error: null })}
+          onCreate={() => {
+            setDraft({ name: draft.name, error: null });
+            void performCreate(draft.name);
+          }}
+          onCancel={() => setDraft(null)}
+        />
+      ) : null}
       {pendingSwitch !== null ? (
         // The panel holds focus, so a screen reader reads the title and body
         // before Tab reaches Cancel.
@@ -597,11 +607,11 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     </>
   );
 
-  return { snapshot, active, onMain, busy, loadFailed, reload, requestSwitch, create, openMerge, dialogs };
+  return { snapshot, active, onMain, busy, loadFailed, reload, requestSwitch, openCreate, openMerge, dialogs };
 }
 
 // The version breadcrumb in the titlebar: shows the active version, switches
-// on click, creates inline, and opens compare, merge and the Versions page.
+// on click, and opens New version, compare, merge and the Versions page.
 export function VersionMenu(props: {
   versions: WorkspaceVersions;
   // The workspace is not ready for a version change.
@@ -613,27 +623,7 @@ export function VersionMenu(props: {
   onShareVersion?: (version: { id: string; name: string }) => void;
 }) {
   const { snapshot, active, onMain, busy } = props.versions;
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [newName, setNewName] = useState<string | null>(null);
-  // Why the field or the engine refused the name being typed.
-  const [nameError, setNameError] = useState<ReactNode>(null);
-
-  // Every way the menu closes drops the name being typed and its error.
-  const setMenu = useCallback((open: boolean) => {
-    setMenuOpen(open);
-    if (open) return;
-    setNewName(null);
-    setNameError(null);
-  }, []);
-  const field = useMemo<VersionNameField>(() => ({
-    refuse: setNameError,
-    created: () => setMenu(false),
-    reopen: (name) => {
-      setMenuOpen(true);
-      setNewName(name);
-      setNameError(null);
-    },
-  }), [setMenu]);
+  const [menuOpen, setMenu] = useState(false);
 
   if (!snapshot) return null;
 
@@ -663,43 +653,16 @@ export function VersionMenu(props: {
         props.versions.requestSwitch(version.id);
       },
     })),
-    newName === null
-      ? {
-          id: "new",
-          // No ellipsis: it opens a field in place, not a dialog.
-          label: "New version",
-          icon: <Plus size={14} aria-hidden />,
-          testId: "version-new",
-          onSelect: () => {
-            setNameError(null);
-            setNewName("");
-          },
-        }
-      : {
-          id: "new",
-          field: {
-            label: "New version name",
-            value: newName,
-            onChange: (value) => {
-              setNewName(value);
-              setNameError(null);
-            },
-            onSubmit: () => {
-              setNameError(null);
-              props.versions.create(newName, field);
-            },
-            onCancel: () => {
-              setNewName(null);
-              setNameError(null);
-            },
-            maxLength: 80,
-            busy: busy === "create",
-            error: nameError,
-            errorTestId: "version-menu-error",
-            hint: busy === "create" ? "Creating…" : <NewVersionHint versions={props.versions} first={snapshot.versions.length === 1} />,
-            testId: "version-new-input",
-          },
-        },
+    {
+      id: "new",
+      label: "New version…",
+      icon: <Plus size={14} aria-hidden />,
+      testId: "version-new",
+      onSelect: () => {
+        setMenu(false);
+        props.versions.openCreate();
+      },
+    },
   ];
   const actions: MenuEntry[] = [];
   if (!onMain && active) {
@@ -758,7 +721,6 @@ export function VersionMenu(props: {
 
   return (
     <div className="relative flex min-w-0 items-center">
-      {/* Every row but New version answers by closing the menu itself. */}
       <Menu
         label="Versions"
         menuTestId="version-menu"
@@ -791,31 +753,6 @@ export function VersionMenu(props: {
     </div>
   );
 }
-
-// A no-break space keeps each number on the same line as its unit.
-const megabytes = (bytes: number) => `${bytes / (1024 * 1024)}\u00a0MB`;
-// What a version leaves alone. The sizes are the engine's capture caps:
-// larger files stay as they are on disk.
-export const SAME_IN_EVERY_VERSION =
-  `Chats, text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} and files History doesn't track stay the same in every version.`;
-
-// Where a new version starts: it forks from the version you're in. Before the
-// first version, a second line says what every version leaves alone.
-export function NewVersionHint(props: { versions: Pick<WorkspaceVersions, "active" | "onMain">; first?: boolean }) {
-  if (!props.versions.onMain) {
-    return <>Starts from <span className="font-medium">{props.versions.active?.name ?? "Main"}</span>, so it can't merge into Main.</>;
-  }
-  if (!props.first) return <>Starts from Main</>;
-  // A screen reader reads the hint as one run, so a hidden full stop ends the
-  // first line's sentence.
-  return (
-    <>
-      Starts from Main<span className="sr-only">.</span>{" "}
-      <span data-testid="version-new-same" className="block text-muted">{SAME_IN_EVERY_VERSION}</span>
-    </>
-  );
-}
-
 
 type MergeStage =
   // A failure stays in the dialog, above the button that merges again.

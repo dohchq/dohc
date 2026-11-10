@@ -12,6 +12,7 @@ const bridgeMock = {
   createWorkspaceVersion: vi.fn(),
   mergeWorkspaceVersion: vi.fn(),
   listWorkspaceVersionConflicts: vi.fn(),
+  listVersionLastChanges: vi.fn(),
 };
 
 const MAIN = { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false };
@@ -22,6 +23,7 @@ beforeEach(() => {
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT], activeVersionId: "draft" });
   bridgeMock.switchWorkspaceVersion.mockResolvedValue({ activeVersionId: "main", changedFileCount: 1 });
+  bridgeMock.listVersionLastChanges.mockResolvedValue({ versions: [] });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 
@@ -206,18 +208,72 @@ describe("VersionMenu", () => {
     await openOn(userEvent.setup(), "Main");
     expect(rows()).toEqual(["Main", "version-new", "separator", "version-share", "separator", "version-all"]);
     expect(descriptionOf(screen.getByRole("menuitemradio", { name: "Main" }))).toBe("Try changes without touching Main.");
-    expect(screen.getByTestId("version-new").textContent).toBe("New version");
+    expect(screen.getByTestId("version-new").textContent).toBe("New version…");
   });
 
-  it("says before the first version what every version leaves alone, in the Versions page's words", async () => {
+  it("opens the New version dialog from New version…, with focus in its name field", async () => {
     const same = "Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.";
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
+    bridgeMock.listVersionLastChanges.mockResolvedValue({ versions: [{ versionId: "main", lastChange: { atMs: Date.now() - 4 * 60_000, personName: "Sam" } }] });
     const user = userEvent.setup();
     renderMenu();
     await openOn(user, "Main");
     await user.click(screen.getByTestId("version-new"));
-    expect(descriptionOf(screen.getByTestId("version-new-input"))).toBe(`Starts from Main. ${same}`);
-    expect(screen.getByTestId("version-new-same").textContent).toBe(same);
+    expect(screen.queryByTestId("version-menu")).toBeNull();
+    const dialog = screen.getByRole("dialog", { name: "New version" });
+    expect(document.activeElement).toBe(screen.getByTestId("version-new-input"));
+    expect(screen.getByLabelText("Name")).toBe(screen.getByTestId("version-new-input"));
+    expect(within(dialog).getByTestId("version-new-start").textContent).toContain("Main");
+    await waitFor(() => expect(screen.getByTestId("version-new-start-changed").textContent).toBe("Changed 4m ago by Sam"));
+    expect([...screen.getByTestId("version-new-facts").querySelectorAll("li")].map((fact) => fact.textContent)).toEqual([
+      "dohc switches you to it. Your edits go there.",
+      "Main stays as it is until you merge.",
+      same,
+    ]);
+    expect(screen.queryByTestId("version-new-no-merge")).toBeNull();
+  });
+
+  it("says in the dialog that unsaved changes are saved first and that a version made from a version can't merge", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT], activeVersionId: "draft" });
+    const user = userEvent.setup();
+    render(
+      <VersionMenuHarness
+        workspaceId="ws-1"
+        activeTabDirty
+        beginLineageOperation={async () => () => {}}
+        onOpenCompare={() => {}}
+        onWorkspaceStateChanged={() => {}}
+        onError={() => {}}
+        clearError={() => {}}
+        onMergeNotice={() => {}}
+        onConflictError={() => {}}
+      />,
+    );
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-new"));
+    const facts = [...screen.getByTestId("version-new-facts").querySelectorAll("li")].map((fact) => fact.textContent);
+    expect(facts.slice(0, 4)).toEqual([
+      "dohc saves your changes in Draft first.",
+      "dohc switches you to it. Your edits go there.",
+      "Draft stays as it is.",
+      "It can't merge into Main, because it starts from Draft.",
+    ]);
+  });
+
+  it("closes the dialog on Cancel and on Escape without creating", async () => {
+    const user = userEvent.setup();
+    renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-new"));
+    await user.type(screen.getByTestId("version-new-input"), "Ideas");
+    await user.click(screen.getByTestId("version-new-cancel"));
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
+    await user.click(screen.getByTestId("version-menu-button"));
+    await user.click(screen.getByTestId("version-new"));
+    expect(screen.getByTestId<HTMLInputElement>("version-new-input").value).toBe("");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
+    expect(bridgeMock.createWorkspaceVersion).not.toHaveBeenCalled();
   });
 
   it("shows the chip's dot beside each version's name, and keeps its space on Main", async () => {
@@ -242,27 +298,44 @@ describe("VersionMenu", () => {
     expect(merge.title).toBe("");
   });
 
-  it.each([
-    ["main", "Main", "Starts from Main"],
-    ["draft", "Draft", "Starts from Draft, so it can't merge into Main."],
-  ] as const)("says what a new version starts from on %s, then that it is being created", async (activeVersionId, active, hint) => {
-    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT], activeVersionId });
-    bridgeMock.createWorkspaceVersion.mockReturnValue(new Promise(() => {}));
+  it("creates on Enter, holds the dialog while it creates, then closes it in the new version", async () => {
+    const ideas = { id: "ideas", name: "Ideas", kind: "named" as const, createdAtMs: 3, canMergeIntoMain: false };
+    let finish!: (value: unknown) => void;
+    bridgeMock.createWorkspaceVersion.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-new"));
+    await user.type(screen.getByTestId("version-new-input"), "Ideas{Enter}");
+    await waitFor(() => expect(screen.getByTestId("version-new-create").textContent).toBe("Creating…"));
+    expect(screen.getByTestId<HTMLButtonElement>("version-new-cancel").disabled).toBe(true);
+    await user.keyboard("{Escape}");
+    expect(screen.getByTestId("version-new-dialog")).toBeTruthy();
+    await act(async () => finish({ versions: [MAIN, DRAFT, ideas], activeVersionId: "ideas" }));
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
+    expect(bridgeMock.createWorkspaceVersion).toHaveBeenCalledWith({ workspaceId: "ws-1", name: "Ideas" });
+    expect(props.onWorkspaceStateChanged).toHaveBeenCalledWith("ideas");
+    expect(screen.getByTestId("version-menu-active").textContent).toBe("Ideas");
+  });
+
+  it("creates from Create and switch", async () => {
+    const ideas = { id: "ideas", name: "Ideas", kind: "named" as const, createdAtMs: 3, canMergeIntoMain: false };
+    bridgeMock.createWorkspaceVersion.mockResolvedValue({ versions: [MAIN, DRAFT, ideas], activeVersionId: "ideas" });
     const user = userEvent.setup();
     renderMenu();
-    await openOn(user, active);
+    await openOn(user, "Draft");
     await user.click(screen.getByTestId("version-new"));
-    const field = screen.getByTestId("version-new-input");
-    expect(descriptionOf(field)).toBe(hint);
-    await user.type(field, "Ideas{Enter}");
-    await waitFor(() => expect(descriptionOf(field)).toBe("Creating…"));
+    await user.type(screen.getByTestId("version-new-input"), "Ideas");
+    await user.click(screen.getByTestId("version-new-create"));
+    await waitFor(() => expect(screen.queryByTestId("version-new-dialog")).toBeNull());
+    expect(bridgeMock.createWorkspaceVersion).toHaveBeenCalledWith({ workspaceId: "ws-1", name: "Ideas" });
   });
 
   it.each([
     ["an empty name", "  ", null, "Enter a name for the version."],
     ["a taken name", "Draft", "VersionedTextStoreError [version-name-conflict]: version-name-conflict", "Another version is called Draft. Choose another name."],
     ["a name the engine refuses", "Ideas", "VersionedTextStoreError [invalid-version-name]: invalid-version-name", "dohc can't use that name. Choose another name."],
-  ] as const)("keeps %s in the field and says why there until the name changes", async (_case, name, refusal, words) => {
+  ] as const)("keeps %s in the dialog and says why under the field until the name changes", async (_case, name, refusal, words) => {
     if (refusal !== null) bridgeMock.createWorkspaceVersion.mockRejectedValue(acrossIpc("desktop:create-workspace-version", refusal));
     const user = userEvent.setup();
     const props = renderMenu();
@@ -280,7 +353,7 @@ describe("VersionMenu", () => {
     await user.type(field, "2");
     expect(screen.queryByTestId("version-menu-error")).toBeNull();
     expect(field.getAttribute("aria-invalid")).toBeNull();
-    expect(descriptionOf(field)).toBe("Starts from Draft, so it can't merge into Main.");
+    expect(field.getAttribute("aria-describedby")).toBeNull();
   });
 
   it("reports any other create failure with a Try again that creates the same name", async () => {
@@ -295,9 +368,9 @@ describe("VersionMenu", () => {
     expect(screen.getByTestId<HTMLInputElement>("version-new-input").value).toBe("Ideas");
     expect(screen.queryByTestId("version-menu-error")).toBeNull();
 
-    // A press on the notice closes the menu before Try again runs.
-    await user.keyboard("{Escape}{Escape}");
-    expect(screen.queryByTestId("version-menu")).toBeNull();
+    // Try again opens the dialog again after it was closed.
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("version-new-dialog")).toBeNull();
     const ideas = { id: "ideas", name: "Ideas", kind: "named" as const, createdAtMs: 3, canMergeIntoMain: false };
     bridgeMock.createWorkspaceVersion.mockResolvedValueOnce({ versions: [MAIN, DRAFT, ideas], activeVersionId: "ideas" });
     act(() => props.onError.mock.calls[0]![2]!());
@@ -308,7 +381,7 @@ describe("VersionMenu", () => {
     expect(props.clearError).toHaveBeenCalledWith("version-create:ws-1:Ideas");
   });
 
-  it("takes back a create failure's notice when the name field creates it", async () => {
+  it("takes back a create failure's notice when the dialog creates it", async () => {
     bridgeMock.createWorkspaceVersion.mockRejectedValueOnce(acrossIpc("desktop:create-workspace-version", "Error: The engine stopped."));
     const user = userEvent.setup();
     const props = renderMenu();

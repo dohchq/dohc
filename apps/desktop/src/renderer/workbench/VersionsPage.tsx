@@ -8,7 +8,7 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
 import { EMPTY_ART } from "./EmptyArt";
-import { NewVersionHint, type VersionNameField, type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
+import { type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
@@ -320,96 +320,24 @@ export function VersionsPage(props: {
     })();
   }, [workspaceId, versionIds, props.versionKey, conflictsRetry]);
 
-  const [newName, setNewName] = useState<string | null>(null);
-  const [nameError, setNameError] = useState<ReactNode>(null);
-  const newButton = useRef<HTMLButtonElement>(null);
-  const restoreButton = useRef(false);
-  const hintId = useId();
-  useEffect(() => {
-    if (newName !== null || !restoreButton.current) return;
-    restoreButton.current = false;
-    newButton.current?.focus();
-  }, [newName]);
-  const closeField = () => {
-    restoreButton.current = true;
-    setNewName(null);
-    setNameError(null);
-  };
-  const field = useMemo<VersionNameField>(() => ({
-    refuse: setNameError,
-    created: closeField,
-    reopen: (name) => {
-      setNewName(name);
-      setNameError(null);
-    },
-  }), []);
-  const creating = versions.busy === "create";
   const locked = versions.busy !== null || props.disabled === true;
 
   const ready = snapshot !== null && lastChanges !== null;
   const onlyMain = ready && ordered.length <= 1;
 
-  // New version, or the name field in its place. One shows at a time: in the
-  // header once a version exists, and in the empty state while only Main does.
-  const newVersion = newName === null ? (
+  // New version opens the dialog. It shows in the header once a version
+  // exists, and in the empty state while only Main does.
+  const newVersion = (
     <SecondaryButton
-      ref={newButton}
       data-testid="versions-page-new"
       disabled={locked}
       size={onlyMain ? "compact" : "default"}
       className={onlyMain ? "inline-flex items-center gap-1.5" : undefined}
-      onClick={() => {
-        setNameError(null);
-        setNewName("");
-      }}
+      onClick={versions.openCreate}
     >
       {onlyMain ? <Plus size={12} aria-hidden /> : null}
-      New version
+      New version…
     </SecondaryButton>
-  ) : (
-    <div className="w-64 min-w-0 text-left">
-      <input
-        autoFocus
-        aria-label="New version name"
-        aria-invalid={nameError !== null || undefined}
-        aria-describedby={hintId}
-        data-testid="versions-page-new-input"
-        value={newName}
-        maxLength={80}
-        readOnly={creating}
-        onChange={(event) => {
-          setNewName(event.target.value);
-          setNameError(null);
-        }}
-        onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing) return;
-          // A switch from the menu locks the page too.
-          if (event.key === "Enter" && !locked) {
-            event.preventDefault();
-            setNameError(null);
-            versions.create(newName, field);
-          } else if (event.key === "Escape" && !creating) {
-            event.preventDefault();
-            event.stopPropagation();
-            closeField();
-          }
-        }}
-        onBlur={() => {
-          // Leaving a field with a name in it keeps the name.
-          if (newName.trim() === "" && !creating) closeField();
-        }}
-        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-      />
-      {nameError !== null ? (
-        <p id={hintId} data-testid="versions-page-new-error" role="alert" className="m-0 mt-1 text-[12px] leading-4 text-danger">
-          {nameError}
-        </p>
-      ) : (
-        <p id={hintId} className="m-0 mt-1 text-[12px] leading-4 text-subtle">
-          {creating ? "Creating…" : <NewVersionHint versions={versions} first={onlyMain} />}
-        </p>
-      )}
-    </div>
   );
 
   let body: ReactNode;
