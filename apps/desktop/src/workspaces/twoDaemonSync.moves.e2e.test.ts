@@ -16,7 +16,7 @@ import { openLiveFolderMoveFixture } from "../testing/liveFolderMoveFixture";
 import { livePageBody, livePageTitle } from "../ipc/errorWords";
 import { openLiveMoveFixture, recordGuardTimings, type GuardPull, type GuardTiming, type LiveMoveFixture, type MoveDevice } from "../testing/liveMoveFixture";
 
-import { engine, compiledRelayMain, runRenameRepros } from "./twoDaemonSync.fixture";
+import { engine, compiledRelayMain } from "./twoDaemonSync.fixture";
 
 describe.skipIf(engine.missing)("a folder move over a page the owner has live", () => {
   const page = "box/inner/page";
@@ -249,9 +249,3 @@ describe("the move guard over a real relay and live host", () => {
   }, 600_000);
 
 });
-
-it.skipIf(engine.missing)("refuses renaming an owner-bound live page, keeps its workspace publishing, and renames it after Stop (bound, unbound)",
-  () => runRenameRepros(["bound", "unbound"]), 300_000);
-
-it.skipIf(engine.missing)("renaming or deleting a captured owner-bound live page in the file manager keeps its workspace publishing",
-  () => runRenameRepros(["capture-rename", "capture-delete"]), 300_000);

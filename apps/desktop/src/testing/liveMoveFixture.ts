@@ -54,9 +54,6 @@ export interface GuardPulls {
   pulls: GuardPull[];
   // Another pass was running when the catch-up began, so a pull here may be that pass's.
   shared: boolean;
-  // The catch-up had ended when the guard stopped waiting, so the guard
-  // returned because its pull finished, not because its wait ran out.
-  endedInWait: boolean;
 }
 
 function failedPull(error: unknown, elapsedMs: number): GuardPull {
@@ -80,10 +77,6 @@ export interface MoveDevice {
   move(fromPath: string, toPath: string): Promise<number>;
   /** Waits for the last guarded move's catch-up to end, then returns the pulls it ran. */
   guardPulls(): Promise<GuardPulls>;
-  /** Relay engine pulls that no guard's catch-up ran. */
-  backgroundPulls(): readonly GuardPull[];
-  /** Whether the relay engine reports a sync failure, which makes the guard skip its catch-up. */
-  syncFailed(): boolean;
   refusalNotices(): Promise<unknown>;
 }
 
@@ -231,28 +224,27 @@ export async function openLiveMoveFixture(input: {
       // failure, against the guard catch-up running when the pull started.
       // The guard hands both of an attempt's catch-ups the same signal, so
       // the signal ties the pull to the move whose wait started the attempt.
-      interface CatchUp { pulls: GuardPull[]; shared: boolean; ended: boolean; settled: Promise<void> }
-      interface MoveRecord { catchUps: CatchUp[]; endedInWait: boolean }
+      interface CatchUp { pulls: GuardPull[]; shared: boolean; settled: Promise<void> }
+      interface MoveRecord { catchUps: CatchUp[] }
       let moving: MoveRecord | undefined;
       let lastGuarded: MoveRecord | undefined;
       const attempts = new WeakMap<AbortSignal, MoveRecord>();
       let catchingUp: GuardPull[] | undefined;
       let pullsRunning = 0;
-      const background: GuardPull[] = [];
       const operations: RelaySyncOperations = {
         claim: () => relay.claim(),
         push: () => relay.push(),
         recoverOrigin: () => relay.recoverOrigin(),
         async pull(runBatch) {
-          const into = catchingUp ?? background;
+          const into = catchingUp;
           const started = performance.now();
           pullsRunning++;
           try {
             const result = await relay.pull(runBatch);
-            into.push({ result: "succeeded", elapsedMs: performance.now() - started });
+            into?.push({ result: "succeeded", elapsedMs: performance.now() - started });
             return result;
           } catch (error) {
-            into.push(failedPull(error, performance.now() - started));
+            into?.push(failedPull(error, performance.now() - started));
             throw error;
           } finally { pullsRunning--; }
         },
@@ -271,10 +263,8 @@ export async function openLiveMoveFixture(input: {
           const pulls: GuardPull[] = [];
           catchingUp = pulls;
           const run = sync.catchUp({ signal });
-          // Attached before the guard awaits the run, so `ended` is set before the guard can return.
-          const catchUp: CatchUp = { pulls, shared, ended: false, settled: Promise.resolve() };
-          const end = () => { catchUp.ended = true; };
-          catchUp.settled = run.then(end, end).finally(() => { if (catchingUp === pulls) catchingUp = undefined; });
+          const catchUp: CatchUp = { pulls, shared, settled: Promise.resolve() };
+          catchUp.settled = run.then(() => undefined, () => undefined).finally(() => { if (catchingUp === pulls) catchingUp = undefined; });
           attempts.get(signal)?.catchUps.push(catchUp);
           return run;
         },
@@ -285,13 +275,12 @@ export async function openLiveMoveFixture(input: {
         targetedPasses: () => targeted,
         pull: () => relay.pull(apply => capture.runRelaySync(apply)),
         async move(fromPath, toPath) {
-          const record: MoveRecord = { catchUps: [], endedInWait: false };
+          const record: MoveRecord = { catchUps: [] };
           lastGuarded = record;
           const beforeMove = async (storedSpelling: () => Promise<string>) => {
             moving = record;
             try { await guard.beforeMove(workspaceId, storedSpelling); } finally {
               moving = undefined;
-              record.endedInWait = record.catchUps.length > 0 && record.catchUps.every(catchUp => catchUp.ended);
             }
           };
           const started = performance.now();
@@ -302,12 +291,10 @@ export async function openLiveMoveFixture(input: {
         },
         async guardPulls() {
           if (!lastGuarded) throw new Error("This device made no guarded move.");
-          const { catchUps, endedInWait } = lastGuarded;
+          const { catchUps } = lastGuarded;
           await Promise.all(catchUps.map(catchUp => catchUp.settled));
-          return { pulls: catchUps.flatMap(catchUp => catchUp.pulls), shared: catchUps.some(catchUp => catchUp.shared), endedInWait };
+          return { pulls: catchUps.flatMap(catchUp => catchUp.pulls), shared: catchUps.some(catchUp => catchUp.shared) };
         },
-        backgroundPulls: () => background,
-        syncFailed: () => sync.snapshot().syncFailure !== null,
         refusalNotices: () => opened.sessions.run(opened.workspace, ({ client, workspace }) =>
           new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace })),
       };
