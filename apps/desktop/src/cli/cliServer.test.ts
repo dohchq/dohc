@@ -4177,7 +4177,7 @@ describe("CLI socket server", () => {
     expect(waiting).toBe(true);
     context.readOnly = true;
     registryWorkspace.readOnly = true;
-    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("owning workspace");
+    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("read-only shared view");
     expect(waiting).toBe(true);
   });
 
