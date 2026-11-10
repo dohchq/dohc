@@ -12,10 +12,11 @@ import { FeedNotice } from "../../src/workspace/FeedNotice";
 import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
 import { useTheme } from "../../src/theme";
 
-const sampleToast: ToastMessage = {
+// Design review's toast. The sample test is written out, so a build without sample data drops it (src/sampleBuild.ts).
+const sampleToast: ToastMessage | null = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? {
   tone: "failure", sender: "automation", title: "Automation “Budget sync” failed", body: "The exchange-rate source didn’t answer.",
   action: { label: noticesWords.tryAgain },
-};
+} : null;
 
 // The platform's own tab bar: Liquid Glass on iOS 26, Material on Android.
 // Toasts sit above every tab except Notices, where each one already has its row.
