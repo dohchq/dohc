@@ -691,24 +691,32 @@ fn reserved_with_private_in(conn: &Connection, key: &DocKey) -> Result<Authors, 
 }
 
 /// Whether a held lineage must settle before its release: its interval still
-/// names authors, including those a failed settlement returned. Its document
-/// parks only with an empty interval ([`crate::local_close_is_covered`]),
-/// read here the same way, and the settlement takes them in, so the release
-/// brings in only private authors. An unresolved settlement resolves on its
-/// own.
+/// names authors, including those a failed settlement returned. A held
+/// lineage's document parks only with an empty interval
+/// ([`crate::local_close_is_covered`]), which leaves its private updates out,
+/// and this reads it the same way. The settlement takes them in, so the
+/// release brings in only private authors. An unresolved settlement resolves
+/// on its own.
 pub(crate) fn release_needs_settlement_in(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<bool, CollabError> {
-    let exists: bool = conn
+    let Some(pending) = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get(0),
+            |row| row.get::<_, String>(0),
         )
-        .map_err(sql)?;
-    Ok(exists && !interval_in(conn, key, i64::MAX)?.is_empty())
+        .optional()
+        .map_err(sql)?
+    else {
+        return Ok(false);
+    };
+    let mut authors = Authors::default();
+    authors.union_json(&pending)?;
+    union_native_in(conn, key, None, i64::MAX, true, &mut authors)?;
+    Ok(!authors.is_empty())
 }
 
 /// Whether this identity already has an update on this document that holds
