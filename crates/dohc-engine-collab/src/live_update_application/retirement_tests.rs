@@ -383,6 +383,12 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
     // unknown author and the document parks only after a settlement.
     assert!(settle, "the interval names the edit before adoption");
     assert_eq!(native_entries(&f)[0].2, Some(serde_json::to_string(&receipt).unwrap()));
+    let applied_past_settlement = |f: &Fixture| {
+        f.store
+            .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, Some(10)))
+            .unwrap()
+    };
+    assert!(!applied_past_settlement(&f), "an acknowledged seed applies nothing");
     apply_event(&mut f, seed_event).unwrap();
     let Reconciliation::Reconciled { applications, settle, .. } = reconcile(&mut f, 10, None, None).unwrap()
     else {
@@ -390,7 +396,7 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
     };
     assert_eq!(applications.len(), 1);
     assert_eq!(applications[0].delivery_id, receipt.delivery_id);
-    assert!(settle, "the application passed the last settlement");
+    assert!(settle && applied_past_settlement(&f), "the application passed the last settlement");
     // A page after the seed's own ACK is empty; F bounds every page.
     let Reconciliation::Reconciled { applications, .. } =
         reconcile(&mut f, 10, Some(&receipt), None).unwrap()
