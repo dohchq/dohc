@@ -48,6 +48,10 @@ export function personalAgentOrigin(agentId: string): string {
   return `${PERSONAL_AGENT_ORIGIN_PREFIX}${agentId}`;
 }
 
+export function personalCollectionOrigin(agentId: string): string {
+  return `${PERSONAL_COLLECTION_ORIGIN_PREFIX}${agentId}`;
+}
+
 // The IDs of a personal agent's message and new thread, as for link posts.
 export const PERSONAL_MESSAGE_ID_PREFIX = "personal-message:";
 export const PERSONAL_THREAD_ID_PREFIX = "personal-thread:";
@@ -96,11 +100,17 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
 }
 
+// Only the relay writes a personal agent's moments, from its own origin.
 export function clientMomentAuthorsRefused(authors:unknown):boolean {
   return authors != null && (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
     !author || typeof author !== "object" || Array.isArray(author) ||
+    isPersonalAgentId((author as Record<string, unknown>).agentId) ||
     (!CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind) &&
       !((author as Record<string, unknown>).kind === "unattributed" && Object.keys(author).length === 1))));
+}
+
+export function isPersonalAgentId(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith(PERSONAL_AGENT_ID_PREFIX);
 }
 
 export function parseLogOp(value: unknown): SyncRelayLogInput {
@@ -178,13 +188,15 @@ function ordinaryAuthorContext(payload: unknown, opKind: string): LiveAuthorCont
   if (opKind === "moment.append" && (Object.hasOwn(fields, "settlementReference") ||
     Object.hasOwn(fields, "attributionUnavailable") || fields.authors != null)) return undefined;
   if (!Object.hasOwn(fields, "authorContext")) return undefined;
+  let context: LiveAuthorContext;
   try {
-    const context = parseLiveAuthorContext(fields.authorContext);
+    context = parseLiveAuthorContext(fields.authorContext);
     if (context.agent) parseLiveAuthorSnapshot([{kind: "agent", ...context.agent}]);
-    return context;
   } catch {
     throw badRequest(`invalid ${opKind} authorContext`);
   }
+  if (isPersonalAgentId(context.agent?.agentId)) throw relayError("authorship_mismatch");
+  return context;
 }
 
 export async function parseAuthenticatedLogOps(

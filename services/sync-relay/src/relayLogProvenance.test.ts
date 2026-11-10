@@ -21,6 +21,9 @@ const RELAY_AUTHORS = [
   {kind: "public", principalId: "forged", grantId: "grant"},
   {kind: "named", userId: "forged", grantId: "grant", grantGeneration: 1},
   {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "forged"},
+  // Only the relay writes a personal agent's moments, from its own origin.
+  {kind: "agent", agentId: PERSONAL_AGENT, onBehalfOf: "owner"},
+  {kind: "agent", agentId: PERSONAL_AGENT, agentName: "Helper", onBehalfOf: "owner", depth: 0},
   // A kind this relay does not know yet is refused, not passed through.
   {kind: "future", grantId: "grant"},
   {kind: "unattributed", humanId: "forged"},

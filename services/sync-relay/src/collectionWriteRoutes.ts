@@ -4,14 +4,16 @@ import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
-import type { LinkAuthorityResolver } from "./linkAuthority";
+import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { readStreamedBytes } from "./relayBytes";
-import { parseString } from "./requestInputs";
+import { parseString, parseWorkspaceId } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
 import { accountDisplayName } from "./accountDisplayName";
 import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
 import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
+import type { CommittedCollectionWrite } from "./storage/collectionWrites";
+import type { PersonalCredential } from "./storage/personalAgentChat";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
 export type LinkCollectionWriteRoute = { route: "link-collection-writes" };
@@ -115,9 +117,18 @@ function commit(
   discussionActivity: Pick<DiscussionActivityHub, "wake">,
   headers: Record<string, string> = {},
 ): Response {
-  let committed: ReturnType<typeof storage.commitCollectionWrite>;
+  return answer(() => storage.commitCollectionWrite(input), workspaceId, discussionActivity, headers);
+}
+
+function answer(
+  write: () => CommittedCollectionWrite,
+  workspaceId: string,
+  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  headers: Record<string, string>,
+): Response {
+  let committed: CommittedCollectionWrite;
   try {
-    committed = storage.commitCollectionWrite(input);
+    committed = write();
   } catch (error) {
     if (!(error instanceof CollectionWriteStaleError)) throw error;
     return jsonResponse({
@@ -266,6 +277,64 @@ export function createLinkCollectionWriteRoute(input: {
       release?.();
     }
   };
+}
+
+/**
+ * `POST /sync/link/personal-agent/collection-writes`: a personal agent at
+ * Edit writes a Collection's own files directly, in a workspace its account
+ * owns. The request names the workspace, a submit id, and the changes with
+ * their content as base64, as an Edit link sends them, never an author. The
+ * fence is read again once the body is in, and the write reads the agent's
+ * authority at that fence, the workspace's ownership, and Edit reach again
+ * inside its transaction.
+ */
+export function createPersonalCollectionWriteRoute(input: {
+  storage: Pick<SyncRelayStorage, "commitPersonalCollectionWrite">;
+  rateLimiter: TokenBucketLimiter;
+  admission: LinkCollectionWriteAdmission;
+  nowMs: () => number;
+  newId: () => string;
+  discussionActivity: Pick<DiscussionActivityHub, "wake">;
+}) {
+  return async function respondToPersonalCollectionWrite(
+    request: Request,
+    authority: PersonalAuthority,
+    fresh: () => Promise<PersonalCredential>,
+  ): Promise<Response> {
+    if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+      throw badRequest("Collection writes require JSON.");
+    }
+    // One agent's writes spend one bucket and hold one body, whichever connection sends them.
+    const key = `personal:${authority.agentId}`;
+    if (!input.rateLimiter.allow(key, input.nowMs())) throw relayError("collection_write_rate_limited");
+    const release = input.admission.admit(key);
+    if (!release) throw relayError("collection_write_rate_limited");
+    try {
+      const body = await readBody(request, MAX_LINK_COLLECTION_WRITE_BODY_BYTES);
+      if (Object.keys(body).some((field) => field !== "workspaceId" && field !== "submitId" && field !== "changes")) {
+        throw badRequest("invalid request");
+      }
+      const workspaceId = parseWorkspaceId(body.workspaceId);
+      const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
+      const credential = await fresh();
+      const { changes, content } = personalChanges(body.changes);
+      return answer(() => input.storage.commitPersonalCollectionWrite({
+        ...credential, workspaceId, submitId, rawChanges: changes, content, now: input.nowMs, newId: input.newId,
+      }), workspaceId, input.discussionActivity, NO_STORE);
+    } finally {
+      release();
+    }
+  };
+}
+
+// The changes as a link sends them. The agent's tool passes a refusal's reason on, so this one says what to fix.
+function personalChanges(raw: unknown): ReturnType<typeof linkChanges> {
+  try {
+    return linkChanges(raw);
+  } catch (error) {
+    if (!(error instanceof RelayError) || error.code !== "share_op_rejected") throw error;
+    throw relayError("share_op_rejected", "dohc could not read these files. Send each file's complete text, or its content as standard base64, up to 4 MiB in all.");
+  }
 }
 
 // Each change as a link sends it: the fields a named write sends, except

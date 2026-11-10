@@ -6,7 +6,7 @@ import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import type { ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import { openSyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
-import { deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
+import { claimsPersonalAgent, deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import { workspaceUsageBytes } from "./workspaces";
 
 const cleanups: (() => void)[] = [];
@@ -88,6 +88,22 @@ it("requires the authenticated account to match, even when the recording context
   expect(deriveLiveAuthorSnapshot(storage, owner, context)).toEqual([]);
   expect(deriveLiveAuthorSnapshot(storage, owner, context, { ...account, accountId: "other" })).toEqual([]);
   expect(deriveLiveAuthorSnapshot(storage, link, context, account)).toEqual([]);
+});
+
+// Only the relay attributes work to a personal agent, so no recording context may name one.
+const personal = { ...agent, agentId: `p-${"a".repeat(26)}` };
+it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAuthorContext]>([
+  ["owner", owner, () => ({ kind: "account", accountId: "owner", agent: personal })],
+  ["named recipient", named, () => ({ kind: "account", accountId: "owner", agent: personal })],
+  ["link", link, publicId => ({ kind: "link", publicPrincipalId: publicId, agent: personal })],
+])("refuses an %s recording context that declares a personal agent", (_kind, authority, context) => {
+  const storage = fixture(), publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
+  expect(claimsPersonalAgent(context(publicId))).toBe(true);
+  expect(() => storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, context(publicId), account))).toThrow(/personal agent/);
+  // The same context naming one of the account's own agents still earns its snapshot.
+  const own = { ...context(publicId), agent } as LiveAuthorContext;
+  expect(claimsPersonalAgent(own)).toBe(false);
+  expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, own, account))).toContainEqual(expect.objectContaining({ kind: "agent", agentId: "writer" }));
 });
 
 it("reuses a durable public mapping and publishes only its ID and stored label", () => {

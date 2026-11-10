@@ -12,6 +12,7 @@ import {
   type ShareAccess,
   isShareAccessValue,
   isValidShareVersionId,
+  prepareSharePath,
   visibleSharePath,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -1512,9 +1513,38 @@ export function filterCollectionWriteForShare(
   raw: unknown,
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): CollectionWriteDecision {
-  const refused: CollectionWriteDecision = { allowed: false };
   const files = collectionEditSelector(selector, chat);
-  if (files === null) return refused;
+  if (files === null) return { allowed: false };
+  return decideCollectionWrite(files, raw, chat, (folder) => coversCollectionFolder(files, folder));
+}
+
+/**
+ * The same decision for a personal agent at Edit. Its reach is its owner's
+ * whole main version, so it covers every Collection folder, and a new
+ * Collection may also sit at the workspace's top level. Each change is
+ * checked as a share of its top-level folder or file would check it.
+ */
+export function filterPersonalCollectionWrite(raw: unknown): CollectionWriteDecision {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) return { allowed: false };
+  const tops = new Set<string>();
+  for (const entry of raw) {
+    const record = asRecord(entry);
+    for (const path of [record?.basedOnPath, record?.afterPath]) {
+      const prepared = typeof path === "string" ? prepareSharePath(path) : null;
+      if (prepared) tops.add(prepared.path.split("/", 1)[0]!);
+    }
+  }
+  if (tops.size === 0) return { allowed: false };
+  return decideCollectionWrite({ paths: [...tops], versionId: null, access: "edit" }, raw, undefined, () => true);
+}
+
+function decideCollectionWrite(
+  files: ShareSelector,
+  raw: unknown,
+  chat: Pick<ChatShareThreadResolver, "channelKind"> | undefined,
+  coversFolder: (folder: string) => boolean,
+): CollectionWriteDecision {
+  const refused: CollectionWriteDecision = { allowed: false };
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
     return refused;
   }
@@ -1547,7 +1577,6 @@ export function filterCollectionWriteForShare(
     if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
     changes.push(change);
   }
-  const coversFolder = (folder: string) => coversCollectionFolder(files, folder);
 
   const schemaCreates = changes.filter(
     (change) => change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
@@ -1556,7 +1585,7 @@ export function filterCollectionWriteForShare(
     if (changes.length !== 1) return refused;
     const change = changes[0]!;
     const collectionPath = parentPath(change.afterPath!);
-    if (!coversFolder(collectionPath)) return refused;
+    if (collectionPath === "" || !coversFolder(collectionPath)) return refused;
     const file = baseName(change.afterPath!);
     if (file === COLLECTION_SCHEMA_FILE && change.basedOnPath !== null) {
       return { allowed: true, write: { kind: "schema", collectionPath, change } };
@@ -1575,7 +1604,7 @@ export function filterCollectionWriteForShare(
   if (schemaCreates.length !== 1) return refused;
   const schema = schemaCreates[0]!;
   const collectionPath = parentPath(schema.afterPath!);
-  if (!coversFolder(parentPath(collectionPath))) return refused;
+  if (collectionPath === "" || !coversFolder(parentPath(collectionPath))) return refused;
   let automations: ProposedChange | null = null;
   const records: ProposedChange[] = [];
   for (const change of changes) {

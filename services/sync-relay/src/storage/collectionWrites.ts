@@ -13,13 +13,14 @@ import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
 import { proposalBase, proposalMomentPayload, type DirectWriteMomentAuthor } from "../recipientMoments";
-import { COLLECTION_FILE_ORIGIN_PREFIX } from "../relayLogInputs";
+import { COLLECTION_FILE_ORIGIN_PREFIX, personalCollectionOrigin } from "../relayLogInputs";
 import { currentCollectionEditGrant } from "../collectionEditGrant";
 import { authorizeLinkShareAction, type AuthorizedShareAction } from "../shareAuthorization";
 import {
   COLLECTION_AUTOMATIONS_FILE,
   COLLECTION_SCHEMA_FILE,
   filterCollectionWriteForShare,
+  filterPersonalCollectionWrite,
   MAIN_VERSION_ID,
   type CollectionWrite,
   type ProposedChange,
@@ -36,6 +37,8 @@ import {
 } from "./linkEnrollment";
 import { agentName, agentWriteAuthorityInTransaction, recordAgentConnectionActionInTransaction, type AgentConnectionRow } from "./agentConnections";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import type { PersonalCredential } from "./personalAgentChat";
+import { personalReachIn, readPersonalAuthority, type PersonalConnectionRow } from "./personalAgents";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -114,6 +117,31 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
       WHERE workspace_id = NEW.workspace_id; END;
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_delete
       AFTER DELETE ON sync_relay_collection_writes BEGIN
+      UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes - OLD.storage_bytes
+      WHERE workspace_id = OLD.workspace_id; END;
+
+    -- A personal agent's direct writes, by agent, workspace, and submit id.
+    -- It answers a retried submit. A personal agent holds no share grant.
+    CREATE TABLE IF NOT EXISTS sync_relay_personal_collection_writes (
+      agent_id TEXT NOT NULL CHECK (length(agent_id) = 28 AND agent_id GLOB 'p-*'),
+      workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      submit_id TEXT NOT NULL CHECK (length(submit_id) BETWEEN 1 AND 128),
+      connection_id TEXT NOT NULL CHECK (length(connection_id) >= 1),
+      payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+      origin_id TEXT NOT NULL,
+      first_origin_seq INTEGER NOT NULL CHECK (first_origin_seq >= 0),
+      last_origin_seq INTEGER NOT NULL CHECK (last_origin_seq >= first_origin_seq),
+      receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+      created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+      storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
+      PRIMARY KEY (agent_id, workspace_id, submit_id)
+    ) STRICT;
+    CREATE TRIGGER IF NOT EXISTS sync_relay_personal_collection_writes_usage_insert
+      AFTER INSERT ON sync_relay_personal_collection_writes BEGIN
+      UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + NEW.storage_bytes
+      WHERE workspace_id = NEW.workspace_id; END;
+    CREATE TRIGGER IF NOT EXISTS sync_relay_personal_collection_writes_usage_delete
+      AFTER DELETE ON sync_relay_personal_collection_writes BEGIN
       UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes - OLD.storage_bytes
       WHERE workspace_id = OLD.workspace_id; END;
   `);
@@ -310,6 +338,116 @@ export function commitCollectionWrite(
     if (agentConnectionId !== null) recordAgentConnectionActionInTransaction(storage, agentConnectionId, input.nowMs);
     return { receipt, created: true };
   });
+}
+
+export interface CommitPersonalCollectionWriteInput extends PersonalCredential {
+  workspaceId: string;
+  submitId: string;
+  /** The changes as the agent sent them, each naming the hash of content it sent. */
+  rawChanges: unknown;
+  /** The bytes of every file the write names, by the hash the relay computed. */
+  content: ReadonlyMap<string, Uint8Array>;
+  /** The relay's clock, read inside the write, so access that ended while it waited writes nothing. */
+  now(): number;
+  newId: () => string;
+}
+
+/**
+ * Commits one personal agent's direct write to a Collection's own files on
+ * its owner's main version. The relay mints the moments under
+ * `relay:personal-collection:<agentId>`, with the agent on behalf of its
+ * account as their one author and its current name in the admitted author
+ * snapshot. Content is checked before the transaction. Inside it, the
+ * agent's authority at the fence its request read, the account's ownership
+ * of the workspace, and Edit reach there are read again first, so a sign-out,
+ * a password change, or narrowed reach that commits first refuses the write,
+ * a retry included. Then the submit id, every file's base, and the quota, as
+ * for a share.
+ */
+export function commitPersonalCollectionWrite(
+  storage: StorageContext,
+  input: CommitPersonalCollectionWriteInput,
+): CommittedCollectionWrite {
+  const { workspaceId } = input;
+  // The agent's authority first, so content checks answer nobody who may not write.
+  storage.readTx(() => personalWriter(storage, input, input.now()));
+  const decision = filterPersonalCollectionWrite(input.rawChanges);
+  if (!decision.allowed) throw relayError("personal_agent_not_collection");
+  const { write } = decision;
+  const bytesOf = suppliedBytes(input.content);
+  const unchecked = validateContent(storage, workspaceId, write, bytesOf);
+
+  return storage.tx(() => {
+    const nowMs = Math.trunc(input.now());
+    const { connection, name } = personalWriter(storage, input, nowMs);
+    const { agentId, ownerUserId } = connection;
+    const payloadSha256 = writeDigest(`personal:${agentId}`, write);
+    const prior = storage.db.prepare(`SELECT payload_sha256, receipt_json FROM sync_relay_personal_collection_writes
+      WHERE agent_id = ? AND workspace_id = ? AND submit_id = ?`).get(agentId, workspaceId, input.submitId);
+    if (prior) {
+      if (prior.payload_sha256 !== payloadSha256) throw relayError("conflict", "this submitId already names another write");
+      return { receipt: JSON.parse(String(prior.receipt_json)) as CollectionWriteReceipt, created: false };
+    }
+    for (const path of unchecked) {
+      throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
+    }
+    // A new file in a folder that is not a Collection is another file write, and says so.
+    if ((write.kind === "new-record" || write.kind === "automations") &&
+        !automationSwitchableFolder(storage, workspaceId, write.collectionPath)) {
+      throw relayError("personal_agent_not_collection");
+    }
+    checkBases(storage, workspaceId, write);
+    if (write.kind === "new-record") checkRecordCreation(storage, workspaceId, write, bytesOf);
+    assertWorkspaceQuota(storage, workspaceId, newBlobBytes(storage, workspaceId, input.content));
+    insertNewBlobs(storage, workspaceId, input.content, nowMs);
+
+    const author: DirectWriteMomentAuthor = { kind: "agent", agentId, onBehalfOf: ownerUserId };
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot([{ kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId }]);
+    const originId = personalCollectionOrigin(agentId);
+    const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
+    const ops = changesOf(write).map((change, index) => ({
+      originSeq: firstOriginSeq + index,
+      opKind: "moment.append",
+      payloadJson: stableJsonStringify(momentFor(storage, workspaceId, change, index, author, { nowMs, newId: input.newId })),
+      recordedAtMs: nowMs,
+      admittedAuthorSnapshot,
+    }));
+    const receipt: CollectionWriteReceipt = {
+      submitId: input.submitId, paths: changesOf(write).map((change) => change.afterPath!), committedAtMs: nowMs,
+    };
+    const receiptJson = JSON.stringify(receipt);
+    const storageBytes = Buffer.byteLength(receiptJson) + Buffer.byteLength(originId) +
+      Buffer.byteLength(connection.connectionId) + 256;
+    // The ledger row goes first, so the append's quota check counts it.
+    storage.db.prepare(
+      `INSERT INTO sync_relay_personal_collection_writes (
+         agent_id, workspace_id, submit_id, connection_id, payload_sha256, origin_id, first_origin_seq, last_origin_seq,
+         receipt_json, created_at_ms, storage_bytes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(agentId, workspaceId, input.submitId, connection.connectionId, payloadSha256, originId, firstOriginSeq,
+      firstOriginSeq + ops.length - 1, receiptJson, nowMs, storageBytes);
+    appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
+    storage.db.prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
+      WHERE agent_id = ?`).run(nowMs, agentId);
+    return { receipt, created: true };
+  });
+}
+
+// The personal agent as the transaction finds it now: its token, connection,
+// epoch, and the account's fence, then the workspace in reach, owned by the
+// account, at Edit. Its current name comes with it.
+function personalWriter(
+  storage: StorageContext,
+  input: CommitPersonalCollectionWriteInput,
+  nowMs: number,
+): { connection: PersonalConnectionRow; name: string } {
+  const connection = readPersonalAuthority(storage, input.check, input.fenceEpoch, nowMs);
+  if (!connection || connection.connectionId !== input.connectionId) throw notFound();
+  const reach = personalReachIn(storage, connection, input.workspaceId);
+  if (!reach) throw relayError("personal_agent_out_of_reach");
+  if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
+  const agent = storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(connection.agentId);
+  return { connection, name: parseLiveUpdateIdentifier(agent?.name) };
 }
 
 const publicPrincipalStatements = new WeakMap<SqliteDb, {
@@ -641,7 +779,7 @@ function momentFor(
   change: ProposedChange,
   index: number,
   author: DirectWriteMomentAuthor,
-  input: CommitCollectionWriteInput,
+  input: Pick<CommitCollectionWriteInput, "nowMs" | "newId">,
 ): Record<string, unknown> {
   const stale = () => new CollectionWriteStaleError(change.afterPath!, currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 ?? null);
   const objectId = change.basedOnPath === null

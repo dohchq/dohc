@@ -367,6 +367,25 @@ it.each(["provenance-refused", "delivery-conflict", "capacity-refused", "invalid
   expect(f.entries).toHaveLength(3);
 });
 
+// Only the relay attributes work to a personal agent, so the engine's claim is final.
+it("quarantines an entry whose agent declaration names a personal agent without admitting it", async () => {
+  const f = fixture(3, 10_000, {agentId: `p-${"a".repeat(26)}`, onBehalfOf: null, depth: 0});
+  const original = f.client.sendRequest.getMockImplementation()!;
+  f.client.sendRequest.mockImplementation(async request => {
+    if (request.method === "liveApplication.quarantineOwnerOutbox") {
+      expect(request.params).toEqual({registrationId: 1, reason: "provenance-refused", deliveryId: "delivery-1", refusalKey: expect.any(String)});
+      f.state.value = "quarantined"; f.state.retryDeliveryId = null;
+      return {id: request.id, result: {state: "quarantined"}} as never;
+    }
+    return original(request);
+  });
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).not.toHaveBeenCalled();
+  expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  expect(f.state.value).toBe("quarantined");
+  expect(f.receipts).toEqual([]);
+});
+
 // The native outbox's refusal record: another refusal uses up the owner's Try again. Writing a
 // refusal again, or one that is no longer its head's own attempt, changes nothing. A fault fails
 // the write, or commits it and loses the response.

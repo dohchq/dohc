@@ -1,5 +1,5 @@
 import type { StorageContext } from "./storage/context.js";
-import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
@@ -241,6 +241,12 @@ export async function drainOwnerOutbox(options: OwnerOutboxScope & {
       if (trustedAccount && trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
       const authorContext = entry.personEdit || declared ? {kind: "account" as const, accountId: trustedAccount!.accountId,
         ...(declared ? {agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : {})} : undefined;
+      // Only the relay attributes work to a personal agent, so this refusal is final, as the journal's would be.
+      if (claimsPersonalAgent(authorContext)) {
+        await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: "provenance-refused"}));
+        adoption.applied();
+        return {admittedEntries, hasMore: false};
+      }
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
         retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata), []) || liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
