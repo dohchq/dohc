@@ -623,16 +623,18 @@ type DrainLimits = {maxEntriesPerDrain?: number; maxBytesPerDrain?: number};
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // How the host reaches the relay's first open, and the clock, jitter and timer its retries use.
 type FirstOpenOptions = {fetch: typeof fetch; nowMs?: () => number; random?: () => number; schedule?: (atMs: number, fire: () => void) => () => void};
+// The clock idle unloading reads, and the timer it arms each deadline on.
+type IdleClock = {nowMs: () => number; schedule: (atMs: number, fire: () => void) => () => void};
 
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 // With `firstOpen`, the host asks the relay to start documents with no lineage through its `fetch`.
-// `pollIntervalMs` replaces the pause between passes.
+// `pollIntervalMs` replaces the pause between passes, and `idleClock` the clock idle unloading reads and arms.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
   maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; pollIntervalMs?: number; firstOpen?: FirstOpenOptions; selfHosted?: boolean;
-  restore?: boolean} = {}) {
+  restore?: boolean; idleClock?: IdleClock} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -1130,7 +1132,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     native.outboxId = NATIVE;
   };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {}),
-    ...(options.firstOpen ? {firstOpen: options.firstOpen} : {})});
+    ...(options.firstOpen ? {firstOpen: options.firstOpen} : {}), ...(options.idleClock ? {idleClock: options.idleClock} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
@@ -1338,7 +1340,8 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits; passDeadlineMs?: number; pollIntervalMs?: number; firstOpen?: FirstOpenOptions; selfHosted?: boolean; restore?: boolean} = {}) {
+  limits?: DrainLimits; passDeadlineMs?: number; pollIntervalMs?: number; firstOpen?: FirstOpenOptions; selfHosted?: boolean; restore?: boolean;
+  idleClock?: IdleClock} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -1611,8 +1614,11 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 // An empty host with the document shared with Edit, enrolled and ready.
 // With `supervised`, the self-host supervisor runs the host as its daemon,
 // configured for restore, and sends it every membership update.
-async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false} = {}) {
-  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised});
+// With `polls`, passes run only when the host wakes itself, or the test runs one, as in setup here, and a
+// supervisor reconciles only on its own wakes too.
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false,
+  polls = undefined as ReturnType<typeof heldPolls> | undefined} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised, ...(polls ? {pollIntervalMs: HELD_POLL_MS} : {})});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   const errors: unknown[] = [];
@@ -1621,9 +1627,14 @@ async function enrolledServiceHost({freshRegistrations = false, frameChanges = f
     const data = join(o.f.root, "self-host"); await mkdir(data);
     supervisor = await startSelfHostedLiveHost({trustedAccount: o.f.trustedAccount, storage: o.f.storage, history: o.f.history, root: data,
       engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(16),
-      startHost: async () => o.host, onError: error => errors.push(error)});
+      startHost: async () => o.host, onError: error => errors.push(error), ...(polls ? {reconcileIntervalMs: HELD_RECONCILE_MS} : {})});
     cleanup.push(() => supervisor!.close());
   } else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  if (polls) {
+    // The supervisor's first update reaches the host on its own, and passes then wait their turn behind it.
+    if (supervised) await vi.waitFor(() => expect(o.membership.map(row => row.method)).toContain("liveApplication.attachWorkspace"), {timeout: 10_000});
+    await polls.until(o.f, () => o.host.isDocumentReady(o.document));
+  }
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
   if (binding.kind !== "current") throw new Error("Missing live binding.");
@@ -2972,12 +2983,19 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
 // the restore's first step runs before the restart. `pending` has the relay
 // accept an edit after the adoption cut that no activation pass delivers.
 // `admitted` has the relay admit the restore before the document moves, and
-// configures restore preparation on the restarted host.
+// configures restore preparation on the restarted host. With `polls`, the
+// restarted host runs passes only when it wakes itself, or the test runs one,
+// as its first passes here.
 const movedDuringRestore = async ({replacement = false, paused = false, covered = false, live = false, kept = false, stopped = true, pending = false,
-  admitted = false} = {}) => {
+  admitted = false, polls = undefined as ReturnType<typeof heldPolls> | undefined} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  const restoring = waiting("Waiting for its restore to finish.");
+  // `held` says the restarted host's passes are held, so the test runs them.
+  const passed = async (held = false) => {
+    if (held) await polls!.until(o.f, () => log.mock.calls.some(call => call[0] === restoring[0] && call[1] === restoring[1]));
+    await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...restoring));
+  };
   if (paused || covered) anotherEditGrant(o);
   if (pending) {o.passes.deliver = false; o.acceptEdit("pending");}
   o.beginRestore();
@@ -2992,6 +3010,11 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   const admission = admitted ? await admitMovedRestore(o) : undefined;
   await o.host.close(); log.mockClear(); o.passes.deliver = true;
   if (admitted) {Object.assign(o.f.config, {restore: RESTORE}); await o.f.save();}
+  if (polls) {
+    const config = o.f.config as unknown as {activation: Record<string, unknown>};
+    config.activation = {...config.activation, pollIntervalMs: HELD_POLL_MS};
+    await o.f.save();
+  }
   moveAway(o);
   const other = {...o.sibling, objectId: "another-object"};
   let driver: ServiceActivationDriver | undefined;
@@ -3003,7 +3026,7 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
     cleanup.push(() => host.close());
     await host.update({workspaces: [o.workspace], documents: [other], departing: [o.sibling]});
   }
-  await passed();
+  await passed(polls !== undefined);
   expect(leaving(o)).toEqual([]);
   expect(host.retains(o.sibling)).toBe(true);
   expect(host.drained("workspace")).toBe(false);
@@ -5925,6 +5948,8 @@ it("asks again about a source whose first-open answer said it was stale", async 
 
 // The pause a host given this interval takes between passes, which only a wake, or `run` below, ends in a test.
 const HELD_POLL_MS = 3_600_000;
+// The supervisor's interval between reconciliations in a test that holds them, which only its own wakes end.
+const HELD_RECONCILE_MS = 2 * HELD_POLL_MS;
 // Watches the activation loop's pauses; start it before the host. `run` ends the pause the loop waits in and
 // resolves once the pass after it ends. `until` runs passes so, at most five, until `done` holds. `paused` says
 // whether the loop waits in a pause now, and `early` counts pauses the host ended itself, as a wake does.
@@ -6404,10 +6429,13 @@ it("removes a detached configured root after restart and keeps unrelated roots",
 // Only Date.now is fake: passes run on real timers, and visits to the held
 // document count them. `hold` keeps passes from activating the real document.
 // `alone` moves the held document to a second workspace, so the real one is alone in its workspace.
-async function idleHost(options: {alone?: boolean} = {}) {
+// With `polls`, passes run only when the host wakes itself, or the test runs one, as in setup here, and
+// idle unloading reads and arms `clock` instead.
+async function idleHost(options: {alone?: boolean; polls?: ReturnType<typeof heldPolls>; clock?: IdleClock} = {}) {
   let now = 1_000_000;
   vi.spyOn(Date, "now").mockImplementation(() => now);
-  const o = await emptyServiceHost({frameChanges: true}), workspaces = [o.workspace];
+  const o = await emptyServiceHost({frameChanges: true, ...(options.polls ? {pollIntervalMs: HELD_POLL_MS} : {}),
+    ...(options.clock ? {idleClock: options.clock} : {})}), workspaces = [o.workspace];
   let other = o.other;
   if (options.alone) {
     const root = join(o.f.root, "workspace-2"); await mkdir(root);
@@ -6419,6 +6447,7 @@ async function idleHost(options: {alone?: boolean} = {}) {
     return held && args[0].path === o.sibling.path ? Promise.resolve({kind: "pending" as const, reason: "held"}) : through.apply(this, args);
   });
   await o.host.update({workspaces, documents: [o.sibling, other], ...stay});
+  if (options.polls) await options.polls.until(o.f, () => o.host.isDocumentReady(o.document));
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const visits = (path: string) => activate.mock.calls.filter(([target]) => target.path === path).length;
   const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
@@ -7801,4 +7830,231 @@ it("keeps pulling a ready workspace every pass while the relay holds no hosted s
   await h.passes(20);
   expect(h.pulls("workspace")).toBe(enrolled);
   h.caughtUp("workspace");
+});
+
+// Issue #1967, round 3: lifecycle work and idle deadlines waited for the next periodic pass to be found.
+// Each test below holds periodic passes, so only the host's own wakes, or a pass the test runs, move it on.
+
+// The engine key of the enrolled document's activation as its retirement settles it through `tip`.
+const retiringKey = (o: Enrolled, tip: {journalCursor: number}) => ({objectId: "object", lineageClaimId: o.document.lineageClaimId, activationId: ACTIVATION,
+  restoreFenceGeneration: o.binding.restoreFenceGeneration, acceptedThrough: tip.journalCursor});
+// Every engine request's method so far, in order.
+const methodsOf = (o: Enrolled) => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+
+// Proves (#3542): reopening a moved document's workspace wakes the pass that gives its restore route back, and
+// Decline wakes the passes that end the route, unload what it loaded and drain the workspace, with no periodic pass.
+it.each(["detaches and attaches", "drops and lists"])("gives a moved document's restore route back after a running host %s its workspace, with passes held", async change => {
+  const polls = heldPolls(), {o, host} = await movedDuringRestore({covered: true, polls});
+  const forgetMoved = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  let passed = false;
+  const nextPass = () => {void afterPasses(o.f, 0).then(() => {passed = true;});};
+  if (change === "detaches and attaches") {
+    nextPass();
+    await host.update({workspaces: [{...o.workspace, maxRegistrations: 7}], documents: [], departing: [o.sibling]});
+  } else {
+    await host.update({workspaces: [], documents: [], departing: []});
+    await vi.waitFor(() => expect(polls.paused()).toBe(true));
+    nextPass();
+    await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  }
+  expect(forgetMoved).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId);
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  // The pass the reopening woke gives the route back.
+  await vi.waitFor(() => expect(passed).toBe(true));
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(host.retains(o.sibling)).toBe(false);
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a stopped document's retirement whose publication pushed a page and had more wakes the pass that pushes
+// the rest, then the passes that confirm the document left and retire it, with no periodic pass.
+it("retires a stopped document whose publication had more pages, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.stop();
+  // The first page pushes one change and has more; the next pushes the rest.
+  let pushes = 0;
+  o.replies.push = {hasMore: true, pushed: 1};
+  o.requestListeners.add(method => {if (method === "sync.push" && ++pushes === 2) o.replies.push = {};});
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(pushes).toBeGreaterThanOrEqual(2);
+  expect(retiringSettles(o, sent).at(-1)).toEqual(["liveApplication.settle", {retirement: key, terminalReceipt: tip}]);
+  expect(o.calls(sent).at(-1)).toBe("liveApplication.releaseActivation");
+  // The last page went out after the last settlement and before the release.
+  const methods = methodsOf(o), released = methods.lastIndexOf("liveApplication.releaseActivation");
+  expect(methods.lastIndexOf("sync.push", released)).toBeGreaterThan(methods.lastIndexOf("liveApplication.settle", released));
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a retirement whose release the engine refuses until the document parks retires once a later pull finds
+// it parked. The pull that finds it wakes the pass that releases it, with no periodic pass.
+it("retires a stopped document once its replica confirms it parked, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.stop();
+  // Its replica lists it departed, so it has not parked, until the first pull after a release was refused.
+  o.replies.commit = {departed: [o.sibling.objectId]};
+  let releases = 0, refused = 0;
+  o.requestListeners.add(method => {
+    if (method === "liveApplication.releaseActivation") releases++;
+    else if (method === "sync.pullHosted" && releases > 0 && refused === 0) {refused = releases; o.replies.commit = {};}
+  });
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(refused).toBeGreaterThan(0);
+  expect(releases).toBeGreaterThan(refused);
+  expect(o.calls(sent).at(-1)).toBe("liveApplication.releaseActivation");
+  expect(o.ownerCalls().slice(sent).at(-1)).toEqual(["liveApplication.releaseActivation", key]);
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a stopped document kept for its recovery copy retires once the copy is saved. The release of the copy's
+// store, as the copy route asks, wakes the passes that retire the document, free its rows and drain the workspace.
+it("retires a stopped document once its recovery copy is saved, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls}), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  const waits = () => errors.mock.calls.some(call => call[0] === "Service activation pass failed." && String(call[1]).includes("recovery copy"));
+  for (let pass = 0; pass < 10 && !waits(); pass++) await polls.run(o.f);
+  expect(waits()).toBe(true);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  expect(o.calls(sent)).not.toContain("liveApplication.reconcileActivation");
+  expect(o.host.drained("workspace")).toBe(false);
+  o.engine.unproven = ["refused"];
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await o.host.releaseKeptEditsStore(k.row()!);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  expect(o.calls(sent)).toContain("liveApplication.releaseActivation");
+  expect(retiredRow(o).retired).toBe(true);
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(k.row()).toBeNull();
+});
+
+// Proves: the supervisor detaches a stopped document's workspace and releases its enrollment once the host drained
+// it. The host's own progress schedules the reconciliation that does it, with periodic passes and reconciliations held.
+it("releases a stopped document's enrollment once its workspace drained, with passes and reconciliations held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({supervised: true, polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  await vi.waitFor(() => expect(o.raw.prepare("SELECT retired,host_drained_at_ms IS NOT NULL AS drained FROM sync_relay_service_host_enrollments").get())
+    .toEqual({retired: 1, drained: 1}), {timeout: 10_000});
+  expect(o.membership.at(-1)?.method).toBe("liveApplication.detachWorkspace");
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: an idle document's deadline wakes the pass that unloads it, at the deadline and not before, and keeps
+// it hosted. Nothing sweeps for idle documents before a deadline is due.
+it("unloads an idle document at its deadline, not before, with passes held", async () => {
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000 - 1);
+  await polls.run(o.f);
+  expect(o.unloaded()).toBe(0);
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // The settled output was published right before the engine unloaded the document.
+  const methods = o.methods();
+  expect(methods[methods.lastIndexOf("liveApplication.unloadDocument") - 1]).toBe("sync.push");
+  expect(o.host.retains(o.sibling)).toBe(true); expect(o.host.settled(o.sibling)).toBe(true);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.host.passCounts().idleSweepsBeforeDue).toBe(0);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a connection that opens while the unload its deadline started is in the engine reloads the document
+// once that unload finishes, with passes held.
+it("reloads a document opened while the unload its deadline started is in the engine, with passes held", async () => {
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.hold(true);
+  const parked = o.park("liveApplication.unloadDocument");
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await parked.entered.promise;
+  o.hold(false);
+  const release = o.editors.acquire(o.sibling), opening = o.host.captureNative(o.binding());
+  parked.release.resolve();
+  const native = await opening;
+  expect(o.unloaded()).toBe(1);
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  release();
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: an idle unload whose reply was lost goes again at its retry deadline, not before, without settling first,
+// and a reconnect sends it once more before reloading the document, with passes held.
+it("sends an unanswered idle unload again at its retry deadline, not before, with passes held", async () => {
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock}), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "Engine connection reset."));
+  expect(o.unloaded()).toBe(1);
+  await vi.waitFor(() => expect(clock.armed()).toContain(630_000));
+  // Passes leave it alone: the engine may have ended its registration.
+  const settles = o.settles().length, visits = o.visits(o.sibling.path);
+  clock.advance(630_000 - 1);
+  await polls.run(o.f);
+  expect(o.unloaded()).toBe(1);
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  clock.advance(630_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+  expect(o.settles().length).toBe(settles);
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  const native = await o.host.captureNative(o.binding());
+  expect(o.unloaded()).toBe(3);
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  expect(o.settles().length).toBe(settles);
+});
+
+// Measures: a ready workspace whose document unloaded idle runs no idle sweep before a deadline and no lifecycle
+// retry, and pulls nothing more, over 100 passes. Before round 3 every pass swept for idle documents.
+it("runs no idle sweep or lifecycle retry, and pulls nothing, over 100 passes of a ready idle workspace", async () => {
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({alone: true, polls, clock});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // What the unload changed on the relay is pulled once.
+  for (let pass = 0; pass < 3; pass++) await polls.run(o.f);
+  const pulls = o.host.hostedPulls("workspace").total;
+  for (let pass = 0; pass < 100; pass++) await polls.run(o.f);
+  expect(o.host.hostedPulls("workspace").total).toBe(pulls);
+  expect(o.host.passCounts()).toEqual({lifecycleRetries: 0, idleSweepsBeforeDue: 0});
+  expect(o.unloaded()).toBe(1);
+  expect(o.host.settled(o.sibling)).toBe(true);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
