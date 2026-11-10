@@ -1059,10 +1059,11 @@ export interface SyncRelayStorage {
     afterRelaySeq: number;
     limit: number;
   }): Array<string | null>;
+  /** False, with nothing written, when the recipient account is being deleted. */
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): void;
+  }): boolean;
   readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
     operation?: { operationId: string; requestJson: string };
