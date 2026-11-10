@@ -38,7 +38,7 @@ import {
 } from "./userSettingsStore";
 
 import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
-import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES } from "../renderer/tokens";
+import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
 import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { createTestScratch } from "../workspaces/testTemp";
 // WSL can expose the Windows temp directory under /mnt, which is slower and

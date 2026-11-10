@@ -2547,6 +2547,15 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
+  sendWorkspaceName: async workspace => {
+    const registered = findWorkspace(workspace.workspaceId);
+    const credentials = cachedCredentials;
+    // Only the owner names the workspace, from a session on its server.
+    if (!registered?.remote || registered.shareView || !credentials ||
+        !workspaceRemoteMatchesCredentials(registered.remote, credentials)) return;
+    await relayShareJsonWithCredentials(credentials, `/sync/workspaces/${encodeURIComponent(workspace.workspaceId)}/name`,
+      { method: "PUT", body: JSON.stringify({ name: basename(workspace.rootPath) }) });
+  },
   collectionsWaitingFor: async workspace => {
     const waiting = await withEngineAdapter(workspace, adapter => adapter.collectionsWaiting());
     if (waiting === null) throw new Error("The workspace engine is not running.");

@@ -8,7 +8,8 @@
     "./session": "./src/session.ts",
     "./signUp": "./src/signUp.ts",
     "./smtp": "./src/smtp.ts",
-    "./accountDeletion": "./src/accountDeletion.ts"
+    "./accountDeletion": "./src/accountDeletion.ts",
+    "./credentialFence": "./src/credentialFence.ts"
   },
   "scripts": {
     "test": "vitest run",

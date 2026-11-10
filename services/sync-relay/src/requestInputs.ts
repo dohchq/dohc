@@ -117,8 +117,8 @@ export function cursorCodec<Cursor extends object>(
 
 export function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // The shares, notices, and link route namespaces take precedence over
-  // workspace routes. Refuse those IDs before accepting a workspace claim.
+  // The relay's own route namespaces take precedence over workspace routes.
+  // Refuse those IDs before accepting a workspace claim.
   if (RESERVED_WORKSPACE_IDS.includes(workspaceId)) throw badRequest("workspaceId is reserved");
   return workspaceId;
 }

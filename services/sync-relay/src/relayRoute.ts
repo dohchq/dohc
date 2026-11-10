@@ -23,6 +23,7 @@ import type {ShareInventoryRoute} from "./shareInventoryRoutes";
 import type {NamedShareTransportRoute} from "./namedShareTransportRoutes";
 import type {ShareProposalRoute, WorkspaceProposalRoute} from "./proposalRoutes";
 import type {CollectionWriteRoute, OwnerCollectionWriteRoute} from "./collectionWriteRoutes";
+import {parsePersonalAgentRoute, type PersonalAgentRoute} from "./personalAgents";
 import {parseShareId, parseString, parseWorkspaceId, relayPathSegments} from "./requestInputs";
 import {notFound} from "./errors";
 import {MAX_ORIGIN_ID_CHARS} from "./wireLimits";
@@ -52,6 +53,8 @@ type SyncRelayRoute =
   | LinkChatRoute
   | { route: "link-collection-writes" }
   | { route: "workspaces" }
+  | { route: "workspace-name"; workspaceId: string }
+  | PersonalAgentRoute
   | NoticeRoute
   | AutomationHostRoute
   | AutomationServerRoute
@@ -115,7 +118,8 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "agent-authorizations") {
     if (parts.length === 3) return { route: "agent-authorizations", action: "begin" };
-    if (parts.length === 4 && (parts[3] === "consent" || parts[3] === "decision")) {
+    if (parts.length === 4 && (parts[3] === "consent" || parts[3] === "decision" ||
+        parts[3] === "personal-consent" || parts[3] === "personal-decision")) {
       return { route: "agent-authorizations", action: parts[3] };
     }
     throw notFound();
@@ -159,6 +163,12 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     return { route: "workspaces" };
   }
   if (parts[0] !== "sync" || !parts[1]) throw notFound();
+  // "workspaces" and "personal-agents" are reserved as workspace ids (parseWorkspaceId), like "notices".
+  if (parts[1] === "workspaces") {
+    if (parts.length === 4 && parts[3] === "name") return { route: "workspace-name", workspaceId: parseWorkspaceId(parts[2]) };
+    throw notFound();
+  }
+  if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
   if (parts[1] === "notices") {
     if (parts.length === 2) return { route: "notices" };

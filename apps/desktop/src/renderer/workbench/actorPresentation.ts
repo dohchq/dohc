@@ -1,6 +1,7 @@
 import type { ActorPresentation, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { ACTOR_HUES } from "@dohc/workspace-contracts/actor-presentation";
-import { palette, identityHues, type IdentityHue } from "../tokens";
+import type { IdentityHue } from "@dohc/workspace-contracts/agent-hues";
+import { palette, identityHues } from "../tokens";
 import { chosenHue, settingsAgentHue, subscribeChosenColors } from "./chosenColors";
 
 export const neutralPresentation: ActorPresentation = { group: "", hue: null, self: false };

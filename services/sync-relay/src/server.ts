@@ -60,6 +60,8 @@ import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { createAgentChatRoutes } from "./agentChatRoutes";
 import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
+import { createPersonalAgents, respondToWorkspaceName, type PersonalAgents } from "./personalAgents";
+import type { CredentialFence } from "@dohc/workspace-auth/credentialFence";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
@@ -129,6 +131,8 @@ export interface CreateSyncRelayHandlerOptions {
   resolveActor: ResolveActor;
   // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
   resolveAccountSession?: ResolveAccountSession;
+  // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
+  credentialFence?: CredentialFence;
   // This server's VAPID public key. Absent means alerts are unavailable here.
   pushVapidPublicKey?: string;
   pushHosts?: ReadonlySet<string>;
@@ -211,6 +215,7 @@ export function createSyncRelayHandler({
   storage,
   resolveActor,
   resolveAccountSession,
+  credentialFence,
   pushVapidPublicKey,
   pushHosts,
   nowMs = () => Date.now(),
@@ -276,7 +281,10 @@ export function createSyncRelayHandler({
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
   linkAuthority: LinkAuthorityResolver;
-  dispose(): void;
+  /** Personal agents' running work and fence, for the routes main composes. */
+  personalAgents: PersonalAgents;
+  /** Stops the fence listener. The Postgres pool can end once it settles. */
+  dispose(): Promise<void>;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
@@ -631,10 +639,13 @@ export function createSyncRelayHandler({
     return fresh;
   };
 
+  const personalAgents = createPersonalAgents({ storage, fence: credentialFence, activity: discussionActivity, nowMs });
+
   // The routes share-web's MCP tool loop calls take a link holder's
   // capability or a connected agent's access token through this one resolver.
   const linkAuthority = createLinkAuthorityResolver({
     storage,
+    personalAgents,
     linkKey,
     publicEditRelease,
     relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
@@ -744,6 +755,8 @@ export function createSyncRelayHandler({
     requireShareWorkspace,
     publicEditRelease,
     activity: discussionActivity,
+    personalAgents,
+    resolveAccountSession,
   });
 
   const respondToAgentChat = createAgentChatRoutes({
@@ -1016,6 +1029,16 @@ export function createSyncRelayHandler({
         }), "");
         return await respondToNotices(request, route, actor.userId);
       }
+      if (route.route === "personal-agents" || route.route === "personal-agent" || route.route === "workspace-name") {
+        // The account's own credential only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.route === "workspace-name" ? route.workspaceId : "");
+        if (route.route === "workspace-name") return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
+        return await personalAgents.respondToOwner(request, route, actor.userId);
+      }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -1143,8 +1166,13 @@ export function createSyncRelayHandler({
   };
   return Object.assign(handle, {
     linkAuthority,
-    dispose(){replicaLinkReads?.close();},
+    personalAgents,
+    dispose() {
+      replicaLinkReads?.close();
+      return personalAgents.dispose();
+    },
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
+      personalAgents.deleteAccount(userId);
       presence.deleteAccount(userId, workspaceIds);
       deletePresenceAccount(userId);
       namedBrowser?.deleteAccount(userId, workspaceIds);

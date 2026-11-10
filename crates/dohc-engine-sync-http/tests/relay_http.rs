@@ -1411,15 +1411,18 @@ fn expected_relay_error(code: &str) -> RelayError {
         "internal_error" => RelayError::ServerInternal,
         "invalid_chat" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
-            RelayError::Forbidden
-        }
+        "link_discussion_blocked"
+        | "link_discussion_paused"
+        | "notice_refused"
+        | "password_incorrect"
+        | "sign_in_again" => RelayError::Forbidden,
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" | "share_access_removed" => RelayError::WorkspaceUnavailable,
         "automation_host_rate_limited" | "notice_rate_limited" => RelayError::HttpStatus(429),
-        "automation_press_rate_limited" => RelayError::HttpStatus(429),
+        "automation_press_rate_limited" | "password_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
+        "personal_agent_unavailable" => RelayError::HttpStatus(503),
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
         "self_share" => RelayError::SelfShare,

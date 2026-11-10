@@ -5,7 +5,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
+import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
 import { chatMentionTokens, handleForName, normalizeHandle, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";

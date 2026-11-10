@@ -19,7 +19,7 @@ it.each([
 
 it("uses the same reserved-ID object as desktop manifest admission", () => {
   expect(RESERVED_WORKSPACE_IDS).toBe(desktopReservedIds);
-  expect(RESERVED_WORKSPACE_IDS).toEqual(["link", "shares", "notices"]);
+  expect(RESERVED_WORKSPACE_IDS).toEqual(["link", "shares", "notices", "workspaces", "personal-agents"]);
   for (const workspaceId of RESERVED_WORKSPACE_IDS) {
     expect(checkManifest({ version: 1, workspaceId, kind: "personal", mode: "local-first" }))
       .toEqual({ status: "reserved-id", workspaceId });

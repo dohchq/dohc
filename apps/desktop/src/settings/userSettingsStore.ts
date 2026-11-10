@@ -3,7 +3,7 @@ import { atomicReplaceFile } from "../atomicReplaceFile";
 import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
 import { join, resolve } from "node:path";
 import { hasPreferredNameControlCharacters } from "@dohc/workspace-contracts/chat-identity-values";
-import { AGENT_HUES } from "../renderer/tokens";
+import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
 import {
   agentProblem, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
   StoredUserSettings,

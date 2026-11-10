@@ -113,6 +113,9 @@ export interface WorkspaceActivityOptions {
     capture: WorkspaceEngineCapture | null,
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
+  // Tells the server the workspace's folder name each time a sync engine
+  // attaches, so personal agent sign-in can show it to the owner.
+  sendWorkspaceName?: (workspace: CreatedWorkspace) => Promise<void>;
   // The engine's answer: Collection updates wait for an unfinished pull. It
   // reads through the owner's open, so it answers only once that open, which
   // abandons a pull when sync is paused, succeeded.
@@ -234,6 +237,14 @@ export function createWorkspaceActivity(
       revision: agentRunRevision,
       active: isAgentAtWork(state.agentRun?.run ?? null),
     };
+  }
+
+  // Sync never waits for the name, and a failed send is only logged.
+  function sendWorkspaceName(workspace: CreatedWorkspace): void {
+    const send = options.sendWorkspaceName;
+    if (!send) return;
+    void (async () => send(workspace))().catch((error: unknown) =>
+      console.warn("[desktop] could not send the workspace name to the server:", error));
   }
 
   function publishAgentRunState(workspaceId: string, active: boolean): void {
@@ -564,6 +575,7 @@ export function createWorkspaceActivity(
       const engine = options.engineFor?.(workspace, entry.capture) ?? null;
       if (engine) {
         entry.engine = engine;
+        sendWorkspaceName(workspace);
         // Initial pull+push runs in the background; status updates stream in
         // through onChange/notify rather than blocking the open.
         void engine.start();
@@ -660,6 +672,7 @@ export function createWorkspaceActivity(
     const engine = options.engineFor?.(workspace, entry.capture, engineOptions) ?? null;
     if (!engine) throw new Error("Cloud sync requires a signed-in server session");
     entry.engine = engine;
+    sendWorkspaceName(workspace);
     try {
       // Propagate first-contact failure: a dead token must surface here, not be
       // swallowed while the UI claims sync is enabled.
@@ -770,6 +783,7 @@ export function createWorkspaceActivity(
       const engine = engineFor(entry.workspace, entry.capture);
       if (engine) {
         entry.engine = engine;
+        sendWorkspaceName(entry.workspace);
         void engine.start();
       }
     }

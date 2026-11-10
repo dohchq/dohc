@@ -277,7 +277,9 @@ export function registerAgentClient(storage: StorageContext, input: {
     storage.db.prepare(`DELETE FROM sync_relay_agent_clients
       WHERE registered_at_ms < ?
         AND NOT EXISTS (SELECT 1 FROM sync_relay_agent_authorizations a WHERE a.client_id = sync_relay_agent_clients.client_id)
-        AND NOT EXISTS (SELECT 1 FROM sync_relay_agent_connections c WHERE c.client_id = sync_relay_agent_clients.client_id)`)
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_agent_connections c WHERE c.client_id = sync_relay_agent_clients.client_id)
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_authorizations a WHERE a.client_id = sync_relay_agent_clients.client_id)
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_connections c WHERE c.client_id = sync_relay_agent_clients.client_id)`)
       .run(nowMs - AGENT_UNUSED_CLIENT_RETENTION_MS);
     const existing = storage.db.prepare("SELECT registration FROM sync_relay_agent_clients WHERE client_id = ?").get(input.clientId);
     if (existing) {
@@ -428,11 +430,64 @@ export function decideAgentAuthorization(storage: StorageContext, input: {
 
 export type AgentTokenGrantResult = { ok: true; connection: AgentConnectionRow } | { ok: false };
 
-function insertTokens(storage: StorageContext, connectionId: string, tokens: { accessTokenHash: string; refreshTokenHash: string }, nowMs: number): void {
-  const insert = storage.db.prepare(`INSERT INTO sync_relay_agent_tokens
+// Link and personal agents keep separate token tables with the same shape.
+// These helpers are the one copy of issuing, code binding, and rotation.
+export type AgentTokenTable = "sync_relay_agent_tokens" | "sync_relay_personal_agent_tokens";
+
+export function insertAgentTokens(
+  storage: StorageContext,
+  table: AgentTokenTable,
+  connectionId: string,
+  tokens: { accessTokenHash: string; refreshTokenHash: string },
+  nowMs: number,
+): void {
+  const insert = storage.db.prepare(`INSERT INTO ${table}
     (token_hash, connection_id, kind, issued_at_ms, expires_at_ms, used_at_ms) VALUES (?, ?, ?, ?, ?, NULL)`);
   insert.run(tokens.accessTokenHash, connectionId, "access", nowMs, nowMs + AGENT_ACCESS_TOKEN_TTL_MS);
   insert.run(tokens.refreshTokenHash, connectionId, "refresh", nowMs, null);
+}
+
+/**
+ * Whether an allowed, unexpired code matches its redemption: client, redirect
+ * address when the client sends one (OAuth 2.1 lets it leave it out),
+ * resource, and PKCE.
+ */
+export function authorizationCodeIsBound(
+  row: Record<string, unknown>,
+  input: { clientId: string; redirectUri: string | null; resourceHash: string; verifierChallenge: string },
+  nowMs: number,
+): boolean {
+  return row.status === "allowed" &&
+    Number(row.expires_at_ms) > nowMs &&
+    String(row.client_id) === input.clientId &&
+    (input.redirectUri === null || String(row.redirect_uri) === input.redirectUri) &&
+    constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) &&
+    constantTimeHashEqual(input.verifierChallenge, String(row.code_challenge));
+}
+
+/** Reusing a refresh token used within the retention ends its connection; one used before is unknown. */
+export function usedRefreshTokenIsRecent(usedAtMs: unknown, nowMs: number): boolean {
+  return usedAtMs !== null && Number(usedAtMs) > nowMs - AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
+}
+
+/**
+ * Spends a refresh token and issues the next pair. It prunes the
+ * connection's expired access tokens and forgotten refresh tokens, so their
+ * number stays bounded.
+ */
+export function rotateAgentTokens(
+  storage: StorageContext,
+  table: AgentTokenTable,
+  connectionId: string,
+  tokens: { refreshTokenHash: string; accessTokenHash: string; nextRefreshTokenHash: string },
+  nowMs: number,
+): void {
+  storage.db.prepare(`UPDATE ${table} SET used_at_ms = ? WHERE token_hash = ?`).run(nowMs, tokens.refreshTokenHash);
+  storage.db.prepare(`DELETE FROM ${table} WHERE connection_id = ? AND
+    ((kind = 'access' AND expires_at_ms <= ?) OR (kind = 'refresh' AND used_at_ms <= ?))`)
+    .run(connectionId, nowMs, nowMs - AGENT_USED_REFRESH_TOKEN_RETENTION_MS);
+  insertAgentTokens(storage, table, connectionId,
+    { accessTokenHash: tokens.accessTokenHash, refreshTokenHash: tokens.nextRefreshTokenHash }, nowMs);
 }
 
 function getConnection(storage: StorageContext, connectionId: string): AgentConnectionRow | null {
@@ -477,12 +532,7 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
     const spend = () => storage.db.prepare("DELETE FROM sync_relay_agent_authorizations WHERE authorization_id = ?")
       .run(authorization.authorizationId);
     const bound =
-      row.status === "allowed" &&
-      Number(row.expires_at_ms) > nowMs &&
-      authorization.clientId === input.clientId &&
-      (input.redirectUri === null || authorization.redirectUri === input.redirectUri) &&
-      constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) &&
-      constantTimeHashEqual(input.verifierChallenge, String(row.code_challenge)) &&
+      authorizationCodeIsBound(row, input, nowMs) &&
       linkBindingIsCurrent(storage, authorization) &&
       input.guard(authorization);
     if (!bound) {
@@ -511,7 +561,7 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
       .run(input.connectionId, authorization.workspaceId, authorization.shareId, authorization.grantId,
         authorization.credentialId, authorization.generation, input.principalId, authorization.clientId,
         authorization.reportedName, input.resourceHash, nowMs, authorization.workspaceId);
-    insertTokens(storage, input.connectionId, input, nowMs);
+    insertAgentTokens(storage, "sync_relay_agent_tokens", input.connectionId, input, nowMs);
     storage.db.prepare(`UPDATE sync_relay_agent_authorizations SET status = 'redeemed', connection_id = ?
       WHERE authorization_id = ?`).run(input.connectionId, authorization.authorizationId);
     upsertLinkUsage(storage, authorization.grantId, nowMs);
@@ -541,9 +591,8 @@ export function refreshAgentTokens(storage: StorageContext, input: {
       WHERE token.token_hash = ? AND token.kind = 'refresh'`).get(input.refreshTokenHash);
     if (!row) return { ok: false };
     const connection = rowToConnection(row);
-    const forgottenBeforeMs = nowMs - AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
     if (row.used_at_ms !== null) {
-      if (Number(row.used_at_ms) > forgottenBeforeMs) {
+      if (usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) {
         retireConnections(storage, "connection_id", connection.connectionId, "retired", nowMs);
       }
       return { ok: false };
@@ -557,11 +606,7 @@ export function refreshAgentTokens(storage: StorageContext, input: {
     ) {
       return { ok: false };
     }
-    storage.db.prepare("UPDATE sync_relay_agent_tokens SET used_at_ms = ? WHERE token_hash = ?").run(nowMs, input.refreshTokenHash);
-    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE connection_id = ? AND
-      ((kind = 'access' AND expires_at_ms <= ?) OR (kind = 'refresh' AND used_at_ms <= ?))`)
-      .run(connection.connectionId, nowMs, forgottenBeforeMs);
-    insertTokens(storage, connection.connectionId, { accessTokenHash: input.accessTokenHash, refreshTokenHash: input.nextRefreshTokenHash }, nowMs);
+    rotateAgentTokens(storage, "sync_relay_agent_tokens", connection.connectionId, input, nowMs);
     return { ok: true, connection };
   });
 }

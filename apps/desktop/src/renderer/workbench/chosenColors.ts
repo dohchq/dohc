@@ -1,5 +1,5 @@
 import { firstAgent, listAgents, type DesktopUserSettings } from "../../settings/userSettings";
-import type { AgentHue, IdentityHue } from "../tokens";
+import type { AgentHue, IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 
 // The colors the settings file chooses for you and your agents. ChatAvatar
 // and canvas presentation subscribe, so a change repaints their colours
