@@ -7327,9 +7327,13 @@ it("stops a document whose kept row still says retrying once its native queue is
   o.f.storage.recordServiceKeptEdits({identity, outboxId: "native-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "edit-d",
     refusalKey: "refusal-d", nowMs: 1});
   expect(o.f.storage.markServiceKeptEditsRetrying(o.f.storage.readServiceKeptEdits(queue)!)).toBe(true);
+  // Stop's fence wakes the pass that begins the retirement, whose reconciliation ends the preparation.
+  // It waits here so the preparation Stop made can be read.
+  const reconciling = o.park("liveApplication.reconcileActivation");
   await expect(hostStop(o)).resolves.toMatchObject({retired: true});
   expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
   expect(o.engine.prepared).toEqual(prepared(o));
+  reconciling.release.resolve();
 });
 
 // Proves: a preparation belongs to the connection that made it. A connection
@@ -8037,7 +8041,11 @@ it("sends an unanswered idle unload again at its retry deadline, not before, wit
   expect(native.invalidated.aborted).toBe(false);
   expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
-  expect(o.settles().length).toBe(settles);
+  // The reload settles the activation it captured; nothing settled while the unload was unanswered.
+  const requests = o.requests();
+  const unloads = requests.flatMap((request, index) => request.method === "liveApplication.unloadDocument" && request.params.objectId === "object" ? [index] : []);
+  expect(unloads).toHaveLength(3);
+  expect(requests.slice(unloads[0], unloads.at(-1)).map(request => request.method)).not.toContain("liveApplication.settle");
 });
 
 // Measures: a ready workspace whose document unloaded idle runs no idle sweep before a deadline and no lifecycle
@@ -8045,10 +8053,12 @@ it("sends an unanswered idle unload again at its retry deadline, not before, wit
 it("runs no idle sweep or lifecycle retry, and pulls nothing, over 100 passes of a ready idle workspace", async () => {
   const polls = heldPolls(), clock = retryClock(), o = await idleHost({alone: true, polls, clock});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // A workspace with no hosted scope pulls every pass, since no reading says when its feed answers again.
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
   clock.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
-  // What the unload changed on the relay is pulled once.
+  // What the enrollment and the unload changed on the relay is pulled once.
   for (let pass = 0; pass < 3; pass++) await polls.run(o.f);
   const pulls = o.host.hostedPulls("workspace").total;
   for (let pass = 0; pass < 100; pass++) await polls.run(o.f);
@@ -8078,7 +8088,8 @@ it("reconciles a retirement's applications across work budgets and settles once 
   const requests = o.client().sendRequest.mock.calls.slice(from).map(call => (call as unknown[])[0] as {method: string; params: {afterReceipt?: unknown}});
   const reconciles = requests.filter(request => request.method === "liveApplication.reconcileActivation");
   expect(reconciles.slice(0, 9).map(request => request.params.afterReceipt)).toEqual([seed, ...[1, 3, 5, 7, 9, 11, 13, 15].map(index => edits[index])]);
-  expect(o.tip()).toEqual(edits[16]);
+  // The retirement moved the activation's row to history.
+  expect(o.retiredTip()).toEqual(edits[16]);
   expect(retiringSettles(o, sent)).toEqual([["liveApplication.settle", {retirement: expect.objectContaining({acceptedThrough: edits[16]!.journalCursor}), terminalReceipt: edits[16]}]]);
   expect(retiredRow(o).boundary.terminalReceipt).toEqual(edits[16]);
   expect(o.host.retains(o.sibling)).toBe(false);
