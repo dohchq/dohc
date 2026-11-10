@@ -30,14 +30,15 @@ export function testPlan(packages) {
 
 // Stop admitting work after failure, then let already-running commands close.
 // Once `more` resolves, one more command can run.
-export async function runBounded(tasks, execute, concurrency = 2, more) {
+export async function runBounded(tasks, execute, concurrency = 2, more, availability) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Test concurrency must be a positive integer.");
   const pending = [...tasks], active = new Set(), resources = new Set();
   let failure, limit = concurrency;
   let widening = more?.then(() => { limit += 1; widening = undefined; });
+  let ready = availability?.changed.then(() => { ready = undefined; }, error => { failure ??= error; ready = undefined; });
   while (pending.length || active.size) {
     while (!failure && active.size < limit) {
-      const index = pending.findIndex(task => !task.resource || !resources.has(task.resource));
+      const index = pending.findIndex(task => (!availability || availability.canRun(task)) && (!task.resource || !resources.has(task.resource)));
       if (index < 0) break;
       const [task] = pending.splice(index, 1);
       if (task.resource) resources.add(task.resource);
@@ -47,10 +48,13 @@ export async function runBounded(tasks, execute, concurrency = 2, more) {
       });
       active.add(work);
     }
-    if (!active.size) break;
-    await Promise.race(widening ? [...active, widening] : active);
+    if (failure && !active.size) break;
+    const changes = [...active, widening, ready].filter(Boolean);
+    if (!changes.length) break;
+    await Promise.race(changes);
   }
   if (failure) throw failure;
+  if (pending.length) throw new Error("Verification tasks never became ready.");
 }
 
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.

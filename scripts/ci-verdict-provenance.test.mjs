@@ -388,17 +388,18 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
     assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
-  assert.deepEqual(jobs.javascript.needs, ["changes", "javascript-prepare", "javascript-pure", "javascript-native", "confinement"]);
+  assert.deepEqual(jobs.javascript.needs, ["changes", "javascript-prepare", "javascript-workers", "confinement"]);
   assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive", "rust-tests", "rust-policy", "confinement"]);
-  for (const [name, scope] of [["javascript-native", "js"], ["rust-tests", "rust"]]) {
-    const job = jobs[name];
-    assert.deepEqual(job.needs, ["changes", scope === "js" ? "javascript-prepare" : "rust-archive"],
-      "artifact consumers must not hold runners while their build is queued");
-    const install = job.steps.findIndex(step => step.name === "Install dependencies");
-    const download = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
-    assert.ok(install >= 0 && install < download);
-    assert.equal(job.steps[download].with.name, `${scope === "js" ? "javascript-prepared" : "rust-tests"}-\${{ github.run_attempt }}`);
-  }
+  const workers = jobs["javascript-workers"];
+  assert.equal(workers.needs, "changes", "pure work can start while native artifacts build");
+  assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");
+  assert.equal(workers.steps.find(step => step.name === "Run the complete assigned inventory").run, "node scripts/verification/cloud.mjs worker ${{ matrix.shard }}");
+  const tests = jobs["rust-tests"];
+  assert.deepEqual(tests.needs, ["changes", "rust-archive"], "Rust execution must not wait for JavaScript");
+  const install = tests.steps.findIndex(step => step.name === "Install dependencies");
+  const download = tests.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+  assert.ok(install >= 0 && install < download);
+  assert.equal(tests.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");
 });
 
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
@@ -465,7 +466,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   }
   // Blacksmith's kernel has no Landlock, so the sandbox suites always run on GitHub's image.
   assert.equal(jobs.confinement["runs-on"], "ubuntu-24.04");
-  for (const name of ["javascript-prepare", "javascript-pure", "javascript-native"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
+  for (const name of ["javascript-prepare", "javascript-workers"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
   for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
@@ -483,7 +484,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const {jobs} = load(workflow);
-  for (const [name, count] of [["javascript-pure", JS_SHARDS], ["javascript-native", JS_SHARDS], ["rust-tests", RUST_SHARDS]]) {
+  for (const [name, count] of [["javascript-workers", JS_SHARDS], ["rust-tests", RUST_SHARDS]]) {
     const job = jobs[name];
     assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count}, (_, index) => index)}, name);
     assert.equal(job.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
@@ -526,7 +527,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
   const jobNames = ["what changed", "confinement", "typecheck + tests", "engine gate", "JS shared preparation", "Rust build once", "Rust policy checks",
-    ...["pure", "native"].flatMap(part => Array.from({length: JS_SHARDS}, (_, index) => `JS ${part} ${index}`)),
+    ...Array.from({length: JS_SHARDS}, (_, index) => `JS worker ${index}`),
     ...Array.from({length: RUST_SHARDS}, (_, index) => `Rust tests ${index}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
     started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));

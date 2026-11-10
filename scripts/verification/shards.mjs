@@ -6,7 +6,29 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = path => path.replaceAll("\\", "/");
 const fileId = path => slash(relative(repoRoot, path));
-export const JS_SHARDS = 8;
+export const JS_SHARDS = 10;
+
+const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
+
+// Partition the same execution units that the runner schedules. A large file
+// stays whole; small files share their package and project initialization.
+export function javascriptGroups(tasks) {
+  const packages = Map.groupBy(tasks.filter(task => task.kind === "vitest"), task => JSON.stringify([task.package, task.project, Boolean(task.native)]));
+  const groups = [];
+  for (const [key, files] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
+    const chunks = [];
+    for (const task of files.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
+      const chunk = chunks.filter(chunk => chunk.weight + task.weight <= 60).sort((a, b) => b.weight - a.weight)[0];
+      if (chunk) { chunk.tasks.push(task); chunk.weight += task.weight; }
+      else chunks.push({ tasks: [task], weight: task.weight });
+    }
+    groups.push(...chunks.map((chunk, index) => ({ ...chunk, id: `vitest-group:${key}:${index}`, kind: "vitest", pkg: files[0].package,
+      native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : null,
+      weight: Math.max(...chunk.tasks.map(task => task.weight), chunk.weight / (files[0].package === "@dohc/app-backend-runtime" ? 1 : 2)) + 4 })));
+  }
+  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), weight: task.weight })));
+  return groups;
+}
 
 export function partitionTasks(tasks, count) {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error("A shard count must be a positive integer.");

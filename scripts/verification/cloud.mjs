@@ -1,16 +1,19 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
 import { changedFiles, desktopProofCommand, passedSpecTitles, postgres, readSelfHostDeliveryProof } from "./verify.mjs";
 import { selectsRepositoryTests } from "./selection.mjs";
-import { JS_SHARDS, assertTaskCoverage, javascriptTasks, partitionTasks } from "./shards.mjs";
+import { JS_SHARDS, assertTaskCoverage, javascriptGroups, javascriptTasks, partitionTasks } from "./shards.mjs";
 import { runBounded } from "./js-tests.mjs";
+import { waitForPreparation } from "./wait-preparation.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
 
 export { JS_SHARDS };
 const output = resolve(repoRoot, ".agent-artifacts/verification/cloud", process.argv[2] ?? "unknown", process.argv[3] ?? "0");
-const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 
 export async function cloudPlan() {
   const changed = process.env.PR_BASE_SHA ? changedFiles(process.env.PR_BASE_SHA) : null;
@@ -25,12 +28,10 @@ function passingBrowserReport(path) {
   return report;
 }
 
-async function runJavascript(tasks, record, save) {
+async function runJavascript(groups, record, save, availability) {
+  const tasks = groups.flatMap(group => group.tasks);
   const selected = new Map(tasks.map(task => [task.id, task]));
-  const packages = Map.groupBy(tasks.filter(task => task.kind === "vitest"), task => task.package);
-  const groups = [...packages].map(([pkg, tasks]) => ({ kind: "vitest", pkg, tasks,
-    resource: databasePackages.has(pkg) ? "postgres" : null, weight: tasks.reduce((n, task) => n + task.weight, 0) }));
-  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ kind: task.kind, tasks: [task], weight: task.weight })));
+  groups = [...groups];
   groups.sort((a, b) => b.weight - a.weight);
   const step = async (name, action) => {
     const row = { name }; record.steps.push(row);
@@ -96,9 +97,31 @@ async function runJavascript(tasks, record, save) {
   }
   // This test replaces the packaged runtime. Its readers finish first.
   const runtime = groups.filter(group => group.tasks.some(task => task.id.includes("stage-app-backend-runtime.test.mjs")));
-  await runBounded(groups.filter(group => !runtime.includes(group)), execute, 2);
+  await runBounded(groups.filter(group => !runtime.includes(group)), execute, 2, undefined, availability);
   for (const group of runtime) await execute(group);
   assertTaskCoverage([...selected.values()], [{ ...record, verdict: "PASS" }]);
+}
+
+async function restoreNativePreparation() {
+  const { artifact, deadline } = await waitForPreparation("js");
+  if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("Native artifact transfer exceeded the JavaScript gate budget.");
+  const response = await fetch(`${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/artifacts/${artifact.id}/zip`, {
+    headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+    signal: AbortSignal.timeout(Math.min(60_000, remaining)),
+  });
+  if (!response.ok || !response.body) throw new Error(`Cannot download the prepared artifact: HTTP ${response.status}.`);
+  const temporary = mkdtempSync(join(tmpdir(), "dohc-js-prepared-"));
+  const zip = join(temporary, "artifact.zip"), archive = join(temporary, "javascript-prepared.tar.zst");
+  try {
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(zip));
+    await run("unzip", ["-o", "-j", zip, "javascript-prepared.tar.zst", "-d", temporary], { log: join(output, "artifact-unzip.log") });
+    await run("tar", ["-I", "zstd", "-xf", archive], { cwd: repoRoot, log: join(output, "artifact-restore.log") });
+    return assertPrepared();
+  } finally {
+    rmSync(zip, { force: true }); rmSync(archive, { force: true }); rmdirSync(temporary);
+  }
 }
 
 export async function cloudJavascript(part, index = 0) {
@@ -107,6 +130,7 @@ export async function cloudJavascript(part, index = 0) {
   const record = { version: 1, scope: "js", part: `${part}-${index}`, commit: git(["rev-parse", "HEAD"]), steps: [], tests: [], completed: [], verdict: "RUNNING" };
   const finish = startTiming(record);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(record, null, 2) + "\n");
+  const step = (name, action) => { const row = { name }; record.steps.push(row); return timed(row, action, save); };
   save();
   let database;
   try {
@@ -114,22 +138,39 @@ export async function cloudJavascript(part, index = 0) {
       await prepare({ install: false, output });
       record.build = assertPrepared();
     } else {
-      if (!["pure", "native"].includes(part) || !Number.isSafeInteger(index) || index < 0 || index >= JS_SHARDS) throw new Error("Use pure|native with a valid shard index.");
+      if (part !== "worker" || !Number.isSafeInteger(index) || index < 0 || index >= JS_SHARDS) throw new Error("Use worker with a valid shard index.");
       process.env.DOHC_REQUIRE_ENGINE_E2E = "1";
       process.env.DOHC_REQUIRE_POSTGRES = "1";
       process.env.DOHC_TEST_ENGINE_BINARY = stagedEnginePath;
-      const tasks = (await cloudPlan()).filter(task => Boolean(task.native) === (part === "native"));
+      const tasks = await step("test inventory", cloudPlan);
       record.planned = tasks.map(task => task.id);
-      const shard = partitionTasks(tasks, JS_SHARDS)[index];
-      record.assigned = shard.map(task => task.id);
+      const shard = partitionTasks(javascriptGroups(tasks), JS_SHARDS)[index];
+      record.assigned = shard.flatMap(group => group.tasks.map(task => task.id));
       save();
-      if (part === "native") {
-        record.build = assertPrepared();
-        process.env.DOHC_QA_OUTPUT = output;
-      }
-      database = await postgres(output);
-      process.env.POSTGRES_URL = database.url;
-      await runJavascript(shard, record, save);
+      process.env.DOHC_QA_OUTPUT = output;
+      let nativeReady = !shard.some(group => group.native);
+      const preparation = nativeReady ? Promise.resolve() : step("native preparation", async () => {
+        const actions = [restoreNativePreparation().then(build => { record.build = build; })];
+        if (shard.some(group => ["desktop", "accounts"].includes(group.kind))) actions.push(step("browser installation", () =>
+          run(...pnpm(["exec", "playwright", "install", "chromium"]), { log: join(output, "browser-install.log") })));
+        const results = await Promise.allSettled(actions);
+        const failure = results.find(result => result.status === "rejected");
+        if (failure) throw failure.reason;
+        nativeReady = true;
+      });
+      // Observe preparation failure immediately, including while PostgreSQL starts.
+      preparation.catch(() => {});
+      let workFailure;
+      try {
+        if (shard.some(group => group.resource === "postgres" || ["desktop", "accounts", "self-host-native"].includes(group.kind))) {
+          database = await step("postgres", () => postgres(output));
+          process.env.POSTGRES_URL = database.url;
+        }
+        await runJavascript(shard, record, save, { changed: preparation, canRun: group => !group.native || nativeReady });
+      } catch (error) { workFailure = error; }
+      const [prepared] = await Promise.allSettled([preparation]);
+      if (workFailure) throw workFailure;
+      if (prepared.status === "rejected") throw prepared.reason;
     }
     record.verdict = "PASS";
   } catch (error) {

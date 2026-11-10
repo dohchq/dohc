@@ -44,6 +44,32 @@ test("package scheduling bounds concurrency and serializes shared database consu
   assert.equal(active.size, 0);
 });
 
+test("pure work fills both lanes before native preparation and admits native work when ready", async () => {
+  const preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
+  let ready = false;
+  const changed = preparation.promise.then(() => { ready = true; });
+  const tasks = [{ name: "native", native: true }, { name: "pure-one" }, { name: "pure-two" }];
+  const run = runBounded(tasks, async task => {
+    started.push(task.name);
+    if (task.name === "pure-two") second.resolve();
+    if (task.native) { native.resolve(); return; }
+    if (task.name === "pure-one") await release.promise;
+    else await preparation.promise;
+  }, 2, undefined, { changed, canRun: task => !task.native || ready });
+  await second.promise;
+  assert.deepEqual(started, ["pure-one", "pure-two"]);
+  preparation.resolve();
+  await native.promise;
+  assert.deepEqual(started, ["pure-one", "pure-two", "native"]);
+  release.resolve();
+  await run;
+  const failure = new Error("preparation failed");
+  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
+    { changed: Promise.reject(failure), canRun: () => false }), error => error === failure);
+  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
+    { changed: Promise.resolve(), canRun: () => false }), /never became ready/);
+});
+
 test("a freed lane runs a waiting package beside the running ones", async () => {
   const more = deferred(), hold = deferred(), second = deferred(), started = [];
   const run = runBounded([{name: "one"}, {name: "two"}, {name: "waiting"}], async task => {
@@ -62,13 +88,13 @@ test("a freed lane runs a waiting package beside the running ones", async () => 
 });
 
 test("a failed package stops admission and waits for its running sibling", async () => {
-  const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), started = [];
+  const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), more = deferred(), started = [];
   const run = runBounded([{name:"fail"}, {name:"sibling"}, {name:"must-not-start"}], async task => {
     started.push(task.name);
     if (task.name === "fail") { await entered.promise; throw failure; }
     entered.resolve();
     await sibling.promise;
-  });
+  }, 2, more.promise);
   // Observe rejection immediately so the test cannot create an unhandled rejection.
   const outcome = run.then(() => assert.fail("must fail"), error => assert.equal(error, failure));
   await entered.promise;

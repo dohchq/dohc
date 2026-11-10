@@ -6,19 +6,17 @@ import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS }
 export function aggregateJavascript(records) {
   const preparation = records.filter(record => record.part === "prepare-0");
   if (preparation.length !== 1 || preparation[0].verdict !== "PASS") throw new Error("The shared JavaScript preparation did not pass.");
-  const shards = records.filter(record => /^(pure|native)-\d+$/u.test(record.part));
-  const expectedParts = ["pure", "native"].flatMap(part => Array.from({ length: JS_SHARDS }, (_, index) => `${part}-${index}`));
+  const shards = records.filter(record => /^worker-\d+$/u.test(record.part));
+  const expectedParts = Array.from({ length: JS_SHARDS }, (_, index) => `worker-${index}`);
   if (records.length !== expectedParts.length + 1 || shards.length !== expectedParts.length
     || expectedParts.some(part => shards.filter(record => record.part === part).length !== 1)) throw new Error("JavaScript shard evidence is missing, duplicated, or unexpected.");
   if (new Set(records.map(record => record.commit)).size !== 1) throw new Error("JavaScript parts examined different commits.");
-  const expected = [];
-  for (const part of ["pure", "native"]) {
-    const parts = shards.filter(record => record.part.startsWith(`${part}-`));
-    const inventory = [...parts[0].planned].sort();
-    for (const row of parts) if (JSON.stringify([...row.planned].sort()) !== JSON.stringify(inventory)) throw new Error(`JavaScript ${part} inventories disagree.`);
-    expected.push(...inventory.map(id => ({ id })));
-    for (const row of parts) if (JSON.stringify([...row.assigned].sort()) !== JSON.stringify([...row.completed].sort())) throw new Error(`Incomplete JavaScript shard ${row.part}.`);
+  const inventory = [...shards[0].planned].sort();
+  for (const row of shards) {
+    if (JSON.stringify([...row.planned].sort()) !== JSON.stringify(inventory)) throw new Error("JavaScript worker inventories disagree.");
+    if (JSON.stringify([...row.assigned].sort()) !== JSON.stringify([...row.completed].sort())) throw new Error(`Incomplete JavaScript shard ${row.part}.`);
   }
+  const expected = inventory.map(id => ({ id }));
   assertTaskCoverage(expected, shards);
   if (records.filter(record => record.selfHostNative).length !== 1) throw new Error("The native delivery and restart proof did not produce its evidence.");
   return { tasks: expected.length, tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })) };
@@ -50,7 +48,7 @@ export function aggregateRust(records) {
 function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
   return ["what changed", "confinement", ...(scope === "js"
-    ? ["typecheck + tests", "JS shared preparation", ...["pure", "native"].flatMap(part => Array.from({ length: JS_SHARDS }, (_, index) => `JS ${part} ${index}`))]
+    ? ["typecheck + tests", "JS shared preparation", ...Array.from({ length: JS_SHARDS }, (_, index) => `JS worker ${index}`)]
     : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS }, (_, index) => `Rust tests ${index}`)])];
 }
 

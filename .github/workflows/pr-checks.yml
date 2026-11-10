@@ -265,8 +265,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-  javascript-pure:
-    name: JS pure ${{ matrix.shard }}
+  javascript-workers:
+    name: JS worker ${{ matrix.shard }}
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
@@ -283,55 +283,12 @@ jobs:
           - 5
           - 6
           - 7
+          - 8
+          - 9
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - name: Run the complete assigned inventory
-        run: node scripts/verification/cloud.mjs pure ${{ matrix.shard }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-js-pure-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-  javascript-native:
-    name: JS native ${{ matrix.shard }}
-    needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
-    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard:
-          - 0
-          - 1
-          - 2
-          - 3
-          - 4
-          - 5
-          - 6
-          - 7
-    env:
-      DOHC_CONFINEMENT_SUITES: exclude
-      CARGO_INCREMENTAL: '0'
+      GITHUB_TOKEN: ${{ github.token }}
       PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -348,24 +305,12 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - name: Install browser
-        run: pnpm exec playwright install chromium
-      - name: Wait for the shared build within the complete gate budget
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/verification/wait-preparation.mjs js
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: javascript-prepared-${{ github.run_attempt }}
-          path: /tmp
-      - name: Restore prepared artifacts
-        run: tar -I zstd -xf /tmp/javascript-prepared.tar.zst
-      - name: Run the complete assigned native inventory
-        run: node scripts/verification/cloud.mjs native ${{ matrix.shard }}
+      - name: Run the complete assigned inventory
+        run: node scripts/verification/cloud.mjs worker ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: verification-js-native-${{ matrix.shard }}-${{ github.run_attempt }}
+          name: verification-js-worker-${{ matrix.shard }}-${{ github.run_attempt }}
           path: .agent-artifacts/verification/cloud/**
           include-hidden-files: true
           if-no-files-found: error
@@ -376,8 +321,7 @@ jobs:
     needs:
       - changes
       - javascript-prepare
-      - javascript-pure
-      - javascript-native
+      - javascript-workers
       - confinement
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
@@ -471,7 +415,7 @@ jobs:
           compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, rust-archive, javascript]
+    needs: [changes, rust-archive]
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' && needs.rust-archive.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
@@ -489,14 +433,6 @@ jobs:
           - 5
           - 6
           - 7
-          - 8
-          - 9
-          - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'

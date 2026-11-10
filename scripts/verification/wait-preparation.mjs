@@ -41,7 +41,7 @@ export async function waitForPreparation(scope, { env = process.env, request = f
     if (!Array.isArray(artifacts)) throw new Error("The preparation artifact inventory is missing.");
     const matching = artifacts.filter(artifact => artifact.name === name && !artifact.expired);
     if (matching.length > 1) throw new Error(`Duplicate preparation artifact ${name}.`);
-    if (matching.length === 1 && builds.length === 1) return;
+    if (matching.length === 1 && builds.length === 1) return { artifact: matching[0], deadline };
     const remaining = deadline - now();
     if (remaining <= 0) throw overBudget();
     await pause(Math.min(10_000, remaining));

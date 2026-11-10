@@ -3,10 +3,10 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertTaskCoverage, nativeTestFiles, partitionTasks } from "./shards.mjs";
+import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionTasks } from "./shards.mjs";
 import { aggregateJavascript, aggregateRust } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_PARTITION_PAIRS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
 
@@ -60,13 +60,35 @@ test("native fixture dependencies propagate through helpers and cycles", () => {
   assert.deepEqual(nativeTestFiles(["native-test", "pure-test"], { dependencies: file => graph.get(file), roots: ["engine"] }), new Set(["native-test"]));
 });
 
+test("execution groups preserve files, projects, native prerequisites, and command tasks", () => {
+  const files = Array.from({ length: 30 }, (_, index) => ({ id: `file-${index}`, kind: "vitest", package: index % 2 ? "@dohc/workspace-api" : "desktop",
+    project: index % 3 ? "node" : "dom", native: index % 4 === 0, weight: index + 1 }));
+  const tasks = [...files, { id: "typecheck", kind: "command", weight: 100 }];
+  const groups = javascriptGroups(tasks);
+  for (const group of groups.filter(group => group.kind === "vitest")) {
+    assert.equal(new Set(group.tasks.map(task => task.package)).size, 1);
+    assert.equal(new Set(group.tasks.map(task => task.project)).size, 1);
+    assert.equal(new Set(group.tasks.map(task => task.native)).size, 1);
+    assert.equal(group.native, group.tasks[0].native);
+    assert.equal(group.resource === "postgres", group.pkg === "@dohc/workspace-api");
+  }
+  assert.deepEqual(javascriptGroups(tasks.toReversed()), groups);
+  assertTaskCoverage(tasks, partitionTasks(groups, JS_SHARDS).map((groups, part) => ({ part, verdict: "PASS", completed: groups.flatMap(group => group.tasks.map(task => task.id)) })));
+});
+
+test("paired Rust workers retain all sixteen nextest partitions exactly once", () => {
+  assert.deepEqual(RUST_PARTITION_PAIRS.flat().toSorted((a, b) => a - b), Array.from({ length: 16 }, (_, index) => index));
+  assert.equal(RUST_PARTITION_PAIRS.length, RUST_SHARDS);
+  assert.ok(RUST_PARTITION_PAIRS[0].includes(0));
+});
+
 test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
   const records = [{ part: "prepare-0", commit: "head", verdict: "PASS" }];
-  for (const part of ["pure", "native"]) for (let index = 0; index < JS_SHARDS; index++) records.push({
-    part: `${part}-${index}`, commit: "head", verdict: "PASS", planned: Array.from({ length: JS_SHARDS }, (_, id) => `${part}-${id}`),
-    assigned: [`${part}-${index}`], completed: [`${part}-${index}`], tests: [], ...(part === "native" && !index ? { selfHostNative: {} } : {}),
+  for (let index = 0; index < JS_SHARDS; index++) records.push({
+    part: `worker-${index}`, commit: "head", verdict: "PASS", planned: Array.from({ length: JS_SHARDS }, (_, id) => `task-${id}`),
+    assigned: [`task-${index}`], completed: [`task-${index}`], tests: [], ...(!index ? { selfHostNative: {} } : {}),
   });
-  assert.equal(aggregateJavascript(records).tasks, JS_SHARDS * 2);
+  assert.equal(aggregateJavascript(records).tasks, JS_SHARDS);
   for (const mutate of [
     rows => rows.pop(), rows => { rows[1].completed = []; }, rows => { rows[1].verdict = "FAIL"; },
     rows => { rows[1].commit = "other"; }, rows => { rows[1].planned.push("forgotten"); }, rows => rows.push(rows[1]),

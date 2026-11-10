@@ -8,7 +8,9 @@ import { readTreeState, classifyTreeProvenance } from "../../tools/rust-engine-p
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 
-export const RUST_SHARDS = 16;
+// Pair the sixteen nextest partitions by the complete cold run's durations.
+export const RUST_PARTITION_PAIRS = [[0, 5], [11, 9], [2, 6], [10, 15], [7, 12], [14, 13], [3, 8], [1, 4]];
+export const RUST_SHARDS = RUST_PARTITION_PAIRS.length;
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 export const RUST_ARCHIVE_PROOFS = ["test fixtures"];
 export const RUST_TEST_PROOFS = ["reader tests"];
@@ -62,22 +64,30 @@ export async function cloudRust(part, index = 0) {
       writeFileSync(resolve(".agent-artifacts/verification/rust-inventory.json"), JSON.stringify(report.planned));
     } else if (part === "tests" && Number.isSafeInteger(index) && index >= 0 && index < RUST_SHARDS) {
       const all = JSON.parse(readFileSync(resolve(".agent-artifacts/verification/rust-inventory.json"), "utf8"));
-      const partition = `hash:${index + 1}/${RUST_SHARDS}`;
       report.planned = all;
+      report.assigned = [];
       // CARGO_BIN_EXE in the integration binary retains the build's target path.
       // Extract once into this checkout, then reuse its metadata for execution.
       const listed = await step("inventory", "cargo", ["nextest", "list", "--archive-file", archive,
-        "--workspace-remap", repoRoot, "--extract-to", repoRoot, "--partition", partition, "--message-format=json"]);
-      report.assigned = rustTestInventory(JSON.parse(listed.stdout)).map(task => task.id);
+        "--workspace-remap", repoRoot, "--extract-to", repoRoot, "--message-format=json"]);
+      const extracted = rustTestInventory(JSON.parse(listed.stdout)).map(task => task.id);
+      if (JSON.stringify(extracted.sort()) !== JSON.stringify([...all].sort())) throw new Error("The extracted Rust archive inventory differs from its build.");
       const reused = ["--cargo-metadata", join(repoRoot, "target/nextest/cargo-metadata.json"),
         "--binaries-metadata", join(repoRoot, "target/nextest/binaries-metadata.json"),
         "--workspace-remap", repoRoot, "--target-dir-remap", join(repoRoot, "target")];
       scratch = join(testScratchParent(), `cloud-${randomUUID()}`);
       mkdirSync(scratch);
       writeFileSync(join(scratch, SCRATCH_SENTINEL), "cloud");
-      const result = await step("test-workspace", "cargo", ["nextest", "run", ...reused, "--partition", partition, "--no-fail-fast", "--no-tests=fail", "--retries=0", "--status-level=pass", "--final-status-level=none"],
-        { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });
-      report.completed = passedRustTests(result.stdout + "\n" + result.stderr);
+      for (const part of RUST_PARTITION_PAIRS[index]) {
+        const partition = `hash:${part + 1}/${RUST_PARTITION_PAIRS.flat().length}`;
+        const listed = await step(`inventory-${part}`, "cargo", ["nextest", "list", ...reused, "--partition", partition, "--message-format=json"]);
+        report.assigned.push(...rustTestInventory(JSON.parse(listed.stdout)).map(task => task.id));
+        save();
+        const result = await step(`test-workspace-${part}`, "cargo", ["nextest", "run", ...reused, "--partition", partition, "--no-fail-fast", "--no-tests=fail", "--retries=0", "--status-level=pass", "--final-status-level=none"],
+          { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });
+        report.completed.push(...passedRustTests(result.stdout + "\n" + result.stderr));
+        save();
+      }
       if (JSON.stringify([...report.completed].sort()) !== JSON.stringify([...report.assigned].sort())) throw new Error("The Rust shard did not pass every assigned test exactly once.");
       if (index === 0) await step("reader tests", process.execPath, ["tools/rust-engine-program/reader-tests.mjs", ...reused],
         { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });

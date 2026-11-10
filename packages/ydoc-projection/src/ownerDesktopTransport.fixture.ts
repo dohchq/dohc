@@ -14,6 +14,7 @@ import {copyFileSync,mkdirSync,readFileSync,writeFileSync} from "node:fs";
 import {join,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {DatabaseSync} from "node:sqlite";
+import {getCACertificates,setDefaultCACertificates} from "node:tls";
 import {afterAll,afterEach,expect,vi} from "vitest";
 import {LiveCommittedDeliveryStore} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import {beginStopRestore,advanceStopRestoreFence,readStopRestore} from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
@@ -84,6 +85,7 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
   const workspace = {workspaceId: "workspace",rootPath: workspaceRoot,attachmentId: Symbol("actual-owner")};
   const capture = createWorkspaceEngineCapture({...workspace,rustEngineSessions: sessions});
   let closeNetwork: (() => Promise<void>) | undefined;
+  let restoreTrustedRoots: (() => void) | undefined;
   let ipc: ReturnType<typeof createEngineYDocSessionIpc> | undefined;
   let renderer: Awaited<ReturnType<typeof bindEngineYDoc>> | undefined;
   let deployment: ReturnType<typeof openRelayDeployment> | undefined;
@@ -177,6 +179,9 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)}}});
     relay.on("upgrade",control.handleUpgrade);
     const {certificate, key} = await ensureLocalhostTls();
+    const trustedRoots = getCACertificates("default");
+    setDefaultCACertificates([...trustedRoots,readFileSync(certificate,"utf8")]);
+    restoreTrustedRoots = () => setDefaultCACertificates(trustedRoots);
     const share = createTlsServer({cert: readFileSync(certificate),key: readFileSync(key)}); share.listen(0,"127.0.0.1"); await once(share,"listening");
     const sharePort = (share.address() as {port: number}).port;
     const bridge = createDeviceControlBridge({publicHosts: new Set([`localhost:${sharePort}`]),relayUrl: `http://127.0.0.1:${relayPort}`,relayExchangeKey: exchangeKey,limits,
@@ -555,6 +560,7 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
     await attempt(() => restoreOutboxRequests?.());
     await attempt(async () => {if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}});
     await attempt(() => closeNetwork?.());
+    await attempt(() => restoreTrustedRoots?.());
     await attempt(() => renderer?.destroy());
     await attempt(() => ipc?.shutdown());
     await attempt(() => capture.stop());
