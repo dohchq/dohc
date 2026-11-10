@@ -19,59 +19,6 @@ struct Params {
     action: HeldChangeAction,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dohc_engine_protocol::transport::RequestContext;
-    use dohc_engine_testkit::ScratchDir;
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn held_drop_and_undo_refuse_received_share_and_read_only_handles() {
-        for received in [false, true] {
-            let scratch = ScratchDir::new().unwrap();
-            let service = EngineService::new();
-            let params = json!({"rootDir":scratch.path(), "workspaceId":"held-permission",
-                "captureMode":"none", "projectCollections":received});
-            let opened = service
-                .workspace_open(&RequestContext::unbounded(), params.clone())
-                .await
-                .unwrap();
-            let owner: WorkspaceHandle =
-                serde_json::from_value(opened["workspace"].clone()).unwrap();
-            let handle = if received {
-                owner.clone()
-            } else {
-                let mut read_only = params;
-                read_only["skipStartupMaintenance"] = json!(true);
-                let attached = service
-                    .workspace_open(&RequestContext::unbounded(), read_only)
-                    .await
-                    .unwrap();
-                serde_json::from_value(attached["workspace"].clone()).unwrap()
-            };
-            for action in ["review", "drop", "undo"] {
-                let mut params = json!({"path":"note.md","action":action});
-                if action != "review" {
-                    params["token"] = json!("a".repeat(64));
-                }
-                assert_eq!(
-                    service
-                        .held_note_change(Some(handle.clone()), params)
-                        .await
-                        .unwrap_err()
-                        .code,
-                    ErrorCode::Forbidden
-                );
-            }
-            if !received {
-                service.workspace_close(Some(handle)).await.unwrap();
-            }
-            service.workspace_close(Some(owner)).await.unwrap();
-        }
-    }
-}
-
 impl EngineService {
     pub(super) async fn held_note_change(
         &self,
@@ -158,5 +105,58 @@ impl EngineService {
         })
         .await
         .map_err(|_| WireError::new(ErrorCode::Internal, "held change task failed"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_protocol::transport::RequestContext;
+    use dohc_engine_testkit::ScratchDir;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn held_drop_and_undo_refuse_received_share_and_read_only_handles() {
+        for received in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let service = EngineService::new();
+            let params = json!({"rootDir":scratch.path(), "workspaceId":"held-permission",
+                "captureMode":"none", "projectCollections":received});
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), params.clone())
+                .await
+                .unwrap();
+            let owner: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).unwrap();
+            let handle = if received {
+                owner.clone()
+            } else {
+                let mut read_only = params;
+                read_only["skipStartupMaintenance"] = json!(true);
+                let attached = service
+                    .workspace_open(&RequestContext::unbounded(), read_only)
+                    .await
+                    .unwrap();
+                serde_json::from_value(attached["workspace"].clone()).unwrap()
+            };
+            for action in ["review", "drop", "undo"] {
+                let mut params = json!({"path":"note.md","action":action});
+                if action != "review" {
+                    params["token"] = json!("a".repeat(64));
+                }
+                assert_eq!(
+                    service
+                        .held_note_change(Some(handle.clone()), params)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Forbidden
+                );
+            }
+            if !received {
+                service.workspace_close(Some(handle)).await.unwrap();
+            }
+            service.workspace_close(Some(owner)).await.unwrap();
+        }
     }
 }
