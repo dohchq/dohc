@@ -1445,6 +1445,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
     // Meanwhile the user shares the channel with someone else, and that
     // lookup answers first.
+    await user.click(screen.getByTestId("chats-share-add-people"));
     await user.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await user.click(screen.getByTestId("chats-share-submit"));
     await waitFor(() => expect(answerShares).toHaveLength(3));
