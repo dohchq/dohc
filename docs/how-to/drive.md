@@ -233,7 +233,7 @@ The Origin CA certificate serves only the app hosts. It is not the edge certific
    cd /srv/dohc-release
    sudo install -d -m 0755 /etc/dohc
    sudo node tools/self-host/bootstrap.mjs init --origin https://drive.dohc.computer --name "dohc Drive" \
-     --image dohc-self-host:<release-revision> --env-file /etc/dohc/drive.env
+     --image dohc-self-host:<release-revision> --env-path /etc/dohc/drive.env
    ```
 
    The file belongs to root and has mode 0600. `drive.mjs` refuses it with any other owner or mode.
@@ -291,7 +291,7 @@ If it does not, stop and report before changing the certificate setup.
 1. **Operator:** Run the check. It changes nothing:
 
    ```sh
-   sudo node /srv/dohc-drive/tools/drive/drive.mjs check --bundle /srv/dohc-release --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid>
+   sudo node /srv/dohc-drive/tools/drive/drive.mjs check --bundle /srv/dohc-release --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid>
    ```
 
    `drive.mjs` checks the release, the configuration file's owner and mode, the Drive settings, the CA and app certificate files, the image, and IPv6.
@@ -301,7 +301,7 @@ If it does not, stop and report before changing the certificate setup.
 2. **Approval:** Start the deployment for the first time, only after approval:
 
    ```sh
-   sudo node /srv/dohc-drive/tools/drive/drive.mjs start --first-start --bundle /srv/dohc-release --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid>
+   sudo node /srv/dohc-drive/tools/drive/drive.mjs start --first-start --bundle /srv/dohc-release --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid>
    ```
 
    Before it starts anything, `drive.mjs` asks Neon whether it holds dohc accounts, and refuses if it does.
@@ -316,7 +316,7 @@ If it does not, stop and report before changing the certificate setup.
    ```sh
    sudo tee /etc/cron.d/dohc-drive-disk >/dev/null <<'EOF'
    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-   17 * * * * root node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid> >/dev/null 2>&1
+   17 * * * * root node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid> >/dev/null 2>&1
    EOF
    ```
 
@@ -448,7 +448,7 @@ Do this on a Linux host other than the Droplet, with the same release bundle and
    ```sh
    cd <release-bundle>
    node scripts/self-host/recovery.mjs verify "$HOME/drive-check/verified" --snapshot "$HOME/drive-check/offsite/<snapshot-file>" \
-     --env-file "$HOME/drive-check/drive.env"
+     --env-path "$HOME/drive-check/drive.env"
    ```
 
 5. **Operator:** Delete the folder whether the check passed or failed. It holds the configuration and unencrypted workspace data:
@@ -489,7 +489,7 @@ Record the times when the job stopped, the alert arrived, the job started, and t
 1. **Operator:** Run the watch with a limit of 1%, so that it reports a failure:
 
    ```sh
-   sudo node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid> --limit 1
+   sudo node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid> --limit 1
    ```
 
    It exits with status 1 and ends with `Reported this to the disk check.`
@@ -532,7 +532,7 @@ A copy rolls back the relay database and its continuity record together, and the
 9. **Operator:** Run the move:
 
    ```sh
-   sudo node /srv/dohc-drive/tools/drive/drive.mjs move --bundle /srv/dohc-release --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid>
+   sudo node /srv/dohc-drive/tools/drive/drive.mjs move --bundle /srv/dohc-release --env-path /etc/dohc/drive.env --volume-uuid <volume-uuid>
    ```
 
 10. **Operator:** [Check that only Cloudflare reaches the origin](#check-that-only-cloudflare-reaches-the-origin).
@@ -566,7 +566,7 @@ Salvage the files from the latest snapshot:
 1. **Operator:** Run `drive.mjs check` with the current bundle. Update only a server that passes it.
 2. **Operator:** Build the new release and copy the Drive recipe from the same commit, as in [Build and copy the release](#build-and-copy-the-release).
 3. **Provider:** If the new bundle's `tools/self-host/cloudflare-proxies.caddy` changed, update the Cloud Firewall's Cloudflare ranges to match.
-4. **Operator:** Follow [Back up and maintain the deployment](self-host.md#back-up-and-maintain-the-deployment), using `--env-file /etc/dohc/drive.env`.
+4. **Operator:** Follow [Back up and maintain the deployment](self-host.md#back-up-and-maintain-the-deployment), using `--env-path /etc/dohc/drive.env`.
 5. **Operator:** Run `drive.mjs check` with the new bundle.
 6. **Operator:** Replace the password manager copy of `/etc/dohc/drive.env`. The upgrade changes `DOHC_IMAGE`.
 

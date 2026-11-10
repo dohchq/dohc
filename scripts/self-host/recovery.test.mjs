@@ -89,7 +89,7 @@ test("ambiguous bind-mount parents are refused before Docker changes", async t =
 
 test("archive failure after stop never restarts services", async t => {
   const root = await fixture(t), mock = runner();
-  const options = parseRecoveryArguments(["archive", join(root, "archive"), "--env-file", join(root, "missing.env")]);
+  const options = parseRecoveryArguments(["archive", join(root, "archive"), "--env-path", join(root, "missing.env")]);
   await assert.rejects(runRecovery(options, mock.run, () => {}, ["compose"]), /ENOENT/);
   assert.equal(mock.calls.some(args => args.includes("stop")), true);
   assert.equal(mock.calls.some(args => args.includes("start")), false);
@@ -107,7 +107,7 @@ test("restore and failed maintenance remain stopped", async t => {
 test("snapshot runs online and never stops, restarts or deletes anything", async t => {
   const root = await fixture(t), mock = runner(), envFile = join(root, "env");
   await writeFile(envFile, "DOHC_SNAPSHOT_KEY=key-from-env\n");
-  await runRecovery(parseRecoveryArguments(["snapshot", join(root, "offsite"), "--env-file", envFile]), mock.run, () => {}, ["compose"]);
+  await runRecovery(parseRecoveryArguments(["snapshot", join(root, "offsite"), "--env-path", envFile]), mock.run, () => {}, ["compose"]);
   assert.equal(mock.calls.some(args => args.includes("stop") || args.includes("start") || args.includes("rm") || args.includes("down")), false);
   const run = mock.calls.find(args => args.includes("run"));
   assert.deepEqual(run.slice(run.indexOf("relay-snapshot")), ["relay-snapshot", "snapshot", "--database", "/data/sync-relay.sqlite",
@@ -122,7 +122,7 @@ test("verify mounts no deployment volume and passes only the snapshot key", asyn
   await writeFile(snapshot, "sealed");
   const calls = [];
   const run = (args, env) => { calls.push({ args, env }); return args.includes("config") ? JSON.stringify(config) : "verified"; };
-  await runRecovery(parseRecoveryArguments(["verify", join(root, "checked"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]);
+  await runRecovery(parseRecoveryArguments(["verify", join(root, "checked"), "--snapshot", snapshot, "--env-path", envFile]), run, () => {}, ["compose"]);
   const verify = calls.at(-1);
   assert.deepEqual(verify.env, { DOHC_SNAPSHOT_KEY: "key-from-env" });
   assert.equal(verify.args.filter(value => value.startsWith("type=volume")).length, 0);
@@ -130,7 +130,7 @@ test("verify mounts no deployment volume and passes only the snapshot key", asyn
   assert.ok(verify.args.includes(`type=bind,source=${root},target=/source,readonly`));
   assert.equal(calls.some(({ args }) => args.includes("stop") || args[0] === "volume"), false);
   await mkdir(join(root, "existing"));
-  await assert.rejects(runRecovery(parseRecoveryArguments(["verify", join(root, "existing"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]), /new directory/);
+  await assert.rejects(runRecovery(parseRecoveryArguments(["verify", join(root, "existing"), "--snapshot", snapshot, "--env-path", envFile]), run, () => {}, ["compose"]), /new directory/);
   assert.throws(() => parseRecoveryArguments(["verify", join(root, "checked")]));
   assert.throws(() => parseRecoveryArguments(["backup", join(root, "b"), "--snapshot", snapshot]));
 });
@@ -141,7 +141,7 @@ test("snapshot and verify refuse to run without a snapshot key", async t => {
   await writeFile(snapshot, "sealed");
   for (const args of [["snapshot", join(root, "offsite")], ["verify", join(root, "checked"), "--snapshot", snapshot]]) {
     const mock = runner();
-    await assert.rejects(runRecovery(parseRecoveryArguments([...args, "--env-file", envFile]), mock.run, () => {}, ["compose"]),
+    await assert.rejects(runRecovery(parseRecoveryArguments([...args, "--env-path", envFile]), mock.run, () => {}, ["compose"]),
       /Set DOHC_SNAPSHOT_KEY in .* to the snapshot key/);
     assert.deepEqual(mock.calls, []);
   }
@@ -150,7 +150,7 @@ test("snapshot and verify refuse to run without a snapshot key", async t => {
 test("invalid settings are refused before Docker runs", async t => {
   const root = await fixture(t), mock = runner(), envFile = join(root, "deployment.env");
   await writeFile(envFile, "DOHC_POSTGRES_HOST=db.provider.invalid:5432/dohc?sslmode=disable&unused=\n");
-  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot"), "--env-file", envFile]), mock.run, () => {}),
+  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot"), "--env-path", envFile]), mock.run, () => {}),
     /Set DOHC_POSTGRES_HOST to your database host name/);
   assert.deepEqual(mock.calls, []);
 });

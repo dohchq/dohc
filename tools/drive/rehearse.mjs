@@ -51,7 +51,7 @@ if (run("docker", ["ps", "--all", "--quiet"]).output.trim() || run("docker", ["v
   throw new Error("Docker already has containers or volumes on this server. Run the rehearsal first, on a new server, before the deployment exists.");
 }
 
-const drive = (command, uuid, extra = []) => run(process.execPath, [join(recipe, "drive.mjs"), command, "--bundle", bundle, "--env-file", envFile,
+const drive = (command, uuid, extra = []) => run(process.execPath, [join(recipe, "drive.mjs"), command, "--bundle", bundle, "--env-path", envFile,
   "--volume-uuid", uuid, ...extra], { allowFailure: true });
 const compose = (file, ...args) => run("docker", composeArgs(file, readSettings(file), ...args), { cwd: bundle });
 const neonEnv = { REHEARSAL_POSTGRES_PASSWORD: "", REHEARSAL_TLS_DIRECTORY: tls, REHEARSAL_POSTGRES_ADDRESS: neonAddress, REHEARSAL_NETWORK: `${owner}_dohc` };
@@ -159,7 +159,7 @@ try {
   chmodSync(join(tls, "app.key"), 0o600);
 
   run(process.execPath, [join(bundle, "tools/self-host/bootstrap.mjs"), "init", "--origin", `https://${publicHost}`, "--name", "dohc Drive rehearsal",
-    "--image", values.image, "--env-file", envFile], { cwd: bundle });
+    "--image", values.image, "--env-path", envFile], { cwd: bundle });
   const settings = { ...parseEnv(readFileSync(envFile, "utf8")),
     DOHC_DEPLOYMENT_NAME: owner, DOHC_BEHIND_CLOUDFLARE: "1", DOHC_RELAY_AUTOMATIONS: "0", DOHC_DATA_DIRECTORY: join(mount, "dohc"),
     DOHC_NETWORK_SUBNET: `${subnet}.0/24`, DOHC_NETWORK_IP_RANGE: `${subnet}.128/25`, DOHC_GATEWAY_ADDRESS: `${subnet}.2`, DOHC_SHARE_WEB_ADDRESS: `${subnet}.3`,

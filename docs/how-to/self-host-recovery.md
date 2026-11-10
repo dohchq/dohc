@@ -107,7 +107,7 @@ If SQLite journals remain after an unclean shutdown, backup refuses before copyi
 Try a normal start and clean stop only if continuity permits it.
 Otherwise, preserve a private deployment archive for further recovery work.
 
-Use `--env-file PATH` for a different environment file.
+Use `--env-path PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
 Use `--project-name NAME` if your deployment overrides the Compose project name.
 The shared configuration reader includes the private-network and data-disk overlays automatically.
@@ -432,7 +432,7 @@ The command refuses to start anything in these cases:
 - Docker cannot complete one of these checks.
 
 Otherwise it starts the deployment and runs the same checks as `node scripts/check-self-host.mjs --running`.
-Use `--env-file PATH` for a different environment file.
+Use `--env-path PATH` for a different environment file.
 If you changed `DOHC_DEPLOYMENT_NAME`, use that name in the accounts volume commands.
 
 If the command refuses, check the disk mount, `DOHC_DATA_DIRECTORY` and the accounts volume.

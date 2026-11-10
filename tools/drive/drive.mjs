@@ -6,8 +6,8 @@ import { posix } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
 
-const usage = `node tools/drive/drive.mjs check|start|move --bundle DIR --env-file PATH --volume-uuid UUID [--first-start]
-node tools/drive/drive.mjs disk-watch --env-file PATH --volume-uuid UUID [--limit PERCENT]
+const usage = `node tools/drive/drive.mjs check|start|move --bundle DIR --env-path PATH --volume-uuid UUID [--first-start]
+node tools/drive/drive.mjs disk-watch --env-path PATH --volume-uuid UUID [--limit PERCENT]
 
 check   Checks this host, the release, the configuration and the mounted volume, then runs the release check.
 start   Runs the same checks, then starts the deployment. Add --first-start only for the deployment's first start.
@@ -28,11 +28,11 @@ export function parseDriveArguments(args) {
   let parsed;
   try {
     parsed = parseArgs({ args, allowPositionals: true, strict: true, options: {
-      bundle: { type: "string" }, "env-file": { type: "string" }, "volume-uuid": { type: "string" }, "first-start": { type: "boolean" },
+      bundle: { type: "string" }, "env-path": { type: "string" }, "volume-uuid": { type: "string" }, "first-start": { type: "boolean" },
       limit: { type: "string" } } });
   } catch { throw new Error(usage); }
   const { values, positionals } = parsed, [command] = positionals, watch = command === "disk-watch";
-  if (positionals.length !== 1 || !["check", "start", "move", "disk-watch"].includes(command) || !values["env-file"] || !values["volume-uuid"] ||
+  if (positionals.length !== 1 || !["check", "start", "move", "disk-watch"].includes(command) || !values["env-path"] || !values["volume-uuid"] ||
     (watch ? values.bundle !== undefined : !values.bundle)) {
     throw new Error(usage);
   }
@@ -44,9 +44,9 @@ export function parseDriveArguments(args) {
   if (watch) {
     const limit = values.limit ?? "70";
     if (!/^[1-9][0-9]?$/.test(limit)) throw new Error("Set --limit to a whole percentage from 1 to 99.");
-    return { command, envFile: posix.resolve(values["env-file"]), volumeUuid: values["volume-uuid"], limit: Number(limit) };
+    return { command, envFile: posix.resolve(values["env-path"]), volumeUuid: values["volume-uuid"], limit: Number(limit) };
   }
-  return { command, bundle: posix.resolve(values.bundle), envFile: posix.resolve(values["env-file"]), volumeUuid: values["volume-uuid"],
+  return { command, bundle: posix.resolve(values.bundle), envFile: posix.resolve(values["env-path"]), volumeUuid: values["volume-uuid"],
     firstStart: Boolean(values["first-start"]) };
 }
 
@@ -273,9 +273,9 @@ async function watchDisk(options, settings, host) {
 }
 
 const releaseCommands = {
-  check: options => ["scripts/check-self-host.mjs", "--env-file", options.envFile],
-  start: options => ["scripts/check-self-host.mjs", "--start", ...(options.firstStart ? ["--first-start"] : []), "--env-file", options.envFile],
-  move: options => ["scripts/self-host/move.mjs", "--env-file", options.envFile],
+  check: options => ["scripts/check-self-host.mjs", "--env-path", options.envFile],
+  start: options => ["scripts/check-self-host.mjs", "--start", ...(options.firstStart ? ["--first-start"] : []), "--env-path", options.envFile],
+  move: options => ["scripts/self-host/move.mjs", "--env-path", options.envFile],
 };
 
 export async function runDrive(options, host = systemHost) {

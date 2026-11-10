@@ -72,7 +72,7 @@ const changed = calls => calls.some(([command, ...args]) => command === "docker"
 
 test("move checks volumes, accounts and the relay deployment through Docker before starting and checking the deployment", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = host();
-  runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {});
+  runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {});
   const check = mock.calls.find(call => call.includes("relay-initialize"));
   assert.ok(check.includes("tools/self-host/compose.data-disk.yml"));
   assert.deepEqual(check.slice(check.indexOf("run")), ["run", "--rm", "--no-deps", "-T", "--entrypoint", "node", "relay-initialize", "-e", check.at(-1)]);
@@ -83,7 +83,7 @@ test("move checks volumes, accounts and the relay deployment through Docker befo
   assert.ok(probe.includes("type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly"));
   // The accounts volume is inspected before a container mounts it, so a missing volume is never created.
   assert.ok(mock.calls.findIndex(call => call.includes("dohc-self-host_dohc_self_host_postgres") && call.includes("inspect")) < mock.calls.indexOf(probe));
-  assert.deepEqual(mock.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  assert.deepEqual(mock.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-path", path]);
   assert.equal(changed(mock.calls), false);
 });
 
@@ -95,13 +95,13 @@ test("move never starts when a file the deployment needs is missing", async t =>
     [["/continuity/deployment.json", "/data/sync-relay.sqlite"], /No relay deployment found in \/mnt\/disk\/dohc/]];
   for (const [missing, refusal] of refusals) {
     const mock = host({ files: deployment.filter(file => !missing.includes(file)) });
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal, missing.join());
+    assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), refusal, missing.join());
     assert.equal(started(mock.calls), false, missing.join());
     assert.equal(changed(mock.calls), false, missing.join());
   }
   // Snapshot state and host data on the disk are not a relay deployment.
   const leftovers = host({ files: ["/pg/PG_VERSION", "/snapshots/notifications.json", "/host-data/automations/replica.db"] });
-  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), leftovers.run, () => {}), /No relay deployment found in \/mnt\/disk\/dohc/);
+  assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), leftovers.run, () => {}), /No relay deployment found in \/mnt\/disk\/dohc/);
   assert.equal(started(leftovers.calls), false);
 });
 
@@ -122,7 +122,7 @@ test("move never starts when Docker cannot complete a check", async t => {
   for (const [fail, refusal] of failures) {
     // Without the failure every check passes, as the first test shows, so the failed check alone must refuse.
     const mock = host({ fail, containers, volumes });
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), refusal);
     assert.equal(started(mock.calls), false, String(refusal));
   }
 });
@@ -150,7 +150,7 @@ test("move refuses while a running container can write the deployment's storage 
   ];
   for (const [options, named] of writers) {
     const mock = host(options);
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
+    assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}),
       { message: `Running containers can write this deployment's storage. Stop them before you start the deployment here: ${named}.` });
     // The refusal comes before any container runs, including the relay check.
     assert.equal(mock.calls.some(call => call.includes("run") || call.includes("relay-initialize")), false, named);
@@ -165,13 +165,13 @@ test("move starts beside read-only mounts and containers that write other folder
       { Type: "volume", Name: "dohc-self-host_dohc_self_host_postgres", RW: false }),
     container("other", { Type: "bind", Source: "/mnt/disk/dohc-old", RW: true }, { Type: "bind", Source: "/mnt/disk/other/sync-relay", RW: true }),
   ] });
-  runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {});
+  runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {});
   assert.equal(started(mock.calls), true);
 });
 
 test("move never mounts a missing accounts volume", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = host({ volumes: {} });
-  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /holds no accounts database/);
+  assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), /holds no accounts database/);
   assert.deepEqual(mock.calls.filter(([, first]) => first === "run"), []);
   assert.equal(started(mock.calls), false);
 });
@@ -180,24 +180,24 @@ test("with an external database, move needs dohc accounts there and keeps every 
   const path = await envFile(t, externalSettings);
   const accountsCheck = calls => calls.find(call => call.includes("check-accounts"));
   const moved = host({ external: "present", files: deployment.slice(1) });
-  runMove(parseMoveArguments(["--env-file", path]), moved.run, () => {});
+  runMove(parseMoveArguments(["--env-path", path]), moved.run, () => {});
   assert.ok(accountsCheck(moved.calls).includes("tools/self-host/compose.external-postgres.yml"));
   assert.ok(moved.calls.some(call => call.includes("relay-initialize")));
   // No local accounts volume exists, so nothing inspects or mounts one.
   assert.ok(!moved.calls.some(call => call.some(value => value.includes("dohc_self_host_postgres"))));
-  assert.deepEqual(moved.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  assert.deepEqual(moved.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-path", path]);
   const refusals = [[{ external: "missing" }, /Database dohc on db\.provider\.invalid holds no dohc accounts/],
     [{ external: "present", fail: args => args.includes("check-accounts") }, /Could not check database dohc on db\.provider\.invalid/],
     [{ external: "present", files: ["/continuity/deployment.json"] }, /missing its record or its database/]];
   for (const [options, refusal] of refusals) {
     const mock = host(options);
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), refusal);
     assert.equal(started(mock.calls), false, String(refusal));
     assert.equal(changed(mock.calls), false, String(refusal));
   }
   // A running writer refuses before the accounts check connects to the database.
   const written = host({ external: "present", containers: [container("old-sync-relay-1", { Type: "bind", Source: "/mnt/disk/dohc/sync-relay", RW: true })] });
-  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), written.run, () => {}), /Running containers can write this deployment's storage/);
+  assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), written.run, () => {}), /Running containers can write this deployment's storage/);
   assert.equal(accountsCheck(written.calls), undefined);
 });
 
@@ -207,7 +207,7 @@ test("move refuses existing volumes stored outside the data disk and leaves them
     const name = `dohc-self-host_${Object.keys(folders).find(key => folders[key] === folder)}`;
     for (const volume of [{ Driver: "local", Options: null }, { Driver: "local", Options: { ...bind(folder), device: `/mnt/old-disk/dohc/${folder}` } }]) {
       const mock = host({ volumes: { ...accounts, [name]: volume } });
-      assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
+      assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}),
         new RegExp(`Docker volume ${name} keeps its data in .*, not /mnt/disk/dohc/${folder}`));
       assert.ok(mock.calls.every(([command, ...args]) => command === "docker" && (args.includes("config") || args[0] === "volume" && args[1] === "inspect")));
     }
@@ -216,7 +216,7 @@ test("move refuses existing volumes stored outside the data disk and leaves them
 
 test("move refuses a deployment that keeps relay data in host volumes before Docker runs", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=\n"), mock = host();
-  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /Set DOHC_DATA_DIRECTORY/);
+  assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), /Set DOHC_DATA_DIRECTORY/);
   assert.deepEqual(mock.calls, []);
 });
 
@@ -226,13 +226,13 @@ test("move refuses invalid settings before Docker or the database sees them", as
     ["POSTGRES_DB=..\n", /Use only letters, digits, underscores, hyphens and dots in POSTGRES_DB/]];
   for (const [setting, refusal] of refusals) {
     const path = await envFile(t, externalSettings + setting), mock = host({ external: "present" });
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.throws(() => runMove(parseMoveArguments(["--env-path", path]), mock.run, () => {}), refusal);
     assert.deepEqual(mock.calls, [], setting);
   }
 });
 
 test("move accepts only an env file option", () => {
-  for (const args of [["--env-file"], ["--env-file", "--start"], ["--project-name", "dohc"], ["extra"]]) {
-    assert.throws(() => parseMoveArguments(args), /move\.mjs \[--env-file PATH\]/);
+  for (const args of [["--env-path"], ["--env-path", "--start"], ["--project-name", "dohc"], ["extra"]]) {
+    assert.throws(() => parseMoveArguments(args), /move\.mjs \[--env-path PATH\]/);
   }
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -188,6 +189,19 @@ test('bootstrap generates a snapshot key and settings refuse snapshot storage wi
   assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_ALERT_EMAIL: '' }).some(error => error.includes('DOHC_SNAPSHOT_ALERT_EMAIL')));
   assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_S3_ENDPOINT: 'http://storage.invalid' }).some(error => error.includes('HTTPS origin')));
   assert.ok(validateSettings({ ...settings(), DOHC_SNAPSHOT_HEARTBEAT_URL: 'http://heartbeat.invalid' }).some(error => error.includes('HEARTBEAT')));
+});
+
+test('bootstrap init creates the environment file named by --env-path', () => {
+  // Node reads --env-file from anywhere on its command line, so the scripts take --env-path instead.
+  const root = mkdtempSync(join(tmpdir(), 'dohc-bootstrap-')), envFile = join(root, 'custom.env');
+  try {
+    const result = spawnSync(process.execPath, ['tools/self-host/bootstrap.mjs', 'init', '--origin', 'https://dohc.team.invalid',
+      '--image', 'dohc-self-host:v1', '--env-path', envFile], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const created = parseEnv(readFileSync(envFile, 'utf8'));
+    assert.equal(created.DOHC_PUBLIC_ORIGIN, 'https://dohc.team.invalid');
+    assert.equal(created.DOHC_IMAGE, 'dohc-self-host:v1');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('a data directory selects the data-disk overlay for relay, continuity, host data and snapshot staging only', () => {

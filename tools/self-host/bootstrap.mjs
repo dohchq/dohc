@@ -52,14 +52,14 @@ export function updateImageSetting(original, image) {
 function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     origin: { type: 'string' }, mode: { type: 'string' }, name: { type: 'string' }, image: { type: 'string' },
-    'env-file': { type: 'string', default: '.env.self-host' }, help: { type: 'boolean' },
+    'env-path': { type: 'string', default: '.env.self-host' }, help: { type: 'boolean' },
   } });
   if (values.help || !positionals.length) {
-    console.log('init --origin https://HOST [--mode public|private] [--name NAME] [--image IMAGE] [--env-file PATH]\nnetwork | start | stop [--env-file PATH]\nupgrade --image IMAGE [--env-file PATH]\nInitialization never replaces an existing file or network route. Stop preserves every data volume.');
+    console.log('init --origin https://HOST [--mode public|private] [--name NAME] [--image IMAGE] [--env-path PATH]\nnetwork | start | stop [--env-path PATH]\nupgrade --image IMAGE [--env-path PATH]\nInitialization never replaces an existing file or network route. Stop preserves every data volume.');
     return;
   }
   if (positionals[0] === 'network') {
-    const settings = readSettings(values['env-file']);
+    const settings = readSettings(values['env-path']);
     console.log(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? privateRouteInstructions(settings).join('\n') :
       settings.DOHC_BEHIND_CLOUDFLARE === '1' ?
         `Point Cloudflare DNS for ${settings.DOHC_PUBLIC_HOST} only to this host's IPv4 (A) record. Do not configure an origin AAAA record. Restrict inbound origin connections to Cloudflare's ranges using the provider's network firewall or Docker's DOCKER-USER chain. See docs/how-to/self-host.md for certificate setup requirements.` :
@@ -67,7 +67,7 @@ function main() {
     return;
   }
   if (['start', 'stop', 'upgrade'].includes(positionals[0])) {
-    const action = positionals[0], envFile = values['env-file'], settings = readSettings(envFile);
+    const action = positionals[0], envFile = values['env-path'], settings = readSettings(envFile);
     if (action === 'upgrade') {
       if (!values.image || !/^[a-zA-Z0-9][a-zA-Z0-9./_:@-]+$/.test(values.image)) throw new Error('Use upgrade --image RELEASE_IMAGE.');
       const errors = validateSettings({ ...settings, DOHC_IMAGE: values.image });
@@ -84,7 +84,7 @@ function main() {
     }
     const result = action === 'stop'
       ? spawnSync('docker', composeArgs(envFile, settings, 'stop'), {stdio: 'inherit'})
-      : spawnSync(process.execPath, ['scripts/check-self-host.mjs', '--start', '--env-file', envFile], {stdio: 'inherit'});
+      : spawnSync(process.execPath, ['scripts/check-self-host.mjs', '--start', '--env-path', envFile], {stdio: 'inherit'});
     if (result.error || result.status !== 0) throw new Error(action === 'upgrade'
       ? 'Upgrade did not become ready. Preserve the current data and inspect logs; no rollback was attempted.'
       : `${action} failed. Inspect the reported service error.`);
@@ -94,8 +94,8 @@ function main() {
   const settings = initialSettings(values);
   let content = readFileSync(new URL('../../.env.self-host.example', import.meta.url), 'utf8');
   for (const [key, value] of Object.entries(settings)) content = content.replace(new RegExp(`^${key}=.*$`, 'm'), () => `${key}='${value}'`);
-  writeFileSync(values['env-file'], content, { flag: 'wx', mode: 0o600 });
-  console.log(`Created ${values['env-file']}. Restrict access to this file and preserve its secrets during upgrades.`);
+  writeFileSync(values['env-path'], content, { flag: 'wx', mode: 0o600 });
+  console.log(`Created ${values['env-path']}. Restrict access to this file and preserve its secrets during upgrades.`);
   console.log('Copy DOHC_SNAPSHOT_KEY to a password manager or other store away from this host. Lost keys make relay snapshots unreadable.');
   console.log('Set the SMTP values before starting the server. No network or containers were changed.');
   console.log(`Connection URL: ${values.origin}`);
