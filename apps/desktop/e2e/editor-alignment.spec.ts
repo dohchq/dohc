@@ -118,6 +118,7 @@ async function measure(page: import("@playwright/test").Page): Promise<BlockEdge
       boxes: {
         hr: box(q(":scope > hr")),
         pre: box(q(":scope > pre")),
+        toolbar: box(q(":scope > .dohc-code-block-toolbar")),
         table: box(q("table")),
         callout: box(q(".dohc-callout")),
         checkbox: box(taskItems[0]?.querySelector("input[type='checkbox']") ?? null),
@@ -233,6 +234,11 @@ function expectTextOnEdge({ edges, boxes }: BlockEdges, edge: number) {
   for (const key of ["pre", "callout"] as const) {
     expect(boxes[key], `${key} frame must render`).not.toBeNull();
     expect.soft(Math.abs(edge - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`).toBeLessThanOrEqual(1.5);
+  }
+  // The code block's toolbar spans its frame.
+  expect(boxes.toolbar, "code toolbar must render").not.toBeNull();
+  for (const side of ["left", "right"] as const) {
+    expect.soft(Math.abs(boxes.toolbar![side] - boxes.pre![side]), `code toolbar's ${side} edge meets its frame's`).toBeLessThanOrEqual(1.5);
   }
   for (const [key, left] of [
     ["checkbox", boxes.checkbox?.left],

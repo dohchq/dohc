@@ -1157,7 +1157,9 @@ body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  /* Matches the widened code-block frame (measure + 2 block insets). */
+  /* Matches the widened code-block frame (measure + 2 block insets), past
+   * the measure every editor child is capped at. */
+  max-width: none;
   width: calc(
     min(var(--dohc-editor-measure), 100% - 2 * var(--dohc-editor-gutter))
       + 2 * var(--dohc-editor-block-inset)
