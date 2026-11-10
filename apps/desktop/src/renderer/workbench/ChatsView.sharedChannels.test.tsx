@@ -1084,13 +1084,16 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(document.activeElement).toBe(joins[1]);
     expect(joins[1]!.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
     const row = joins[1]!.closest("li")!;
-    expect(row.getAttribute("aria-current")).toBe("true");
+    // The view reports the reveal as it sets the mark, which shows a render later.
+    await waitFor(() => expect(row.getAttribute("aria-current")).toBe("true"));
     expect(row.className).toContain("bg-selected");
     expect(joins[0]!.closest("li")!.getAttribute("aria-current")).toBeNull();
     act(() => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
     });
-    expect(row.getAttribute("aria-current")).toBeNull();
+    // The view may start listening for the key press a render after it marks
+    // the row. A key press before that clears the mark once the view sees the count.
+    await waitFor(() => expect(row.getAttribute("aria-current")).toBeNull());
     expect(row.className).not.toContain("bg-selected");
   });
 

@@ -38,7 +38,8 @@ describe("ChatsView direct messages", () => {
     const accept = screen.getByTestId("chats-dm-request-accept");
     expect(document.activeElement).toBe(accept);
     const row = screen.getByTestId("chats-dm-request-item");
-    expect(row.getAttribute("aria-current")).toBe("true");
+    // The view reports the reveal as it sets the mark, which shows a render later.
+    await waitFor(() => expect(row.getAttribute("aria-current")).toBe("true"));
     expect(row.className).toContain("bg-selected");
     act(() => {
       fireEvent.pointerDown(window);
