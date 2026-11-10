@@ -151,7 +151,9 @@ export const DatasetRequest = z.discriminatedUnion("action", [
     changeSha256: sha256.describe("The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.").optional() }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
-    input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
+    input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    invocationId: identity.describe("A fresh id for this running request. cancelInvoke requests cancellation; retry with the same input and idempotencyKey.").optional() }).strict(),
+  z.object({ ...workspace, action: z.literal("cancelInvoke"), invocationId: identity }).strict(),
 ]);
 export type DatasetRequest = z.infer<typeof DatasetRequest>;
 export const DatasetPreparation = z.object({ preparationId: identity, revision, sourceDigest: sha256 }).strict();
@@ -224,6 +226,7 @@ export const DatasetListRefusal = z.discriminatedUnion("kind", [
 ]);
 export type DatasetListRefusal = z.infer<typeof DatasetListRefusal>;
 export const DatasetResult = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("invoke-cancel-requested"), outcome: z.literal("unknown") }).strict(),
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
   DatasetDeleted.extend({ kind: z.literal("deleted") }).strict(),
@@ -296,4 +299,5 @@ export const DATASET_CAPABILITIES = {
   approveMigration: "dataset.migration.approve",
   discardMigration: "dataset.migration.discard",
   invoke: "dataset.operation.invoke",
+  cancelInvoke: "dataset.operation.cancel",
 } as const satisfies Record<DatasetRequest["action"], CapabilityId>;

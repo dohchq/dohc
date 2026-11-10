@@ -59,6 +59,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   pendingAttempts: ["pending-attempts"],
   reconcileAttempt: ["attempt-reconciled"],
   cancelAttempt: ["attempt-cancelled"],
+  cancelInvoke: ["invoke-cancel-requested"],
   export: ["exported"],
   prepareRecovery: ["recovery-prepared"],
   claimRecovery: ["recovery-claimed"],

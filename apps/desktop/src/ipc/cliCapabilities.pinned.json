@@ -173,7 +173,8 @@
       "dataset.schema.change.prepare",
       "dataset.migration.approve",
       "dataset.migration.discard",
-      "dataset.operation.invoke"
+      "dataset.operation.invoke",
+      "dataset.operation.cancel"
     ],
     "appPublication": [
       "app.link.create",
@@ -364,6 +365,7 @@
     "chat file-mentions": "chat.read",
     "file duplicate": "file.duplicate",
     "chat links": "chat.read",
-    "notices list": "notice.list"
+    "notices list": "notice.list",
+    "dataset cancelInvoke": "dataset.operation.cancel"
   }
 }

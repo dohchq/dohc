@@ -165,11 +165,15 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
     const sequence = request.current;
     signal.throwIfAborted();
-    const result = await bridge().dataset({ ...addressInput(input), action: "invoke" });
-    signal.throwIfAborted();
+    const invocationId = crypto.randomUUID();
+    const cancel = () => { void bridge().dataset({ action: "cancelInvoke", workspaceId: input.workspaceId, invocationId }).catch(() => {}); };
+    signal.addEventListener("abort", cancel, { once: true });
+    let result;
+    try { result = await bridge().dataset({ ...addressInput(input), action: "invoke", invocationId }); }
+    finally { signal.removeEventListener("abort", cancel); }
     if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
     if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
-    if (sequence === request.current) setCopy(result.copy);
+    if (sequence === request.current && !signal.aborted) setCopy(result.copy);
     return result;
   };
   const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, revision: dataset?.revision, revisionSha256: dataset?.revisionSha256, invoke, onError,
@@ -401,7 +405,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
       onExport={exportRecovery} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
-      onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
+      onError={onError} onClose={() => setCustomAction(null)} onSettled={() => setRecordsVersion(value => value + 1)} />}
     {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
       files={[automationsFile(automations.collectionPath, automations.fileMade)]} onOpenFile={onOpenFile} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}

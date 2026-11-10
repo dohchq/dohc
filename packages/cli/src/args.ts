@@ -1060,6 +1060,10 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     take: [{ field: "reference", from: "pendingAttempts", path: "entries[].reference" }],
     notes: ["Set acknowledge to true."],
   },
+  cancelInvoke: {
+    summary: "Request cancellation of a running Collection action.",
+    notes: ["Use the invocationId sent with invoke. The action may already have changed records. Check records or History. Retry with the same input and idempotencyKey."],
+  },
   export: {
     summary: "Save a private recovery archive of a Collection.",
     required: ["savePath"],
@@ -1134,6 +1138,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     notes: [
       "Use describe to find approved operation IDs.",
       "Retry an uncertain write with the same input and idempotencyKey.",
+      "Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.",
     ],
   },
 };

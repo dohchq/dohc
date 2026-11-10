@@ -368,6 +368,21 @@ it("recovers committed data after the worker dies before finalization", async ()
   expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "once", value: "saved" }]);
 });
 
+it("keeps a committed action when cancellation arrives before finalization and replays its retry once", async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "finalize" && !cancelled) { cancelled = true; controller.abort(); }
+    else controls.deliver();
+  }) });
+  const input = { id: "once", value: "saved" };
+  await expect(f.invoke(input, { signal: controller.signal })).rejects.toThrow();
+  expect(f.journal.head(f.scope, f.authorize).cursor.revision).toBe(1);
+  expect(await f.invoke(input)).toMatchObject({ replayed: true, revision: 1, result: [input] });
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([input]);
+  expect(f.journal.head(f.scope, f.authorize).cursor.revision).toBe(1);
+});
+
 it("does not commit a prepared write after revocation", async () => {
   let revoke = () => {};
   const f = await fixture({ launch: launcher((command, controls) => {

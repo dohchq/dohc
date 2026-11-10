@@ -31,7 +31,7 @@ const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
 vi.mock("./CreateDatasetFormDialog", () => ({ CreateDatasetFormDialog: (props: { onApproveChoices?(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void> }) =>
   <button onClick={() => void props.onApproveChoices!({ workspaceId: "workspace-a", preparationId: "choices", revisionSha256: "a".repeat(64), approvalDigest: "d".repeat(64) }, new AbortController().signal)
     .then(() => formDialog.outcomes.push("approved"), (error: Error) => formDialog.outcomes.push(error.message))}>Approve public choices</button> }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; dataset?: DatasetDescription; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void; onCustomAction?(operationId: string): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-fields={props.dataset?.tables[0]?.fields.map(field => field.name).join(",")} data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
@@ -44,11 +44,37 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
   {props.onCustomize && <button onClick={props.onCustomize}>Customize…</button>}
   {props.onManageAccess && <button onClick={props.onManageAccess}>Manage access</button>}
+  {props.dataset?.operations.filter(operation => operation.kind === "action").map(operation => <button key={operation.operationId} onClick={() => props.onCustomAction?.(operation.operationId)}>{operation.label}</button>)}
 </> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 // A builder left with changes keeps its draft for the next panel, so each test starts with none.
 afterEach(() => { cleanup(); resetAutomationButtonsForTests(); resetKeptAutomationDraftsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
+
+it("forwards Cancel over IPC with the running invocation id and retains the retry key", async () => {
+  const action = { ...dataset.operations[0]!, operationId: id(7), name: "draw", label: "Draw winner", kind: "action" as const };
+  const running = deferred<unknown>();
+  backend.dataset.mockImplementation(async request => {
+    if (request.action === "invoke") return running.promise;
+    if (request.action === "cancelInvoke") { running.reject(new Error("cancelled")); return { kind: "invoke-cancel-requested", outcome: "unknown" }; }
+    return { kind: "description", dataset: { ...dataset, operations: [...dataset.operations, action] } };
+  });
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Draw winner" }));
+  const recordsVersion = Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));
+  fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+  const first = backend.dataset.mock.calls.find(([request]) => request.action === "invoke")![0];
+  fireEvent.keyDown(document, { key: "Escape" });
+  await screen.findByText("Action cancelled");
+  expect(Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"))).toBe(recordsVersion + 1);
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "cancelInvoke", workspaceId: "workspace-a", invocationId: first.invocationId });
+  backend.dataset.mockResolvedValue({ kind: "invoked", result: null, revision: 1, replayed: true });
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await screen.findByText("Action completed");
+  const second = backend.dataset.mock.calls.filter(([request]) => request.action === "invoke")[1]![0];
+  expect(second.idempotencyKey).toBe(first.idempotencyKey);
+  expect(second.invocationId).not.toBe(first.invocationId);
+});
 
 describe("a dataset table's buttons", () => {
   const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
@@ -121,7 +147,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
   fireEvent.click(history.getByRole("button", { name: "Undo edit" }));
   await history.findByText("No saved operations on this page. Refresh to check for changes.");
   expect(backend.dataset).toHaveBeenCalledWith({ action: "invoke", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), revision: 1,
-    revisionSha256: current.revisionSha256, operationId: id(5), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
+    revisionSha256: current.revisionSha256, operationId: id(5), invocationId: expect.any(String), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
   expect(onNotice).toHaveBeenCalledWith("Reversed the edit");
   expect(onError).not.toHaveBeenCalled();
 });

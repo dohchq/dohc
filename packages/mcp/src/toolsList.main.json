@@ -2064,6 +2064,12 @@
                   "idempotencyKey": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+                  },
+                  "invocationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "description": "A fresh id for this running request. cancelInvoke requests cancellation; retry with the same input and idempotencyKey."
                   }
                 },
                 "required": [
@@ -2075,6 +2081,31 @@
                   "revisionSha256",
                   "input",
                   "idempotencyKey"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "cancelInvoke"
+                  },
+                  "invocationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "action",
+                  "invocationId"
                 ],
                 "additionalProperties": false
               }

@@ -11,6 +11,7 @@ const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:
   operations:[{operationId:id(4),name:"list",label:"List equipment",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}]};
 const cursor = {workspaceId:"workspace",datasetId:id(1),hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
 const requests: unknown[] = [
+  {action:"cancelInvoke",workspaceId:"workspace",invocationId:id(99)},
   {action:"deletePreview",workspaceId:"workspace",datasetPath:"equipment/dataset.json",limit:10},
   {action:"delete",workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true},
   {action:"cancelAttempt",workspaceId:"workspace",datasetPath:"equipment/dataset.json",reference:"b".repeat(64),acknowledge:true},
