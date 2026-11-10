@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { addAbortListener } from "node:events";
-import { createReadStream } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -24,7 +24,7 @@ const Record = z.object({
   operationId: z.string(), staged: z.string().optional(), noUndo: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
   copies: z.array(z.object({
-    path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
+    path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(), tag: z.string(),
   })).optional(),
   engine: z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
 });
@@ -258,6 +258,24 @@ async function alreadyPlaced(source: string, target: string): Promise<boolean> {
   return b.isFile() && a.size === b.size && (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev || await fingerprint(source) === await fingerprint(target));
 }
 
+type PendingCopy = NonNullable<RecoveryRecord["copies"]>[number];
+// A copy under way holds a random tag just past the deleted file's end, and
+// cuts it off once all the bytes are in. Linux can give a new file the copy's
+// freed inode and creation time, so only the tag tells a half-finished copy
+// from a file someone saved there. A whole copy matches the deleted file. A
+// copy left empty, because its tag never got in, starts again.
+const COPY_TAG_BYTES = 16;
+async function copyState(file: FileHandle, entry: Stats, pending: PendingCopy, source: string): Promise<"empty" | "partial" | "complete" | undefined> {
+  if (!entry.isFile() || pending.ino === 0 || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs) return undefined;
+  if (entry.size === pending.size + COPY_TAG_BYTES) {
+    const tail = Buffer.alloc(COPY_TAG_BYTES);
+    const { bytesRead } = await file.read(tail, 0, COPY_TAG_BYTES, pending.size);
+    return bytesRead === COPY_TAG_BYTES && tail.toString("hex") === pending.tag ? "partial" : undefined;
+  }
+  if (entry.size === pending.size && await fingerprint(file, entry.size) === await fingerprint(source, entry.size)) return "complete";
+  return entry.size === 0 ? "empty" : undefined;
+}
+
 // Retrying through a verified handle cannot remove or overwrite a replacement at the path.
 async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRecord, path: string, source: string, target: string, mode: number): Promise<void> {
   const pending = record.copies?.find(copy => copy.path === path), occupant = await info(target);
@@ -272,35 +290,35 @@ async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRec
       return open(target, "r");
     })
     : await open(target, "wx", mode);
-  let complete = false;
+  let state: Awaited<ReturnType<typeof copyState>>;
   try {
     const entry = await file.stat();
     if (pending && occupant) {
-      if (!entry.isFile() || pending.ino === 0
-        || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs
-        || size !== pending.size || entry.size > size
-        || await fingerprint(file, entry.size) !== await fingerprint(source, entry.size)) {
-        throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
-      }
-      // Full bytes may have survived a crash before the receipt. Flush them before acknowledging the copy.
-      complete = entry.size === size;
+      state = size === pending.size ? await copyState(file, entry, pending, source) : undefined;
+      if (!state) throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
     }
     if (!writable) {
       await file.chmod(mode | 0o200);
       await file.close();
       file = await open(target, "r+");
       const current = await file.stat();
-      if (!current.isFile() || current.dev !== entry.dev || current.ino !== entry.ino || current.birthtimeMs !== entry.birthtimeMs
-        || current.size !== entry.size || await fingerprint(file, current.size) !== await fingerprint(source, current.size)) {
+      if (current.size !== entry.size || await copyState(file, current, pending!, source) !== state) {
         throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
       }
     }
-    if (!complete) {
-      record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
-        { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size }];
-      // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
-      await saveRecoveryRecord(workspace, record);
+    // Full bytes may have survived a crash before the receipt. Flush them before acknowledging the copy.
+    if (state !== "complete") {
+      if (state !== "partial") {
+        const tag = randomBytes(COPY_TAG_BYTES);
+        record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
+          { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size, tag: tag.toString("hex") }];
+        // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
+        await saveRecoveryRecord(workspace, record);
+        await file.write(tag, 0, COPY_TAG_BYTES, size);
+      }
+      // The tag's write leaves the file position at the start.
       await file.writeFile(createReadStream(source));
+      await file.truncate(size);
     }
     await file.chmod(mode & 0o7777);
     await file.sync();

@@ -1022,6 +1022,29 @@ mod capture_file_hold_tests {
                 .map_err(StorageError::persist_public)
             })
             .unwrap();
+        // dohc#3193. Another version's switch write with the same bytes waits
+        // for that version, so it doesn't hold this head.
+        let other_version = MaterializationJobSpec {
+            job_id: crate::actor::versions::switch_projection_job_id(
+                "hold-proof",
+                "feature",
+                "placed.md",
+                MaterializationOperation::Write,
+                &head.blob_sha256,
+                false,
+            ),
+            target_generation: 1,
+            ..settle
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &other_version,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
         assert!(retire_once(&mut store).unwrap().retired.is_some());
         assert!(moments(&store) > count);
     }
@@ -1822,6 +1845,12 @@ impl ActorHandle {
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
+            let unwritten = store
+                .read_with(|conn| unwritten_switch_secrets(conn, &workspace_id, &version_id))?;
+            entries.retain(|entry| {
+                entry.sha256 != dohc_engine_domain::SECRET_SEED_SENTINEL_SHA
+                    || !unwritten.contains(&entry.path)
+            });
             let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
             let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
             entries.retain(|entry| !held_paths.blocks(&entry.path));
@@ -2967,20 +2996,59 @@ pub(super) fn ensure_no_pending_undo_placement(
     Ok(())
 }
 
+/// The secrets that `version`'s switch has yet to write where no file was
+/// (dohc#3112). Until replay writes one, its missing file is not a deletion,
+/// as the domain seed rules for plain files.
+fn unwritten_switch_secrets(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+) -> Result<std::collections::BTreeSet<String>, RuntimeError> {
+    let mut jobs = conn
+        .prepare_cached(
+            "SELECT job_id, target_path, content_sha256 FROM materialization_jobs
+             WHERE workspace_id IN (?1,'') AND status='pending' AND operation='write'
+                 AND preimage_present=0 AND job_id GLOB 'version-switch-secret-mat_*'",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let mut rows = jobs
+        .query(params![workspace])
+        .map_err(StorageError::corrupt_public)?;
+    let mut paths = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let path: String = row.get(1).map_err(StorageError::corrupt_public)?;
+        let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        if job
+            == super::versions::switch_projection_job_id(
+                workspace,
+                version,
+                &path,
+                dohc_engine_storage::MaterializationOperation::Write,
+                &sha,
+                true,
+            )
+        {
+            paths.insert(path);
+        }
+    }
+    Ok(paths)
+}
+
 /// A write that failed to place the active head stays pending, so its file is
 /// missing until replay lands it. Retiring that head would discard the file
 /// instead of waiting for it. The write is a version switch's, or the one that
 /// records the head's latest moment, as for a document settle. Another
-/// version's pending write with the same bytes does not count: replay skips it
-/// while that version is inactive.
+/// version's pending write with the same bytes does not count, since replay
+/// completes it without writing while that version is inactive.
 fn ensure_no_pending_head_placement(
     conn: &Connection,
     workspace: &str,
     path: &str,
 ) -> Result<(), RuntimeError> {
-    let pending: bool = conn
+    let mut jobs = conn
         .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+            "SELECT j.job_id, a.version_id, j.content_sha256 FROM materialization_jobs j
          JOIN versioned_workspaces w ON w.workspace_id=?1
          JOIN path_aliases a ON a.workspace_id=w.workspace_id AND a.path=j.target_path
              AND a.version_id=coalesce((SELECT version_id FROM active_versions
@@ -2992,17 +3060,34 @@ fn ensure_no_pending_head_placement(
              AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
              AND (j.job_id GLOB 'version-switch-mat_*' OR EXISTS(SELECT 1 FROM moments m
                  WHERE m.workspace_id=a.workspace_id AND m.moment_id=s.latest_moment_id
-                     AND m.moment_order=j.target_generation)))",
+                     AND m.moment_order=j.target_generation))",
         )
-        .map_err(StorageError::corrupt_public)?
-        .query_row(params![workspace, path], |r| r.get(0))
         .map_err(StorageError::corrupt_public)?;
-    if pending {
-        return Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "head-placement-pending",
-            },
-        ));
+    let mut rows = jobs
+        .query(params![workspace, path])
+        .map_err(StorageError::corrupt_public)?;
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let version: String = row.get(1).map_err(StorageError::corrupt_public)?;
+        let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        // A switch job names its version only in its id (dohc#3193).
+        if !job.starts_with("version-switch-mat_")
+            || job
+                == super::versions::switch_projection_job_id(
+                    workspace,
+                    &version,
+                    path,
+                    dohc_engine_storage::MaterializationOperation::Write,
+                    &sha,
+                    false,
+                )
+        {
+            return Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "head-placement-pending",
+                },
+            ));
+        }
     }
     Ok(())
 }

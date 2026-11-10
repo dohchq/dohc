@@ -25,6 +25,7 @@ import {
   splitShellStatements,
   startSiteDevServer,
   startStaticSitePreview,
+  withoutReusedParents,
   type SiteLogEntry,
 } from "./siteRunner";
 
@@ -1338,6 +1339,38 @@ describe("startSiteDevServer", () => {
     }
     expect(error instanceof Error ? error.message : error).toMatch(/cancelled/);
     expect(Date.now() - startedAt).toBeLessThan(10_000);
+  });
+});
+
+describe("withoutReusedParents", () => {
+  // A Windows read that lands after app command 100 exited: pid, parent pid,
+  // local start time. Program 200 names pid 100 because its own parent held
+  // that number before the app's command did.
+  it("leaves out programs whose parent pid a later process took", async () => {
+    const spawnedAt = new Date(2026, 10, 10, 12, 0, 30, 600).getTime();
+    const table = [
+      "200 100 11/10/2026 09:15:00",
+      "201 200 11/10/2026 12:00:31",
+      "300 100 11/10/2026 12:00:30",
+      "400 300 11/10/2026 12:00:40",
+      "500 400 11/10/2026 12:00:33",
+    ].join("\n");
+    const descendants = await posixSpawn.processDescendants(100, async () => withoutReusedParents(table, 100, spawnedAt));
+    expect(descendants.sort()).toEqual([300, 400]);
+  });
+  it("keeps a child started in the hour that repeats when clocks go back", async () => {
+    // Removing TZ again would leave Node in this zone, so the old zone goes back by name.
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      // The second 01:10 that morning, after clocks went back.
+      const spawnedAt = Date.parse("2026-11-01T01:10:00.600-08:00");
+      const descendants = await posixSpawn.processDescendants(100, async () =>
+        withoutReusedParents("300 100 11/01/2026 01:10:01", 100, spawnedAt));
+      expect(descendants).toEqual([300]);
+    } finally {
+      process.env.TZ = zone;
+    }
   });
 });
 

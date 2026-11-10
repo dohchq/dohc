@@ -151,6 +151,7 @@ export interface AgentClientRow {
   clientId: string;
   registration: AgentClientRegistration;
   reportedName: string | null;
+  reportedVersion: string | null;
   redirectUris: string[];
 }
 
@@ -265,6 +266,7 @@ export function registerAgentClient(storage: StorageContext, input: {
   clientId: string;
   registration: AgentClientRegistration;
   reportedName: string | null;
+  reportedVersion: string | null;
   redirectUris: readonly string[];
   nowMs: number;
 }): boolean {
@@ -285,28 +287,30 @@ export function registerAgentClient(storage: StorageContext, input: {
     if (existing) {
       // A minted id names one registration. Only a metadata document refreshes.
       if (existing.registration !== "metadata-document" || input.registration !== "metadata-document") return false;
-      storage.db.prepare(`UPDATE sync_relay_agent_clients SET reported_name = ?, redirect_uris_json = ?, updated_at_ms = ?
-        WHERE client_id = ?`).run(input.reportedName, JSON.stringify(input.redirectUris), nowMs, input.clientId);
+      storage.db.prepare(`UPDATE sync_relay_agent_clients SET reported_name = ?, reported_version = ?, redirect_uris_json = ?,
+        updated_at_ms = ? WHERE client_id = ?`)
+        .run(input.reportedName, input.reportedVersion, JSON.stringify(input.redirectUris), nowMs, input.clientId);
       return true;
     }
     const count = Number(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_clients").get()?.count ?? 0);
     if (count >= AGENT_CLIENT_LIMIT) return false;
     storage.db.prepare(`INSERT INTO sync_relay_agent_clients
-      (client_id, registration, reported_name, redirect_uris_json, registered_at_ms, updated_at_ms)
-      VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(input.clientId, input.registration, input.reportedName, JSON.stringify(input.redirectUris), nowMs, nowMs);
+      (client_id, registration, reported_name, reported_version, redirect_uris_json, registered_at_ms, updated_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.clientId, input.registration, input.reportedName, input.reportedVersion, JSON.stringify(input.redirectUris), nowMs, nowMs);
     return true;
   });
 }
 
 export function getAgentClient(storage: StorageContext, clientId: string): AgentClientRow | null {
-  const row = storage.db.prepare(`SELECT client_id, registration, reported_name, redirect_uris_json
+  const row = storage.db.prepare(`SELECT client_id, registration, reported_name, reported_version, redirect_uris_json
     FROM sync_relay_agent_clients WHERE client_id = ?`).get(clientId);
   if (!row) return null;
   return {
     clientId: String(row.client_id),
     registration: String(row.registration) as AgentClientRegistration,
     reportedName: nullableText(row.reported_name),
+    reportedVersion: nullableText(row.reported_version),
     redirectUris: JSON.parse(String(row.redirect_uris_json)) as string[],
   };
 }

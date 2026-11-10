@@ -1,8 +1,10 @@
 import { dump } from "js-yaml";
-import type {
-  CollectionSchema,
-  FieldDefinition,
-  ViewDefinition,
+import {
+  chosenOptionColor,
+  type CollectionSchema,
+  type FieldDefinition,
+  type OptionColor,
+  type ViewDefinition,
 } from "@dohc/workspace-contracts";
 
 // Pure schema-model operations behind the collection authoring UI. Every
@@ -15,7 +17,7 @@ function fieldEntry(field: FieldDefinition): Record<string, unknown> {
   switch (field.type) {
     case "select":
     case "multi-select":
-      return { type: field.type, options: field.options };
+      return { type: field.type, options: field.options, ...keptColors(field.options, field.colors) };
     case "relation":
       return { type: field.type, collection: field.collection, many: field.many };
     default:
@@ -59,18 +61,53 @@ export function addField(
 // every record's frontmatter key from the field. It ships together with the
 // record-key rewrite, not before.
 
-/** Replaces a select or multi-select field's options. Other fields pass through. */
+/** The colors of the given options, in their order, so the file reads top to bottom. */
+function keptColors(
+  options: readonly string[],
+  colors: Readonly<Record<string, OptionColor>> | undefined,
+): { colors?: Record<string, OptionColor> } {
+  const kept = options.flatMap((option) => {
+    const color = chosenOptionColor(colors, option);
+    return color ? [[option, color] as const] : [];
+  });
+  return kept.length > 0 ? { colors: Object.fromEntries(kept) } : {};
+}
+
+/**
+ * Replaces a select or multi-select field's options. `colors` holds the colors
+ * someone chose; other options keep the colors they have. Other fields pass
+ * through.
+ */
 export function setFieldOptions(
   schema: CollectionSchema,
   name: string,
   options: string[],
+  colors?: Readonly<Record<string, OptionColor>>,
+): CollectionSchema {
+  return {
+    ...schema,
+    fields: schema.fields.map((field) => {
+      if (field.name !== name || (field.type !== "select" && field.type !== "multi-select")) return field;
+      const { colors: _previous, ...rest } = field;
+      return { ...rest, options, ...keptColors(options, { ...field.colors, ...colors }) };
+    }),
+  };
+}
+
+/** Sets one option's color on a select or multi-select field. */
+export function setOptionColor(
+  schema: CollectionSchema,
+  name: string,
+  option: string,
+  color: OptionColor,
 ): CollectionSchema {
   return {
     ...schema,
     fields: schema.fields.map((field) =>
       field.name === name &&
-      (field.type === "select" || field.type === "multi-select")
-        ? { ...field, options }
+      (field.type === "select" || field.type === "multi-select") &&
+      field.options.includes(option)
+        ? { ...field, ...keptColors(field.options, { ...field.colors, [option]: color }) }
         : field,
     ),
   };

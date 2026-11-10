@@ -92,6 +92,7 @@
     "remark-rehype": "^11.1.2",
     "smol-toml": "^1.7.1",
     "tailwindcss": "^4.3.3",
+    "toqr": "0.1.1",
     "typescript": "^7.0.2",
     "unified": "^11.0.5",
     "vite": "^7.3.6",

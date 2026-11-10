@@ -379,6 +379,15 @@ pub trait EngineService: Send + Sync {
             self.call(ctx, request).await
         }
     }
+
+    /// Whether `request` only reads. A read has nothing to report past its
+    /// deadline or cancel, so the supervisor answers it `DEADLINE_EXCEEDED` or
+    /// `CANCELLED` then, even while its handler still waits on a stuck
+    /// workspace. The handler runs to its end under the same admission. A write
+    /// answers false, because its caller needs to know what it did.
+    fn reads_only(&self, _request: &Request) -> bool {
+        false
+    }
 }
 
 /// A client-side transport: something a generated client can issue typed

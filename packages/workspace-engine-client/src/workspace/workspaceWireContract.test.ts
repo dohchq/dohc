@@ -245,6 +245,27 @@ describe("workspace wire schemas", () => {
     expect(result.schema.fields).toEqual([{ name: "Mark paid", type: "button" }]);
   });
 
+  it("decodes a select field's option colors and rejects an unknown color", () => {
+    const get = (colors: Record<string, string>) =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+        path: "tasks",
+        objectId: "object-tasks",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: null,
+          description: null,
+          fields: [{ name: "Status", type: "select", options: ["Todo", "Done"], colors }],
+          views: [],
+        },
+        recordCount: 0,
+      });
+    expect(get({ Done: "teal" }).schema.fields).toEqual([
+      { name: "Status", type: "select", options: ["Todo", "Done"], colors: { Done: "teal" } },
+    ]);
+    expect(() => get({ Done: "chartreuse" })).toThrow(ProtocolShapeError);
+  });
+
   it("accepts the shared full collection reason-code set", () => {
     for (const code of reasonCodes.schemaReasonCodes) {
       expect(() =>

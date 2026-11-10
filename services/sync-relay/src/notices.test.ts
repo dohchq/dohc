@@ -227,6 +227,7 @@ describe("notice list", () => {
       nextCursor: "1",
       hasMore: false,
       replace: true,
+      personalAgentsRevision: 0,
     });
     expect((await pull(h, "someone-else")).notices).toEqual([]);
   });
@@ -652,7 +653,9 @@ describe("pulling changes", () => {
       { noticeId: "b", mark: "read" },
       { noticeId: "b", mark: "dismissed" },
     ]);
-    expect(await pull(h, "owner", changes.nextCursor)).toEqual({ notices: [], nextCursor: "5", hasMore: false, replace: false });
+    expect(await pull(h, "owner", changes.nextCursor)).toEqual({
+      notices: [], nextCursor: "5", hasMore: false, replace: false, personalAgentsRevision: 0,
+    });
 
     // Dismissing a read row is still a change.
     await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);

@@ -12,6 +12,10 @@ import { AgentList } from "./AgentList";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
+  // What the open workspace goes by, for its agent link.
+  workspaceName: string;
+  // The personal agent whose page opens, by id, such as one a notice names.
+  openAgent?: { agentId: string };
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
   onClearError?: (identity: string) => void;
   settings: DesktopUserSettings;
@@ -153,6 +157,8 @@ export function AgentsMcpSettings(props: {
     <div className="flex flex-col">
       <AgentList
         workspaceId={workspaceId}
+        workspaceName={props.workspaceName}
+        {...(props.openAgent ? { openAgent: props.openAgent } : {})}
         settings={props.settings}
         agentProblems={props.agentProblems}
         config={config}

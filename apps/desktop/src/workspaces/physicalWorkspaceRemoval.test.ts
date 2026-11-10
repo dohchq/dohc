@@ -80,11 +80,11 @@ it("still rejects registry removal failures and does not report them as draft cl
   expect(h.notifyRenderer).not.toHaveBeenCalled();
 });
 
-it("reports a draft cleanup failure during failed-join rollback without replacing the original failure or skipping notification", async () => {
-  const h = harness(false);
-  const cleanupError = Object.assign(new Error("recovery record is busy"), {code: "EPERM"});
+it("takes a failed join's entry out of the list without asking, and keeps its typing", async () => {
+  // The person would choose Cancel if dohc asked.
+  const confirm = vi.fn(async () => false);
+  const h = harness(false, confirm);
   const joinError = new Error("join failed");
-  h.removeDrafts.mockRejectedValueOnce(cleanupError);
   const logError = vi.fn();
   const run = createJoinedWorkspaceRunner({
     canonicalizeRoot: root => root,
@@ -94,7 +94,7 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
       persist: () => h.setRegistered(workspace),
       rollback: () => h.setRegistered(null),
     }),
-    remove: async(binding,cleanup)=>{await h.remove(binding,cleanup);},
+    remove: async (binding, cleanup) => { await h.remove(binding, cleanup, undefined, {keepDrafts: true}); },
     release: (reservation, finalize) => h.owner.releaseReservation(reservation, finalize),
     closeRelay: vi.fn(async () => {}),
     rollbackComplete: h.notifyRenderer,
@@ -107,8 +107,10 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
     failure: () => joinError,
   })).rejects.toBe(joinError);
   expect(h.current()).toBeNull();
+  expect(h.owner.workspaceIds()).toEqual([]);
+  expect(confirm).not.toHaveBeenCalled();
+  expect(h.removeDrafts).not.toHaveBeenCalled();
   expect(h.notifyRenderer).toHaveBeenCalledOnce();
-  expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, cleanupError);
   expect(logError).toHaveBeenCalledOnce();
   expect(logError.mock.calls[0]?.[1]).toBe(joinError);
 });

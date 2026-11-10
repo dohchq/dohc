@@ -5,7 +5,7 @@ import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -14,7 +14,7 @@ import {
   type NoticeRow,
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
-import { RELAY_API_VERSION_CAUSE } from "@dohc/workspace-contracts/relay";
+import { RELAY_API_VERSION_CAUSE, type NoticeKind } from "@dohc/workspace-contracts/relay";
 import { SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
@@ -24,6 +24,8 @@ import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { AUTOMATION_NOTICE_KINDS, type NoticeTarget } from "../../notices/noticeTarget";
 import { relativeTime } from "../relativeTime";
+import { neutralPresentation, presentationClasses, subscribePresentation } from "./actorPresentation";
+import { personalAgentName } from "./chosenColors";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 
@@ -188,13 +190,22 @@ const SENDER_NAME = {
   agent: "From an agent",
   automation: "From an automation",
 } as const;
+const PERSONAL_AGENT_SIGNED_IN: NoticeKind = "personal-agent-signed-in";
+
 // A toast sets the mark on its text's first line; a row passes its own place.
-function SenderMark(props: { kind: NoticeRow["senderKind"]; className?: string }) {
+// A personal agent's sign-in takes the hue of the agent its target names
+// while the roster holds it.
+function SenderMark(props: { notice: Pick<NoticeRow, "kind" | "senderKind" | "target">; className?: string }) {
+  const kind = props.notice.senderKind;
+  const agentId = props.notice.kind === PERSONAL_AGENT_SIGNED_IN && kind === "agent" ? props.notice.target?.agent ?? null : null;
+  const agentTint = useSyncExternalStore(subscribePresentation, () =>
+    agentId === null || personalAgentName(agentId) === null ? null
+      : presentationClasses({ ...neutralPresentation, agentId }, "agent"));
   const place = props.className ?? "mt-0.5 shrink-0";
-  if (props.kind === null) {
+  if (kind === null) {
     return <Info size={14} aria-hidden className={`${place} text-subtle`} />;
   }
-  if (props.kind === "automation") {
+  if (kind === "automation") {
     return (
       <span className={place}>
         <Zap size={14} aria-hidden data-sender-shape="zap" className="block text-muted" />
@@ -202,7 +213,7 @@ function SenderMark(props: { kind: NoticeRow["senderKind"]; className?: string }
       </span>
     );
   }
-  const person = props.kind === "person";
+  const person = kind === "person";
   return (
     <span className={place}>
       <span
@@ -211,12 +222,12 @@ function SenderMark(props: { kind: NoticeRow["senderKind"]; className?: string }
         className={`grid size-4 place-items-center border ${
           person
             ? "rounded-full border-line bg-panel-2 text-muted"
-            : "rounded-md border-agent/50 bg-bg text-agent"
+            : `rounded-md ${agentTint ?? "border-agent/50 bg-bg text-agent"}`
         }`}
       >
         {person ? <User size={10} aria-hidden /> : <Sparkles size={10} aria-hidden />}
       </span>
-      <span className="sr-only">{SENDER_NAME[props.kind]}</span>
+      <span className="sr-only">{SENDER_NAME[kind]}</span>
     </span>
   );
 }
@@ -2050,7 +2061,7 @@ export function NoticeCenter(props: {
             >
               {isHeld(sentToast.notice)
                 ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-                : <SenderMark kind={sentToast.notice.senderKind} />}
+                : <SenderMark notice={sentToast.notice} />}
               <div className="min-w-0 flex-1">
                 <span className="block break-words leading-snug">
                   {sentToast.notice.title}
@@ -2480,7 +2491,7 @@ export function NoticeCenter(props: {
                           <span className="flex h-6 w-4 shrink-0 items-center justify-center">
                             {isHeld(notice)
                               ? <AlertTriangle size={14} aria-hidden className="shrink-0 text-warning" />
-                              : <SenderMark kind={notice.senderKind} className="shrink-0" />}
+                              : <SenderMark notice={notice} className="shrink-0" />}
                           </span>
                           <NoticeText
                             title={notice.title}

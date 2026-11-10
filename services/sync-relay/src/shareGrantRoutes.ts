@@ -659,7 +659,7 @@ export function createShareGrantRoutes(
         if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
           throw relayError("invalid_chat", "chat is not shareable");
         }
-        storage.createShare({
+        const created = storage.createShare({
           share: {
             shareId,
             workspaceId: route.workspaceId,
@@ -682,6 +682,8 @@ export function createShareGrantRoutes(
             parentGrantId: null,
           },
         });
+        // The recipient's account is being deleted.
+        if (!created) throw notFound();
         return jsonResponse({
           ok: true,
           shareId,
@@ -716,7 +718,7 @@ export function createShareGrantRoutes(
       if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
         throw relayError("invalid_chat", "chat is not shareable");
       }
-      storage.createShare({
+      const createFor = (recipientUserId: string | null) => storage.createShare({
         share: {
           shareId,
           workspaceId: route.workspaceId,
@@ -728,9 +730,9 @@ export function createShareGrantRoutes(
         grant: {
           grantId,
           shareId,
-          principalKind: resolved ? "user" : "email",
-          principalUserId: resolved ?? null,
-          principalEmail: resolved ? null : email.trim().toLowerCase(),
+          principalKind: recipientUserId ? "user" : "email",
+          principalUserId: recipientUserId,
+          principalEmail: recipientUserId ? null : email.trim().toLowerCase(),
           access,
           generation: 1,
           status: "active",
@@ -739,6 +741,9 @@ export function createShareGrantRoutes(
           parentGrantId: null,
         },
       });
+      // An account being deleted counts as no account: its address gets the
+      // pending invite any other address gets, and the reply stays the same.
+      if (!resolved || !createFor(resolved)) createFor(null);
       return jsonResponse({
         ok: true,
         shareId,

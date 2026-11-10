@@ -60,6 +60,14 @@ describe("where a sent notice opens", () => {
       .toEqual({ kind: "share", shareId: "share-1", path: "trip/day-1.md" });
   });
 
+  it("opens Settings › Agents at the page of the personal agent that signed in", () => {
+    const agent = `p-${"g".repeat(26)}`;
+    expect(sentNoticePlace({ workspaceId: "notes", recipientShareId: null, target: { settings: "agents", agent } }, [workspace("notes")], "notes"))
+      .toEqual({ kind: "agents-settings", agent });
+    expect(sentNoticePlace({ workspaceId: null, recipientShareId: null, target: { settings: "agents" } }, [], "notes"))
+      .toEqual({ kind: "agents-settings", agent: null });
+  });
+
   it("has nowhere to go for a notice about no workspace", () => {
     expect(sentNoticePlace({ workspaceId: null, recipientShareId: null, target: {} }, [], "notes"))
       .toEqual({ kind: "none" });

@@ -26,6 +26,14 @@ export const accountWords = {
   forgetFailed: "dohc could not delete the sign-in saved on this phone.",
   couldNotSignIn: (server: string) => `${server} could not sign this phone in. Try again or contact its administrator.`,
   sessionEnded: (server: string) => `${server} ended this phone's session. Connect again to continue.`,
+  // Scanning the QR code a computer shows under Connect a phone, in its Settings.
+  scanCode: "Scan code",
+  scanHint: "Scan the code under Connect a phone in your computer's Settings.",
+  notServerCode: "This code isn't a server address. Scan the code under Connect a phone in your computer's Settings.",
+  insecureCode: "This code's server doesn't use HTTPS. Contact its administrator.",
+  cameraOff: "dohc can't use the camera. Allow it in Settings.",
+  cameraFailed: "dohc could not open the camera. Enter the server address instead.",
+  openSettings: "Open Settings",
   problem: (kind: ServerProblemKind, server: string): string => {
     switch (kind) {
       case "offline": return `dohc could not reach ${server}. Check your connection.`;

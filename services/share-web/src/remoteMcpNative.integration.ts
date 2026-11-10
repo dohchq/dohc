@@ -22,7 +22,10 @@ import {createLiveHostReports} from "../../sync-relay/src/namedLiveHostReports.j
 import {createNamedFrameChanges} from "../../sync-relay/src/liveHostChanges.js";
 import {createLinkLiveResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
-import {signInAgent} from "./mcpSignIn.test-helper.js";
+import {chatMessageAppend, chatThreadCreate, sequenced, type ChatOp} from "../../sync-relay/src/testing/index.js";
+import {agentChannelWireId} from "@dohc/security-contract/chat-wire-ids";
+import {signInAgent, tokenRequest, type ShareWebSend} from "./mcpSignIn.test-helper.js";
+import {listening, signInPersonalAgent, TestAccounts, type TestAccount} from "./mcpPersonalSignIn.test-helper.js";
 import {createShareWebApplication} from "./server.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -36,6 +39,29 @@ const routeLimits = {maxConnections: 4, maxConnectionsPerWorkspace: 96, reserved
   maxPendingRequests: 4, maxRequestBytes: 32768, maxResponseBytes: 65536, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 10000, idleTimeoutMs: 60000, drainTimeoutMs: 1000};
 const audience = "https://share.example.test", exchangeKey = "mcp-native-exchange-".repeat(2), ticketKey = "mcp-native-tickets-".repeat(2), linkKey = "mcp-native-links-".repeat(2);
+
+// The loopback listener at `listener()` stands behind the public host, as in the deployed proxy.
+function behindPublicHost(listener: () => string): typeof fetch {
+  return async (input, init) => {
+    const request = new Request(input, init), url = new URL(request.url);
+    request.headers.set("host", new URL(audience).host);
+    const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+    return new Promise((resolve, reject) => {
+      const outgoing = httpRequest(listener() + url.pathname + url.search, {method: request.method,
+        headers: Object.fromEntries(request.headers), signal: request.signal}, response => {
+        const chunks: Buffer[] = [];
+        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+        response.once("error", reject);
+        response.once("end", () => {
+          const headers = new Headers();
+          for (let i = 0; i < response.rawHeaders.length; i += 2) headers.append(response.rawHeaders[i]!, response.rawHeaders[i + 1]!);
+          resolve(new Response([204, 205, 304].includes(response.statusCode!) ? null : Buffer.concat(chunks), {status: response.statusCode, headers}));
+        });
+      });
+      outgoing.once("error", reject); outgoing.end(body);
+    });
+  };
+}
 
 it("uses shared links over MCP with native durable edits, View restrictions, revocation, and an offline host", async () => {
   const executable = process.env.DOHC_SERVICE_HOST_PROOF_BINARY && resolve(process.env.DOHC_SERVICE_HOST_PROOF_BINARY);
@@ -115,26 +141,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     publicHttp.listen(0, "127.0.0.1"); await once(publicHttp, "listening");
     closes.push(() => new Promise<void>(done => publicHttp.close(() => done())));
     const publicUrl = `http://127.0.0.1:${(publicHttp.address() as {port: number}).port}`;
-    // The loopback listener stands behind the public host, as in the deployed proxy.
-    const publicFetch: typeof fetch = async (input, init) => {
-      const request = new Request(input, init), url = new URL(request.url);
-      request.headers.set("host", new URL(audience).host);
-      const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
-      return new Promise((resolve, reject) => {
-        const outgoing = httpRequest(publicUrl + url.pathname + url.search, {method: request.method,
-          headers: Object.fromEntries(request.headers), signal: request.signal}, response => {
-          const chunks: Buffer[] = [];
-          response.on("data", chunk => chunks.push(Buffer.from(chunk)));
-          response.once("error", reject);
-          response.once("end", () => {
-            const headers = new Headers();
-            for (let i = 0; i < response.rawHeaders.length; i += 2) headers.append(response.rawHeaders[i]!, response.rawHeaders[i + 1]!);
-            resolve(new Response([204, 205, 304].includes(response.statusCode!) ? null : Buffer.concat(chunks), {status: response.statusCode, headers}));
-          });
-        });
-        outgoing.once("error", reject); outgoing.end(body);
-      });
-    };
+    const publicFetch = behindPublicHost(() => publicUrl);
     async function ownerRequest(path: string, body: unknown) {
       const response = await fetch(relayUrl + path, {method: "POST", headers: {authorization: "Bearer test-owner", "content-type": "application/json"}, body: JSON.stringify(body)});
       const value = await response.json(); expect(response.status, JSON.stringify(value)).toBe(200); return value;
@@ -192,3 +199,101 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
   writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
     scope: "Real MCP HTTP, relay HTTP/WS, native service host, disk settlement; test owner identity", acknowledgement}, null, 2));
 }, 90000);
+
+it("signs a personal agent in over HTTP, and it posts, waits and refreshes across a share-web restart", async () => {
+  const output = process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
+  if (!output) throw new Error("An output directory is required.");
+  mkdirSync(output, {recursive: true});
+  const root = mkdtempSync(join(resolve(output), "mcp-personal-"));
+  const configPath = join(root, "deployment.json");
+  initializeRelayDeployment({configPath, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity")});
+  const deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
+  // The account server is a test fixture; the relay, share-web, and the HTTP between them are real.
+  const owner: TestAccount = {userId: "owner", name: "Ada", email: "ada@example.test", password: "owner password"};
+  const accounts = new TestAccounts(audience, [owner]);
+  const clients: Client[] = [], closes: (() => Promise<void>)[] = [];
+  try {
+    const {storage} = deployment;
+    expect(storage.claimWorkspace({workspaceId: "trip", ownerUserId: owner.userId, createdAtMs: 1})).toBe("created");
+    const relayApp = createSyncRelayHandler({storage, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
+      credentialFence: accounts, resolveAccountSession: accounts.resolveAccountSession,
+      resolveActor: async (request, workspaceId) => {
+        if (request.headers.get("authorization") !== "Bearer test-owner") throw new UnauthorizedError();
+        return {userId: owner.userId, workspaceId};
+      }});
+    closes.push(() => relayApp.dispose());
+    await listening(relayApp, accounts);
+    const relayHttp = serveFetchHandler({handler: relayApp, maxBodyBytes: () => 32768,
+      oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});
+    relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
+    closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
+    const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`;
+
+    // Each share-web start is a new process's state; the relay holds every credential.
+    let publicUrl = "";
+    let stopShareWeb = async () => {};
+    async function startShareWeb() {
+      const application = createShareWebApplication({relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey,
+        publicHosts: new Set([new URL(audience).host]),
+        accountAuth: {publicOrigin: audience, upstreamUrl: "https://accounts.example.test"}, fetchAuth: accounts.fetchAuth});
+      const publicHttp = serveFetchHandler({handler: application.handle, maxBodyBytes: () => 65536,
+        oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});
+      publicHttp.listen(0, "127.0.0.1"); await once(publicHttp, "listening");
+      publicUrl = `http://127.0.0.1:${(publicHttp.address() as {port: number}).port}`;
+      stopShareWeb = () => new Promise<void>(done => publicHttp.close(() => done()));
+    }
+    await startShareWeb();
+    closes.push(() => stopShareWeb());
+    const publicFetch = behindPublicHost(() => publicUrl);
+    const send: ShareWebSend = (path, init) => publicFetch(audience + path, init);
+    async function connect(accessToken: string, resource: string) {
+      const client = new Client({name: "personal-proof-agent", version: "1"}); clients.push(client);
+      await client.connect(new StreamableHTTPClientTransport(new URL(resource), {requestInit: {headers: {authorization: `Bearer ${accessToken}`}}, fetch: publicFetch}));
+      return client;
+    }
+    let ownerSeq = 0;
+    async function ownerSays(ops: ChatOp[]) {
+      const response = await fetch(`${relayUrl}/sync/trip/log`, {method: "POST", headers: {authorization: "Bearer test-owner", "content-type": "application/json"},
+        body: JSON.stringify({originId: "owner-computer", ops: sequenced(ops, ownerSeq)})});
+      expect(response.status, await response.clone().text()).toBe(200);
+      ownerSeq += ops.length;
+    }
+    const call = async (client: Client, name: string, args: Record<string, unknown> = {}) =>
+      (await client.callTool({name, arguments: args})).structuredContent as Record<string, unknown>;
+
+    // Register, sign the browser in, consent at Comment in the address's workspace, and trade the code for tokens.
+    const agent = await signInPersonalAgent({send, origin: audience, workspaceId: "trip", account: owner, clientName: "Trip helper"});
+    const {agentId} = await relayApp.linkAuthority.personal(new Request(`${relayUrl}/sync/link/personal-agent/workspaces`, {headers: {
+      authorization: `DohcAgent ${agent.accessToken}`, "x-dohc-agent-resource": agent.resource, "x-dohc-relay-exchange-key": exchangeKey}}));
+    const dm = agentChannelWireId(agentId);
+    let client = await connect(agent.accessToken, agent.resource);
+    expect(await call(client, "dohc_list_workspaces")).toMatchObject({ok: true, workspaces: [{workspace: "trip", level: "comment"}]});
+
+    await ownerSays([
+      chatThreadCreate("thread-dm", dm),
+      chatMessageAppend("ask", "thread-dm", "Plan the first day?", {authorUserId: owner.userId, authorDisplayName: owner.name}),
+    ]);
+    const asked = await call(client, "dohc_wait_for_messages", {timeoutMs: 0});
+    expect(asked).toMatchObject({more: false, messages: [{workspace: "trip", channel: dm, path: null, threadId: "thread-dm", messageId: "ask", text: "Plan the first day?"}]});
+    expect(await call(client, "dohc_post_channel", {workspace: "trip", threadId: "thread-dm", body: "Museums in the morning.", idempotencyKey: "reply-1"}))
+      .toMatchObject({ok: true, message: {workspace: "trip", channel: dm, path: null, authorKind: "agent", authorDisplayName: "Trip helper"}});
+
+    // share-web restarts. The agent refreshes its token and holds a wait that its owner's next message ends.
+    await stopShareWeb();
+    await startShareWeb();
+    const refreshed = await tokenRequest(send, {grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken, resource: agent.resource});
+    expect(refreshed.status).toBe(200);
+    const {access_token: accessToken} = await refreshed.json() as {access_token: string};
+    client = await connect(accessToken, agent.resource);
+    const held = call(client, "dohc_wait_for_messages", {cursor: asked.cursor, timeoutMs: 20_000});
+    await ownerSays([chatMessageAppend("thanks", "thread-dm", "Thanks.", {authorUserId: owner.userId, authorDisplayName: owner.name})]);
+    // Its own reply doesn't come back; the owner's next message does.
+    expect(await held).toMatchObject({messages: [{workspace: "trip", channel: dm, threadId: "thread-dm", messageId: "thanks", text: "Thanks."}]});
+  } finally {
+    const errors: unknown[] = [];
+    for (const close of [...clients.map(client => () => client.close()), ...closes.reverse(), async () => deployment.storage.close()]) {
+      try {await close();} catch (error) {errors.push(error);}
+    }
+    if (errors.length) throw new AggregateError(errors, "Personal MCP cleanup failed.");
+  }
+}, 60000);

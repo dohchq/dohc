@@ -104,7 +104,7 @@ async function stack(options: { exchangeKey?: boolean } = {}) {
     return { code: value, verifier };
   }
   return {
-    send, mcp, connect, code, secret, otherSecret, blob, relayCalls,
+    send, mcp, connect, code, secret, otherSecret, blob, relayCalls, storage,
     refuseConsent() { consentRefused = true; },
     restart() { app = application(); },
   };
@@ -188,6 +188,30 @@ it("registers a public client, and refuses metadata it cannot use", async () => 
   expect(await notJson.json()).toMatchObject({ error: "invalid_client_metadata" });
 });
 
+it("keeps the version a client reports without its control characters, and refuses one too long or not text", async () => {
+  const s = await stack();
+  const created = await register(s.send, {
+    redirect_uris: [LOOPBACK_REDIRECT], client_name: "Planner", software_version: "2.4.0\u0000 beta\n",
+  });
+  expect(created.status).toBe(201);
+  const client = await created.json() as { client_id: string; software_version?: string };
+  expect(client.software_version).toBe("2.4.0 beta");
+  expect(s.storage.getAgentClient(client.client_id)).toMatchObject({ reportedName: "Planner", reportedVersion: "2.4.0 beta" });
+
+  const onlyControl = await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: "\u0007" });
+  expect(onlyControl.status).toBe(201);
+  const unversioned = await onlyControl.json() as { client_id: string; software_version?: string };
+  expect(unversioned.software_version).toBeUndefined();
+  expect(s.storage.getAgentClient(unversioned.client_id)).toMatchObject({ reportedVersion: null });
+
+  expect((await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: "v".repeat(100) })).status).toBe(201);
+  for (const version of ["v".repeat(101), 2]) {
+    const refused = await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: version });
+    expect(refused.status, String(version)).toBe(400);
+    expect(await refused.json()).toMatchObject({ error: "invalid_client_metadata" });
+  }
+});
+
 it("shows an error page, and never redirects, until the relay accepts the redirect URI", async () => {
   const s = await stack();
   const clientId = await registeredClient(s.send);
@@ -242,10 +266,11 @@ it("serves the consent page with its own headers and a cookie for this request o
   const form = await consentForm(page);
   expect(form.cookie.split("=")[1]).toBe(form.secret);
   expect(form.html).toContain('<meta name="referrer" content="same-origin">');
-  expect(form.html).toContain("<bdi>Planner &#60;script&#62;</bdi><span class=\"note\">Name reported by the agent</span>");
+  expect(form.html).toContain("<p class=\"lede\">\"<bdi>Planner &#60;script&#62;</bdi>\" is the name the agent gave.</p>");
+  expect(form.html).toContain("<span class=\"tile agent\">P</span>");
   expect(form.html).not.toContain("<script>");
-  expect(form.html).toContain("Can view");
-  expect(form.html).toContain("127.0.0.1:33418");
+  expect(form.html).toContain("<div class=\"row\"><dt>Access</dt><dd class=\"k\">Can view</dd></div>");
+  expect(form.html).toContain("<span class=\"to\">Returns to an app on this computer</span>");
   expect(form.html).not.toContain(s.secret);
 });
 

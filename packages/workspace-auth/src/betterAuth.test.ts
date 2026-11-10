@@ -1,6 +1,7 @@
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
+import { createPostgresCredentialFence } from "./credentialFence";
 import { actorFromSession, createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 import type { SignUpAdmission } from "./signUp";
 import type { EmailMessage } from "./smtp";
@@ -104,7 +105,9 @@ if (pgAvailable) {
       "utf8",
     );
     await pool.query(migration);
-    await pool.query(await readFile(new URL("../../workspace-postgres/src/db/migrations/0004_account_deletion.sql", import.meta.url), "utf8"));
+    for (const migration of ["0004_account_deletion.sql", "0005_credential_fences.sql", "0006_session_created_on_database_clock.sql"]) {
+      await pool.query(await readFile(new URL(`../../workspace-postgres/src/db/migrations/${migration}`, import.meta.url), "utf8"));
+    }
     auth = createWorkspaceAuth({
       pool,
       baseURL: "http://localhost:1786",
@@ -453,6 +456,21 @@ describeWithPostgres("account email", () => {
     await expect(
       auth.api.signInEmail({ body: { email, password: PASSWORD } }),
     ).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("starts a session after a password change that consent counts as current", async () => {
+    // Better Auth leaves the session's start on this database's clock to Postgres.
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    await auth.api.requestPasswordReset({ body: { email } });
+    const link = linkIn(lastEmailTo(email));
+    const newPassword = "another-real-password-456";
+    await auth.api.resetPassword({ body: { newPassword, token: link.searchParams.get("token") ?? "" } });
+    const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
+    const session = await pool.query<{ id: string }>(`select id from "session" where token = $1`, [signin.token]);
+    const credentials = await createPostgresCredentialFence(pool).readConsentCredentials(user.id, session.rows[0]!.id);
+    expect(credentials?.epoch).toBeGreaterThan(0);
+    expect(credentials?.sessionCurrent).toBe(true);
   });
 
   it("refuses a second sign-up for the same address and sends no mail", async () => {
