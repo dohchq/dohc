@@ -3573,6 +3573,7 @@ export function ChatsView(props: {
   // thread; the store stops its cursor at the last message.
   const markChatRead = useCallback(
     async (channelId: string, label: string, dmThreadId?: string): Promise<void> => {
+      const token = liveToken.current;
       try {
         if (dmThreadId !== undefined) {
           await bridge().markChatThreadRead({ workspaceId, threadId: dmThreadId, upToSequence: Number.MAX_SAFE_INTEGER });
@@ -3583,11 +3584,14 @@ export function ChatsView(props: {
             .filter((thread) => thread.unreadCount > 0)
             .map((thread) => bridge().markChatThreadRead({ workspaceId, threadId: thread.id, upToSequence: thread.messageCount })));
         }
+        // After a workspace switch these refreshes would repaint the new workspace with this one's chats.
+        if (token !== liveToken.current) return;
         props.onThreadRead?.();
         props.onDmRead?.();
         void refreshOverview({ background: true });
         void refreshDms("person");
       } catch (error) {
+        if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, `dohc could not mark ${label} as read.`), error, () => void markChatRead(channelId, label, dmThreadId));
       }
     },

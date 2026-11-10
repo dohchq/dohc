@@ -1,11 +1,11 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
-import { bridgeMock, channel, dm, renderView, shareListing, thread } from "./ChatsView.testHarness";
+import { bridgeMock, channel, ChatsView, dm, renderView, shareListing, thread } from "./ChatsView.testHarness";
 
 function archived(settings: DesktopUserSettings, ...channelIds: string[]): DesktopUserSettings {
   return { ...settings, sidebar: { ...settings.sidebar, archivedChats: { "workspace-a": channelIds } } };
@@ -123,6 +123,29 @@ describe("ChatsView archive and row menus", () => {
     await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
       workspaceId: "workspace-a", threadId: "thread-dm-1", upToSequence: Number.MAX_SAFE_INTEGER,
     }));
+  });
+
+  it("drops a Mark as read that finishes after the window changed workspaces", async () => {
+    const user = userEvent.setup();
+    let finish!: () => void;
+    bridgeMock.markChatThreadRead.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm({ unreadCount: 1 })], pending: [], declined: [] });
+    const onDmRead = vi.fn();
+    const props = { workspaces: [{ workspaceId: "workspace-a", label: "Work" }, { workspaceId: "workspace-b", label: "Personal" }],
+      onOpenFileChat: vi.fn(), onError: vi.fn(), userSettings: DEFAULT_USER_SETTINGS, onDmRead };
+    const view = render(<ChatsView workspaceId="workspace-a" {...props} />);
+
+    fireEvent.contextMenu(await screen.findByTestId("chats-dm-item"), { clientX: 40, clientY: 60 });
+    await user.click(screen.getByTestId("chat-row-menu-mark-read"));
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledOnce());
+    view.rerender(<ChatsView workspaceId="workspace-b" {...props} />);
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "workspace-b" })));
+    const workspaceACalls = () => bridgeMock.listChatChannels.mock.calls.filter(([input]) => input.workspaceId === "workspace-a").length;
+    const before = workspaceACalls();
+
+    await act(async () => finish());
+    expect(onDmRead).not.toHaveBeenCalled();
+    expect(workspaceACalls()).toBe(before);
   });
 
   it("lets you leave a group shared with you, and never add people to it", async () => {
