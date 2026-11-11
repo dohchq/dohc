@@ -4724,13 +4724,12 @@ fn ydoc_write_state_on_store(
         faults,
         &writes,
     )?;
-    // A head with no write of its own needs the file to hold the newest
-    // write before it, so that write answers for it.
     let own = [
         format!("ydoc-mat_{moment_id}"),
         format!("sync-mat_{moment_id}"),
     ];
-    for job_id in own.iter().chain(writes.last()) {
+    let _ = &writes;
+    for job_id in own.iter() {
         if let Some(job) = store.load_materialization_job(job_id)? {
             return Ok(match job.status {
                 JobStatus::Complete | JobStatus::Cancelled => YdocWriteState::Landed,
