@@ -1,5 +1,7 @@
 import { parseHostEpoch } from "@dohc/live-session-contract";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { WebSocket } from "ws";
+import { createNamedLiveBrowserTransport } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { restoreDirectWrites } from "./stopAndRestore";
 import { engineMomentDetailForIpc } from "../ipc/engineHistoryIpc";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
@@ -655,6 +657,192 @@ it.skipIf(engine.missing)(
     }
   },
   240_000,
+);
+
+// An agent writes a note into a shared folder as a file, and no desktop has
+// it open. The server starts live editing on it through its first open, and
+// a link holder opens it live. The desktop that shares the workspace then
+// pulls the server's first version, joins that live session and edits the
+// note. The edit reaches the link holder live, with no Stop and Resume, and
+// the server keeps the note live.
+it.skipIf(engine.missing)(
+  "lets the desktop join a note the server started live from an agent's file, and a link holder gets its edit live",
+  async () => {
+    const workspaceId = "first-open-desktop-join";
+    const rootA = await createTestScratch("dohc-first-open-join-desktop-");
+    const relayRoot = await createTestScratch("dohc-first-open-join-relay-");
+    const ca = await mintLocalhostCa(relayRoot);
+    const previousRoots = getCACertificates("default");
+    setDefaultCACertificates([...previousRoots, ca.ca]);
+    const trustEnv = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" };
+    for (const [name, value] of Object.entries(trustEnv)) vi.stubEnv(name, value);
+    const proxy = await startServerProxy(ca);
+    const exchangeKey = "first-open-join-exchange-".repeat(2);
+    const relayDbPath = join(relayRoot, "relay", "relay.sqlite");
+    const path = "notes/trip.md";
+    const text = "---\ntitle: Trip\n---\n\nBring snacks for the drive.\n";
+    let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>> | undefined;
+    let desktop: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    let transport: ReturnType<typeof createNamedLiveBrowserTransport<{ objectId: string }>> | undefined;
+    const sockets = new Set<WebSocket>();
+    try {
+      relayServer = await spawnSyncRelay({ dbPath: relayDbPath, compiledMain: compiledRelayMain,
+        editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+        linkBoundary: { linkKey: "first-open-join-link-key-".repeat(2), relayExchangeKey: exchangeKey, publicViewerOrigin: proxy.origin } });
+      proxy.routeRelayTo(relayServer.baseUrl);
+      const connection = { baseUrl: proxy.origin, token: `test:${workspaceId}` };
+      const headers = { authorization: `Bearer ${connection.token}`, "content-type": "application/json" };
+      const profile = selfHostLiveProfile();
+      const nativeConfigPath = join(rootA, "owner-ingress.json");
+      await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+      // Every desktop's engine gets the private live transport, as the desktop prepares it.
+      const openDesktop = () => openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
+        allowInsecureLoopbackForTests: false, privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient } });
+
+      // The agent's file, published without any editor opening it.
+      desktop = await openDesktop();
+      let relay = desktop.relay.bind({ ...desktop.workspace, relay: connection });
+      await relay.claim();
+      await desktop.chats.ensureGeneralChannel({ workspaceId });
+      await pushUntilDrained(relay);
+      const adapter = await desktop.sessions.run(desktop.workspace, async ({ client, workspace }) =>
+        new VersionedLiveAdapter(client, workspace, { workspaceId }));
+      await adapter.ensureMainVersion({ workspaceId });
+      await adapter.writeTextFile({ workspaceId, versionId: "main", path, text, publish: true, metadata: { origin: "api" } });
+      await pushUntilDrained(relay);
+      await desktop.close();
+      desktop = undefined;
+
+      // The folder is shared by an Edit link with live editing on. With no
+      // desktop open, the server starts the note live through its first open.
+      const created = await fetch(`${proxy.origin}/sync/${workspaceId}/shares/links`, { method: "POST", headers,
+        body: JSON.stringify({ paths: ["notes"], access: "edit" }) });
+      expect(created.status).toBe(200);
+      const link = await created.json() as { shareId: string; url: string };
+      const enabled = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, { method: "POST", headers,
+        body: JSON.stringify({ shareId: link.shareId }) });
+      expect([200, 202]).toContain(enabled.status);
+      let listing: unknown;
+      const discovery = async () => {
+        const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, { headers: { authorization: headers.authorization } });
+        expect(response.status).toBe(200);
+        listing = await response.json();
+        return readyOwnerDeliveryDocuments(listing, workspaceId);
+      };
+      await expect.poll(async () => (await discovery()).map(row => row.binding.currentPath), { timeout: 120_000 }).toEqual([path])
+        .catch(error => { throw new Error(JSON.stringify({ listing, diagnostics: relayServer!.diagnostics() }), { cause: error }); });
+      const document = (await discovery())[0]!;
+      const objectId = document.binding.objectId;
+      const firstOpen = new DatabaseSync(relayDbPath, { readOnly: true });
+      try {
+        // The live session runs on the first-open version the server made, the only one the note has.
+        expect(firstOpen.prepare(`SELECT json_extract(payload_json,'$.lineageClaimId') AS lineage FROM sync_relay_log
+          WHERE workspace_id=? AND origin_id LIKE 'service-host:first-open:%' AND json_extract(payload_json,'$.objectId')=?`)
+          .all(workspaceId, objectId)).toEqual([{ lineage: document.binding.lineageClaimId }]);
+      } finally { firstOpen.close(); }
+
+      // The link holder opens the note live through the relay's link routes.
+      const exchanged = await fetch(`${proxy.origin}/sync/link-exchange`, { method: "POST",
+        headers: { "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey },
+        body: JSON.stringify({ secret: new URL(link.url).hash.slice(1) }) });
+      expect(exchanged.status).toBe(200);
+      const { capabilityToken } = await exchanged.json() as { capabilityToken: string };
+      const discriminator = randomBytes(9).toString("base64url");
+      const linkHeaders = { authorization: `LinkCapability ${capabilityToken}`, "x-dohc-link-profile-secret": randomBytes(32).toString("base64url"),
+        "x-dohc-relay-exchange-key": exchangeKey, origin: proxy.origin };
+      let publicPrincipalId: string | undefined;
+      transport = createNamedLiveBrowserTransport<{ objectId: string }>({ publicOrigin: proxy.origin, limits: profile.editor,
+        recordingContext() {
+          if (!publicPrincipalId) throw new Error("Link identity is unavailable.");
+          return { kind: "link", publicPrincipalId };
+        },
+        async authorize(selection, signal) {
+          const response = await fetch(`${proxy.origin}/sync/live/link-tickets`, { method: "POST", signal,
+            headers: { ...linkHeaders, "content-type": "application/json" }, body: JSON.stringify({ discriminator, objectId: selection.objectId }) });
+          if (response.status !== 200) throw new Error(`Link ticket refused: ${response.status} ${await response.text()}`);
+          const ticket = await response.json() as { expiresAtMs: number; publicPrincipalId: string; token: string };
+          publicPrincipalId = ticket.publicPrincipalId;
+          const url = new URL("/sync/live/link", proxy.origin);
+          url.protocol = "wss:";
+          url.searchParams.set("session", discriminator);
+          return { ticketToken: ticket.token, discriminator, websocketUrl: url.href };
+        },
+        openSocket(url, protocols) {
+          const socket = new WebSocket(url, protocols, { ca: ca.ca, headers: linkHeaders, perMessageDeflate: false });
+          sockets.add(socket);
+          socket.once("close", () => sockets.delete(socket));
+          return socket as unknown as globalThis.WebSocket;
+        } });
+      const holder = transport.select({ objectId });
+      await holder.reconnect();
+      await expect.poll(() => holder.state().status, { timeout: 120_000 }).toBe("live");
+      expect(yDocToMarkdown(holder.doc)).toContain("Bring snacks for the drive.");
+      expect(holder.doc.getMap("frontmatter").get("packed")).toBeUndefined();
+
+      // The desktop opens again, pulls the server's first version and joins
+      // the live session, as its delivery loop does for each ready note.
+      desktop = await openDesktop();
+      const joined = desktop;
+      relay = joined.relay.bind({ ...joined.workspace, relay: connection });
+      await relay.claim();
+      capture = createWorkspaceEngineCapture({ ...joined.workspace, rustEngineSessions: joined.sessions, settleDebounceMs: 60_000 });
+      await pullCaptured(relay, capture);
+      const config = { ...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document] };
+      const refusals = new OwnerKnownRefusals();
+      const pass = () => joined.sessions.run(joined.workspace, async ({ workspace }) => runNativeOwnerDeliveryPass({
+        client: joined.nativeClient(), workspaceHandle: workspace, document, config, refusals, signal: AbortSignal.timeout(60_000),
+        bearer: connection.token, accountId: workspaceId, assertCurrent() {} }));
+      expect(["empty", "acknowledged"]).toContain(await pass());
+      const desktopDb = (query: (db: DatabaseSync) => unknown) => {
+        const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+        try { return query(db); } finally { db.close(); }
+      };
+      expect(desktopDb(db => db.prepare("SELECT lineage_claim_id AS lineage FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?")
+        .all(workspaceId, objectId))).toEqual([{ lineage: document.binding.lineageClaimId }]);
+
+      // The person edits the note in the desktop. The edit waits for the
+      // server in the desktop's live queue, and its next pass delivers it.
+      const editor = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      try {
+        expect(await editor.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try {
+            Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+            const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["packed", "yes"]]));
+            return Y.encodeStateAsUpdate(scratch, before);
+          } finally { scratch.destroy(); }
+        }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "first-open-join-edit" })).toBe(true);
+        expect(Number((desktopDb(db => db.prepare("SELECT COALESCE(SUM(pending_entry_count),0) AS count FROM owner_ydoc_outboxes WHERE workspace_id=? AND object_id=?")
+          .get(workspaceId, objectId)) as { count: number }).count)).toBeGreaterThan(0);
+        await expect.poll(async () => {
+          await pass();
+          return holder.doc.getMap("frontmatter").get("packed");
+        }, { timeout: 120_000 }).toBe("yes");
+      } finally { await editor.close({ settle: false }); }
+      expect(holder.state().status).toBe("live");
+
+      // The server keeps the note live after the desktop's ordinary sync too.
+      await pushUntilDrained(relay);
+      await pullCaptured(relay, capture);
+      expect((await discovery()).map(row => row.binding.currentPath)).toEqual([path]);
+      expect((listing as { documents: { path: string; status: string }[] }).documents).toEqual([expect.objectContaining({ path, status: "ready" })]);
+      expect(relayServer.diagnostics().stderr).not.toContain(`Live editing of ${path} in workspace ${workspaceId} is held`);
+    } finally {
+      transport?.close();
+      for (const socket of sockets) socket.terminate();
+      try { await capture?.stop(); } finally {
+        await desktop?.close();
+        await relayServer?.stop();
+        await proxy.close();
+        setDefaultCACertificates(previousRoots);
+        vi.unstubAllEnvs();
+      }
+    }
+  },
+  300_000,
 );
 
 it.skipIf(engine.missing)(
