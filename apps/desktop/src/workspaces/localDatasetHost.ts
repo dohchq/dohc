@@ -108,8 +108,8 @@ export interface LocalDatasetHostOptions {
   onDatasetsChanged?(): void;
   /** This attachment's workspace engine for document Collection apps. Throws while it is unavailable. */
   collectionEngine?(): LocalCollectionEngine;
-  /** Who a local Collection app's response is made by: the agent run active now, or the person here. */
-  collectionAuthor?(): Promise<MomentWriteAuthor>;
+  /** Who a local Collection app's response is made by. See localCollectionAuthor. */
+  collectionAuthor?(activated: boolean): Promise<MomentWriteAuthor>;
 }
 export interface LocalDatasetPreparation {
   preparationId: string;
@@ -692,9 +692,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         if (!options.collectionEngine) throw new Error("Document Collection apps are unavailable here.");
         return options.collectionEngine();
       },
-      author() {
+      author(activated) {
         if (!options.collectionAuthor) throw new Error("Document Collection apps are unavailable here.");
-        return options.collectionAuthor();
+        return options.collectionAuthor(activated);
       } });
     apps = createLocalDatasetApps({ db, store: appStore, workspaceId, ownerId, assertCurrent, agentRun: () => options.agentRun?.() ?? null, localPersonId: () => options.localPersonId(),
       approved: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
