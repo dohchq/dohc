@@ -35,6 +35,28 @@ import { registerOperations } from "./operationTable";
 import { isSharedLiveFileRefusal, readError, sharedLiveRestoreDetail } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 import { isLiveStopWaiting } from "./liveEditingStop";
+import type { OwnerLiveDocumentActionDependencies } from "./relaySharesIpc";
+
+/**
+ * Stop and restore removes the page next, so a release that left edits
+ * outside the file counts as kept: deferred, with its Markdown write held,
+ * or failed after the server stopped live editing (#3129).
+ */
+export function watchReleaseOutsideFile<Workspace>(ownerLiveStop: OwnerLiveDocumentActionDependencies<Workspace>["ownerLiveStop"]) {
+  let outsideFile = false;
+  const watched: typeof ownerLiveStop = async (...args) => {
+    if (args[1] !== "release") return ownerLiveStop(...args);
+    try {
+      const stop = await ownerLiveStop(...args);
+      if (stop?.deferred || stop?.settlementReason) outsideFile = true;
+      return stop;
+    } catch (error) {
+      outsideFile = true;
+      throw error;
+    }
+  };
+  return { ownerLiveStop: watched, outsideFile: () => outsideFile };
+}
 
 // A refused file's reason, as the person reads it. A file History no longer
 // tracks is refused in dohc's words. Unreadable rules are their own typed

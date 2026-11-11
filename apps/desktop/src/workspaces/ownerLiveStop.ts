@@ -40,7 +40,14 @@ export async function reconcileOwnerLiveStops(options: {
     }
     catch (error) {
       // Let discovery install a restore successor before the next Stop attempt.
-      if (!(error instanceof EngineRequestError && ["owner-stop-conflict","owner-stop-restore-pending"].includes(error.message))) throw error;
+      if (!(error instanceof EngineRequestError && ["owner-stop-conflict","owner-stop-restore-pending"].includes(error.message))) {
+        // A release that committed ended the Stop even when it then could not write
+        // the file, as for one deleted outside dohc. One that did not stays owed.
+        const owed=(await options.client.ownerYDocStopList(request(),options.signal)).some(row => row.retirementOwed &&
+          row.document.objectId===stop.document.objectId && row.document.mainVersionId===stop.document.mainVersionId);
+        if (owed) throw error;
+        console.error("[desktop] owner live release stopped but could not write the file:",stop.document.objectId,error);
+      }
     }
     options.onComplete?.(stop);
     options.assertCurrent();

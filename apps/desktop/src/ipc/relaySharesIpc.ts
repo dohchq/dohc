@@ -289,17 +289,17 @@ export function createOwnerLiveDocumentActions<
       const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
       let released: OwnerLiveStop | undefined;
-      await unchanged();
       try {
+        await unchanged();
         released=await dependencies.ownerLiveStop(operation.workspace,local.binding ? "release" : "retired",document.currentPath,local.binding ?? local.document,response.acceptedCursor);
       } catch (error) {
-        // The server already stopped live editing. A release that did not
-        // commit kept the queue, and Stop reconciliation tries it again; one
-        // that committed left a record that the file still needs the edits.
-        if (!quarantined) throw error;
+        // The server already stopped live editing, so the Stop did. A release
+        // that did not run or commit kept its Stop row, and Stop reconciliation
+        // sends it again; one that committed left a record that the file still
+        // needs the edits. A file deleted outside dohc refuses the release's write.
         operation.assertCurrent();
-        console.error("[desktop] owner live release kept the refused edits:",error);
-        return {keptEdits:"kept"};
+        console.error("[desktop] owner live release failed after the server stopped live editing:",error);
+        return {keptEdits:quarantined || onServer ? "kept" : "none"};
       }
       operation.assertCurrent();
       return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released)};
