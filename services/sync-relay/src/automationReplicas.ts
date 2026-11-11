@@ -647,7 +647,7 @@ function replicaFolder(root: string, namespace: string, workspaceId: string): st
 /**
  * The server keeps no copies: they go at once, with their rows, rather than
  * after the retention a host move keeps them for. Call it at start when the
- * deployment runs neither automations nor the account API.
+ * server keeps no copies of workspaces.
  */
 export async function removeAutomationReplicas(storage: SyncRelayStorage, root: string): Promise<void> {
   storage.forgetAutomationWorkspaces();
