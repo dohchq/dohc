@@ -3,4 +3,7 @@
 // shrinks back under it; only new notes start without that history.
 export const DOCUMENT_TOO_DENSE_CAUSE =
   "This note has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit.";
+/** The same cause when the engine refuses to save the note, rather than the relay refusing to take it live. */
+export const DOCUMENT_TOO_DENSE_SAVE_CAUSE =
+  "This note has grown too large for dohc to save, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit.";
 export const DOCUMENT_TOO_DENSE_NEXT = "Move its text into new, smaller notes and continue there.";
