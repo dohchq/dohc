@@ -11,6 +11,9 @@ export const CONNECTION_LOST_REASON = "dohc lost its connection to this document
 // An edit dohc refused for good, once its set-aside row is dismissed. Tabs share
 // one session, so only closing every tab ends it.
 export const NOT_SAVED_REASON = "dohc could not save this document. Close every tab showing it, then reopen it to edit.";
+// The server took none of this computer's live edits to the document, or too
+// many wait to reach it. Its Notices row offers what ends the pause.
+export const LIVE_EDITING_PAUSED_REASON = "Live editing is paused for this document. Open Notices to continue.";
 
 // Why this session became read-only, beside any row it set aside, since no row
 // says why. None when access ended, which has its own reason.
@@ -34,6 +37,8 @@ export function readOnlyReasons(causes: {
   transition: string | undefined;
   // Refused for good, with its set-aside row dismissed.
   notSaved: boolean;
+  // This computer's live edits to it wait on the server.
+  livePaused: boolean;
 }): string[] {
   if (causes.gone) return [];
   const reasons = [
@@ -42,6 +47,7 @@ export function readOnlyReasons(causes: {
     causes.shared && !causes.accessEnded ? SAVE_STATE["read-only"].title : undefined,
     causes.transition,
     causes.notSaved ? NOT_SAVED_REASON : undefined,
+    causes.livePaused ? LIVE_EDITING_PAUSED_REASON : undefined,
   ];
   return reasons.filter((reason): reason is string => reason !== undefined);
 }

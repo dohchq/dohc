@@ -38,6 +38,7 @@ import type {
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
   MyShareChangeRow,
+  OwnerLiveQuarantine,
   RebuildEngineStoreResult,
   ShareAccess,
   ShareHandoffStatus,
@@ -454,6 +455,11 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
+
+// A refused queue on this computer, in a state the engine still refuses edits
+// in. A finished Stop (stopped-kept, not-written, cannot-write) releases the note.
+const FROZEN_QUEUE_RECOVERY: ReadonlySet<OwnerLiveQuarantine["recovery"]> =
+  new Set(["paused", "retrying", "stopping", "unreadable"]);
 
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
@@ -2222,6 +2228,18 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
   }, [pendingShareMarks, pendingShare, openTabs]);
+  // Notes whose queue on this computer takes no more edits: a full one, or one
+  // the server refused. The engine refuses every edit to them, so their editors
+  // stay read-only rather than set each keystroke aside. Main lists them until
+  // Try again delivers, the queue drains or a finished Stop releases the note.
+  // A row kept after a restore holds no current queue, and main lists a row the
+  // server keeps only when this computer's queue for the note isn't refused.
+  const livePausedPaths = syncStatus?.ownerLivePausedPaths;
+  const liveQuarantines = syncStatus?.ownerLiveQuarantines;
+  const liveEditingPaused = useMemo(() => new Set([
+    ...(livePausedPaths ?? []),
+    ...(liveQuarantines ?? []).filter((row) => row.storedOn === "this-computer" && !row.saveOnly && FROZEN_QUEUE_RECOVERY.has(row.recovery)).map((row) => row.path),
+  ]), [livePausedPaths, liveQuarantines]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -7194,6 +7212,7 @@ export function DesktopWorkspaceShell(props: {
                   (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)
                 }
+                liveEditingPaused={liveEditingPaused.has(tabPath)}
                 receivedShare={!!shareView || isMountedSharePath(tabPath)}
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}

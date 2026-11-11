@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { FileInspector } from "./FileInspector";
+import { LIVE_EDITING_PAUSED_REASON } from "./readOnlyReasons";
 
 // WS-G2-C-2: the engine Y.Doc is the PRIMARY editing surface,
 // so its in-flight/settling save state must reach the SHELL TAB's dirty dot via
@@ -83,6 +84,14 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     const chip = await screen.findByTestId("markdown-save-state");
     expect(chip.getAttribute("data-state")).toBe("read-only");
     expect(chip.textContent).toBe("Read-only");
+  });
+
+  it("says Read-only, and why, while live editing is paused", async () => {
+    render(<FileInspector workspaceId="ws-1" path="a.md" liveEditingPaused />);
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.getAttribute("data-state")).toBe("read-only");
+    expect(chip.textContent).toBe("Read-only");
+    expect(chip.getAttribute("title")).toBe(LIVE_EDITING_PAUSED_REASON);
   });
 
   it("keeps the existing unexplained error tooltip", async () => {
