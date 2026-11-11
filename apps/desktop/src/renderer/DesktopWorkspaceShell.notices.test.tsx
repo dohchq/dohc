@@ -3527,6 +3527,27 @@ describe("owner live documents", () => {
     expect(within(toast).getByText(title)).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
   });
+  it("takes back a waiting Stop's notice when a later Stop is refused after Live documents closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), refused = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(waitingStop()).mockReturnValueOnce(refused.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    const stopButton = () => within(dialog).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    await user.click(stopButton());
+    await screen.findByText(LIVE_STOP_WAITING);
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(stopButton());
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
+    await user.keyboard("{Escape}");
+    await act(async () => refused.reject(liveStopError({code: "edits-pending"})));
+    await screen.findByText(`Live editing didn't stop for ${LIVE_ROW.path}`);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = await screen.findByTestId("notice-center");
+    expect(within(center).queryByText(LIVE_STOP_WAITING)).toBeNull();
+    expect(within(center).queryByText(`Stopping live editing for ${LIVE_ROW.path}`)).toBeNull();
+  });
   it("keeps the Stopping row as it was when its Try again waits again", async () => {
     const bridge = makeBridge(Promise.resolve(null)), again = deferred<StopOwnerLiveDocumentResult>();
     bridge.getSyncStatus.mockResolvedValue(stoppingStatus());

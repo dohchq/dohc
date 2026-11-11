@@ -1177,6 +1177,8 @@ export function DesktopWorkspaceShell(props: {
     const identity = `live-stop-edits-pending:${objectId}`;
     const report = () => {
       if (!current()) return;
+      // The Stop answered, so it no longer waits.
+      clearIdentity(`live-stop-waiting:${id}:${objectId}`);
       const needsResume = liveStopOffersResume(refusal);
       const withheld = refusal.code === "edits-pending" && refusal.pending === "conflict-parent-withheld";
       reportShellFailure({identity,
