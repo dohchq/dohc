@@ -43,8 +43,8 @@ test("prepared engines transfer across checkout paths and still reject changed i
     const exec = cp.execFileSync;
     cp.execFileSync = (command, ...args) => command === 'rustc' ? Buffer.from('fixture rustc') : exec(command, ...args);
     syncBuiltinESMExports();
-    const {assertPrepared} = await import('./scripts/verification/build.mjs');
-    assertPrepared({engineOnly: true});
+    const {assertPrepared, enginePath} = await import('./scripts/verification/build.mjs');
+    assertPrepared({engineOnly: true, engineBinary: enginePath});
   `], {cwd: worker, encoding: "utf8", timeout: 20_000});
   assert.equal(check().status, 0, "an unchanged engine transfers to the worker");
   const cargo = join(root, "worker", ".cargo");
