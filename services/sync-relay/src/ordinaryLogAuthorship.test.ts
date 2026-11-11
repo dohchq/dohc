@@ -153,6 +153,15 @@ describe("ordinary admitted authorship", () => {
     await expect(parseAuthenticatedLogOps([{...update({authorContext: {...context, humanName: "Forged"}}), opKind: "moment.append"}], "alice", lookup)).rejects.toThrow("invalid moment.append authorContext");
   });
 
+  it.each(["ydoc.update", "moment.append"])("refuses a %s whose recording context declares a personal agent", async opKind => {
+    const agent = {agentId: `p-${"a".repeat(26)}`, agentName: "Helper"};
+    await expect(parseAuthenticatedLogOps([{...update({authorContext: {...context, agent}}), opKind}], "alice", () => "Alice"))
+      .rejects.toMatchObject({code: "authorship_mismatch"});
+    // The account's own agents still declare themselves.
+    await expect(parseAuthenticatedLogOps([{...update({authorContext: {...context, agent: {...agent, agentId: "helper"}}}), opKind}],
+      "alice", () => "Alice")).resolves.toHaveLength(1);
+  });
+
   it("bounds server names and declared agent entries by serialized bytes", async () => {
     for (const name of [null, "", "x".repeat(513)]) {
       const [admitted] = await parseAuthenticatedLogOps([update({authorContext: context})], "alice", () => name);

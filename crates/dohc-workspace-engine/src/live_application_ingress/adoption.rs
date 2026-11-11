@@ -245,4 +245,23 @@ mod tests {
             assert_eq!(error.message, "invalid-owner-adoption-event", "{case}");
         }
     }
+
+    /// History the relay committed before it refused personal agents can name
+    /// one, so adoption decodes it. A peer refuses a new audit record that
+    /// names one (`an_audit_record_naming_a_personal_agent_is_refused`).
+    #[test]
+    fn a_committed_event_naming_a_personal_agent_decodes() {
+        let personal = json!({"kind": "agent", "agentId": format!("p-{}", "a".repeat(26))});
+        let mut event = metadata(json!([]));
+        event["canonicalVersion"] = json!(2);
+        event["authorSnapshot"] = json!([personal]);
+        event["firstSeenDeletes"] = json!([]);
+        event["checkpointCoverage"] =
+            json!([{"author": personal, "structRanges": [], "deletionRanges": []}]);
+        let decoded = decode(&cut(event.clone()), 1, limits(), reconstruction()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded.events[0].metadata).unwrap(),
+            event
+        );
+    }
 }

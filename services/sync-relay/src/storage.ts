@@ -969,6 +969,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return collectionWriteStorage.commitCollectionWrite(this, input);
   }
 
+  checkPersonalCollectionWriter(input: collectionWriteStorage.PersonalWriterInput, nowMs: number): void {
+    collectionWriteStorage.checkPersonalCollectionWriter(this, input, nowMs);
+  }
+
+  commitPersonalCollectionWrite(input: collectionWriteStorage.CommitPersonalCollectionWriteInput) {
+    return collectionWriteStorage.commitPersonalCollectionWrite(this, input);
+  }
+
   automationSwitchableFolder(workspaceId: string, folder: string): boolean {
     return collectionWriteStorage.automationSwitchableFolder(this, workspaceId, folder);
   }

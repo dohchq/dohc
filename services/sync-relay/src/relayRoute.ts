@@ -139,7 +139,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   if (parts.length === 4 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "personal-agent") {
     const action = parts[3];
     if (action === "workspaces" || action === "groups" || action === "post" || action === "wait" || action === "chat" ||
-        action === "discussion" || action === "files" || action === "blob") {
+        action === "discussion" || action === "files" || action === "blob" || action === "collection-writes") {
       return { route: "personal-agent-tools", action };
     }
     throw notFound();

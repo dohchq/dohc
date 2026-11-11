@@ -15,7 +15,7 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
-import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
@@ -244,6 +244,8 @@ function captureLiveFrameHost(options: {
         const trustedAutomationGrant = input.trustedAutomationGrant;
         if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
+        // Only the relay attributes work to a personal agent.
+        if (!trustedAutomation && claimsPersonalAgent(authorContext)) return { result: "refused", reason: "provenance-refused" };
         if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
         if (updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };

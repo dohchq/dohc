@@ -15,7 +15,7 @@ async function advertisedPersonalTools(): Promise<Tool[]> {
       fetch: async (input, init) => {
         const request = new Request(input, init);
         const result = await servePersonalMcp(request, {
-          signal: request.signal, deadlineAtMs: Date.now() + 30_000,
+          signal: request.signal, deadlineAtMs: Date.now() + 30_000, admitLargeBody: () => () => {},
           client: {
             call: async (action) => {
               if (action !== "workspaces") throw new Error(`Unexpected inventory call: ${action}`);
@@ -51,6 +51,10 @@ it("takes a Comment thread's id in the same shape to read it and to reply in it"
 
 it("takes the share link tools' inputs where they mean the same thing", () => {
   const linkFiles = linkTools["comment/current/without-live"], linkChannel = linkTools["group-channel"];
+  // A Collection write takes the Edit link's write and the workspace it goes to.
+  const { workspace, ...write } = properties(personalTools, "dohc_write_collection_files");
+  expect(write).toEqual(properties(linkTools["edit/current/without-live"], "dohc_write_collection_files"));
+  expect(workspace).toEqual(properties(personalTools, "dohc_list_files").workspace);
   for (const name of ["dohc_post_channel", "dohc_post_discussion"]) {
     const post = properties(personalTools, name);
     expect([post.body, post.idempotencyKey], name).toEqual([properties(linkChannel, "dohc_post_group").body, properties(linkChannel, "dohc_post_group").idempotencyKey]);
