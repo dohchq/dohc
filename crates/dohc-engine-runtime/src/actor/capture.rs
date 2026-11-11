@@ -2170,6 +2170,14 @@ fn capture_ingest_in_tx(
 ) -> Result<WriteResult, RuntimeError> {
     let (pinned, held) = pinned_capture_input(tx, input)?;
     let input = pinned.as_ref();
+    if !held {
+        ensure_no_pending_switch_placement(
+            tx,
+            &input.workspace_id,
+            &input.path,
+            input.text.as_bytes(),
+        )?;
+    }
     let placement_admission = if held {
         Ok(())
     } else {
@@ -2895,6 +2903,7 @@ fn capture_ingest_binary_on_store(
         let input = pinned.as_ref();
         let mut admitted = false;
         if hold.is_none() {
+            ensure_no_pending_switch_placement(tx, &input.workspace_id, &input.path, &input.bytes)?;
             ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)?;
         }
         let mut result = capture_ingest_binary_with_admission_in_tx(
@@ -3092,6 +3101,85 @@ fn ensure_no_pending_head_placement(
     Ok(())
 }
 
+/// The capture refusal while the active version's switch has yet to replace or
+/// delete a file that still holds the previous version's bytes (dohc#3621).
+/// Replay lands the switch's write, and capture sees the path again then.
+pub const CAPTURE_WAITS_FOR_SWITCH: &str = "capture-waits-for-switch";
+
+/// Whether `disk` is exactly what a pending write or delete of the active
+/// version's switch expects to replace at `path`. Capturing those bytes would
+/// record the previous version's file in the active one. Other bytes are an
+/// edit made after the switch, and capture records them. The bytes are hashed
+/// only when such a job exists, so other captures pay one indexed lookup.
+fn switch_placement_waits(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+    disk: &[u8],
+) -> Result<bool, RuntimeError> {
+    let mut jobs = conn
+        .prepare_cached(
+            "SELECT j.job_id, j.operation, j.content_sha256, j.preimage_sha256,
+                 coalesce((SELECT version_id FROM active_versions
+                     WHERE workspace_id=w.workspace_id),w.main_version_id)
+             FROM materialization_jobs j JOIN versioned_workspaces w ON w.workspace_id=?1
+             WHERE j.workspace_id IN (?1,'') AND j.target_path=?2 AND j.status='pending'
+                 AND j.preimage_present=1 AND j.job_id GLOB 'version-switch-*mat_*'",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let mut rows = jobs
+        .query(params![workspace, path])
+        .map_err(StorageError::corrupt_public)?;
+    let mut disk_sha256 = None;
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let preimage: Option<String> = row.get(3).map_err(StorageError::corrupt_public)?;
+        if preimage.as_deref()
+            != Some(
+                disk_sha256
+                    .get_or_insert_with(|| dohc_engine_storage::hex_sha256(disk))
+                    .as_str(),
+            )
+        {
+            continue;
+        }
+        let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let operation: String = row.get(1).map_err(StorageError::corrupt_public)?;
+        let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        let version: String = row.get(4).map_err(StorageError::corrupt_public)?;
+        let operation = match operation.as_str() {
+            "write" => dohc_engine_storage::MaterializationOperation::Write,
+            "delete" => dohc_engine_storage::MaterializationOperation::Delete,
+            _ => continue,
+        };
+        // A switch job names its version only in its id (dohc#3193).
+        let secret = job.starts_with("version-switch-secret-mat_");
+        if job
+            == super::versions::switch_projection_job_id(
+                workspace, &version, path, operation, &sha, secret,
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_no_pending_switch_placement(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+    disk: &[u8],
+) -> Result<(), RuntimeError> {
+    if switch_placement_waits(conn, workspace, path, disk)? {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: CAPTURE_WAITS_FOR_SWITCH,
+            },
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_capture_target_not_leased(
     conn: &Connection,
     leases: &LeaseRegistry,
@@ -3165,6 +3253,16 @@ fn capture_secret_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // The actor's writer runs the switch too, so no switch job can appear
+    // between this read and the capture's write.
+    store.read_with(|conn| {
+        ensure_no_pending_switch_placement(
+            conn,
+            &input.workspace_id,
+            &input.path,
+            input.text.as_bytes(),
+        )
+    })?;
     SecretFileStore::new(store, key)
         .capture_secret_with(input, faults, |tx, result| {
             journal_secret_put_outbound_in_tx(tx, result)
