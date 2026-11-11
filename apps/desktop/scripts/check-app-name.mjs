@@ -1,9 +1,11 @@
 // Checks, on macOS or Linux, what the desktop's app naming does to a current
-// tester's profile: the settings folder it resolves, and the name Electron
+// tester's profile: the settings folder it resolves, and the app name Electron
 // gives the secret that protects a saved sign-in. It starts the pinned
 // Electron once, with no window, in a temporary home holding a copy of
-// fixtures/app-name-profile laid out under the old folder name. It reads and
-// writes nothing outside that home, and never touches the keychain.
+// fixtures/app-name-profile laid out under the old folder name. Electron runs
+// with a mock keychain (macOS) or a plain password store (Linux), so it never
+// reaches the real keychain or keyring, and it never resolves the real
+// settings folder. Chromium may still use the system's temporary folder.
 //
 //   pnpm --filter @dohc/desktop exec node scripts/check-app-name.mjs
 import { spawnSync } from "node:child_process";
@@ -38,10 +40,6 @@ if (!appData.startsWith(home)) {
   void app.whenReady().then(() => {
     console.log(JSON.stringify({
       appName: app.name,
-      // Electron 43 names the macOS keychain item, and the Linux keyring
-      // entry's application, from app.name once main has loaded
-      // (electron_browser_main_parts.cc, PostCreateMainMessageLoop).
-      keychainService: app.name + " Safe Storage",
       settingsFolder: app.getPath("userData"),
       settingsFiles: readdirSync(app.getPath("userData")).sort(),
     }));
@@ -77,7 +75,9 @@ async function check() {
     const electron = createRequire(import.meta.url)("electron");
     const env = { ...process.env, HOME: home, CFFIXED_USER_HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache") };
     delete env.ELECTRON_RUN_AS_NODE;
-    const run = spawnSync(electron, [probe], { env, encoding: "utf8", timeout: 60_000 });
+    // Keep Electron off the real keychain and keyring. Neither switch changes app.name or userData.
+    const keyStore = process.platform === "darwin" ? "--use-mock-keychain" : "--password-store=basic";
+    const run = spawnSync(electron, [keyStore, probe], { env, encoding: "utf8", timeout: 60_000 });
     const line = run.stdout.split("\n").find((text) => text.startsWith("{"));
     if (!line) throw new Error(`The probe printed nothing (exit ${run.status}).\n${run.stderr}`);
     const found = JSON.parse(line);
@@ -85,7 +85,6 @@ async function check() {
 
     const failures = [];
     if (found.appName !== "dohc") failures.push(`app name is ${found.appName}, not dohc`);
-    if (found.keychainService !== "dohc Safe Storage") failures.push(`the key is stored as ${found.keychainService}`);
     if (realpathSync(found.settingsFolder) !== realpathSync(oldFolder)) failures.push(`settings folder is ${found.settingsFolder}, not ${oldFolder}`);
     const after = hashes(oldFolder);
     for (const [name, hash] of Object.entries(before)) {
@@ -93,7 +92,11 @@ async function check() {
       if (!found.settingsFiles.includes(name)) failures.push(`the app didn't find ${name}`);
     }
     console.log(`App name: ${found.appName}`);
-    console.log(`Key stored as: ${found.keychainService}`);
+    // Electron 43 names the macOS keychain item, and the Linux keyring entry's
+    // application, from app.name once main has loaded
+    // (electron_browser_main_parts.cc, PostCreateMainMessageLoop). The app
+    // can't read that name back, so this line is derived, not observed.
+    console.log(`Keychain item, derived from the app name: ${found.appName} Safe Storage`);
     console.log(`Settings folder: ${found.settingsFolder} (${process.platform === "darwin" ? "Library/Application Support" : ".config"}/${packageName} in the temporary home)`);
     console.log(`Tester files found unchanged: ${Object.keys(before).join(", ")}`);
     if (failures.length > 0) throw new Error(`App name check failed:\n- ${failures.join("\n- ")}`);
