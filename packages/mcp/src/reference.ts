@@ -612,6 +612,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
 
+A desktop MCP tool refuses an argument it does not take. The error names that argument and lists the ones the tool takes.
+
 Partial form creation returns \`{ kind: "partial", created, failedStage, reason, retry }\`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools

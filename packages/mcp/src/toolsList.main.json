@@ -43,6 +43,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -68,6 +69,7 @@
         "required": [
           "channelWireId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -94,6 +96,7 @@
         "required": [
           "version"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -122,6 +125,7 @@
         "required": [
           "appRoot"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -147,6 +151,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -171,6 +176,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -204,6 +210,7 @@
         "required": [
           "name"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -244,6 +251,7 @@
           "collectionPath",
           "name"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -265,6 +273,7 @@
         "required": [
           "name"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2084,6 +2093,7 @@
         "required": [
           "request"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2109,6 +2119,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2141,7 +2152,8 @@
               "required": [
                 "id",
                 "revision"
-              ]
+              ],
+              "additionalProperties": false
             }
           },
           "acceptLateWriteRisk": {
@@ -2153,6 +2165,7 @@
           "copies",
           "acceptLateWriteRisk"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2175,6 +2188,7 @@
             "maximum": 12
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2208,6 +2222,7 @@
           "grantId",
           "connectionId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2227,6 +2242,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2266,6 +2282,7 @@
           "path",
           "replacement"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2299,6 +2316,7 @@
           "databasePath",
           "tableName"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2325,6 +2343,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2342,6 +2361,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2394,6 +2414,7 @@
         "required": [
           "subject"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2441,6 +2462,7 @@
           "source",
           "literals"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2476,6 +2498,7 @@
           "collectionPath",
           "automation"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2497,6 +2520,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2528,6 +2552,7 @@
             "maxLength": 4096
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2549,6 +2574,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2569,6 +2595,7 @@
             "type": "boolean"
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2581,6 +2608,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2593,6 +2621,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2625,6 +2654,7 @@
           "shareId",
           "grantId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2637,6 +2667,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2649,6 +2680,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2667,6 +2699,7 @@
             "maxLength": 200
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2679,6 +2712,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2691,6 +2725,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2712,6 +2747,7 @@
         "required": [
           "version"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2746,6 +2782,7 @@
           "fromPath",
           "toPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2799,6 +2836,7 @@
           "button",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3211,6 +3249,7 @@
         "required": [
           "request"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3249,7 +3288,8 @@
               "field",
               "operator",
               "value"
-            ]
+            ],
+            "additionalProperties": false
           },
           "sort": {
             "maxItems": 8,
@@ -3273,7 +3313,8 @@
               "required": [
                 "field",
                 "direction"
-              ]
+              ],
+              "additionalProperties": false
             }
           },
           "groupBy": {
@@ -3294,6 +3335,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3321,6 +3363,7 @@
           "databasePath",
           "sql"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3357,6 +3400,7 @@
           "automation",
           "run"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3378,6 +3422,7 @@
         "required": [
           "id"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3434,6 +3479,7 @@
             "maximum": 100
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3455,6 +3501,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3493,6 +3540,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3514,6 +3562,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3537,6 +3586,7 @@
         "required": [
           "operationId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3574,6 +3624,7 @@
           "collectionPath",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3601,6 +3652,7 @@
           "shareId",
           "grantId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3695,6 +3747,7 @@
           "threadId",
           "body"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3754,6 +3807,7 @@
           "conflictId",
           "resolution"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3790,6 +3844,7 @@
           "automation",
           "run"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3817,6 +3872,7 @@
           "path",
           "incident"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3838,6 +3894,7 @@
         "required": [
           "id"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3864,6 +3921,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3913,6 +3971,7 @@
         "required": [
           "query"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3944,6 +4003,7 @@
           "recordPath",
           "fields"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3992,6 +4052,7 @@
           "title",
           "body"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4076,6 +4137,7 @@
           "group",
           "body"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4103,6 +4165,7 @@
           "path",
           "incident"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4115,6 +4178,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4136,6 +4200,7 @@
         "required": [
           "version"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4157,6 +4222,7 @@
         "required": [
           "appRoot"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4177,6 +4243,7 @@
         "required": [
           "operationId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4210,6 +4277,7 @@
             "maximum": 25000
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4222,6 +4290,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4263,6 +4332,7 @@
           "path",
           "content"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4314,6 +4384,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4339,6 +4410,7 @@
         "required": [
           "channelWireId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4361,6 +4433,7 @@
             "maximum": 12
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4387,6 +4460,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4404,6 +4478,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4456,6 +4531,7 @@
         "required": [
           "subject"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4503,6 +4579,7 @@
           "source",
           "literals"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4524,6 +4601,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4555,6 +4633,7 @@
             "maxLength": 4096
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4576,6 +4655,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4596,6 +4676,7 @@
             "type": "boolean"
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4608,6 +4689,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4620,6 +4702,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4632,6 +4715,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4644,6 +4728,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4697,6 +4782,7 @@
           "button",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4735,7 +4821,8 @@
               "field",
               "operator",
               "value"
-            ]
+            ],
+            "additionalProperties": false
           },
           "sort": {
             "maxItems": 8,
@@ -4759,7 +4846,8 @@
               "required": [
                 "field",
                 "direction"
-              ]
+              ],
+              "additionalProperties": false
             }
           },
           "groupBy": {
@@ -4780,6 +4868,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4807,6 +4896,7 @@
           "databasePath",
           "sql"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4828,6 +4918,7 @@
         "required": [
           "id"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4884,6 +4975,7 @@
             "maximum": 100
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4905,6 +4997,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4943,6 +5036,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -4980,6 +5074,7 @@
           "collectionPath",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5029,6 +5124,7 @@
         "required": [
           "query"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5050,6 +5146,7 @@
         "required": [
           "appRoot"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5062,6 +5159,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5113,6 +5211,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5138,6 +5237,7 @@
         "required": [
           "channelWireId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5160,6 +5260,7 @@
             "maximum": 12
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5186,6 +5287,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5203,6 +5305,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5255,6 +5358,7 @@
         "required": [
           "subject"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5302,6 +5406,7 @@
           "source",
           "literals"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5323,6 +5428,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5354,6 +5460,7 @@
             "maxLength": 4096
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5375,6 +5482,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5395,6 +5503,7 @@
             "type": "boolean"
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5407,6 +5516,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5419,6 +5529,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5431,6 +5542,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5443,6 +5555,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5496,6 +5609,7 @@
           "button",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5534,7 +5648,8 @@
               "field",
               "operator",
               "value"
-            ]
+            ],
+            "additionalProperties": false
           },
           "sort": {
             "maxItems": 8,
@@ -5558,7 +5673,8 @@
               "required": [
                 "field",
                 "direction"
-              ]
+              ],
+              "additionalProperties": false
             }
           },
           "groupBy": {
@@ -5579,6 +5695,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5606,6 +5723,7 @@
           "databasePath",
           "sql"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5627,6 +5745,7 @@
         "required": [
           "id"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5683,6 +5802,7 @@
             "maximum": 100
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5704,6 +5824,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5742,6 +5863,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5779,6 +5901,7 @@
           "collectionPath",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5828,6 +5951,7 @@
         "required": [
           "query"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5849,6 +5973,7 @@
         "required": [
           "appRoot"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5861,6 +5986,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5912,6 +6038,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5937,6 +6064,7 @@
         "required": [
           "channelWireId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5959,6 +6087,7 @@
             "maximum": 12
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -5985,6 +6114,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6002,6 +6132,7 @@
             "maxLength": 32768
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6054,6 +6185,7 @@
         "required": [
           "subject"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6101,6 +6233,7 @@
           "source",
           "literals"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6122,6 +6255,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6153,6 +6287,7 @@
             "maxLength": 4096
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6174,6 +6309,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6194,6 +6330,7 @@
             "type": "boolean"
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6206,6 +6343,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6218,6 +6356,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6230,6 +6369,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6242,6 +6382,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6295,6 +6436,7 @@
           "button",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6333,7 +6475,8 @@
               "field",
               "operator",
               "value"
-            ]
+            ],
+            "additionalProperties": false
           },
           "sort": {
             "maxItems": 8,
@@ -6357,7 +6500,8 @@
               "required": [
                 "field",
                 "direction"
-              ]
+              ],
+              "additionalProperties": false
             }
           },
           "groupBy": {
@@ -6378,6 +6522,7 @@
         "required": [
           "collectionPath"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6405,6 +6550,7 @@
           "databasePath",
           "sql"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6426,6 +6572,7 @@
         "required": [
           "id"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6482,6 +6629,7 @@
             "maximum": 100
           }
         },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6503,6 +6651,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6541,6 +6690,7 @@
         "required": [
           "path"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6578,6 +6728,7 @@
           "collectionPath",
           "recordId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6627,6 +6778,7 @@
         "required": [
           "query"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6673,6 +6825,7 @@
           "expectedContentHash",
           "submitId"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6694,6 +6847,7 @@
         "required": [
           "appRoot"
         ],
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -6706,6 +6860,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
