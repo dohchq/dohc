@@ -3338,6 +3338,19 @@ fn ydoc_settle_attempt_on_store(
                     &earlier,
                 )?;
                 if incomplete > 0 {
+                    // One still owed failed for a passing reason, such as a
+                    // locked file, so the caller retries; one that conflicted
+                    // never lands.
+                    let stopped = &earlier[earlier.len() - incomplete];
+                    if store
+                        .load_materialization_job(stopped)?
+                        .is_some_and(|job| job.status == JobStatus::Pending)
+                    {
+                        return Err(dohc_engine_sync::SyncError::RetryableState {
+                            reason: "settlement-materialization-pending",
+                        }
+                        .into());
+                    }
                     return Err(RuntimeError::ActiveVersionMaterializationIncomplete {
                         failed_jobs: incomplete + 1,
                     });

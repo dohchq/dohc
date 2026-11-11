@@ -830,9 +830,18 @@ async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
         )
     };
     let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
-    settle(faults.clone(), 301)
+    let refused = settle(faults.clone(), 301)
         .await
         .expect_err("the older write fails, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+                reason: "settlement-materialization-pending"
+            })
+        ),
+        "a passing failure asks the caller to retry: {refused:?}"
+    );
     assert!(faults.fired(), "the older write reaches the injected fault");
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
@@ -901,7 +910,7 @@ async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
     std::fs::write(&file, "before parked again").expect("outside edit");
 
     let actor = supervisor.open(&db, 400).expect("reopen actor").actor;
-    actor
+    let refused = actor
         .ydoc_settle(
             scratch.path().to_path_buf(),
             key,
@@ -919,6 +928,13 @@ async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
         )
         .await
         .expect_err("an older write didn't land, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::ActiveVersionMaterializationIncomplete { .. }
+        ),
+        "a conflict never lands, so a retry can't help: {refused:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
         "before parked again",
