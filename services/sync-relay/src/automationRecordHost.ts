@@ -20,7 +20,7 @@ export function createAutomationRecordHost(options: {
 }): NonNullable<AutomationServerOptions["recordDelivery"]> {
   return {
     namespace: options.namespace,
-    async capture({binding, shareId, ownerUserId}, signal) {
+    async capture({binding, ownerUserId}, signal) {
       signal.throwIfAborted();
       const mode = options.storage.getLiveHostControl()?.configuredMode;
       const host = mode === "service" ? options.serviceHost() : mode === "device" ? options.deviceHost : undefined;
@@ -35,7 +35,7 @@ export function createAutomationRecordHost(options: {
         if (error instanceof Error && ["Device delivery is unavailable.", "Service host is unavailable."].includes(error.message)) throw wait();
         throw error;
       }
-      return captureOwnerLiveFrameHost({authenticatedUserId: ownerUserId, shareId, storage: options.storage, native,
+      return captureOwnerLiveFrameHost({authenticatedUserId: ownerUserId, storage: options.storage, native,
         trustedAccount: {accountId: ownerUserId, name: await accountDisplayName(options.lookupUserDisplayName, ownerUserId) ?? "Unnamed"},
         bounds: options.bounds, validate: options.validate});
     },

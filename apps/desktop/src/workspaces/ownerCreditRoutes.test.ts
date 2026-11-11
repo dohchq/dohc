@@ -26,7 +26,7 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
     vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {pending = 0; return {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null};});
     const validateJournal = createLiveMarkdownJournalValidator(policy);
     const result = await drainOwnerOutbox({storage: f.storage, client: {sendRequest: async () => ({result: {outboxId: "outbox", pendingBytes: pending, state: "active", retryDeliveryId: null}})} as never,
-      admission: {trustedAccount: accountId => ({accountId, name: "Relay name"}), shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
+      admission: {trustedAccount: accountId => ({accountId, name: "Relay name"}), workspaceIds: new Set(["workspace"]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
         refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _, ...input}) => validateJournal(input)},
       workspace: "handle", host: captured.host, registrationId: 1, binding, adoption: {adoptionId: "adoption", sequence: 0, applied() {}},
@@ -34,7 +34,7 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
     expect(result).toEqual({admittedEntries: 1, hasMore: false});
   } else {
     const lifetime = new AbortController(); let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
-    const carrier = new OwnerYDocFrameDelivery({relayUrl: "https://relay.test", shareId: "share", frames, attemptTimeoutMs: 1000,
+    const carrier = new OwnerYDocFrameDelivery({relayUrl: "https://relay.test", frames, attemptTimeoutMs: 1000,
       signal: lifetime.signal, freshBearer: async () => "owner-session", authenticatedAccountId: async () => "owner",
       acceptedState: {readState: async () => ({stateVector: Uint8Array.of(0), journalCursor: 0}), applyInitialSync: async () => "applied",
         applyAcceptedFrame: async () => "applied", isReceiptApplied: async () => true},

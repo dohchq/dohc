@@ -410,9 +410,28 @@ it("reports ready only with completed retained activation and the current native
   f.host.ready.mockReturnValue(false);
   expect((await state()).status).toBe("preparing");
   f.host.ready.mockReturnValue(true);
-  expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
+  expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: a damaged stored activation binding makes its own row unavailable
+// and leaves the rest of the readiness list served.
+it("lists a document with a damaged activation binding as unavailable and still serves the healthy one", async () => {
+  const f = await fixture(); f.seed("docs/b.md", "object-b");
+  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  retainServiceActivation(f.raw, namespace, true);
+  f.host.ready.mockReturnValue(true);
+  const documents = async () => {
+    const response = await f.handle(f.request());
+    expect(response.status).toBe(200);
+    return (await response.json()).documents;
+  };
+  const healthy = {path: "docs/b.md", objectId: "object-b", status: "preparing"};
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
+    document: {binding, relayDatabaseNamespace: namespace}}, healthy]);
+  f.raw.exec("UPDATE sync_relay_service_activations SET binding_json=json_set(binding_json,'$.selectorPaths','damaged')");
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}, healthy]);
 });
 
 // Proves: when the owner's restore ends a note's last Edit grant, the owner
@@ -426,7 +445,7 @@ it("reports a restored note ready to its owner after the restore ended its last 
   keptByOwnerRestore(f.raw, namespace);
   expect(f.release(binding.objectId)).toBeNull();
   expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
-    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace, shareId: scope.shareId}}]);
+    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace}}]);
 });
 
 // Proves: only the owner discovers the restored note. The revoked recipient
@@ -921,7 +940,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
     (delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
     restore_fence_generation,principal_kind,principal_id,accepting_host_epoch,received_at_ms,update_bytes,
     relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,canonical_version,first_seen_deletes_json)
-    VALUES ('pending-edit',?,?,'main',?,?,?,'["docs"]',7,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
+    VALUES ('pending-edit',?,?,'main',?,?,?,'["docs/a.md"]',7,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
     .get("c".repeat(64), scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.currentPath, namespace, "d".repeat(64))!.journal_cursor);
   f.host.pending.delete(binding.objectId);
   const stopped = await stop();

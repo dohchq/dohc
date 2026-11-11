@@ -25,8 +25,7 @@ export function readyOwnerDeliveryDocuments(value: unknown, workspaceId: string)
       throw new Error("Owner live document binding differs from the requested workspace.");
     }
     objects.add(binding.objectId);
-    documents.push({binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(row.document.relayDatabaseNamespace),
-      shareId: parseLiveUpdateIdentifier(row.document.shareId)});
+    documents.push({binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(row.document.relayDatabaseNamespace)});
   }
   return documents;
 }

@@ -90,7 +90,7 @@ export interface ServiceHostedSet {
 }
 // The lineages whose kept queue stays frozen at its owner's refused adoption seed, and those whose queue holds another refused edit.
 interface KeptHeads {readonly seeded: ReadonlySet<string>; readonly refused: ReadonlySet<string>}
-interface ServiceHostedDocument {readonly workspaceId: string; readonly objectId: string; readonly path: string; readonly shareId: string}
+interface ServiceHostedDocument {readonly workspaceId: string; readonly objectId: string; readonly path: string}
 function parseServiceWorkspace(item: unknown) {
   const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["hostedReplication"]);
   return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"),
@@ -564,11 +564,12 @@ export async function startServiceLiveHost(options: {
     // Stop fenced it, or neither an Edit grant of its owner covers it nor the
     // owner's restore kept it live, even while that restore is unfinished.
     const authorityLost = ({target, objectId}: {target: ServiceActivationTarget; objectId: string}) => {
-      const share = storage.getShare(target.shareId);
-      if (!share || share.workspaceId !== target.workspaceId) return true;
-      const owner = {userId: share.granterUserId, shareId: share.shareId};
-      return !storage.serviceHostDocumentEnabled({workspaceId: target.workspaceId, objectId}, owner, true) ||
-        !storage.serviceHostEnrollmentCovered({workspaceId: target.workspaceId, objectId, ownerUserId: owner.userId, shareId: owner.shareId, path: target.path});
+      const ownerUserId = storage.workspaceOwner(target.workspaceId), document = {workspaceId: target.workspaceId, objectId};
+      if (ownerUserId === null) return true;
+      // The share that enrolled the document is only where the coverage check looks first.
+      const shareId = storage.readServiceHostEnrollmentByObjectId(target.workspaceId, objectId)?.shareId ?? null;
+      return !storage.serviceHostDocumentEnabled(document, {userId: ownerUserId}, true) ||
+        !storage.serviceHostEnrollmentCovered({...document, ownerUserId, shareId, path: target.path});
     };
     const PARKING = "Waiting for its hosted replica to confirm the document parked.";
     const RESTORING = "Waiting for its restore to finish.";
@@ -1188,13 +1189,13 @@ export async function startServiceLiveHost(options: {
       if (!activation || config.workspaces.length || config.activation!.targets.length) throw new Error("Only an activation host that starts empty takes membership updates.");
       const workspaces = value.workspaces.map(parseServiceWorkspace), desired = new Map(workspaces.map(row => [row.workspaceId, row]));
       const wanted = new Map(value.documents.map(item => {
-        const target = parseServiceActivationTarget({workspaceId: item.workspaceId, path: item.path, shareId: item.shareId});
+        const target = parseServiceActivationTarget({workspaceId: item.workspaceId, path: item.path});
         return [JSON.stringify([target.workspaceId, target.path]), {target, objectId: parseLiveUpdateIdentifier(item.objectId, "object ID")}] as const;
       }));
       if (wanted.size !== value.documents.length) throw new Error("Duplicate service activation target.");
       checkServiceMembership(workspaces, [...wanted.values()].map(row => row.target));
       const departing = new Map(value.departing.map(row => {
-        const document = {target: parseServiceActivationTarget({workspaceId: row.workspaceId, path: row.path, shareId: row.shareId}),
+        const document = {target: parseServiceActivationTarget({workspaceId: row.workspaceId, path: row.path}),
           objectId: parseLiveUpdateIdentifier(row.objectId, "object ID")};
         if (!desired.has(document.target.workspaceId)) throw new Error("Departing document's workspace is not configured.");
         return [JSON.stringify([document.target.workspaceId, document.objectId]), document] as const;

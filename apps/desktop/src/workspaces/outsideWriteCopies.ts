@@ -37,9 +37,9 @@ export class OutsideWriteCopyError extends Error {
     super(`dohc could not keep a copy of ${path}\n${next}\nUntil then, dohc leaves ${path} as it was.\n${location}\nCause: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
   }
 
-  static async from(path: string, cause: unknown, rootPath: string): Promise<OutsideWriteCopyError> {
+  static async from(path: string, cause: unknown, rootPath: string, copiesPath: string = guard.path): Promise<OutsideWriteCopyError> {
     if (cause instanceof OutsideWriteCopyError) return cause;
-    for (const candidate of [".dohc", ".dohc/local", guard.path]) {
+    for (const candidate of [".dohc", ".dohc/local", copiesPath]) {
       if ((await lstat(join(rootPath, candidate)).catch(() => null))?.isFile()) {
         return new OutsideWriteCopyError(path, cause, rootPath, candidate);
       }

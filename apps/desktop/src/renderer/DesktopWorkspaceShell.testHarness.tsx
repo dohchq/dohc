@@ -756,6 +756,8 @@ function makeBaseBridge(
     goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
+    restoreProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "restored" as const })),
+    discardProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "discarded" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
     getCaptureRecoveryStatus: vi.fn(
       async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: [] }),

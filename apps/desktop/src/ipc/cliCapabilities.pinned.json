@@ -102,6 +102,12 @@
     "saveKeptCopy": [
       "file.kept.save"
     ],
+    "restoreProtectedCopy": [
+      "file.protected.restore"
+    ],
+    "discardProtectedCopy": [
+      "file.protected.discard"
+    ],
     "retainedCopies": [
       "file.retained.list"
     ],

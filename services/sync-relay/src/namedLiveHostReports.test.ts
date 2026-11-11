@@ -52,7 +52,7 @@ function beginTransition(f: Fixture) {
 const ticketCount = (f: Fixture) => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get();
 
 const secondScope = { ...scope, grantId: "edit-2", userId: "reader-2" };
-const secondBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md" };
+const secondBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md", selectorPaths: ["docs/b.md"] };
 
 /** Adds a second current document and a second named editor the way the shared fixture adds the first. */
 function addSecondDocumentAndEditor(f: Fixture) {
@@ -103,7 +103,7 @@ it("keeps the reported binding separate from the native port's objects", async (
   f.captureNative.mockResolvedValueOnce(native);
   const report = await f.reports.currentBinding(scope, binding.objectId);
   (native.binding.selectorPaths as string[]).push("native-change");
-  expect(report?.binding.selectorPaths).toEqual(["docs"]);
+  expect(report?.binding.selectorPaths).toEqual(["docs/a.md"]);
 
   f.captureNative.mockImplementationOnce(async received => {
     (received.selectorPaths as string[]).push("port-change");

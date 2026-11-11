@@ -190,10 +190,11 @@ export function registered(
     deployment?: boolean;
     liveTickets?: LiveTicketStoragePolicy;
     linkDiscussionPrincipalLimit?: number;
+    currentPath?: string;
   } = {},
 ) {
   const f = fixture(options, options.host),
-    input = { ...validated(options.baselineBytes,undefined,undefined,options.readerArtifact), host: { ...(options.host ?? host) } };
+    input = { ...validated(options.baselineBytes,options.currentPath,undefined,options.readerArtifact), host: { ...(options.host ?? host) } };
   f.moment(input);
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe("registered");
   f.write(db => { db
@@ -207,7 +208,7 @@ export function registered(
     VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`); });
   const doc = new Y.Doc();
   Y.applyUpdate(doc, input.baselineBytes);
-  const actor = { kind: "owner", userId: "owner", shareId: "share" } as const;
+  const actor = { kind: "owner", userId: "owner" } as const;
   const update = (key = "title", value = "Changed") => {
     const before = Y.encodeStateVector(doc);
     doc.getMap("frontmatter").set(key, value);

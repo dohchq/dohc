@@ -13,6 +13,7 @@ import { existsSync, type PathLike } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
+import { protectedWriteCopies } from "./protectedWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
@@ -186,6 +187,7 @@ interface CaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onOutsideWriteCopies?: WorkspaceEngineCaptureOptions["onOutsideWriteCopies"];
+  onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
   onKeptFiles?: WorkspaceEngineCaptureOptions["onKeptFiles"];
   onRetainedCopies?: WorkspaceEngineCaptureOptions["onRetainedCopies"];
   onHeldFiles?: WorkspaceEngineCaptureOptions["onHeldFiles"];
@@ -222,6 +224,8 @@ function caseInsensitiveDisk(root: string, path: string, text: string) {
     async deletePath(path) {
       operations.push("delete");
       files.delete(key(path));
+      // A protected write reads the real file first, so it must be gone there too.
+      await rm(path, { force: true });
     },
   };
   return { writer, operations, read: (path: string) => files.get(key(join(root, path))) };
@@ -2963,7 +2967,7 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(errors).not.toHaveBeenCalled();
       const rows = damage === "malformed receipt" ? originalRows : null;
       expect(outside).toHaveBeenCalledExactlyOnceWith(rows, expect.stringContaining(broken));
-      expect(await engine.listKeptCopies()).toEqual({ ...native, ...(rows === null ? {} : { outsideWriteCopies: rows }) });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, ...(rows === null ? {} : { outsideWriteCopies: rows }), protectedCopies: [] });
       await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
       await engine.flush();
       expect(outside).toHaveBeenCalledOnce();
@@ -3009,11 +3013,11 @@ describe("workspaceEngineCapture batch capture", () => {
       await engine.listKeptCopies();
       expect(outside).toHaveBeenCalledOnce();
       await opens.open(workspace);
-      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows, protectedCopies: [] });
       expect(outside).toHaveBeenLastCalledWith(rows, null);
       opens.close(workspace);
       await rm(join(root, rows[0]![1]));
-      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows, protectedCopies: [] });
       expect(outside).toHaveBeenLastCalledWith(rows, expect.stringContaining("dohc has not finished opening this workspace"));
     } finally {
       await engine.stop();
@@ -4089,6 +4093,251 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  // The kept copies of protected files, read as plain files.
+  async function protectedCopyFiles(root: string): Promise<string[]> {
+    const dir = join(root, ".dohc/local/protected-copies");
+    const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    return Promise.all(names.filter(name => name.endsWith(".json")).map(name => readFile(join(dir, name), "utf8")));
+  }
+
+  // Workspace files outside .dohc whose bytes hold `text`.
+  async function filesOutsideDohcHolding(root: string, text: string): Promise<string[]> {
+    const found: string[] = [];
+    for (const name of await readdir(root, { recursive: true })) {
+      const path = String(name).split("\\").join("/");
+      if (path === ".dohc" || path.startsWith(".dohc/")) continue;
+      const entry = await lstat(join(root, path));
+      if (entry.isFile() && (await readFile(join(root, path), "utf8")).includes(text)) found.push(path);
+    }
+    return found;
+  }
+
+  async function protectedPullFixture(change: "write" | "removal", history: readonly string[], disk: string) {
+    const root = await createTestScratch("relay-protected-copy-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    for (const text of history) loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: ".env", text });
+    await write(root, ".env", disk);
+    const sessions = mockLiveSessions(loopback);
+    const operation = change === "write" ? "write" as const : "delete" as const;
+    if (change === "write") {
+      loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: ".env", text: "TOKEN=theirs\n", origin: "sync" });
+    } else {
+      const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+      await secretStore.deleteSecretFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: ".env", metadata: { origin: "sync" } });
+    }
+    const page = (commit: () => Promise<void>) => (materializePage: MaterializeRelayPullPage) =>
+      deliverRelayPage(materializePage, { fastForwardedPaths: [{ versionId: "main", path: ".env", operation, contentKind: "secret" as const }] }, commit);
+    return { root, loopback, sessions, page };
+  }
+
+  it.each(["write", "removal"] as const)("keeps a change History lacks in a protected file before a pulled %s", async change => {
+    const { root, sessions, page } = await protectedPullFixture(change, ["TOKEN=saved\n"], "TOKEN=mine\n");
+    const reported: unknown[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: sessions,
+      onOutsideWriteCopies: (...args) => { reported.push(args); },
+      onProtectedCopies: (...args) => { reported.push(args); },
+      onError: (context, error) => { reported.push([context, String(error)]); },
+    });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await engine.runRelaySync(page(commit));
+      expect(commit).toHaveBeenCalledOnce();
+      if (change === "write") expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=theirs\n");
+      else expect(existsSync(join(root, ".env"))).toBe(false);
+      const copies = await protectedCopyFiles(root);
+      expect(copies).toHaveLength(1);
+      expect(copies[0]).toContain("TOKEN=mine");
+      expect(await filesOutsideDohcHolding(root, "TOKEN=mine")).toEqual([]);
+      expect(JSON.stringify(reported)).not.toContain("TOKEN=mine");
+    } finally { await engine.stop(); }
+  });
+
+  it("leaves a protected file as it was and holds the pull when dohc cannot keep its copy", async () => {
+    const { root, sessions, page } = await protectedPullFixture("write", ["TOKEN=saved\n"], "TOKEN=mine\n");
+    await write(root, ".dohc/local/protected-copies", "not a folder");
+    const engine = capture(root, { rustEngineSessions: sessions, onError: () => undefined });
+    const commit = vi.fn(async () => undefined);
+    try {
+      const run = engine.runRelaySync(page(commit));
+      await expect(run).rejects.toThrow("dohc could not keep a copy of .env\nMove .dohc/local/protected-copies out of the way, then choose Try again.\nUntil then, dohc leaves .env as it was.");
+      await expect(run).rejects.not.toThrow("TOKEN=mine");
+      expect(commit).not.toHaveBeenCalled();
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+    } finally { await engine.stop(); }
+  });
+
+  it.each(["write", "removal"] as const)("leaves protected text over 1 MB as it is before a pulled %s, since Restore could not bring it back", async change => {
+    const big = `TOKEN=${"x".repeat(1024 * 1024)}\n`;
+    const { root, sessions, page } = await protectedPullFixture(change, ["TOKEN=saved\n"], big);
+    const engine = capture(root, { rustEngineSessions: sessions });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await engine.runRelaySync(page(commit));
+      expect(commit).toHaveBeenCalledOnce();
+      expect(await readFile(join(root, ".env"), "utf8")).toBe(big);
+      expect(await protectedCopyFiles(root)).toEqual([]);
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps and restores no protected text through a folder that leads outside the workspace", async () => {
+    const root = await createTestScratch("relay-protected-copy-");
+    const outside = await createTestScratch("relay-protected-copy-");
+    await write(outside, ".env", "TOKEN=outside\n");
+    try {
+      // A junction needs no privilege on Windows; symlink elsewhere.
+      await symlink(outside, join(root, "linked"), process.platform === "win32" ? "junction" : "dir");
+    } catch { return; }
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: "linked/.env", text: "TOKEN=theirs\n", origin: "sync" });
+    const sessions = mockLiveSessions(loopback);
+    const engine = capture(root, { rustEngineSessions: sessions, onError: () => undefined });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await expect(engine.runRelaySync(materializePage => deliverRelayPage(materializePage, {
+        fastForwardedPaths: [{ versionId: "main", path: "linked/.env", operation: "write" as const, contentKind: "secret" as const }],
+      }, commit))).rejects.toThrow("escapes the workspace");
+      expect(commit).not.toHaveBeenCalled();
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      expect(await readFile(join(outside, ".env"), "utf8")).toBe("TOKEN=outside\n");
+
+      const copies = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await copies.keep("linked/.env", "TOKEN=mine\n", "main");
+      await expect(engine.restoreProtectedCopy((await copies.list())[0]![1])).rejects.toThrow("escapes the workspace");
+      const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: "linked/.env", text: "TOKEN=outside\n" })).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps and restores no protected text through a folder swapped for an outside link after the check", async () => {
+    const root = await createTestScratch("relay-protected-copy-");
+    const outside = await createTestScratch("relay-protected-copy-");
+    await write(outside, ".env", "TOKEN=outside\n");
+    await write(root, "real/.env", "TOKEN=inside\n");
+    const type = process.platform === "win32" ? "junction" : "dir";
+    const link = join(root, "linked");
+    try { await symlink(join(root, "real"), link, type); } catch { return; }
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    // The first read of linked/.env itself finds the folder already swapped.
+    let swap = true;
+    vi.mocked(lstat).mockImplementation((async (path: PathLike) => {
+      if (swap && String(path) === join(link, ".env")) {
+        swap = false;
+        await actual.rm(link);
+        await actual.symlink(outside, link, type);
+      }
+      return await actual.lstat(path);
+    }) as typeof lstat);
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: "linked/.env", text: "TOKEN=theirs\n", origin: "sync" });
+    const sessions = mockLiveSessions(loopback);
+    const engine = capture(root, { rustEngineSessions: sessions, onError: () => undefined });
+    try {
+      await engine.runRelaySync(materializePage => deliverRelayPage(materializePage, {
+        fastForwardedPaths: [{ versionId: "main", path: "linked/.env", operation: "write" as const, contentKind: "secret" as const }],
+      })).catch(() => undefined);
+      expect((await protectedCopyFiles(root)).join()).not.toContain("TOKEN=outside");
+
+      swap = true;
+      await actual.rm(link);
+      await actual.symlink(join(root, "real"), link, type);
+      const copies = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await copies.keep("linked/.env", "TOKEN=mine\n", "main");
+      for (const [, id] of await copies.list()) await engine.restoreProtectedCopy(id).catch(() => undefined);
+      const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: "linked/.env", text: "TOKEN=outside\n" })).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps one protected copy across a stopped write, its redelivery and a later pull, and reports it after the restart", async () => {
+    const { root, loopback, page } = await protectedPullFixture("write", ["TOKEN=saved\n"], "TOKEN=mine\n");
+    const writer = createDefaultDiskWriter(root);
+    const commit = vi.fn(async () => undefined);
+    const first = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      diskWriter: { ...writer, writeTextFile: async () => { throw new Error("disk write refused"); } },
+      onError: () => undefined,
+    });
+    await expect(first.runRelaySync(page(commit))).rejects.toThrow("disk write refused");
+    await first.stop();
+    expect(commit).not.toHaveBeenCalled();
+    expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+    expect(await protectedCopyFiles(root)).toHaveLength(1);
+    // A new start, as after dohc stopped before its notice: the copy is already kept.
+    const reported: (readonly (readonly [string, string, number])[] | null)[] = [];
+    const second = capture(root, { rustEngineSessions: mockLiveSessions(loopback), onProtectedCopies: copies => { reported.push(copies); } });
+    try {
+      await second.runRelaySync(page(commit));
+      expect(commit).toHaveBeenCalledOnce();
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=theirs\n");
+      second.start();
+      await vi.waitFor(() => expect(reported.at(-1)).toEqual([[".env", expect.any(String), expect.any(Number)]]));
+      loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: ".env", text: "TOKEN=theirs-2\n", origin: "sync" });
+      await second.runRelaySync(page(commit));
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=theirs-2\n");
+      const copies = await protectedCopyFiles(root);
+      expect(copies).toHaveLength(1);
+      expect(copies[0]).toContain("TOKEN=mine");
+    } finally { await second.stop(); }
+  });
+
+  it.each(["write", "removal"] as const)("keeps no copy of protected text History already holds before a pulled %s", async change => {
+    const { root, sessions, page } = await protectedPullFixture(change, ["TOKEN=older\n", "TOKEN=saved\n"], "TOKEN=older\n");
+    const notice = vi.fn();
+    const engine = capture(root, { rustEngineSessions: sessions, onProtectedCopies: notice });
+    try {
+      await engine.runRelaySync(page(async () => undefined));
+      if (change === "write") expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=theirs\n");
+      else expect(existsSync(join(root, ".env"))).toBe(false);
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      expect(notice).not.toHaveBeenCalled();
+    } finally { await engine.stop(); }
+  });
+
+  it("restores a kept protected change on top of History, keeps the synced text there, and discards another for good", async () => {
+    const { root, sessions, page } = await protectedPullFixture("write", ["TOKEN=saved\n"], "TOKEN=mine\n");
+    const engine = capture(root, { rustEngineSessions: sessions });
+    const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+    try {
+      await engine.runRelaySync(page(async () => undefined));
+      const kept = await protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root }).list();
+      expect(kept).toEqual([[".env", expect.any(String), expect.any(Number)]]);
+      const id = kept[0]![1];
+
+      await expect(engine.restoreProtectedCopy(id)).resolves.toEqual({ path: ".env", status: "restored" });
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      const [tip] = await secretStore.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" });
+      const restored = await secretStore.getSecretMoment({ workspaceId: WORKSPACE_ID, momentId: tip!.latestMomentId });
+      expect(restored?.metadata).toMatchObject({ origin: "restore", summary: "Restored your change to .env" });
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: ".env", text: "TOKEN=theirs\n" })).toBe(true);
+      await expect(engine.restoreProtectedCopy(id)).rejects.toMatchObject({ name: "ProtectedCopyFinalError", message: "This kept change is no longer available." });
+
+      const elsewhere = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await elsewhere.keep(".env", "TOKEN=elsewhere\n", "trip");
+      const tripId = (await elsewhere.list())[0]![1];
+      await expect(engine.restoreProtectedCopy(tripId))
+        .rejects.toThrow("Your change was kept in a different version. Switch to that version to restore it.");
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+      await expect(engine.discardProtectedCopy(tripId)).resolves.toEqual({ path: ".env", status: "discarded" });
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      await expect(engine.discardProtectedCopy(tripId)).rejects.toMatchObject({ name: "ProtectedCopyFinalError", message: "This kept change is no longer available." });
+
+      await elsewhere.keep(".env", "x".repeat(1024 * 1024 + 1), "main");
+      const bigId = (await elsewhere.list())[0]![1];
+      await expect(engine.restoreProtectedCopy(bigId)).rejects.toMatchObject({
+        name: "ProtectedCopyFinalError",
+        message: "Your change is over the 1 MB limit for protected files.",
+      });
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+    } finally { await engine.stop(); }
+  });
 
   async function deliverRelayPage<T extends {
     fastForwardedPaths: readonly RelayMaterializedPath[];

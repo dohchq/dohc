@@ -64,6 +64,8 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return { status: "saved", path: "notes (kept copy).md" }; }),
     listRetainedCopies: vi.fn<Operations["listRetainedCopies"]>(async () => { steps.push("retained"); return { copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }; }),
     deleteRetainedCopies: vi.fn<Operations["deleteRetainedCopies"]>(async () => { steps.push("delete retained"); return { deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } }; }),
+    restoreProtectedCopy: vi.fn<Operations["restoreProtectedCopy"]>(async () => { steps.push("restore protected"); return { path: ".env", status: "restored" }; }),
+    discardProtectedCopy: vi.fn<Operations["discardProtectedCopy"]>(async () => { steps.push("discard protected"); return { path: ".env", status: "discarded" }; }),
   };
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");

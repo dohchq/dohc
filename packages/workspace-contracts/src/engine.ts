@@ -1871,6 +1871,14 @@ export interface SecretFileStore {
     versionId: VersionId;
     path: string;
   }): Promise<SecretFileMaterialization>;
+  // Whether protected History for the path, in any version, holds exactly
+  // this text. Internal like materializeSecretFile: only desktop main asks,
+  // before a sync replaces a protected file, and no agent surface exposes it.
+  secretTextRecorded(input: {
+    workspaceId: WorkspaceId;
+    path: string;
+    text: string;
+  }): Promise<boolean>;
   // Releases the underlying database handle after in-flight writes drain.
   close(): Promise<void>;
 }

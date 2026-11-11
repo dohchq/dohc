@@ -90,7 +90,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     return {id: request.id,result: {kind: "page",...current,totalBytes: bytes.length,digest: sha(bytes),bytesBase64: chunk.toString("base64"),nextCursor: current.offset + chunk.length < bytes.length ? {...current,offset: current.offset + chunk.length} : following}};
   })};
   const storage = {
-    getShare: () => ({workspaceId: "workspace",shareId: "share",granterUserId: "owner"}),
+    workspaceOwner: () => "owner",
     resolveCurrentLiveDocumentBinding: () => ({kind: "current",host,binding,authority: {principalKind: "owner", principalId: "owner"}}),
     readLiveUpdateJournalCut: () => ({kind: "cut",cut: {checkpoint: {bytes: new Uint8Array([0,0])},suffix: []}}),
     commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => {
@@ -99,7 +99,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     }),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
-  const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,
+  const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), workspaceIds: new Set(["workspace"]),maxEntriesPerDrain,maxBytesPerDrain,
     refusals: new OwnerKnownRefusals(),validate};
   /**
    * A native service transport over this native outbox, registered and

@@ -162,7 +162,7 @@ syncBuiltinESMExports();\n`);
     storage.createShare({ share: { shareId: "share", workspaceId: "workspace", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 3 },
       grant: { grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit", generation: 1,
         status: "active", createdAtMs: 3, revokedAtMs: null, parentGrantId: null } });
-    const actor = { kind: "owner", userId: "owner", shareId: "share" } as const;
+    const actor = { kind: "owner", userId: "owner" } as const;
     const admit = (deliveryId: string) => {
       const before = Y.encodeStateVector(doc);
       doc.getMap("frontmatter").set("title", deliveryId);

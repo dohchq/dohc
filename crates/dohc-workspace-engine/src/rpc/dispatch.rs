@@ -838,6 +838,10 @@ impl EngineService {
                 self.secrets_materialize(&ctx, request.workspace, request.params)
                     .await?
             }
+            "secrets.recorded" => {
+                self.secrets_recorded(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.channels.create" => {
                 self.chats_channels_create(&ctx, request.workspace, request.params)
                     .await?
@@ -1592,6 +1596,7 @@ mod tests {
             "secrets.apply",
             "secrets.restore",
             "secrets.materialize",
+            "secrets.recorded",
         ] {
             assert!(method_requires_initial_capture_ready(method), "{method}");
         }
@@ -1776,6 +1781,7 @@ mod tests {
             "secrets.materialize",
             "secrets.moments.get",
             "secrets.moments.list",
+            "secrets.recorded",
             "secrets.restore",
             "secrets.stateExists",
             "secrets.write",

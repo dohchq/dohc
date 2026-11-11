@@ -79,6 +79,12 @@ describe("workspaceActivity capture hooks", () => {
       expect(failedRead).not.toHaveProperty("outsideWriteCopies");
       hooks.onOutsideWriteCopies?.([], null);
       expect(activity.getStatus("activity-test")).toMatchObject({ outsideWriteCopies: [], outsideWriteCopyReadError: null });
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("protectedCopies");
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("protectedCopyReadError");
+      hooks.onProtectedCopies?.([[".env", "copy-1", 10]], ".dohc/local/protected-copies/broken.json");
+      expect(activity.getStatus("activity-test")).toMatchObject({
+        protectedCopies: [[".env", "copy-1", 10]], protectedCopyReadError: ".dohc/local/protected-copies/broken.json",
+      });
       await activity.stopAll();
     }
   });

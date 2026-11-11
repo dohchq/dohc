@@ -25,7 +25,7 @@ const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "obj
 const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: resolve("/native.json"), nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
-  attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]});
+  attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace"}]});
 const update = new Uint8Array([1, 2, 3]), updateDigest = createHash("sha256").update(update).digest("hex");
 const agentDeclaration = {agentId: "trip-agent-hosted", onBehalfOf: "local", depth: 0};
 const receipt = {deliveryId: "delivery", updateDigest, journalCursor: 2, acceptingHostEpoch: parseHostEpoch(1)};

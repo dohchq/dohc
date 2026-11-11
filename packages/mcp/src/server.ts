@@ -73,6 +73,8 @@ import {
   readHeldChange,
   readWorkspaceFile,
   saveKeptCopy,
+  restoreProtectedCopy,
+  discardProtectedCopy,
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
@@ -314,7 +316,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_kept_copies",
     {
       description:
-        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.",
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path. Changes to protected files such as `.env` that a sync replaced or deleted are listed in `protectedCopies` as [path, id, keptAtMs] entries, kept on this computer only; use dohc_restore_protected_copy or dohc_discard_protected_copy.",
       inputSchema: {},
     },
     async () => text(await listKeptCopies(ctx)),
@@ -328,6 +330,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_restore_protected_copy",
+    {
+      description:
+        "Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.",
+      inputSchema: { id: z.string() },
+    },
+    async (args) => text(await restoreProtectedCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_discard_protected_copy",
+    {
+      description:
+        "Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.",
+      inputSchema: { id: z.string() },
+    },
+    async (args) => text(await discardProtectedCopy(ctx, args)),
   );
 
   register(

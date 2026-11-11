@@ -24,7 +24,8 @@ export type LiveAdmissionValidation = LiveJournalValidation | {
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
   trustedAccount(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
-  readonly shares: ReadonlyMap<string,string>;
+  /** The workspaces whose owner queues it delivers, each as its workspace's owner. */
+  readonly workspaceIds: ReadonlySet<string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
   /** Outlives every pass and connection, so a refusal received once is recorded, not admitted again. */
@@ -37,6 +38,18 @@ export interface OwnerOutboxAdmission {
   readonly keptOnServer?: ServiceKeptEditsIdentity;
   validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
+}
+
+/**
+ * The owner a queue in the workspace delivers as: whoever owns the workspace
+ * now. Nothing ties a queue to the account that wrote it, and the relay has
+ * no ownership transfer. Any future transfer must fence the old owner's
+ * queues, or tie them to that account, before this delivers them.
+ */
+export function admittedOwner(storage: Pick<SyncRelayStorage, "workspaceOwner">, admission: Pick<OwnerOutboxAdmission, "workspaceIds">, workspaceId: string) {
+  const userId = admission.workspaceIds.has(workspaceId) ? storage.workspaceOwner(workspaceId) : null;
+  if (userId === null) throw new Error("Owner workspace is unavailable.");
+  return {kind: "owner" as const, userId};
 }
 
 export type CapacityLiveAdmissionValidator = OwnerOutboxAdmission["validate"] & {
@@ -226,10 +239,7 @@ export async function drainOwnerOutbox(options: OwnerOutboxScope & {
       // The engine's entry names the seed's place in its outbox.
       const acknowledgeFirst = seed && receiptFirst?.deliveryId(entry.sequence) === entry.deliveryId && receiptFirst.updateDigest === entry.updateDigest;
       if (seed && service && !acknowledgeFirst) throw new Error("Service seed delivery is unavailable.");
-      const shareId = admission.shares.get(binding.workspaceId);
-      const share = shareId ? storage.getShare(shareId) : null;
-      if (!share || share.workspaceId !== binding.workspaceId) throw new Error("Owner share is unavailable.");
-      const actor = {kind: "owner" as const,userId: share.granterUserId,shareId: share.shareId};
+      const actor = admittedOwner(storage, admission, binding.workspaceId);
       const document = {workspaceId: binding.workspaceId,mainVersionId: binding.mainVersionId,objectId: binding.objectId,lineageClaimId: binding.lineageClaimId};
       const current = storage.resolveCurrentLiveDocumentBinding({document,actor}, admission.activation);
       if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
