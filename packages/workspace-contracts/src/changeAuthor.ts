@@ -12,6 +12,17 @@ export type ChangeAuthor = z.infer<typeof ChangeAuthor>;
 export const ChangeAuthorStatus = z.discriminatedUnion("kind", [Person.extend({ self: z.boolean() }), Agent]);
 export type ChangeAuthorStatus = z.infer<typeof ChangeAuthorStatus>;
 
+/**
+ * The author with a name the engine can store, or none. An agent names itself,
+ * so a name too long or not well-formed text is left out rather than failing
+ * the change it labels.
+ */
+export function storableChangeAuthor(author: ChangeAuthor): ChangeAuthor {
+  if (author.kind === "person" || author.agentName === undefined) return author;
+  const { agentName, ...rest } = author;
+  return agentName.length > 0 && agentName.length <= 64 && agentName.isWellFormed() ? author : rest;
+}
+
 export function changeAuthorStatus(author: ChangeAuthor, localPersonId: string | null): ChangeAuthorStatus {
   return author.kind === "agent" ? author : { ...author, self: author.personId === localPersonId };
 }

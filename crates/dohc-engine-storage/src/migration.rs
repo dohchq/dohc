@@ -5712,7 +5712,7 @@ mod tests {
             ),
             (
                 "v2-live-document-changes",
-                "9156bc9ad8216b5b49f6d14cf6f21830650d9e7518e994a59512f10399253902",
+                "a2b983ef5ce31429bcf7e2ea3ac488deec15f3ba3afe07022e464003025e84dd",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

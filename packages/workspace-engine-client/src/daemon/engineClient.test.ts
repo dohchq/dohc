@@ -185,17 +185,18 @@ describe("private owner delivery transport", () => {
     peer.acknowledge(); await transport.ready();
     const author = {kind: "person", personId: "person-1"} as const;
     const begin = {objectId: "doc", path: "a.md", action: "stopped", author, before: "ready"} as const;
-    const {objectId, ...pending} = begin;
+    const {objectId, before: _before, ...pending} = begin;
     const changes = [{objectId, pending: {...pending, changeId: "c1", atMs: 5}}];
-    const replies: JsonValue[] = [{changeId: "c1", atMs: 5}, null, {finished: true}, {changes}, {changeId: "c1", atMs: 5, author}, {finished: 1}, {changes: [{objectId: "doc", pending: {...changes[0]!.pending, before: "gone"}}]}];
+    const replies: JsonValue[] = [{changeId: "c1", atMs: 5}, null, {finished: true}, {changes}, {changeId: "c1", atMs: 5, author}, {finished: 1}, {changes: [{objectId: "doc", pending: {...changes[0]!.pending, action: "paused"}}]}];
     const sent: unknown[] = [];
     peer.onEnvelope = e => {if (e.type === "request") {sent.push([e.method, e.params]); peer.send({type: "response", id: e.id, result: replies.shift() ?? null});}};
     try {
       expect(await transport.ownerLiveChangeBegin(request, begin)).toEqual({changeId: "c1", atMs: 5});
-      expect(await transport.ownerLiveChangeBegin(request, {...begin, before: "retired"})).toBeNull();
+      // A self-reported name the engine cannot store is left out.
+      expect(await transport.ownerLiveChangeBegin(request, {...begin, before: "retired", author: {kind: "agent", agentId: "a", agentName: "x".repeat(65), onBehalfOf: "person-1", depth: 1}})).toBeNull();
       expect(await transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "applied"})).toBe(true);
       expect(await transport.ownerLiveChangeList(request, ["doc"])).toEqual(changes);
-      expect(sent).toEqual([["ydoc.liveChange.begin", begin], ["ydoc.liveChange.begin", {...begin, before: "retired"}],
+      expect(sent).toEqual([["ydoc.liveChange.begin", begin], ["ydoc.liveChange.begin", {...begin, before: "retired", author: {kind: "agent", agentId: "a", onBehalfOf: "person-1", depth: 1}}],
         ["ydoc.liveChange.finish", {objectId: "doc", changeId: "c1", outcome: "applied"}], ["ydoc.liveChange.list", {objectIds: ["doc"]}]]);
       await expect(transport.ownerLiveChangeBegin(request, begin)).rejects.toThrow("Invalid live change response.");
       await expect(transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "refused"})).rejects.toThrow("Invalid live change response.");

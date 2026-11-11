@@ -116,7 +116,7 @@ async fn an_applied_change_becomes_the_last_and_a_refused_one_keeps_it() {
         list(&transport, &handle, &[]).await,
         json!([{ "objectId": "doc", "pending": {
             "changeId": stop["changeId"], "action": "stopped", "path": "notes/plan.md",
-            "atMs": stop["atMs"], "author": person(), "before": "ready",
+            "atMs": stop["atMs"], "author": person(),
         } }])
     );
     assert!(finish(&transport, &handle, "doc", &stop, "applied").await);
@@ -213,7 +213,6 @@ async fn an_interrupted_change_stays_pending_across_a_reopen() {
     let listed = list(&transport, &handle, &[]).await;
     assert_eq!(listed[0]["objectId"], "doc");
     assert_eq!(listed[0]["pending"]["changeId"], change["changeId"]);
-    assert_eq!(listed[0]["pending"]["before"], "retired");
     assert!(finish(&transport, &handle, "doc", &change, "applied").await);
     assert_eq!(
         list(&transport, &handle, &["doc"]).await,

@@ -1,11 +1,15 @@
 //! Who stopped or resumed live editing of each owner document.
 //!
-//! The desktop begins a change before it acts and finishes it with the
-//! outcome. A begun change is pending; an applied one replaces the document's
-//! last change, and a refused one leaves the last change as it was. A pending
-//! change that an interrupted action left behind is listed until the desktop
-//! finishes it. Each change names its pending record, so a late finish of an
-//! older change never settles a newer one.
+//! The desktop begins a change before it acts and finishes it with its own
+//! operation's response. A begun change is pending; an applied one replaces
+//! the document's last change, and a refused one leaves the last change as it
+//! was. A pending change that an interrupted action left behind is listed until
+//! the desktop finishes it. Each change names its pending record, so a late
+//! finish of an older change never settles a newer one.
+//!
+//! The relay keeps no author, so no relay status can credit a change: one
+//! interrupted after the relay applied it is refused, and the document shows
+//! no author rather than another actor's.
 //!
 //! The records are local provenance only. They grant nothing and outlive their
 //! document: nothing else deletes them. Live editing itself is the relay's and
@@ -113,31 +117,6 @@ pub enum LiveStatus {
     Absent,
 }
 
-impl LiveStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::Preparing => "preparing",
-            Self::Paused => "paused",
-            Self::Retired => "retired",
-            Self::Unavailable => "unavailable",
-            Self::Absent => "absent",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, DomainError> {
-        Ok(match value {
-            "ready" => Self::Ready,
-            "preparing" => Self::Preparing,
-            "paused" => Self::Paused,
-            "retired" => Self::Retired,
-            "unavailable" => Self::Unavailable,
-            "absent" => Self::Absent,
-            _ => return Err(corrupt()),
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LiveChangeOutcome {
@@ -170,7 +149,6 @@ pub struct PendingLiveChange {
     pub path: String,
     pub at_ms: i64,
     pub author: ChangeAuthor,
-    pub before: LiveStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -214,15 +192,14 @@ pub fn begin_live_change(
     let author = serde_json::to_string(&input.author).map_err(|_| corrupt())?;
     let inserted = committed(store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         tx.execute(
-            "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,before_status,at_ms,author_json) \
-             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(workspace_id,slot,object_id) DO NOTHING",
+            "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,at_ms,author_json) \
+             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7) ON CONFLICT(workspace_id,slot,object_id) DO NOTHING",
             params![
                 workspace_id,
                 input.object_id,
                 change_id,
                 input.action.as_str(),
                 path,
-                input.before.as_str(),
                 now_ms,
                 author
             ],
@@ -274,8 +251,8 @@ fn finish_in(
     }
     if outcome == LiveChangeOutcome::Applied {
         tx.execute(
-            "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,before_status,at_ms,author_json) \
-             SELECT workspace_id,'last',object_id,NULL,action,path,NULL,at_ms,author_json FROM live_document_changes \
+            "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,at_ms,author_json) \
+             SELECT workspace_id,'last',object_id,NULL,action,path,at_ms,author_json FROM live_document_changes \
              WHERE workspace_id=?1 AND slot='pending' AND object_id=?2 \
              ON CONFLICT(workspace_id,slot,object_id) DO UPDATE SET action=excluded.action,path=excluded.path,\
              at_ms=excluded.at_ms,author_json=excluded.author_json",
@@ -321,7 +298,7 @@ fn list_in(
     let mut documents = BTreeMap::<String, LiveDocumentChanges>::new();
     let mut pending = conn
         .prepare(
-            "SELECT object_id,change_id,action,path,before_status,at_ms,author_json FROM live_document_changes \
+            "SELECT object_id,change_id,action,path,at_ms,author_json FROM live_document_changes \
              WHERE workspace_id=?1 AND slot='pending'",
         )
         .map_err(DomainError::sql_corrupt)?;
@@ -332,14 +309,13 @@ fn list_in(
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, String>(6)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })
         .map_err(DomainError::sql_corrupt)?;
     for row in rows {
-        let (object_id, change_id, action, path, before, at_ms, author) =
+        let (object_id, change_id, action, path, at_ms, author) =
             row.map_err(DomainError::sql_corrupt)?;
         entry(&mut documents, &object_id).pending = Some(PendingLiveChange {
             change_id,
@@ -347,7 +323,6 @@ fn list_in(
             path,
             at_ms,
             author: author_from(&author)?,
-            before: LiveStatus::parse(&before)?,
         });
     }
     let mut last = conn
