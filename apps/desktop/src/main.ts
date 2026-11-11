@@ -118,7 +118,7 @@ import {
 } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
-import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
+import { createShareHandoffIpcHandlers, sendShareHandoffStatus } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { removeEarlierMarkedCopies, removeMarkedCopies, systemMarkedCopies } from "./workspaces/markedCopies";
@@ -1280,12 +1280,20 @@ function noticeStore(): NoticeStore {
 }
 app.on("browser-window-focus", () => void noticeStore().sync());
 
+// A link lands in liveWorkspaceWindow (showOrCreateMainWindow), so that window takes its handoff.
+function takesShareHandoff(window: BrowserWindow | null): boolean {
+  return window !== null && window === liveWorkspaceWindow();
+}
+
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   const publicStatus = ShareHandoffStatus.parse(status);
   if (!app.isReady()) return;
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
-  }
+  sendShareHandoffStatus<BrowserWindow>({
+    windows: BrowserWindow.getAllWindows(),
+    takesHandoff: takesShareHandoff,
+    status: publicStatus,
+    send: (win, windowStatus) => win.webContents.send(CHANNELS.shareHandoffStatus, windowStatus),
+  });
 }
 
 const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
@@ -6845,6 +6853,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, shareHandoffOperations, createShareHandoffIpcHandlers({
     shareHandoffRedemption,
+    takesHandoff: (event: IpcMainInvokeEvent) => takesShareHandoff(BrowserWindow.fromWebContents(event.sender)),
   }));
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

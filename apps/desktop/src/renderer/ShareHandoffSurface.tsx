@@ -62,6 +62,9 @@ export function ShareHandoffSurface(props: {
   onOpened: () => void;
   // Whether the person has a workspace of their own, not only shared views.
   ownWorkspace?: boolean;
+  // Shows Chats at a Group invitation or message request, where it waits
+  // with Join or Accept. Without it, the card says where to find it.
+  openInChats?: (shareId: string) => void;
   mountInto?: {
     workspaceId: string;
     onMounted: (label: string, access: ShareAccess | null) => void;
@@ -110,6 +113,13 @@ export function ShareHandoffSurface(props: {
       lookupRequest.next();
     };
   }, [lookupAttempt, shareId]);
+
+  const opensInChats = receivedShare.kind === "chats" && receivedShare.shareId === shareId && props.openInChats !== undefined;
+  const openInChats = useRef(props.openInChats);
+  openInChats.current = props.openInChats;
+  useEffect(() => {
+    if (opensInChats && shareId !== null) openInChats.current?.(shareId);
+  }, [opensInChats, shareId]);
 
   if (props.status.status === "idle") return null;
 
@@ -248,7 +258,8 @@ export function ShareHandoffSurface(props: {
 
   if (
     receivedShare.kind === "chats" &&
-    receivedShare.shareId === shareId
+    receivedShare.shareId === shareId &&
+    !opensInChats
   ) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>

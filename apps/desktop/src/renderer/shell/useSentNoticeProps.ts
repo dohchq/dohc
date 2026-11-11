@@ -51,6 +51,17 @@ export interface NoticeShare {
   controls?: Extract<NoticeTarget, { to: "automation-controls" }>;
 }
 
+// The workspace of this person's own, not a shared view, they opened last:
+// where a Group invitation or message request waits in Chats.
+export function lastOpenedOwnWorkspace(workspaces: readonly WorkspaceSummary[]): WorkspaceSummary | null {
+  return workspaces
+    .filter((candidate) => candidate.shareView === undefined)
+    .reduce<WorkspaceSummary | null>(
+      (latest, candidate) => (latest === null || (candidate.lastOpenedAt ?? 0) > (latest.lastOpenedAt ?? 0) ? candidate : latest),
+      null,
+    );
+}
+
 /**
  * The shell's side of Notices sent to this person: where each one opens from
  * this workspace, and the actions the notice center offers on them. Opening
@@ -309,12 +320,7 @@ export function useSentNoticeProps(input: {
               if (workspaces.some((candidate) => candidate.workspaceId === workspaceId && candidate.shareView === undefined)) {
                 return await openTarget({ to: "chats-invitation", shareId: place.shareId, inputs }, signal);
               }
-              const own = workspaces
-                .filter((candidate) => candidate.shareView === undefined)
-                .reduce<WorkspaceSummary | null>(
-                  (latest, candidate) => (latest === null || (candidate.lastOpenedAt ?? 0) > (latest.lastOpenedAt ?? 0) ? candidate : latest),
-                  null,
-                );
+              const own = lastOpenedOwnWorkspace(workspaces);
               if (own === null) return NO_OWN_WORKSPACE_NOTE;
               onSwitchWorkspace(own, { to: "chats-invitation", shareId: place.shareId, inputs });
               return null;

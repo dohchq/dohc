@@ -232,12 +232,12 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
-import { countInput } from "./ui/inputCount";
+import { countInput, inputCount } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { lastOpenedOwnWorkspace, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import { useKeptTyping } from "./shell/useKeptTyping";
 import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
@@ -3258,6 +3258,16 @@ export function DesktopWorkspaceShell(props: {
     openChatsNavigator();
   }, [openChatsNavigator]);
   const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
+  // A link to a Group or a message request opens Chats at it, here or, from a
+  // shared view, in the workspace of this person's own they opened last.
+  const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
+  const openHandoffInChats = (shareId: string) => {
+    if (ownWorkspaceForChats === null) return;
+    const invitation = { shareId, inputs: inputCount() };
+    if (ownWorkspaceForChats.workspaceId === workspaceId) openChatsInvitation(invitation);
+    else props.onSwitchWorkspace(ownWorkspaceForChats, { to: "chats-invitation", ...invitation });
+    props.onShareHandoffOpened?.();
+  };
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -7904,7 +7914,8 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceReady={props.onSwitchWorkspace}
             onBack={() => props.onDismissShareHandoff?.()}
             onOpened={() => props.onShareHandoffOpened?.()}
-            ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
+            ownWorkspace={ownWorkspaceForChats !== null}
+            {...(ownWorkspaceForChats === null ? {} : { openInChats: openHandoffInChats })}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}

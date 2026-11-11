@@ -5,6 +5,7 @@ import "./CollectionPage";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import * as shellError from "./shell/useShellError";
@@ -12,7 +13,7 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, OwnerLiveDocumentsResult, ShareHandoffStatus, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { NoticeTarget } from "../notices/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -2470,6 +2471,65 @@ describe("notices sent to you", () => {
     // Runs Chats' pending effects, where a live reveal would focus Join.
     await act(async () => undefined);
     expect(document.activeElement).not.toBe(join);
+  });
+
+  describe("from a link to a Group or a message request", () => {
+    const DONE: ShareHandoffStatus = { status: "done", statusId: "status-1", shareId: "share-1" };
+    const VIEW: Workspace = { ...WORKSPACE, workspaceId: "ws-view", shareView: { shareId: "share-2", granterEmail: "owner@dohc.test", access: "view" } };
+    function handoffBridge() {
+      return Object.assign(makeBridge(Promise.resolve(null)), {
+        listChatChannelShares: vi.fn(async () => INVITATION_LISTING),
+        getRelayReceivedShare: vi.fn(async () => ({ found: true as const, chats: true as const })),
+      });
+    }
+    // DesktopRoot's part: the handoff ends once the shell says it opened.
+    function renderHandoff(bridge: ReturnType<typeof handoffBridge>, workspace: Workspace, workspaces: Workspace[], onSwitchWorkspace = vi.fn()) {
+      vi.stubGlobal("dohcDesktop", bridge);
+      const onOpened = vi.fn();
+      function Host() {
+        const [status, setStatus] = useState<ShareHandoffStatus>(DONE);
+        return (
+          <DesktopWorkspaceShell
+            workspace={workspace}
+            workspaces={workspaces}
+            {...shellBootstrapProps(bridge)}
+            onSwitchWorkspace={onSwitchWorkspace}
+            handoffStatus={status}
+            onShareHandoffOpened={() => {
+              onOpened();
+              setStatus({ status: "idle" });
+            }}
+          />
+        );
+      }
+      render(<Host />);
+      return { onOpened, onSwitchWorkspace };
+    }
+
+    it("opens Chats here at the invitation, with its Join focused, instead of saying where it waits", async () => {
+      const { onOpened } = renderHandoff(handoffBridge(), WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+      const join = await screen.findByTestId("chats-join-shared");
+      await waitFor(() => expect(document.activeElement).toBe(join));
+      expect(screen.queryByTestId("handoff-opens-in-chats")).toBeNull();
+    });
+
+    it("opens it from a shared view in the workspace of their own they opened last", async () => {
+      const older: Workspace = { ...WORKSPACE, workspaceId: "ws-older", lastOpenedAt: 1 };
+      const latest: Workspace = { ...WORKSPACE, workspaceId: "ws-latest", lastOpenedAt: 2 };
+      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [older, VIEW, latest]);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { to: "chats-invitation", shareId: "share-1", inputs: expect.any(Number) }));
+      expect(onSwitchWorkspace).toHaveBeenCalledOnce();
+      expect(onOpened).toHaveBeenCalledOnce();
+    });
+
+    it("says to create a workspace first when they have none of their own", async () => {
+      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [VIEW]);
+      expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toContain("Create one from Manage workspaces first.");
+      expect(onSwitchWorkspace).not.toHaveBeenCalled();
+      expect(onOpened).not.toHaveBeenCalled();
+    });
   });
 
   it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {
