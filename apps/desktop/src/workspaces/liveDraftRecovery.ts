@@ -231,7 +231,10 @@ export async function removeWorkspaceLiveDrafts(directory: string, workspaceId: 
 // Typing kept for a workspace no longer in the list, such as one whose join
 // failed. It stays until the person dismisses it in Notices.
 export async function listKeptTyping(directory: string, isListed: (workspaceId: string) => boolean): Promise<Array<{workspaceId: string} & Pick<LiveDraftRecoveryRecord, "recordId" | "path" | "text">>> {
-  const rows = await recoveryRecords(directory);
+  // Only saved records: an interrupted write shares its record's id, so
+  // listing it would let a dismissal delete text the person did not see. The
+  // store promotes or sets it aside on its own.
+  const rows = (await recoveryRecords(directory)).filter(row => /^[a-f0-9]{64}\.json$/.test(basename(row.file)));
   const removed = new Set(rows.map(row => row.record.workspaceId).filter((id): id is string =>
     typeof id === "string" && KeptTyping.shape.workspaceId.safeParse(id).success && !isListed(id)));
   const kept = [];

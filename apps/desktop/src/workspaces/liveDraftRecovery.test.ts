@@ -63,6 +63,23 @@ it("lists typing kept for workspaces no longer listed, and removes one record on
   expect((await listKeptTyping(directory, workspaceId => workspaceId === "listed")).map(record => record.path)).toEqual(["notes.txt"]);
   // Removing it again finds nothing and changes nothing.
   await removeKeptTyping(directory, "removed", plan.recordId);
+  // An interrupted rewrite of a checkpoint shares its record id. Only the
+  // saved record lists, so a dismissal deletes exactly the text it showed,
+  // and the interrupted write stays for the store's own recovery.
+  await writeTypingCheckpoint(directory, {
+    version: 2, checkpointId: "rewritten", workspaceId: "removed", versionId: "main",
+    objectId: "object", path: "draft.txt", expectedClaimId: null,
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: null,
+    text: "saved", updateBase64: Buffer.from(update).toString("base64"),
+    admittedBaseBase64: Buffer.from(update).toString("base64"), updates: [],
+  });
+  const saved = (await listKeptTyping(directory, workspaceId => workspaceId === "listed")).find(record => record.path === "draft.txt")!;
+  const interrupted = join(directory, `${saved.recordId}.json.interrupted.tmp`);
+  await writeFile(interrupted, (await readFile(join(directory, `${saved.recordId}.json`), "utf8")).replace('"saved"', '"newer"'));
+  const listed = (await listKeptTyping(directory, workspaceId => workspaceId === "listed")).filter(record => record.path === "draft.txt");
+  expect(listed.map(record => record.text)).toEqual(["saved"]);
+  await removeKeptTyping(directory, "removed", saved.recordId);
+  expect(await readFile(interrupted, "utf8")).toContain('"newer"');
   expect(await listKeptTyping(join(directory, "absent"), () => false)).toEqual([]);
 });
 
