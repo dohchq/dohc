@@ -1738,6 +1738,44 @@ fn project_ydoc_on_store(
     })
 }
 
+/// The document a settle projects, which a held change's review must project
+/// too. While the adopted owner's own edits wait for the relay, a live
+/// settlement projects only what the relay accepted: its file and moment
+/// never carry the private tail, and the native head keeps it.
+pub(super) fn settle_source<'a>(
+    doc: &'a Ydoc,
+    live_audit: Option<&'a dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+) -> Result<&'a Ydoc, RuntimeError> {
+    let doc = live_audit
+        .and_then(|audit| audit.accepted_prefix())
+        .unwrap_or(doc);
+    // A doc holding unintegrated remote updates (missing cross-origin
+    // dependency) must not settle: the projection would omit pending remote
+    // content and last_settled_sha would record that incomplete artifact as
+    // settled — the CRDT then advances past a stale file.
+    if doc.has_pending_dependencies() {
+        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
+    }
+    Ok(doc)
+}
+
+/// What a settle writes for `doc`. A held change's review projects through
+/// this too, so it shows the bytes the save would write.
+pub(super) fn settle_projection(
+    store: &EngineStore,
+    key: &DocKey,
+    doc: &Ydoc,
+    content_kind: ContentKind,
+    reader_resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    use_reader: bool,
+) -> Result<Projection, RuntimeError> {
+    if use_reader {
+        project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver)
+    } else {
+        project_ydoc_on_store(store, key, doc, content_kind)
+    }
+}
+
 fn project_ydoc_on_store_with_reader(
     store: &EngineStore,
     key: &DocKey,
@@ -3144,28 +3182,20 @@ fn ydoc_settle_attempt_on_store(
             &cold_doc
         }
     };
-    // While the adopted owner's own edits wait for the relay, a live
-    // settlement projects only what the relay accepted. Its file and moment
-    // never carry the private tail, and the native head keeps it.
-    let accepted_prefix = live_audit.and_then(|audit| audit.accepted_prefix());
-    let settles_prefix = accepted_prefix.is_some();
-    let doc = accepted_prefix.unwrap_or(doc);
-    // A doc holding unintegrated remote updates (missing cross-origin
-    // dependency) must not settle: the projection would omit pending remote
-    // content and last_settled_sha would record that incomplete artifact as
-    // settled — the CRDT then advances past a stale file.
-    if doc.has_pending_dependencies() {
-        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
-    }
+    let settles_prefix = live_audit.is_some_and(|audit| audit.accepted_prefix().is_some());
+    let doc = settle_source(doc, live_audit)?;
     // A settlement covering no accepted edit still projects, but publishes
     // nothing. Only its projection is kept locally, for a restore.
     let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
     let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
-    let mut projection = if use_reader {
-        project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
-    } else {
-        project_ydoc_on_store(store, key, doc, content_kind)
-    }?;
+    let mut projection = settle_projection(
+        store,
+        key,
+        doc,
+        content_kind,
+        reader_resolver.as_deref(),
+        use_reader,
+    )?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc

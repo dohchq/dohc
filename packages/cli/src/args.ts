@@ -37,7 +37,7 @@ type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "documentRead" | "documentHeld" | "fileChats"; path: string }
   | { verb: "collectionSetFields"; recordPath: string; fields: Record<string, string>; agent?: string }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
@@ -298,6 +298,20 @@ function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"
 }
 
 const DOCUMENT_VERBS = {
+  read: {
+    capabilityId: "document.read",
+    summary: "Read the current Markdown, including edits in an open editor.",
+    operands: "<path>",
+    notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
+    parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
+  },
+  held: {
+    capabilityId: "document.held.read",
+    summary: "Show a change dohc held: the file's text and what saving the change would write.",
+    operands: "<path>",
+    notes: ["Prints null when nothing is held for the file."],
+    parse: input => ({ verb: "documentHeld", path: parsePath(input, "document held") }),
+  },
   "held-change": {
     capabilityId: "document.held.change",
     summary: "Review, drop, or undo a held change on the owner's computer.",
@@ -320,13 +334,6 @@ const DOCUMENT_VERBS = {
       if (token !== undefined && !/^[0-9a-f]{64}$/u.test(token)) fail("--token must be the 64-character token returned by Review or Drop");
       return {verb: "heldNoteChange", path, action, ...(token ? {token} : {})};
     },
-  },
-  read: {
-    capabilityId: "document.read",
-    summary: "Read the current Markdown, including edits in an open editor.",
-    operands: "<path>",
-    notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
-    parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
   },
   edit: {
     capabilityId: "document.edit",

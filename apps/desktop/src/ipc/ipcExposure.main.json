@@ -244,6 +244,7 @@
     "desktop:read-explorer-menu",
     "desktop:read-old-window-state",
     "desktop:read-external-open",
+    "desktop:read-held-change",
     "desktop:read-history-operation",
     "desktop:read-reports-notice",
     "desktop:read-schedule-host",
@@ -413,6 +414,7 @@
     "desktop:links-in": "active-workspace",
     "desktop:links-resolve": "active-workspace",
     "desktop:links-edges": "active-workspace",
+    "desktop:read-held-change": "active-workspace",
     "desktop:make-message-link": "active-workspace",
     "desktop:resolve-work-link": "active-workspace"
   }

@@ -411,6 +411,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!document.ok) throw new DohcCliError(document.reason);
       return document.markdown;
     }
+    case "documentHeld": {
+      const held = result as CliResultByVerb["documentHeld"];
+      if (!held.ok) throw new DohcCliError(held.reason);
+      return JSON.stringify(held.change, null, 2);
+    }
     case "collectionSetFields":
       return `Updated ${lineSafe((result as Extract<CliResultByVerb["collectionSetFields"], { ok: true }>).recordPath)}`;
     case "heldNoteChange":

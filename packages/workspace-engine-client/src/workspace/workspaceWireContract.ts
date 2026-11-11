@@ -77,6 +77,7 @@ export const WORKSPACE_METHOD = {
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
   syncCollectionsWaiting: "sync.collectionsWaiting",
+  ydocHeldChange: "ydoc.heldChange",
   automationsRunNow: "automations.runNow",
 } as const;
 
@@ -201,6 +202,8 @@ export type GranularChatMessageSearchResponse =
 export type WatcherStatusResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
 
+/** One held save, as `ydoc.heldChange` answers for it. */
+export type HeldChange = NonNullable<WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.ydocHeldChange]["change"]>;
 /**
  * A file dohc moved aside while it saved, because another program changed
  * it meanwhile. It waits in the engine's staging directory until
@@ -532,6 +535,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.ydocHeldChange]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
@@ -1553,6 +1557,21 @@ const WorkspaceResultSchemas = {
   /** Collections updates wait for an ordinary pull to commit its last page. */
   [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
     waiting: Schema.Boolean,
+  }),
+  /**
+   * One held save: `file` is the file's text on disk, and `held` what saving
+   * the waiting change would write. Past the response cap only `tooLarge`.
+   * `unavailable` names why the engine can't reproduce the save's text.
+   */
+  [WORKSPACE_METHOD.ydocHeldChange]: mutableStruct({
+    change: Schema.NullOr(Schema.Union([
+      mutableStruct({ path: Schema.NonEmptyString, file: Schema.NullOr(Schema.String), held: Schema.String }),
+      mutableStruct({ path: Schema.NonEmptyString, tooLarge: Schema.Literal(true) }),
+      mutableStruct({
+        path: Schema.NonEmptyString,
+        unavailable: Schema.Literals(["waitingForSync", "fileUnreadable", "unsupported"]),
+      }),
+    ])),
   }),
   [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
     claim: AutomationClaimSummarySchema,

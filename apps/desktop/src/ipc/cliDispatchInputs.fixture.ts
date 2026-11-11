@@ -41,6 +41,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "share agents": ["share", "grant"],
   "share disconnect": ["share", "grant", "connection"],
   "document read": ["Notes/a.md"],
+  "document held": ["Notes/a.md"],
   "document edit": ["Notes/a.md", "--text", "Updated"],
   "document create": ["Notes/new.md"],
   "document chats": ["Notes/a.md"],

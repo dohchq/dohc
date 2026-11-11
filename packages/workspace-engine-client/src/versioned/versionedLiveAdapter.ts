@@ -68,6 +68,7 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
+  type HeldChange,
   type KeptCopiesListResult,
   type KeptCopySaveResult,
   type RetainedCopiesDeleteResult,
@@ -1491,6 +1492,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       {},
     );
     return result.waiting;
+  }
+
+  /** The held save at `path`: the file on disk beside what saving would write. */
+  async heldChange(path: string): Promise<HeldChange | null> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.ydocHeldChange, { path })).change;
   }
 
   async writeSecretFile(input: {

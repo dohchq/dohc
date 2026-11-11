@@ -141,7 +141,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
+  read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
 };
 
@@ -223,6 +223,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
+  dohc_read_held_change: { cli: "documentHeld" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
   dohc_held_note_change: { cli: "heldNoteChange" },
@@ -428,6 +429,7 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_list_versions: "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_compare_version: "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_list_version_conflicts: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {

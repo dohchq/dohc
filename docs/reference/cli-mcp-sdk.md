@@ -404,6 +404,16 @@ Read a Markdown document as it is now, including edits an open editor has not sa
 
 Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
 
+### `dohc_read_held_change`
+
+Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.
+
+A shared view holds no saves of its own, so it does not offer this tool.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null } | { ok: false, reason }`.
+
 ### `dohc_held_note_change`
 
 Review, drop, or undo a held note change. Only a local agent in the owner's workspace may use this. Review names the authors and returns a token. Drop requires that token, saves the waiting text in History, and returns an Undo token. Undo restores the waiting text as held. Neither action rewrites the file or grants conversion consent. Refusals: held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.
@@ -966,6 +976,30 @@ Read, edit, and create live Markdown documents. List and start chats on tracked 
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
+#### `dohc document read`
+
+```sh
+dohc document read <path> [options]
+```
+
+Read the current Markdown, including edits in an open editor.
+
+Read before editing. Without --json, prints the Markdown byte for byte.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, markdown }`.
+
+#### `dohc document held`
+
+```sh
+dohc document held <path> [options]
+```
+
+Show a change dohc held: the file's text and what saving the change would write.
+
+Prints null when nothing is held for the file.
+
+With `--json`, prints `{ schemaVersion, ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null }`.
+
 #### `dohc document held-change`
 
 ```sh
@@ -980,18 +1014,6 @@ held-change-stale: Run review again and use its new token for drop. held-change-
 - `--token <token>`: Use the review token for Drop or the Drop token for Undo.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, token, authors, held, historyMomentId }`.
-
-#### `dohc document read`
-
-```sh
-dohc document read <path> [options]
-```
-
-Read the current Markdown, including edits in an open editor.
-
-Read before editing. Without --json, prints the Markdown byte for byte.
-
-With `--json`, prints `{ schemaVersion, ok: true, path, markdown }`.
 
 #### `dohc document edit`
 

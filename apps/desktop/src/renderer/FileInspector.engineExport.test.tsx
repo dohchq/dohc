@@ -113,6 +113,9 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     exportDocumentFile: vi.fn(async () => ({ saved: true })),
+    // A lossy note's band asks the engine whether it holds a change.
+    readHeldChange: vi.fn(async () => ({ change: null })),
+    onNoticesChanged: vi.fn(() => () => undefined),
   };
 
   beforeEach(() => {

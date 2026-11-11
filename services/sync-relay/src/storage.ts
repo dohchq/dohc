@@ -917,6 +917,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return accountWorkspaceStorage.setShowOnPhone(this, input);
   }
 
+  endAccountReasonsOfHiddenOrDisownedCopies() {
+    accountWorkspaceStorage.endAccountReasonsOfHiddenOrDisownedCopies(this);
+  }
+
   accountFeedStanding(workspaceId: string) {
     return accountFeedStorage.accountFeedStanding(this, workspaceId);
   }

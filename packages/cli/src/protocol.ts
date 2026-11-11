@@ -2,6 +2,7 @@ import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-li
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
@@ -641,6 +642,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentHeld"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
@@ -735,6 +737,7 @@ export const CLI_CAPABILITIES = {
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
+  documentHeld: ["document.held.read"],
   versionList: ["version.list"],
   versionCompare: ["version.compare"],
   versionConflicts: ["version.conflicts.list"],
@@ -1391,6 +1394,10 @@ const documentReadResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1), markdown: z.string() }).strict(),
   rawFailureSchema,
 ]);
+const documentHeldResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), change: HeldChange.nullable() }).strict(),
+  rawFailureSchema,
+]);
 const documentEditResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
   rawFailureSchema,
@@ -1925,6 +1932,7 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  documentHeld: documentHeldResultSchema,
   versionList: versionListResultSchema,
   versionCompare: versionCompareResultSchema,
   versionConflicts: versionConflictsResultSchema,
