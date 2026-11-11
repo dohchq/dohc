@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { openSyncRelayStorage } from "../storage";
@@ -53,6 +53,15 @@ it("retains configured storage validation and permits retry after an open failur
   expect(() => openEmptyRelayTestStorage(target, {workspaceQuotaBytes: 0})).toThrow(/workspaceQuotaBytes/);
   expect(existsSync(target)).toBe(false);
   openEmptyRelayTestStorage(target, {workspaceQuotaBytes: 1024}).close();
+});
+
+it("refuses an orphaned WAL without creating a database or changing the WAL", () => {
+  const target = path("orphaned-wal"), wal = `${target}-wal`, bytes = Buffer.from("leftover WAL");
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(wal, bytes);
+  expect(() => openEmptyRelayTestStorage(target).close()).toThrow(/existing WAL/);
+  expect(existsSync(target)).toBe(false);
+  expect(readFileSync(wal)).toEqual(bytes);
 });
 
 it("registers fresh fixtures, preserves their writes on reopen, and removes them after closing", async () => {

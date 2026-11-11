@@ -33,12 +33,15 @@ export async function waitForPreparation(scope, { env = process.env, request = f
         if (matching.length === 1 && now() < deadline) {
           const artifact = matching[0], downloadDeadline = Math.min(deadline, now() + 30_000);
           if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
-          const unavailable = () => new Error(`Preparation artifact ${name} was listed but never became downloadable within its 30-second retry cap.`);
+          let saw404 = false;
+          const unavailable = cause => new Error(saw404
+            ? `Preparation artifact ${name} was listed but never became downloadable within its 30-second retry cap.`
+            : `Preparation artifact ${name} download timed out waiting for a response within its 30-second retry cap.`, { cause });
           for (;;) {
             if (now() >= downloadDeadline) throw unavailable();
             let response;
             try { response = await api.download(artifact.id, downloadDeadline - now()); }
-            catch (error) { if (now() >= downloadDeadline) throw unavailable(); throw error; }
+            catch (error) { if (now() >= downloadDeadline) throw unavailable(error); throw error; }
             if (response.status !== 404) {
               if (!response.ok || !response.body) {
                 await response.body?.cancel();
@@ -48,6 +51,7 @@ export async function waitForPreparation(scope, { env = process.env, request = f
               await response.body.cancel();
               return { artifact };
             }
+            saw404 = true;
             await response.body?.cancel();
             if (now() >= downloadDeadline) throw unavailable();
             await pause(Math.min(2_000, downloadDeadline - now()));

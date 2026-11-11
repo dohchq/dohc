@@ -374,6 +374,30 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
     }
   });
 
+  test(`${scope} download caps preserve the cause and distinguish stalls from observed 404s`, async () => {
+    for (const saw404 of [false, true]) for (const capped of [false, true]) {
+      let clock = 0, downloads = 0;
+      const cause = new Error("download connection stalled");
+      await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+        request: async url => {
+          if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+          if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+          if (++downloads === 1 && saw404) return apiResponse(null, 404);
+          clock = capped ? 30_000 : 3_000;
+          throw cause;
+        },
+      }), error => {
+        if (!capped) assert.equal(error, cause, "errors before the cap are not wrapped or retried");
+        else {
+          assert.equal(error.cause, cause);
+          assert.match(error.message, saw404 ? /listed but never became downloadable.*30/u : /download timed out waiting for a response.*30/u);
+        }
+        return true;
+      });
+      assert.equal(downloads, saw404 ? 2 : 1);
+    }
+  });
+
   test(`${scope} unchanged artifact bodies on 200 permanently slow polling to 10 seconds`, async () => {
     let clock = 0, reads = 0;
     const pauses = [];
