@@ -275,8 +275,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- A row in Notices stays unread until the pointer or keyboard focus reaches it, the person presses **Mark all read**, or the person opens what the row is about. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
-- A Notices row opens what it is about. A click, Enter or Space on the row goes where its Open or Review action goes, and reads the row. A row whose actions only change state, such as **Try again**, opens where the problem is, or nowhere. Opening a row never retries, sends, installs or deletes.
+- A row in Notices stays unread until the pointer or keyboard focus reaches it, the person presses **Mark all read**, or the person opens what the row is about. Taking its toast's step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A Notices row opens what it is about. A click, Enter or Space on the row goes where its toast's Open or Review action goes, and reads the row. A row that opens shows no Open of its own; its corner says Opening… while it waits. A row whose actions only change state, such as **Try again**, opens where the problem is, or nowhere. Opening a row never retries, sends, installs or deletes.
 - A row with nowhere to go has no pointer, hover fill, role or Tab stop. Arrow keys still reach it, so the keyboard can read and dismiss it.
 - A row's own actions and icon controls do only what they name, and never also open the row.
 - When what a row is about is gone, its text becomes `dohc could not find this chat.` or `dohc could not find this file.`, and the row stops opening, with no toast and no navigation.
@@ -286,7 +286,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Couldn't confirm this workspace's account**, has no × and stays until it ends.
 - **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
 - Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Opening a dialog closes Notices too, which commits them. If dohc quits first, the cleared rows come back at the next start, because their Undo was still open. A dismissal that fails brings its row back.
-- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
+- A row keeps its title line for the icon controls, copy, its time and dismiss. The time sits in the corner as `now`, `5m`, `6h` or the date. The dismiss × takes its place while the pointer or focus is on the row. Its worded actions, such as **Try again**, sit on a line under its text.
+- A row about a message says what the message said: an agent's reply shows its opening words under `Nova replied in #trip`.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.

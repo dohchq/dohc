@@ -24,7 +24,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { AUTOMATION_NOTICE_KINDS, type NoticeTarget } from "../../notices/noticeTarget";
-import { relativeTime } from "../relativeTime";
+import { cornerTime } from "../relativeTime";
 import { neutralPresentation, presentationClasses, subscribePresentation } from "./actorPresentation";
 import { personalAgentName } from "./chosenColors";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
@@ -158,9 +158,11 @@ const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
 // A failed automation run, or an agent run that says why it didn't reply. Its
-// toast shows the body and stays until closed, and Copy sits beside its text.
+// toast stays until closed, and Copy sits beside its text. A run's reply
+// names its message, and its body is the reply's opening words.
 const isFailure = (notice: NoticeRow): boolean =>
-  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" ||
+  (notice.kind === "agent-run" && notice.body !== "" && notice.target?.message === undefined);
 
 // A held change to a lossy note, from another workspace. dohc held it on
 // purpose, so it shows as a warning, not a failure.
@@ -242,7 +244,7 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
-  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 dohc-focus-row";
+  "group/row dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 dohc-focus-row";
 // A row's first line is as tall as its tallest control, so a title that
 // wraps leaves its controls where they were. It holds only icon controls;
 // worded actions get a line under the text, so they never squeeze the title.
@@ -300,6 +302,47 @@ function RowTitle(props: { title: ReactNode; testId: string; onOpen?: () => void
     >
       {props.title}
     </button>
+  );
+}
+
+// A row's top-right corner: when it happened, or Opening… while the row
+// opens, then its dismiss ×. The × takes that word's place while the pointer
+// or focus is on the row, so a list at rest shows only when. A row with no
+// time shows its × at rest.
+function RowCorner(props: {
+  timeMs?: number;
+  busy?: boolean;
+  testId: string;
+  onDismiss?: (event: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const dismiss = props.onDismiss ? (
+    <button
+      type="button"
+      data-testid={`${props.testId}-dismiss`}
+      aria-label="Dismiss notice"
+      onClick={props.onDismiss}
+      className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+    >
+      <X size={11} aria-hidden />
+    </button>
+  ) : null;
+  if (!props.busy && props.timeMs === undefined) return dismiss;
+  const wordClass = `whitespace-nowrap text-[12px] tabular-nums text-subtle${dismiss ? " group-hover/row:invisible group-focus-within/row:invisible" : ""}`;
+  return (
+    <span className="relative flex h-6 items-center">
+      {props.busy || props.timeMs === undefined ? (
+        <span data-testid={`${props.testId}-opening`} className={wordClass}>Opening…</span>
+      ) : (
+        <time dateTime={new Date(props.timeMs).toISOString()} className={wordClass}>
+          {cornerTime(props.timeMs)}
+        </time>
+      )}
+      {dismiss ? (
+        <span className="absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+          {dismiss}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -1042,17 +1085,12 @@ export function LocalNoticeRow(props: {
               <RowTitle title={text.title} testId={`notice-${notice.id}`} onOpen={props.onOpen} busy={props.opening} />
               <span className={ROW_CONTROLS_CLASS}>
                 {notice.filePaths?.length ? null : text.copy.icon}
-                {notice.onDismiss ? (
-                  <button
-                    type="button"
-                    data-testid={`notice-${notice.id}-dismiss`}
-                    aria-label="Dismiss notice"
-                    onClick={props.onDismiss}
-                    className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    <X size={11} aria-hidden />
-                  </button>
-                ) : null}
+                <RowCorner
+                  timeMs={notice.timeMs}
+                  busy={props.opening}
+                  testId={`notice-${notice.id}`}
+                  onDismiss={notice.onDismiss ? props.onDismiss : undefined}
+                />
               </span>
             </div>
             {props.note === undefined ? text.body : <RowNote note={props.note} />}
@@ -1100,14 +1138,6 @@ export function LocalNoticeRow(props: {
               </>
             ) : null}
             {text.copy.block}
-            {notice.timeMs !== undefined ? (
-              <time
-                dateTime={new Date(notice.timeMs).toISOString()}
-                className="mt-1 block text-[12px] text-subtle"
-              >
-                {relativeTime(notice.timeMs)}
-              </time>
-            ) : null}
           </div>
         )}
       </NoticeText>
@@ -2126,12 +2156,13 @@ export function NoticeCenter(props: {
               <div className="min-w-0 flex-1">
                 <span className="block break-words leading-snug">
                   {sentToast.notice.title}
-                  {/* About four lines, then it scrolls, so a long reason never
-                      pushes the title and controls out of a short window. */}
-                  {sentToastFails && sentToast.notice.body ? (
+                  {/* A failure's reason shows about four lines, then scrolls, so
+                      it never pushes the title and controls out of a short
+                      window. Anything else shows two lines, as a reply's words. */}
+                  {sentToast.notice.body ? (
                     <span
                       data-testid="sent-notice-toast-body"
-                      className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                      className={`mt-0.5 block text-[11px] text-muted ${sentToastFails ? "max-h-[5.5em] overflow-y-auto overscroll-contain" : "line-clamp-2"}`}
                     >
                       {sentToast.notice.body}
                     </span>
@@ -2554,6 +2585,9 @@ export function NoticeCenter(props: {
                       // A row that says why it cannot open goes nowhere; its
                       // Open stays, to try again once the person has acted.
                       const openRowNotice = openNote === undefined ? openNotice : undefined;
+                      // A row that opens is its own Open, so the button shows
+                      // only while the row cannot.
+                      const openButton = openRowNotice ? undefined : openNotice;
                       const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
                         ? () => void runSentNoticeNow(notice)
                         : undefined;
@@ -2601,24 +2635,22 @@ export function NoticeCenter(props: {
                                   <RowTitle title={text.title} testId={`sent-notice-${notice.noticeId}`} onOpen={openRowNotice} busy={busy} />
                                   <span className={ROW_CONTROLS_CLASS}>
                                     {text.copy.icon}
-                                    {dismissNotice ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-dismiss`}
-                                        aria-label="Dismiss notice"
-                                        onClick={(event) => {
-                                          focusPastRow(event.currentTarget);
-                                          dismissNotice();
-                                        }}
-                                        className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-                                      >
-                                        <X size={11} aria-hidden />
-                                      </button>
-                                    ) : null}
+                                    <RowCorner
+                                      timeMs={notice.createdAtMs}
+                                      busy={busy && openRowNotice !== undefined}
+                                      testId={`sent-notice-${notice.noticeId}`}
+                                      onDismiss={dismissNotice
+                                        ? (event) => {
+                                            focusPastRow(event.currentTarget);
+                                            dismissNotice();
+                                          }
+                                        : undefined}
+                                    />
                                   </span>
                                 </div>
                                 {openNote === undefined ? text.body : <RowNote note={openNote} />}
-                                {runNow || retry || openNotice || text.copy.action ? (
+                                {folder ? <p className="m-0 mt-0.5 truncate text-[12px] text-subtle">{folder}</p> : null}
+                                {runNow || retry || openButton || text.copy.action ? (
                                   <div className={ROW_ACTIONS_CLASS}>
                                     {runNow ? (
                                       <button
@@ -2642,7 +2674,7 @@ export function NoticeCenter(props: {
                                         Try again
                                       </button>
                                     ) : null}
-                                    {openNotice ? (
+                                    {openButton ? (
                                       <button
                                         type="button"
                                         data-testid={`sent-notice-${notice.noticeId}-open`}
@@ -2657,12 +2689,6 @@ export function NoticeCenter(props: {
                                   </div>
                                 ) : null}
                                 {text.copy.block}
-                                <p className="m-0 mt-1 flex min-w-0 gap-2 text-[12px] text-subtle">
-                                  <time dateTime={new Date(notice.createdAtMs).toISOString()}>
-                                    {relativeTime(notice.createdAtMs)}
-                                  </time>
-                                  {folder ? <span className="truncate">{folder}</span> : null}
-                                </p>
                                 {note ? (
                                   <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
                                     {note}
