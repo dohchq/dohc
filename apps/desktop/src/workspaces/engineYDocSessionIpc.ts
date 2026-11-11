@@ -1434,7 +1434,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
     } catch (error) {
       if (!(error instanceof LiveDocumentOwnedError)) throw error;
-      throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`, { cause: error });
+      throw new Error(`${path} is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.`, { cause: error });
     }
   }
 
