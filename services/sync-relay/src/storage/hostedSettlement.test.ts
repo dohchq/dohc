@@ -879,27 +879,47 @@ it("folds automation depth across authenticated contributors while preserving th
       .toEqual([{kind:"automation",...automation,attribution:{...automation.attribution,depth:3}}]);
   } finally {f.close();}
 });
-it.each(["transition", "skipped-base"])("anchors a changed full selector binding to its accepted predecessor: %s", async variant => {
-  const f=registered({deployment:true});
+// Every editor's accepted events carry the lineage's one recorded binding. A
+// recipient's share decides only admission, so edits from the owner and from
+// shares with different selectors settle in one interval.
+it("settles an owner edit and a named recipient edit into one interval", async () => {
+  const f = registered({deployment: true});
   try {
-    const first=publication(f,"old-selector");await prepare(f,[first.op]);append(f,[first.op]);
-    f.write(db=>db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
-      .run(JSON.stringify({paths:["docs/a.md"],versionId:null})));
-    const next=publication(f,"new-selector",first.receipt.journalCursor,first.markdownSha,1);
-    expect(next.record.binding.selectorPaths).not.toEqual(first.record.binding.selectorPaths);
-    let selected=next;
-    if(variant==="skipped-base")selected=publication(f,"skipped-selector",next.receipt.journalCursor,next.markdownSha,1);
-    await prepare(f,[selected.op]);
-    const result=append(f,[selected.op]);
-    if(variant==="transition") {
-      expect(result.settlementRefusals).toBeUndefined();
-      const later=publication(f,"later-selector",next.receipt.journalCursor,next.markdownSha,2);
-      await prepare(f,[later.op]);expect(append(f,[later.op]).settlementRefusals).toBeUndefined();
-    } else {
-      expect(result.settlementRefusals).toHaveLength(1);
-      expect(refusedChecks()).toEqual(["prepare base-binding-change"]);
-    }
-  } finally {f.close();}
+    f.doc.gc = false;
+    const owner = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "owner-edit"), "owner-edit", f.actor));
+    expect(owner.result).toMatchObject({kind: "accepted"});
+    const last = publication(f, "named-edit");
+    expect(last.record.acceptedEventCount).toBe(2);
+    expect(last.record.binding).toEqual(owner.admitted!.metadata.accepted.binding);
+    await prepare(f, [last.op]);
+    expect(last.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(append(f, [last.op]).inserted).toBe(1);
+    expect(refusedChecks()).toEqual([]);
+  } finally { f.close(); }
+});
+
+it("settles edits through two shares with different selectors into one interval", async () => {
+  const f = registered({deployment: true});
+  try {
+    f.doc.gc = false;
+    f.write(db => {
+      db.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('file-share','workspace','owner',?,0)")
+        .run(JSON.stringify({paths: ["docs/a.md"], versionId: null}));
+      db.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES ('file-grant','file-share','user','writer',NULL,'edit',1,'active',0,NULL,NULL)`);
+    });
+    const file = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "file-share-edit"), "file-share-edit",
+      {kind: "named", userId: "writer", grantId: "file-grant"}));
+    expect(file.result).toMatchObject({kind: "accepted"});
+    // The folder share's recipient publishes the interval.
+    const last = publication(f, "folder-share-edit");
+    expect(last.record.acceptedEventCount).toBe(2);
+    expect(last.record.binding).toEqual(file.admitted!.metadata.accepted.binding);
+    await prepare(f, [last.op]);
+    expect(last.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(append(f, [last.op]).inserted).toBe(1);
+    expect(refusedChecks()).toEqual([]);
+  } finally { f.close(); }
 });
 
 

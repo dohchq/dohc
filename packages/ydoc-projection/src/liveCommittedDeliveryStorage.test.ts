@@ -49,7 +49,7 @@ function ackBaseline(
     bootstrapReplayed: false,
   });
 }
-it("funds the stored document binding independently of a large share selector", () => {
+it("keeps a recipient's binding and the delivery baseline independent of a large share selector", () => {
   const f = registered();
   try {
     const paths = ["docs", ...Array.from({ length: 99 }, (_, index) => `other-${index}/${"x".repeat(200)}`)];
@@ -58,8 +58,8 @@ it("funds the stored document binding independently of a large share selector", 
     const current = f.storage.resolveCurrentLiveDocumentBinding({ document: f.input.evidence.document, actor: { kind: "named", userId: "reader", grantId: "grant" } });
     expect(current.kind).toBe("current");
     if (current.kind !== "current") throw Error("current binding");
-    expect(current.binding.selectorPaths).toHaveLength(100);
-    expect(Buffer.byteLength(JSON.stringify(current.binding))).toBeGreaterThan(20_000);
+    // The share admits the recipient; the binding stays the lineage's own.
+    expect(current.binding.selectorPaths).toEqual([f.input.evidence.currentPath]);
     const { store } = delivery(f), drain = store.open({ host, document: f.input.evidence.document });
     expect(drain.baseline.binding.selectorPaths).toEqual([f.input.evidence.currentPath]);
     ackBaseline(store, drain);

@@ -2226,8 +2226,9 @@ it("refuses an exhausted settlement across a restore whose publication was refus
 
 // Proves: an exhausted restore publication is retried only from where
 // admission measures it, the last row at another binding when one follows the
-// latest binding. Here the file's first row is set to a recipient's folder
-// selector, or another path, as if accepted before the change. Out of budget, a
+// latest binding. Here the file's first row is set to another selector, as a
+// journal recorded under an earlier binding holds, or to another path, as if
+// accepted before a rename. Out of budget, a
 // publication starting at that row is asked to retry; one starting before it
 // is refused, and the device's next op lands behind it.
 it.each([["selector", "selector_paths_json", '["docs"]'], ["rename", "current_path", "docs/old.md"]] as const)(

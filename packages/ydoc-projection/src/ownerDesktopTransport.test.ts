@@ -359,7 +359,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); membership.close(); namedPeer.close(); browser.destroy();};
     // A link's wire selector is relative to its share.
     expect(peerSync.binding.selectorPaths).toEqual([link ? "a.md" : "docs/a.md"]);
-    expect(nativePeer.binding.selectorPaths).toEqual(["docs"]);
+    // The recipient's accepted binding is the lineage's recorded one, on which the owner registered.
+    expect(ticket.binding.selectorPaths).toEqual(["docs/a.md"]);
+    expect(nativePeer.binding.selectorPaths).toEqual(["docs/a.md"]);
     expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
     const firstApplied = peerSync.nextApplied(peerSignal.signal);
     // The production nextApplied waiter must be armed before the owner changes.

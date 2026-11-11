@@ -155,14 +155,25 @@ function probeJournalCharge(f: ReturnType<typeof registered>, input: LiveUpdateJ
   } finally { raw.close(); probe.close(); }
 }
 
-// A recipient's binding takes its share's selector; an owner's does not.
-it('charges a recipient\'s wide selectors and provenance before committing within workspace quota', () => {
+// A lineage's first activation records the binding every editor gets. One
+// recorded while owners took a share's selector can carry 100 wide selectors.
+function recordBinding(f: ReturnType<typeof registered>, selectorPaths: readonly string[]) {
+  const document = f.input.evidence.document
+  f.write(db => { db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,
+    lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes)
+    VALUES ('journal-test','activation',?,?,?,?,'{}',?,?,x'0000','owner','{}',1)`)
+    .run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
+      JSON.stringify({ ...document, currentPath: 'docs/a.md', selectorPaths, restoreFenceGeneration: 0 }), document.lineageClaimId) })
+}
+
+it('charges a recorded binding\'s wide selectors and provenance on a recipient\'s edit before committing within workspace quota', () => {
   const f = registered();
   try {
     const paths = ['docs', ...Array.from({ length: 99 }, (_, index) => `other/${index}/${'x'.repeat(200)}`)];
-    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({ paths, versionId: null }));
+    recordBinding(f, paths);
     const input = f.capture(f.update(), 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' }), initial = Number(f.journalRows().usage);
     expect(input.updateBytes.byteLength).toBeLessThan(100);
+    expect(input.metadata.binding.selectorPaths).toEqual(paths);
     expect(Buffer.byteLength(JSON.stringify(input.metadata.binding.selectorPaths))).toBeGreaterThan(20_000);
     const payloadOnlyQuota = initial + input.updateBytes.byteLength + liveDeliveryEventReservationBytes(input.cutToken.document, host.hostId,
       { journalCursor: 1, deliveryId: input.metadata.deliveryId, updateDigest: input.metadata.updateDigest, acceptingHostEpoch: host.hostEpoch });
@@ -1268,7 +1279,7 @@ it.each([1, 100])('bounds repeated binding validation for %s selector paths whil
   const f = registered();
   try {
     const paths = ['docs', ...Array.from({length: pathCount - 1}, (_, index) => `other/${String(index).padStart(3, '0')}`)];
-    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths, versionId: null}));
+    recordBinding(f, paths);
     const reader = {kind: 'named', userId: 'reader', grantId: 'grant'} as const;
     for (let i = 0; i < 40; i++) expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + i, 'value-' + i), 'delivery-' + i, reader)).result.kind).toBe('accepted');
     calls.bindings = 0;

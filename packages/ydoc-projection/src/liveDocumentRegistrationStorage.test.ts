@@ -274,9 +274,9 @@ it('resolves current owner and exact named authority after real registration', (
       actor: { kind: 'owner', userId: 'owner' } })
     const named = f.storage.resolveCurrentLiveDocumentBinding({ document: input.evidence.document,
       actor: { kind: 'named', userId: 'reader', grantId: 'grant' } })
-    expect(owner).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', restoreFenceGeneration: 1 },
+    expect(owner).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', selectorPaths: ['docs/a.md'], restoreFenceGeneration: 1 },
       authority: { principalKind: 'owner', principalId: 'owner', grantId: null, grantGeneration: null } })
-    expect(named).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', restoreFenceGeneration: 1 },
+    expect(named).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', selectorPaths: ['docs/a.md'], restoreFenceGeneration: 1 },
       authority: { principalKind: 'named', principalId: 'reader', grantId: 'grant', grantGeneration: 4 } })
     f.raw.exec("UPDATE sync_relay_share_grants SET access = 'view' WHERE grant_id = 'grant'")
     expect(f.storage.resolveCurrentLiveDocumentBinding({ document: input.evidence.document,
