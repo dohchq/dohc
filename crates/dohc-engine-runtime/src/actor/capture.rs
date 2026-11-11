@@ -2250,7 +2250,13 @@ fn capture_ingest_in_tx(
     // A lineage read for an object the path no longer resolves to belongs to
     // another file.
     let recovery = recovery.filter(|prepared| prepared.object_id == result.snapshot.object_id);
-    if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
+    // A binary head that already held these bytes stays as it was, so there
+    // is no lineage or Collection record to reconcile with it.
+    let kept_binary_head = result.moment.after_content_kind == "binary";
+    if let Some(prepared) = recovery
+        .as_ref()
+        .filter(|prepared| prepared.preserve && !kept_binary_head)
+    {
         let projection = prepared
             .lineage
             .projection()
@@ -2269,7 +2275,7 @@ fn capture_ingest_in_tx(
             }
         }
     }
-    if admitted {
+    if admitted && !kept_binary_head {
         #[cfg(feature = "fault-injection")]
         let _collection_phase =
             dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
