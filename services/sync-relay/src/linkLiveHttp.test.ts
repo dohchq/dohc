@@ -13,7 +13,7 @@ const limits = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwner
   upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100};
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanups.splice(0)) await close();});
-async function fixture(sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean) {
+async function fixture(sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean | "document-too-dense") {
   const f = await ticketFixture(); cleanups.push(f.close); vi.spyOn(Date, "now").mockReturnValue(1000);
   // Synthetic private authority fixture. Public Edit creation/exchange remains closed.
   f.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
@@ -115,6 +115,15 @@ it("explains an unavailable live session only after proving the file is shared",
     const refused = await f.handle(request(undefined, undefined, headers));
     expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
   }
+  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
+  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+});
+
+// Trying again later can't help a note whose history is over the bound, so it gets its own answer.
+it("explains a document blocked as too dense in its own words, after proving the file is shared", async () => {
+  const f = await fixture(() => "document-too-dense");
+  const response = await f.handle(request());
+  expect([response.status, await response.json()]).toEqual([409, linkRefusalBody("link_live_too_dense")]);
   const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
   expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
 });

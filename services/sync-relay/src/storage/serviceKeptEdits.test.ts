@@ -57,6 +57,43 @@ it("never reuses a refusal's token for a later refusal of the same queue", async
   expect(f.storage.readServiceKeptEdits(queue("outbox-1"))).toMatchObject({generation: later, retrying: false});
 });
 
+// Proves: a store written before notes could be refused as too dense keeps its
+// rows and its token sequence when it opens, and then records that refusal.
+it("migrates a v1 store's rows and token sequence, then records a too-dense refusal", async () => {
+  const f = await ticketFixture(); cleanups.push(f.close);
+  const record = (storage: typeof f.storage, outboxId: string, reason: string) => {
+    storage.recordServiceKeptEdits({identity, outboxId, binding, reason, headDeliveryId: "delivery-1", refusalKey: outboxId, nowMs: 5});
+    return storage.readServiceKeptEdits(queue(outboxId))!.generation;
+  };
+  const kept = record(f.storage, "outbox-1", "invalid-update");
+  const forgotten = record(f.storage, "outbox-2", "capacity-refused");
+  f.storage.forgetServiceKeptEdits(queue("outbox-2"));
+  const before = f.storage.listServiceKeptEdits(scope.workspaceId);
+  // Rebuild the table as v1 wrote it: the same rows and sequence, without the new reason.
+  const sql = String(f.raw.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(SERVICE_KEPT_EDITS)!.sql);
+  expect(sql).toContain(",'document-too-dense'");
+  f.raw.exec(`BEGIN;
+    ALTER TABLE ${SERVICE_KEPT_EDITS} RENAME TO kept_v2;
+    DROP INDEX idx_sync_relay_service_kept_edits_object;
+    ${sql.replace(",'document-too-dense'", "")};
+    INSERT INTO ${SERVICE_KEPT_EDITS} SELECT * FROM kept_v2;
+    DROP TABLE kept_v2;
+    UPDATE sqlite_sequence SET seq=${forgotten} WHERE name='${SERVICE_KEPT_EDITS}';
+    CREATE INDEX idx_sync_relay_service_kept_edits_object ON ${SERVICE_KEPT_EDITS}(workspace_id,object_id);
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-kept-edits-v2';
+    INSERT OR IGNORE INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES ('service-kept-edits-v1',0);
+    COMMIT;`);
+  const reopened = openSyncRelayStorage(f.path, f.config);
+  try {
+    expect(reopened.listServiceKeptEdits(scope.workspaceId)).toEqual(before);
+    expect(reopened.readServiceKeptEdits(queue("outbox-1"))!.generation).toBe(kept);
+    expect(record(reopened, "outbox-3", "document-too-dense")).toBe(forgotten + 1);
+    expect(reopened.readServiceKeptEdits(queue("outbox-3"))).toMatchObject({reason: "document-too-dense"});
+  } finally {reopened.close();}
+  expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-kept-edits-%' ORDER BY migration_id").all()
+    .map(row => row.migration_id)).toEqual(["service-kept-edits-v1", "service-kept-edits-v2"]);
+});
+
 // Proves: a row names the store that holds its queue, and only rows of the
 // attached store's identity hold the document. A later store's queue with the
 // same outbox ID, as after re-adopting the same lineage and base, is a row of

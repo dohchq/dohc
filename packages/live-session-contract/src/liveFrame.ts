@@ -136,6 +136,7 @@ const refusalCodes: Record<LiveUpdateRefusal, number> = {
   "invalid-update": 1, "authority-refused": 2, "stale-session": 3,
   "stale-binding": 4, "restore-fenced": 5, "provenance-refused": 6,
   "baseline-missing": 7, "delivery-conflict": 8, "capacity-refused": 9,
+  "document-too-dense": 10,
 };
 const retryCodes: Record<LiveUpdateRetry, number> = {
   "admission-unavailable": 1, "host-unavailable": 2, "application-pending": 3,

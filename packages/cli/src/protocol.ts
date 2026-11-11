@@ -370,6 +370,9 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+  // Begins with the shared cause sentence in @dohc/live-session-contract/live-refusal-words; a desktop test keeps them equal.
+  "document-too-dense": "This note has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. Resume can't help. Save a recovery copy, then move its text into new, smaller notes and continue there.",
+  "unrecognized": "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.",
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
 
@@ -1680,7 +1683,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
     documents: z.array(z.object({
       path: z.string().min(1),
       objectId: z.string().min(1).max(512),
-      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired", "unrecognized"]),
       reason: liveDocumentReasonSchema.optional(),
       canResume: z.boolean(),
       deferredStop: z.object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() }).strict().optional(),

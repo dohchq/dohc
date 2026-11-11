@@ -2099,11 +2099,12 @@ fn require_succession(
 /// The quarantines a relay refusal leaves, the reasons the relay keeps an
 /// owner's refused edits for. Restore and binding quarantines recover only
 /// through enrollment.
-const RELAY_REFUSALS: [&str; 4] = [
+const RELAY_REFUSALS: [&str; 5] = [
     "provenance-refused",
     "delivery-conflict",
     "capacity-refused",
     "invalid-update",
+    "document-too-dense",
 ];
 
 /// Whether a retirement kept one of the outbox's refused entries, after the

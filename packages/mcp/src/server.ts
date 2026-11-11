@@ -362,7 +362,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_live_documents",
     {
       description:
-        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
+        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, `retired` once live editing stopped, or `unrecognized` when this version of dohc doesn't know the server's status), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
         Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `\`${reason}\`: ${step}`).join(" ") +
         " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       inputSchema: { cursor: z.string().min(1).max(4096).optional() },

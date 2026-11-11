@@ -1311,7 +1311,7 @@ it.each(["service", "device"] as const)("resolves the selected owner restore poi
     expect(point).toEqual({...capture.point, markdownDigest: hash(Buffer.from(expected)), projectionDigest: hash(Buffer.from(expected))});
     expect(point.markdownDigest).not.toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
     expect(f.journalRows()).toEqual(before);
-    expect(() => resolveLiveRestorePoint(capture, {...policy, maxStructVisits: 1})).toThrow(/capacity-refused/);
+    expect(() => resolveLiveRestorePoint(capture, {...policy, maxStructVisits: 1})).toThrow(/document-too-dense/);
   } finally {f.close();}
 });
 

@@ -105,7 +105,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     requireReading(delta.length <= MAX_UPDATE_BYTES, 'capacity-refused')
     const result = journal({document: input.document, currentPath: input.currentPath,
       checkpoint: input.checkpoint, suffix: [], candidate: delta})
-    if (result.kind === 'refused') throw new Refusal(result.reason === 'capacity-refused' ? 'capacity-refused' : 'journal-refused')
+    if (result.kind === 'refused') throw new Refusal(result.reason === 'capacity-refused' || result.reason === 'document-too-dense' ? 'capacity-refused' : 'journal-refused')
     const sourceSha256 = sha(input.source)
     const expected = expired ? utf8.encode(canonical) : input.source
     requireReading(result.evidence.projectedMarkdownSha256 === sha(expected)

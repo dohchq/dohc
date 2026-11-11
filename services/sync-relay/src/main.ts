@@ -670,9 +670,11 @@ const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount:
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
-// Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
+// Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document,
+// and why when the note has grown too large to edit live, so only moving its text into new notes can help.
 const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
-  storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document) : undefined;
+  storage.getLiveHostControl()?.configuredMode === "service" &&
+  (selfHost.blocked(document) === "document-too-dense" ? "document-too-dense" as const : selfHost.stopped(document)) : undefined;
 if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;

@@ -15,10 +15,10 @@ import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
-import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
+import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooDense,ServiceActivationTooLarge,
   type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
-export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
+export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooDense,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -380,6 +380,7 @@ export class ServiceActivationStore {
       ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
+    if (validation.kind === "document-too-dense") throw new ServiceActivationTooDense();
     if (validation.kind !== "accepted") throw new Error(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {

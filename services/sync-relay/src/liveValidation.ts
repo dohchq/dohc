@@ -31,7 +31,8 @@ export type SettlementNormalizationResult =
         | "invalid-update"
         | "invalid-schema"
         | "projection-mutated"
-        | "capacity-refused";
+        | "capacity-refused"
+        | "document-too-dense";
       source: "call" | "registration-input";
     };
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (

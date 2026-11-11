@@ -4,8 +4,8 @@ import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-
 export function selfHostLiveProfile() {
   const MiB = 1024 * 1024;
   const frames = {
-    receive: {maxFrameBytes: 64 * 1024, maxStateVectorBytes: 128 * 1024, maxUpdateBytes: 2 * MiB, maxSyncBytes: 4 * MiB},
-    maxQueuedBytes: 4 * MiB, maxQueuedFrames: 128, maxControlBytes: 128 * 1024, maxControlFrames: 16, maxAssemblyBytes: 4 * MiB,
+    receive: {maxFrameBytes: 64 * 1024, maxStateVectorBytes: 128 * 1024, maxUpdateBytes: 4 * MiB, maxSyncBytes: 5 * MiB},
+    maxQueuedBytes: 4 * MiB, maxQueuedFrames: 128, maxControlBytes: 128 * 1024, maxControlFrames: 16, maxAssemblyBytes: 5 * MiB,
   };
   const validation = {...WORKER_LIVE_VALIDATION_POLICY};
   const requests = {maxPendingRequests: 32, maxRequestBytes: 16 * 1024, maxResponseBytes: 64 * 1024, timeoutMs: 30_000};
@@ -14,7 +14,7 @@ export function selfHostLiveProfile() {
   const nativeIngress = {ingress: {aggregateBytes: 512 * MiB, applicationWorkingReserveBytes: 8 * MiB, maxUploads: 4, uploadDeadlineMs: 30_000},
     maxRegistrations: 64, maxAdoptionBytes: 4 * MiB, maxAdoptionEvents: 128, maxApplicationsPerSettlement: 128,
     ownerOutbox: {maxPendingBytes: 64 * MiB, maxPendingAgeMs: 7 * 24 * 60 * 60 * 1000},
-    sync: {policy: {maxClientVectorBytes: 128 * 1024, maxHostVectorBytes: 128 * 1024, maxOutputBytes: 4 * MiB, maxReadBytes: 16 * MiB}, workingReserveBytes: 8 * MiB}};
+    sync: {policy: {maxClientVectorBytes: 128 * 1024, maxHostVectorBytes: 128 * 1024, maxOutputBytes: 8 * MiB, maxReadBytes: 16 * MiB}, workingReserveBytes: 8 * MiB}};
   const nativeClient = {aggregateBytes: 256 * MiB, maxUploads: 4};
   const editor = {provider: {frames, maxPendingUpdateBytes: 4 * MiB, maxPendingUpdates: 128, maxDeliveryAttempts: 8},
     maxHttpResponseBytes: 64 * 1024, maxSocketBufferedBytes: 4 * MiB, connectTimeoutMs: 30_000, sendTimeoutMs: 30_000, drainPollMs: 10};
@@ -26,18 +26,18 @@ export function selfHostLiveProfile() {
     browserSessions: {...requests, maxSessions: 256, retentionMs: 12 * 60 * 60 * 1000},
     namedLive: {version: 1, tickets: {retainedTicketsPerPrincipalGrant: 8, expiredTicketCleanupBatchSize: 64},
       transport: {...connections, maxPendingRequests: requests.maxPendingRequests, maxRequestBytes: requests.maxRequestBytes, maxResponseBytes: requests.maxResponseBytes},
-      frames, host: {maxClientVectorBytes: 128 * 1024, maxSyncOutputBytes: 4 * MiB, maxAppliedUpdateBytes: 2 * MiB,
+      frames, host: {maxClientVectorBytes: 128 * 1024, maxSyncOutputBytes: 4 * MiB + 128 * 1024, maxAppliedUpdateBytes: 4 * MiB,
         maxSubmissionBytes: 4 * MiB, maxAdmissionBytes: 16 * MiB}, validation, maxListeners: 320},
     service: {ingress: nativeIngress.ingress, client: {...nativeClient, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000},
       settlement: {maxApplicationsPerSettlement: nativeIngress.maxApplicationsPerSettlement},
       adoption: {maxBytes: nativeIngress.maxAdoptionBytes, maxEvents: nativeIngress.maxAdoptionEvents, ownerOutbox: nativeIngress.ownerOutbox},
       sync: nativeIngress.sync,
-      // One restore at a time. Its native reservation, about 206 MiB, shares
+      // One restore at a time. Its native reservation, about 246 MiB, shares
       // the 512 MiB ingress budget with live applications and owner delivery.
-      restore: {maxBytes: 2 * MiB, maxEvents: 64, aggregateBytes: 40 * MiB, workingReserveBytes: 8 * MiB, maxOperations: 1, validation},
+      restore: {maxBytes: 4 * MiB, maxEvents: 64, aggregateBytes: 72 * MiB, workingReserveBytes: 8 * MiB, maxOperations: 1, validation},
       // A hosted document with no live connection for idleUnloadMs settles and
       // leaves memory until it is opened again.
-      activation: {validation, maxCaptureBytes: 4 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
+      activation: {validation, maxCaptureBytes: 8 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000},
       // Copying and migrating an earlier store for its owner's recovery copy
       // may take this long, the longest the engine answers a request.

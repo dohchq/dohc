@@ -2,6 +2,7 @@ import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 import type { DatasetListRefusal } from "@dohc/cli/dataset";
 import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
+import { DOCUMENT_TOO_DENSE_NEXT, DOCUMENT_TOO_DENSE_SAVE_CAUSE } from "@dohc/live-session-contract/live-refusal-words";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -48,8 +49,7 @@ export const PRIVACY_DENIED_WORDS =
  * check (#3575). A live note keeps the blocks its edits deleted, so the
  * note's weight never goes down: only new notes clear it.
  */
-export const DOCUMENT_TOO_DENSE_WORDS =
-  "This note has grown too large for dohc to save, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. dohc still has the latest text and shows it in the note, but the file on disk has an older version, which is what other programs and agents see. Move its text into new, smaller notes and continue there.";
+export const DOCUMENT_TOO_DENSE_WORDS = `${DOCUMENT_TOO_DENSE_SAVE_CAUSE} dohc still has the latest text and shows it in the note, but the file on disk has an older version, which is what other programs and agents see. ${DOCUMENT_TOO_DENSE_NEXT}`;
 
 export const VOLUME_SHARES_NEW_FILES_WORDS =
   "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";

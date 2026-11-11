@@ -640,7 +640,7 @@ async function proveSettlementRecord(
     throw error;
   });
   if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
-  if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
+  if (normalized.kind === "refused" && (normalized.reason === "capacity-refused" || normalized.reason === "document-too-dense")) {
     if (batched) throw relayError("settlement_proof_budget");
     throw new SettlementProofExhausted("state-capacity");
   }

@@ -91,7 +91,9 @@ export async function remoteLiveDocument(options: {
     const state = provider?.state();
     const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);
     const unknown = changed && !refused;
-    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
+    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", error: unknown ? "The edit outcome is unknown. Read the live document before retrying."
+      : refused && state.reason === "document-too-dense" ? LINK_REFUSALS.link_live_too_dense.error
+      : error instanceof Error ? error.message : "Live document is unavailable."};
   } finally {
     lifetime.abort();
     provider?.close();

@@ -1,4 +1,5 @@
 import { LIVE_STOP_WAITING, liveStopError } from "../ipc/liveEditingStop";
+import {DOCUMENT_TOO_DENSE_CAUSE} from "@dohc/live-session-contract/live-refusal-words";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, moveWorkspacePath, PENDING_SHARE_READ_WARNING, readWorkspaceFile, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import { OwnerLiveDocument, type OwnerLiveQuarantine } from "../ipc/bridgeContract";
@@ -2203,6 +2204,9 @@ async function liveDocumentsFixture(options: { caller?: string } = {}) {
 // Agents read reason codes, so each one the window's list can carry has its documented next step.
 it("documents every reason a Live documents row can carry", () => {
   expect(Object.keys(LIVE_DOCUMENT_REASON_STEPS).sort()).toEqual([...OwnerLiveDocument.shape.reason.unwrap().options].sort());
+});
+it("tells agents why a note too dense to edit live stopped, in the words every surface uses", () => {
+  expect(LIVE_DOCUMENT_REASON_STEPS["document-too-dense"]).toBe(`${DOCUMENT_TOO_DENSE_CAUSE} Resume can't help. Save a recovery copy, then move its text into new, smaller notes and continue there.`);
 });
 
 describe.each(["cli", "mcp"] as const)("live documents through %s", door => {

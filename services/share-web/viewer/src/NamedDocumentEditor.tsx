@@ -1,4 +1,5 @@
 import {liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
+import {DOCUMENT_TOO_DENSE_CAUSE} from "@dohc/live-session-contract/live-refusal-words";
 import {useEffect, useRef, useState} from "react";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
 import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -11,6 +12,8 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (["authorizing", "connecting", "syncing"].includes(state.status)) return "Opening the file…";
   const limit = liveConnectionLimitMessage(state.reason);
   if (limit) return limit;
+  if (state.status === "quarantined" && state.reason === "document-too-dense")
+    return `${DOCUMENT_TOO_DENSE_CAUSE} Copy any unsynced changes you want to keep. Ask the owner to move its text into new, smaller notes.`;
   if (state.status === "quarantined") return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused") return link ? "This link cannot open the file. Ask the owner for access." : "This account cannot open the file. Sign in with the invited account.";
   if (state.status === "closed") return "Editing stopped. Copy any unsynced changes you want to keep.";

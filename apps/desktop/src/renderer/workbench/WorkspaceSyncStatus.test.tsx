@@ -291,6 +291,11 @@ describe("sync status surface", () => {
       reason: "conflict-parent-withheld" as const,
       label: "Live editing can't resume",
     },
+    {
+      delivery: "retrying" as const,
+      reason: "document-too-dense" as const,
+      label: "Too large to edit live",
+    },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
     const live = screen.getByTestId("owner-live-delivery-status");

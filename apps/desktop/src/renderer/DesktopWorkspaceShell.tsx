@@ -194,7 +194,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, tooDenseKeptEditsNote, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -2385,6 +2385,12 @@ export function DesktopWorkspaceShell(props: {
       if (row.recovery==="retrying") {
         reportShellFailure({title:`Trying again for ${row.path}`,tone:"warning",quiet:true,
           message:"dohc is sending your kept edits to the server once more.",details,action:save,target,identity});
+        continue;
+      }
+      // The server refuses the note's history, not one edit, so Try again would fail again.
+      if (row.reason==="document-too-dense" && (row.recovery==="paused" || row.recovery==="copied")) {
+        reportShellFailure({title:`Live editing stopped for ${row.path}`,...(row.recovery==="copied" ? {tone:"warning",quiet:true} : {}),
+          message:tooDenseKeptEditsNote(row.recovery,row.storedOn),details,action:save,target,identity});
         continue;
       }
       // Try again cannot reach an earlier copy of the workspace, so the row offers only Save.

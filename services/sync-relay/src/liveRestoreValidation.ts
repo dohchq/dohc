@@ -51,7 +51,7 @@ export function runLiveRestoreWork(work: LiveRestoreWork, policy: OrderedLiveUpd
           document: {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
             objectId: binding.objectId, lineageClaimId: binding.lineageClaimId},
           currentPath: binding.currentPath, checkpoint: validated.content.stateUpdate});
-        if (normalized.kind === "refused" && normalized.reason === "capacity-refused") throw new LiveRestoreTooLarge();
+        if (normalized.kind === "refused" && normalized.reason === "document-too-dense") throw new LiveRestoreTooLarge();
       }
       reply = {kind: "proposal", content: {...validated.content}, nativeSourceRanges: validated.nativeSourceRanges,
         ...(work.mode === "review" ? {review: validated.projectReview(work.maxOutputBytes)} : {})};

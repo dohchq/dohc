@@ -4384,7 +4384,7 @@ for (const c of [
     const history = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);
     const validation = validateOrdinaryActivation({document: o.document, currentPath: source.currentPath,
       baselineBytes: capture.baselineBytes, cut: {source, fullState: capture.fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, restorePolicy);
-    if (validation.kind !== "accepted") throw new Error(validation.message);
+    if (validation.kind !== "accepted") throw new Error(validation.kind === "refused" ? validation.message : validation.kind);
     return verifyOrdinaryActivationCut(o.f.storage as StorageContext, {...input, history, baseline: validation.baseline, proof: validation.proof});
   };
   const refusal = "Ordinary activation found a later ordinary file moment with a divergent projection.";

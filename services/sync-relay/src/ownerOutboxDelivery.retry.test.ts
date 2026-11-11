@@ -219,9 +219,10 @@ it.each<LiveJournalValidation>([
   expect(f.receipts).toHaveLength(1);
 });
 
-// The real validator, with a stricter budget such as a relay upgrade brings,
-// refuses history the journal already admitted. That is never the owner's fault.
-it("does not quarantine the owner's head when the real validator refuses the admitted history", async () => {
+// The real validator, with a stricter budget such as a relay upgrade brings, refuses history the journal
+// already admitted. Deleted blocks keep their weight, so no later edit can bring the note back under the
+// bound: the owner's head is kept as too dense, rather than failing the pass on every attempt.
+it("keeps the owner's head as too dense when the real validator refuses the admitted history", async () => {
   const f = fixture(), peer = new Y.Doc();
   let admitted: Uint8Array;
   try {
@@ -244,14 +245,15 @@ it("does not quarantine the owner's head when the real validator refuses the adm
   if (!stricter) throw new Error("No budget refuses only the admitted history.");
   const strict = stricter;
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(({retainStateUpdate: _retainStateUpdate, ...input}) => strict(input));
-  await expect(f.run(validate)).rejects.toThrow();
-  expect(validate.mock.results[0]!.value).toEqual({kind: "refused",reason: "capacity-refused",source: "admitted-cut"});
-  expect(f.quarantines).toEqual([]); expect(f.native.state).toBe("active");
+  expect(await f.run(validate)).toEqual({admittedEntries: 0,hasMore: false});
+  expect(validate.mock.results[0]!.value).toEqual({kind: "refused",reason: "document-too-dense",source: "admitted-cut"});
+  expect(f.quarantines).toEqual(["document-too-dense"]);
   expect(f.relay.journalRows().journal).toMatchObject([{delivery_id: "admitted-row"}]);
   expect(f.pending).toEqual([f.entry]); expect(f.receipts).toEqual([]); expect(f.applyThrough).not.toHaveBeenCalled();
-  // The relay's own budget admits the same head on the next pass.
-  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
-  expect(f.receipts).toMatchObject([{deliveryId: f.entry.deliveryId}]);
+  // The next pass leaves the kept head alone instead of checking it again.
+  validate.mockClear();
+  expect(await f.run(validate)).toEqual({admittedEntries: 0,hasMore: false});
+  expect(validate).not.toHaveBeenCalled(); expect(f.quarantines).toEqual(["document-too-dense"]);
 });
 
 it("keeps a quarantined head and its bytes through a relay restart and upgrade, without probing it", async () => {

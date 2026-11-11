@@ -124,7 +124,9 @@ it("reports a local size refusal as not applied and sends no edit", async () => 
 
 it.each(LIVE_UPDATE_REFUSAL_VALUES)("reports the host refusal %s as not applied", async reason => {
   const f = await fixture(false, limits.provider.maxPendingUpdateBytes, reason);
-  expect(await f.run()).toMatchObject({ok: false, outcome: "not-applied", error: reason});
+  // An agent can act on a note too dense to edit live only once it knows why, so that refusal comes in words.
+  expect(await f.run()).toMatchObject({ok: false, outcome: "not-applied",
+    error: reason === "document-too-dense" ? LINK_REFUSALS.link_live_too_dense.error : reason});
   expect(yDocToMarkdown(f.doc)).toContain("**world**");
 });
 

@@ -21,7 +21,6 @@ import { parseLiveCheckpointCoverage, type LiveCheckpointAuthorCoverage, parseLi
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
-import { LiveJournalAdmittedCapacityError } from "./errors";
 import {LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
 import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
 import {parseNativeRestoreCancellationAnswer, type NativeRestoreCancellationReceipt} from "../liveRestoreFence";
@@ -672,7 +671,7 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
   if (outer.kind === "refused") {
     const refused = baselineRecord(value, ["kind", "reason", "source"]);
     if (!["call", "admitted-cut", "candidate", "final"].includes(String(refused.source)) ||
-      !["invalid-input", "invalid-update", "invalid-schema", "projection-mutated", "capacity-refused"].includes(String(refused.reason))) throw new TypeError("Invalid journal refusal.");
+      !["invalid-input", "invalid-update", "invalid-schema", "projection-mutated", "capacity-refused", "document-too-dense"].includes(String(refused.reason))) throw new TypeError("Invalid journal refusal.");
     return refused as unknown as LiveJournalValidation;
   }
   if (outer.kind !== "accepted") throw new TypeError("Invalid journal validation.");
@@ -703,8 +702,8 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
 function journalValidationRefusal(validation: Extract<LiveJournalValidation, { kind: "refused" }>): Exclude<RelayLiveUpdateJournalResult["result"], { kind: "accepted" }> {
   const { source, reason } = validation;
   if (source === "call" || reason === "projection-mutated") throw new Error("Live journal validator integration failed.");
+  if (reason === "document-too-dense") return { kind: "refused", reason };
   if (source === "admitted-cut") {
-    if (reason === "capacity-refused") throw new LiveJournalAdmittedCapacityError();
     if (reason === "invalid-update" || reason === "invalid-schema") throw new Error("Admitted live journal storage cannot validate.");
     throw new Error("Impossible admitted journal refusal.");
   }

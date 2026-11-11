@@ -1548,6 +1548,12 @@ describe("notice center", () => {
       title: "Live editing can't resume",
       body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
     },
+    // Resume sends the same history again, so the notice names the step that helps.
+    {
+      reason: "document-too-dense" as const,
+      title: "Too large to edit live",
+      body: "A note in this workspace has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. Open Live documents to see which note, then move its text into new, smaller notes and continue there.",
+    },
   ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();

@@ -5,6 +5,7 @@ import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import type {LiveHostConnectionCoordinate} from "./storage/types";
+import {SERVICE_KEPT_EDITS_REASONS} from "./storage/serviceKeptEdits";
 
 /**
  * Permission to acknowledge one native service activation's adoption seed
@@ -106,7 +107,7 @@ export function serviceOwnerTransport(options: {
       const params=configRecord(request.params,["registrationId","reason","deliveryId","refusalKey"]);
       registration(params.registrationId);
       if(!adopted || !outboxId)throw new Error("Service owner outbox is unavailable.");
-      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict" && params.reason!=="capacity-refused" && params.reason!=="invalid-update")throw new Error("Invalid owner quarantine reason.");
+      if(typeof params.reason!=="string" || !SERVICE_KEPT_EDITS_REASONS.includes(params.reason))throw new Error("Invalid owner quarantine reason.");
       if(typeof params.deliveryId!=="string" || !params.deliveryId || typeof params.refusalKey!=="string" || !params.refusalKey)throw new Error("Invalid owner refusal.");
       const response=await client.sendRequest({...request,method:"ydoc.ownerOutbox.quarantine",
         params:{outboxId,reason:params.reason,refusal:{deliveryId:params.deliveryId,key:params.refusalKey}}},signal);

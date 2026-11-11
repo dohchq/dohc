@@ -22,8 +22,29 @@ import {parseWorkspaceId} from "../requestInputs";
 // at its owner's adoption seed, the host records the checkpoint a copy reads
 // now, and a copy of an older one no longer counts.
 export const SERVICE_KEPT_EDITS = "sync_relay_service_kept_edits";
-const MIGRATION = "service-kept-edits-v1";
+const MIGRATION = "service-kept-edits-v2";
 const SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (
+  generation INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id TEXT NOT NULL,
+  replication_epoch TEXT NOT NULL,
+  stream_identity TEXT NOT NULL,
+  outbox_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  binding_json TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN ('provenance-refused','delivery-conflict','capacity-refused','invalid-update','document-too-dense')),
+  head_delivery_id TEXT NOT NULL,
+  refusal_key TEXT NOT NULL,
+  retrying INTEGER NOT NULL CHECK (retrying IN (0,1)),
+  copied INTEGER NOT NULL CHECK (copied IN (0,1)),
+  copied_checkpoint TEXT CHECK (copied_checkpoint IS NULL OR (copied=1 AND length(copied_checkpoint)=64)),
+  frozen_checkpoint TEXT CHECK (frozen_checkpoint IS NULL OR length(frozen_checkpoint)=64),
+  recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
+  UNIQUE (workspace_id, replication_epoch, stream_identity, outbox_id),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT`;
+// v1 had no `document-too-dense` reason.
+const V1_MIGRATION = "service-kept-edits-v1";
+const V1_SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (
   generation INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id TEXT NOT NULL,
   replication_epoch TEXT NOT NULL,
@@ -46,8 +67,8 @@ const OBJECT_INDEX = "idx_sync_relay_service_kept_edits_object";
 const OBJECT_INDEX_SQL = `CREATE INDEX ${OBJECT_INDEX} ON ${SERVICE_KEPT_EDITS}(workspace_id,object_id)`;
 /** Rows in one page of a workspace's list. */
 export const SERVICE_KEPT_EDITS_PAGE = 256;
-export type ServiceKeptEditsReason = "provenance-refused" | "delivery-conflict" | "capacity-refused" | "invalid-update";
-export const SERVICE_KEPT_EDITS_REASONS: readonly string[] = ["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"];
+export type ServiceKeptEditsReason = "provenance-refused" | "delivery-conflict" | "capacity-refused" | "invalid-update" | "document-too-dense";
+export const SERVICE_KEPT_EDITS_REASONS: readonly string[] = ["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update", "document-too-dense"];
 
 /** The workspace identity whose hosted store holds a queue. */
 export interface ServiceKeptEditsIdentity {readonly replicationEpoch: string; readonly streamIdentity: string}
@@ -88,14 +109,27 @@ export interface ServiceKeptEdits {
 
 const same = (a: string, b: string) => a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
 export function initializeServiceKeptEditsSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(MIGRATION);
+  const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
+  const marked = isMarked(MIGRATION);
   const existing = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(SERVICE_KEPT_EDITS);
-  if (!marked) {
+  const exact = (sql: string) => !!existing && existing.type === "table" && typeof existing.sql === "string" && same(existing.sql, sql);
+  if (marked) {
+    if (!exact(SQL)) throw new Error("Service kept edits storage is damaged.");
+  } else if (isMarked(V1_MIGRATION)) {
+    if (!exact(V1_SQL)) throw new Error("Service kept edits storage is damaged.");
+    // Rows keep their generations, and the sequence carries over so no refusal's token is handed out again.
+    db.exec(`ALTER TABLE ${SERVICE_KEPT_EDITS} RENAME TO ${SERVICE_KEPT_EDITS}_v1;
+      DROP INDEX ${OBJECT_INDEX};
+      ${SQL};
+      INSERT INTO ${SERVICE_KEPT_EDITS} SELECT * FROM ${SERVICE_KEPT_EDITS}_v1;
+      DELETE FROM sqlite_sequence WHERE name='${SERVICE_KEPT_EDITS}';
+      INSERT INTO sqlite_sequence(name,seq) SELECT '${SERVICE_KEPT_EDITS}',seq FROM sqlite_sequence WHERE name='${SERVICE_KEPT_EDITS}_v1';
+      DROP TABLE ${SERVICE_KEPT_EDITS}_v1;
+      ${OBJECT_INDEX_SQL};`);
+  } else {
     if (existing) throw new Error("Unmarked service kept edits storage exists.");
     db.exec(SQL);
     db.exec(OBJECT_INDEX_SQL);
-  } else if (!existing || existing.type !== "table" || typeof existing.sql !== "string" || !same(existing.sql, SQL)) {
-    throw new Error("Service kept edits storage is damaged.");
   }
   const indexes = db.prepare(`PRAGMA index_list(${SERVICE_KEPT_EDITS})`).all();
   const index = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(OBJECT_INDEX);

@@ -3687,6 +3687,8 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
         Some("binding-changed"),
         Some("delivery-conflict"),
         Some("provenance-refused"),
+        Some("capacity-refused"),
+        Some("document-too-dense"),
     ] {
         let f = observed_release_fixture();
         let key = DocKey::new("workspace", "main", "object").unwrap();

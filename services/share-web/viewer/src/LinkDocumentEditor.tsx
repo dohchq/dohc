@@ -58,7 +58,7 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
     {!available && <p role="alert">Editing is no longer available. Copy any unsynced changes before closing this file.</p>}
     {busy && <p role="status">Opening the file…</p>}
     {error && <div className="download-card"><p>{error}</p>
-      {available && <button className="handoff-button secondary" onClick={open}>Retry</button>}</div>}
+      {available && error !== LINK_REFUSALS.link_live_too_dense.error && <button className="handoff-button secondary" onClick={open}>Retry</button>}</div>}
     {session && <NamedDocumentEditor key={session.doc.guid} session={session} path={path} link onState={receive}/>}
     {pending && <aside className="comments-panel" aria-label="Draft recovery"><h2>Review your draft</h2>
       <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>

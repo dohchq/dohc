@@ -71,7 +71,7 @@ const setBytes = ByteArray.prototype.set
 const utf8 = new TextEncoder()
 
 const LIVE_MARKDOWN_VALIDATION_REFUSALS = [
-  'invalid-input', 'invalid-update', 'invalid-schema', 'projection-mutated', 'capacity-refused',
+  'invalid-input', 'invalid-update', 'invalid-schema', 'projection-mutated', 'capacity-refused', 'document-too-dense',
 ] as const
 export type LiveMarkdownValidationRefusal = (typeof LIVE_MARKDOWN_VALIDATION_REFUSALS)[number]
 export interface LiveMarkdownRegistrationInput {
@@ -114,6 +114,13 @@ function refuse(reason: LiveMarkdownValidationRefusal): never { throw new Refusa
 export function isProseMirrorSchemaError(error: unknown): boolean {
   return error instanceof RangeError
     && /^(Invalid content for node |Invalid collection of marks for node |Unsupported attribute |Expected value of type |No value supplied for attribute |Unknown node type: |Invalid node type: )/.test(error.message)
+}
+/**
+ * The cut's work budgets measure the note and its kept history, so running out of one means the note is too dense
+ * to check live. The count of edits since the last checkpoint, which clears by itself, is refused before the cut.
+ */
+function noteRefusal(reason: LiveMarkdownValidationRefusal): LiveMarkdownValidationRefusal {
+  return reason === 'capacity-refused' ? 'document-too-dense' : reason
 }
 function refusal<S extends RefusedRegistration['source'] | RefusedJournal['source']>(
   reason: LiveMarkdownValidationRefusal, source: S,
@@ -206,7 +213,7 @@ function validateRegistrationInput(
   try { checkpoint = captureBytes(checkpointValue) }
   catch { return refusal('invalid-input', 'registration-input') }
   const result = validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, ownedPolicy)
-  if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
+  if (result.kind === 'refused') return refusal(noteRefusal(result.reason), 'registration-input')
   const { cut, topology } = result
   let checkpointCopy: Uint8Array | undefined
   const projected = projectAndFinalize(cut, ownedPolicy, topology, 'drop', () => {
@@ -214,7 +221,7 @@ function validateRegistrationInput(
     checkpointCopy = copyBytes(checkpoint)
     if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
   })
-  if (projected.kind === 'refused') return refusal(projected.reason, 'registration-input')
+  if (projected.kind === 'refused') return refusal(noteRefusal(projected.reason), 'registration-input')
   if (!includeEvidence) return { kind: 'accepted' }
   if (checkpointCopy === undefined) return refusal('projection-mutated', 'registration-input')
   const { projectedMarkdown, finalized } = projected
@@ -391,7 +398,7 @@ function journalValidator(
     // Let the completed cut become collectible before replaying its prefix.
     const attempt = validateAttempt(input, diagnose, prefixes)
     if (attempt.kind === 'accepted') return attempt
-    const { failure } = attempt
+    const failure = {...attempt.failure, reason: noteRefusal(attempt.failure.reason)}
     if (failure.stage.kind === 'call') return refusal(failure.reason, 'call')
     if (failure.stage.kind === 'input') {
       return refusal(failure.reason, failure.stage.role === 'candidate' ? 'candidate' : 'admitted-cut')
@@ -489,13 +496,13 @@ class ProjectionBudget {
   nodes = 0
 
   consume(depth: number): void {
-    if (depth > MAX_DEPTH) refuse('capacity-refused')
+    if (depth > MAX_DEPTH) refuse('document-too-dense')
     this.consumeNode()
   }
 
   consumeNode(): void {
     this.nodes += 1
-    if (this.nodes > MAX_NODES) refuse('capacity-refused')
+    if (this.nodes > MAX_NODES) refuse('document-too-dense')
   }
 
   get remaining(): number {
@@ -550,7 +557,7 @@ function visitPublicValue(
       return
     }
     if (value instanceof Y.Array) {
-      if (value.length > budget.remaining) refuse('capacity-refused')
+      if (value.length > budget.remaining) refuse('document-too-dense')
       for (const child of value.toArray()) {
         visitPublicValue(child, depth + 1, budget, ancestors)
       }
@@ -558,7 +565,7 @@ function visitPublicValue(
     }
     if (value instanceof Y.AbstractType) refuse('invalid-schema')
     if (Array.isArray(value)) {
-      if (value.length > budget.remaining) refuse('capacity-refused')
+      if (value.length > budget.remaining) refuse('document-too-dense')
       if (Object.getPrototypeOf(value) !== Array.prototype) {
         refuse('invalid-schema')
       }
@@ -646,7 +653,7 @@ function bodyFingerprint(
   budget: ProjectionBudget | null,
   depth = 0,
 ): XmlFingerprint[] {
-  if (budget !== null && body.length > budget.remaining) refuse('capacity-refused')
+  if (budget !== null && body.length > budget.remaining) refuse('document-too-dense')
   const schema = getDohcProseMirrorSchema()
   const permitsText = body instanceof Y.XmlElement
     && schema.nodes[body.nodeName]?.contentMatch.matchType(schema.nodes.text) != null
@@ -666,7 +673,7 @@ function xmlFingerprint(
   if (value instanceof Y.XmlHook) refuse('invalid-schema')
   if (value instanceof Y.XmlElement) {
     budget?.consume(depth)
-    if (budget !== null && value.length > budget.remaining) refuse('capacity-refused')
+    if (budget !== null && value.length > budget.remaining) refuse('document-too-dense')
     const attributes = value.getAttributes() as Record<string, unknown>
     const entries = sortedValueEntries(attributes)
     for (const [key, attribute] of entries) {
@@ -779,7 +786,7 @@ function validatePublicState(
   engineReader = false,
 ): string {
   // Projection and reimport are the costliest steps, so a note too dense for them is refused first (#3575).
-  if (!withinLiveNoteCapacity(scratch, policy)) refuse('capacity-refused')
+  if (!withinLiveNoteCapacity(scratch, policy)) refuse('document-too-dense')
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
     || !(scratch.share.get('body') instanceof Y.XmlFragment)
@@ -822,10 +829,10 @@ function validatePublicState(
   }
 
   const projectedMarkdown = yDocToMarkdown(scratch)
-  if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
+  if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('document-too-dense')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
   const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader)
-  if (source.kind === 'capacity-refused') refuse('capacity-refused')
+  if (source.kind === 'capacity-refused') refuse('document-too-dense')
   if (source.kind === 'invalid' || source.kind === 'import-failed'
     || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')
   if (!zeroStructSeed) {

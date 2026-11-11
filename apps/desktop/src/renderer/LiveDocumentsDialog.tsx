@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { DOCUMENT_TOO_DENSE_CAUSE, DOCUMENT_TOO_DENSE_NEXT } from "@dohc/live-session-contract/live-refusal-words";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -9,8 +10,8 @@ import { useRequestSequence } from "./useRequestSequence";
 
 export type LiveDocumentRow = {
   path: string;
-  status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld";
+  status: "ready" | "preparing" | "paused" | "unavailable" | "retired" | "unrecognized";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "document-too-dense" | "unrecognized";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
@@ -180,6 +181,7 @@ function mergeRows(
 
 function statusLabel(row: LiveDocumentRow): string {
   if (row.quarantine === "unreadable") return "Can't read edits";
+  if (tooDense(row)) return "Too large to edit live";
   if (row.quarantine === "paused" && row.earlier) return "Kept on the server";
   if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
@@ -193,6 +195,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-document-without-lineage") return "Not started";
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
+  if (row.reason === "unrecognized") return "Needs a newer dohc";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -216,8 +219,15 @@ function statusTone(row: LiveDocumentRow): string {
 
 // The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return !row.saveOnly && row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
+  return !row.saveOnly && row.status !== "retired" && row.status !== "unrecognized" && !row.deferredStop && row.reason !== "session-host-diverged";
 }
+
+// The server refuses this note's history, not one edit, so Resume and Try again cannot help.
+function tooDense(row: LiveDocumentRow): boolean {
+  return row.reason === "document-too-dense" && (row.quarantine === undefined || row.quarantine === "paused" || row.quarantine === "copied");
+}
+
+const UNRECOGNIZED_REASON_NOTE = "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.";
 
 function canResume(row: LiveDocumentRow): boolean {
   return !row.saveOnly && row.canResume;
@@ -227,14 +237,23 @@ function canResume(row: LiveDocumentRow): boolean {
 function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
   const one = stop.unsentEdits === 1;
   const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
-  const resume = row.reason === "session-host-diverged" || row.reason === "conflict-parent-withheld" ? ""
+  const resume = row.reason === "session-host-diverged" || row.reason === "conflict-parent-withheld" || row.reason === "document-too-dense"
+    || row.reason === "unrecognized" ? ""
     : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
+}
+
+/** Edits refused because their note is too dense to edit live: what still holds, and the steps that help. */
+export function tooDenseKeptEditsNote(recovery: "paused" | "copied", storedOn: "this-computer" | "server" | undefined): string {
+  if (recovery === "copied") return `A recovery copy with your unsaved edits is beside this note. ${DOCUMENT_TOO_DENSE_CAUSE} ${DOCUMENT_TOO_DENSE_NEXT}`;
+  // A stopped queue on this computer refuses the note's later edits; the server keeps its own.
+  return `${storedOn === "this-computer" ? "New edits to this note aren't being saved to the file. " : ""}${DOCUMENT_TOO_DENSE_CAUSE} Save a recovery copy: it appears beside this note with your unsaved edits. Then move its text into new, smaller notes and continue there.`;
 }
 
 // Edits the server refused: where they are, and the one way back that always works.
 function quarantineNote(row: LiveDocumentRow): string | null {
   if (row.saveOnly && row.quarantine !== "unreadable") return row.sessionEnded ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+  if (tooDense(row) && (row.quarantine === "paused" || row.quarantine === "copied")) return tooDenseKeptEditsNote(row.quarantine, row.storedOn);
   switch (row.quarantine) {
     case "paused":
       if (row.earlier) return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
@@ -839,6 +858,12 @@ export function LiveDocumentsDialog({
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
                   </p>
+                ) : null}
+                {tooDense(row) && row.quarantine === undefined && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">{DOCUMENT_TOO_DENSE_CAUSE} {DOCUMENT_TOO_DENSE_NEXT}</p>
+                ) : null}
+                {row.reason === "unrecognized" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">{UNRECOGNIZED_REASON_NOTE}</p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}
                 {row.reason === "session-host-diverged" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (

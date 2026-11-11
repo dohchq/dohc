@@ -104,10 +104,19 @@ it("freezes a conflicting delivery for explicit recovery instead of retrying for
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
 });
 
-it.each(["provenance-refused", "capacity-refused", "invalid-update"] as const)("freezes a %s refusal for visible recovery", async reason => {
+it.each(["provenance-refused", "capacity-refused", "invalid-update", "document-too-dense"] as const)("freezes a %s refusal for visible recovery", async reason => {
   const f = fixture({result: {result: "refused", reason}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason});
+});
+
+// No admitted note can take an edit over the update limit, so it stops as too dense rather than retrying unseen.
+it("freezes an edit over the update limit as too dense without sending it", async () => {
+  const f = fixture(), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  const update = new Uint8Array(frames.receive.maxUpdateBytes + 1);
+  expect(await f.delivery.deliver(fresh.authority, {...envelope, update, updateDigest: hash(update)})).toEqual({kind: "quarantine", reason: "document-too-dense"});
+  expect(f.submit).not.toHaveBeenCalled();
 });
 
 it.each([

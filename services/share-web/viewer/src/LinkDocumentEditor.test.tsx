@@ -44,6 +44,12 @@ it("shows the grant-scoped refusal with its next step", async () => {
   await settle(() => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true);
   expect(container.textContent).toContain("Retry");
 });
+it("explains a note too dense to edit live and offers no retry, since retrying gets the same refusal", async () => {
+  vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_live_too_dense.error));
+  await render(true);
+  await settle(() => container.textContent?.includes(LINK_REFUSALS.link_live_too_dense.error) === true);
+  expect([...container.querySelectorAll("button")].map(value => value.textContent)).toEqual(["Back to shared files"]);
+});
 it("retains a quarantined draft after access loss, including updates rejected before they entered the queue", async () => {
   const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
   await render(true, onClose); await settle(() => container.querySelector('[role="textbox"]') !== null);

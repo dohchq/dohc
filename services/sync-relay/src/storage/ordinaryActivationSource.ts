@@ -21,6 +21,10 @@ export class ServiceActivationStaleCut extends Error {
 export class ServiceActivationBusy extends Error {
   constructor(){super("Live validation is busy.");}
 }
+/** The capture is too dense to check live, as it will be on every capture until its owner changes it. */
+export class ServiceActivationTooDense extends Error {
+  constructor(){super("Native activation is too dense to check live.");}
+}
 /** Validating the capture ran its validation process out of memory, as the same capture would again. */
 export class ServiceActivationTooLarge extends Error {
   constructor(){super("Native activation is too large to validate.");}

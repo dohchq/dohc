@@ -396,8 +396,8 @@ describe("owner live document enrollment", () => {
 
   // Proves: a deferred Stop offers Resume on a document whose server copy
   // is missing an owner edit, since a Resume retries it, but not on one whose
-  // conflict parent is withheld.
-  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
+  // conflict parent is withheld, or that is too dense to edit live.
+  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false], ["document-too-dense", false], ["unrecognized", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
@@ -834,6 +834,18 @@ describe("owner live document enrollment", () => {
       await expect(h.invoke(relayShareOperations.retryOwnerLiveQuarantine.channel, {workspaceId: "other", objectId: "object", incident: quarantine.incident})).rejects.toThrow();
       expect(h.retryOwnerLiveQuarantine).toHaveBeenCalledOnce();
     });
+
+    // A Resume would send the same refused history again.
+    it("names a document whose edits were refused as too dense, and offers no Resume", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, reason: "document-too-dense"}]);
+      h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+        ? {ok: true, documents: [], nextCursor: null}
+        : {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable", reason: "session-host-refused"}]});
+      expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toEqual({documents: [
+        {path: "live.md", objectId: "object", status: "unavailable", reason: "document-too-dense", canResume: false, quarantine: "paused",
+          storedOn: "this-computer", incident: quarantine.incident},
+      ], nextCursor: null});
+    });
   });
 
   it("rejects renderer identity, unsafe paths, and unavailable resumes", async () => {
@@ -858,15 +870,28 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
   });
 
-  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+  it("shows a row whose reason this build doesn't know, as unrecognized and without Resume", async () => {
     const h = harness();
-    const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
+    const future = (path: string, status: string) => ({path, objectId: path, status, reason: "future-value"});
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
-      ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown("retired")], nextCursor: "unknown.md"}
-      : {ok: true, documents: [unknown("ready"), {path: "live.md", objectId: "live", status: "ready"},
+      ? {ok: true, documents: [future("old.md", "retired")], nextCursor: null}
+      : {ok: true, documents: [future("live.md", "paused")]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
+      {path: "old.md", objectId: "old.md", status: "retired", reason: "unrecognized", canResume: false},
+      {path: "live.md", objectId: "live.md", status: "paused", reason: "unrecognized", canResume: false},
+    ], nextCursor: null});
+  });
+
+  it("shows a row whose status this build doesn't know, as unrecognized and without Stop or Resume, using the last raw cursor", async () => {
+    const h = harness();
+    const unknown = () => ({path: "unknown.md", objectId: "unknown", status: "future-value", reason: "session-host-refused"});
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown()], nextCursor: "unknown.md"}
+      : {ok: true, documents: [unknown(), {path: "live.md", objectId: "live", status: "ready"},
         {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
       {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      {path: "unknown.md", objectId: "unknown", status: "unrecognized", reason: "unrecognized", canResume: false},
       {path: "live.md", objectId: "live", status: "ready", canResume: false},
       {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
     ], nextCursor: "unknown.md"});

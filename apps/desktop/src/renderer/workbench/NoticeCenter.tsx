@@ -654,6 +654,15 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // Resume sends the same history again, so the notice names the step that helps.
+  if (reason === "document-too-dense") {
+    return {
+      title: "Too large to edit live",
+      body: "A note in this workspace has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. Open Live documents to see which note, then move its text into new, smaller notes and continue there.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",

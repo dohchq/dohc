@@ -3,6 +3,8 @@ export const LINK_REFUSALS = {
   link_view_access: {status: 403, error: "This link gives View access. Ask the owner for a link with the access you need."},
   link_comment_access: {status: 403, error: "This link gives Comment access. Ask the owner for an Edit link."},
   link_live_unavailable: {status: 503, error: "Live editing is unavailable. Try again later."},
+  // The cause is DOCUMENT_TOO_DENSE_CAUSE from @dohc/live-session-contract, which depends on this package.
+  link_live_too_dense: {status: 409, error: "This note has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. You can still read it. Ask the owner to move its text into new, smaller notes."},
   link_unavailable: {status: 503, error: "This link can't be reached right now. Try again in a moment."},
   link_read_rate_limited: {status: 429, error: "This link has reached its request limit. Try again later."},
   app_collection_missing: {status: 410, error: "This app can't find its data. Ask the person who shared it with you."},
