@@ -351,6 +351,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

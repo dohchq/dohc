@@ -11,6 +11,7 @@ import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pa
 import { JS_SHARDS } from "./verification/shards.mjs";
 import { CLOUD_JOB_GRAPH } from "./verification/cloud-aggregate.mjs";
 import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
+import { environmentInputs } from "./verification/build.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
   classifyTreeProvenance,
@@ -554,6 +555,19 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
   assert.match(proof, /numPendingTests \|\| r\.numTodoTests/);
   assert.match(proof, /--security-opt no-new-privileges:true --cap-drop ALL/);
   assert.match(proof, /Seccomp:/);
+});
+
+test("prepared artifact consumers share preparation's fingerprint environment", () => {
+  const {jobs} = load(workflow);
+  const fingerprintEnv = env => Object.fromEntries(Object.entries(env ?? {})
+    .filter(([name]) => Object.values(environmentInputs).some(pattern => pattern.test(name))));
+  const expected = fingerprintEnv(jobs["javascript-prepare"].env);
+  for (const [name, job] of Object.entries(jobs)) {
+    // Workers restore and validate artifacts inside cloud.mjs.
+    if (job.steps.some(step => /assertPrepared\b|javascript-prepared|cloud\.mjs (?:worker|prepare)\b|--prepared-runtime\b/u.test(JSON.stringify(step)))) {
+      assert.deepEqual(fingerprintEnv(job.env), expected, name);
+    }
+  }
 });
 
 test("job names match the workflow graph and timeout backstops", () => {
