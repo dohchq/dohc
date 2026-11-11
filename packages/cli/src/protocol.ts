@@ -671,6 +671,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("sharedFilesHeld"), args: z.object(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("syncFailure"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
@@ -769,6 +770,7 @@ export const CLI_CAPABILITIES = {
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   sharedFilesHeld: ["workspace.status"],
+  syncFailure: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
@@ -2016,6 +2018,15 @@ export const cliResultSchemas = {
         }).strict()),
         message: z.string().min(1),
       }).strict().nullable(),
+    }).strict(),
+    rawFailureSchema,
+  ]),
+  // Why the last sync pass failed, until a pass succeeds: a stable code, the
+  // sentence a person reads, and the engine's detail for a report.
+  syncFailure: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      syncFailure: z.object({ code: z.string().min(1), message: z.string().min(1), detail: z.string() }).strict().nullable(),
     }).strict(),
     rawFailureSchema,
   ]),

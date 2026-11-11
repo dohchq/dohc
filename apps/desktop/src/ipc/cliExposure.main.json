@@ -67,6 +67,7 @@
     "show",
     "stopAgain",
     "stopSync",
+    "syncFailure",
     "threads",
     "versionCompare",
     "versionConflicts",
@@ -91,7 +92,8 @@
     "keptCopies",
     "retainedCopies",
     "saveKeptCopy",
-    "sharedFilesHeld"
+    "sharedFilesHeld",
+    "syncFailure"
   ],
   "publicSocketVerbs": [
     "accessObject",

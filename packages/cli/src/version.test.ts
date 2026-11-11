@@ -76,12 +76,12 @@ it("says under a conflict that a newer version waits behind it, and only there",
   const listed = { conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync",
     contentKind: "text", currentText: "mine", incomingText: "theirs", baseText: "base" };
   const waiting = { code: "resolve-existing-conflict", objectId: "notes-object", originId: "computer-d", originSeq: 4,
-    message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved." };
+    message: "A newer version of notes.md from another computer is waiting. It comes in after this conflict is resolved." };
   const request = vi.fn(async () => ({ ok: true, nextAfterConflictId: null,
     conflicts: [{ ...listed, waiting }, { ...listed, conflictId: "c2", path: "plan.md" }] }) as never);
   expect((await executeCli({ argv: ["version", "conflicts"], request })).stdout).toBe([
     "c1 · sync · notes.md",
-    "  A newer version from another machine is waiting. It comes in after you resolve this conflict.",
+    "  A newer version from another computer is waiting. It comes in after you resolve this conflict.",
     "c2 · sync · plan.md",
     "",
   ].join("\n"));

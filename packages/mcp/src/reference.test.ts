@@ -65,6 +65,8 @@ describe("CLI, MCP, and app channel reference", () => {
       "liveKeptEdits",
       // dohc_workspace_status reports it as its `heldFiles` field.
       "sharedFilesHeld",
+      // dohc_workspace_status reports it as its `syncFailure` field.
+      "syncFailure",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);

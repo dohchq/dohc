@@ -387,6 +387,13 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::PathOccupied { path, .. }) => {
             return WireError::new(ErrorCode::Internal, format!("sync-path-occupied: {path}"));
         }
+        // Changes waiting on an open conflict reached their limit. The desktop
+        // shows its sentences and keeps the counts after them for a report.
+        RuntimeError::Relay(RelayError::Local(detail))
+            if detail.starts_with("conflict-wait-limit: ") =>
+        {
+            return WireError::new(ErrorCode::Internal, detail.clone());
+        }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
             let mut wire = map_runtime_inner(&RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
@@ -1556,6 +1563,19 @@ mod tests {
                 "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)"
             ),
         );
+    }
+
+    #[test]
+    fn conflict_wait_limit_keeps_its_sentences_on_the_wire() {
+        let detail = "conflict-wait-limit: Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again. (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)";
+        let wire = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
+        assert_eq!(
+            (wire.code, wire.message.as_str()),
+            (ErrorCode::Internal, detail)
+        );
+        // It retries as any other failed pass does.
+        let generic = map_runtime(RuntimeError::Relay(RelayError::Local("other".into())));
+        assert_eq!(wire.retry, generic.retry);
     }
 
     #[test]

@@ -29,7 +29,7 @@ function counted(count: number, one: string, many: string): string {
 function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
   return [...page.conflicts.flatMap(conflict => [
     `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
-    ...(conflict.waiting ? ["  A newer version from another machine is waiting. It comes in after you resolve this conflict."] : []),
+    ...(conflict.waiting ? ["  A newer version from another computer is waiting. It comes in after you resolve this conflict."] : []),
   ]),
     ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
