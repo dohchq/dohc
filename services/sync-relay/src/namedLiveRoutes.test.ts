@@ -1045,12 +1045,12 @@ it.each([
 });
 
 // A share narrowed from a folder to the file still covers it, but changes what
-// the recipient is shown. The open connection closes, and a reconnect shows
-// the share as it is now.
+// the recipient is shown. The open connection closes. Reopening, with a new
+// provider, shows the share as it is now.
 it.each([
   ["named", false, "docs/a.md", ["docs/a.md"]],
   ["link", true, "a.md", ["a.md"]],
-] as const)("closes a %s connection when its folder share narrows to the file, and a reconnect shows the new view", async (_kind, link, currentPath, selectorPaths) => {
+] as const)("closes a %s connection when its folder share narrows to the file, and reopening shows the new view", async (_kind, link, currentPath, selectorPaths) => {
   const f = await fixture(limits, link);
   f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
   const first = f.connect((await f.mint()).token); expect(await first.status).toBe(101);

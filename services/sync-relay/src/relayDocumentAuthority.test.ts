@@ -317,8 +317,10 @@ it("reads the baseline binding for owner and named alike, with exact named autho
       const selectorPaths = ["docs/a.md"];
       const request = { document: { ...readDocument }, actor: { ...actor } };
       const result = storage.resolveCurrentLiveDocumentBinding(request);
-      expect(result).toEqual({ kind: "current", host: readHost,
-        binding: { ...readDocument, currentPath: "docs/a.md", selectorPaths, restoreFenceGeneration: 7 },
+      const binding = { ...readDocument, currentPath: "docs/a.md", selectorPaths, restoreFenceGeneration: 7 };
+      expect(result).toEqual({ kind: "current", host: readHost, binding,
+        // An owner is shown the binding itself, a named recipient its own share's paths under a workspace ID naming the grant.
+        view: actor.kind === "owner" ? binding : { ...binding, workspaceId: "named:edit-1", selectorPaths: ["docs"] },
         authority: actor.kind === "owner"
           ? { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null }
           : { principalKind: "named", principalId: "reader-1", grantId: "edit-1", grantGeneration: 4 } });

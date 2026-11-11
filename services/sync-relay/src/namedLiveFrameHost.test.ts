@@ -283,8 +283,8 @@ it.each(["grant", "coverage", "restore", "host"])("invalidates the capture when 
 
 // A share edit that still covers the document changes what the recipient is
 // shown, so its session ends. A ticket minted before the edit still redeems,
-// and the session it opens shows the share as it is now.
-it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("ends a named recipient's session when its share is %s, and a new session shows the new view", async (_case, paths) => {
+// and reopening with it shows the share as it is now.
+it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("ends a named recipient's session when its share is %s, and reopening shows the new view", async (_case, paths) => {
   const f = await setup();
   const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
