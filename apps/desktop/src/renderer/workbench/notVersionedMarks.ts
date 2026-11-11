@@ -28,6 +28,10 @@ export function createNotVersionedMarks(): NotVersionedPaths & { set(paths: read
   };
 }
 
+// A marked row's tag, and its tooltip.
+export const NOT_VERSIONED = "Not versioned";
+export const NOT_VERSIONED_TITLE = "Main and every version have the same copy, so changing it here changes it in Main too.";
+
 const NONE: NotVersionedPaths = { subscribe: () => () => undefined, has: () => false, under: () => [] };
 export const NotVersionedMarks = createContext<NotVersionedPaths>(NONE);
 
@@ -49,9 +53,12 @@ export function notVersionedConfirmText(action: "delete" | "rename" | "move", so
     : action === "rename" ? `Rename ${name} in Main too?`
     : `Move ${name} in Main too?`;
   const itself = paths.length === 1 && sources.length === 1 && paths[0] === sources[0];
-  const body = itself
+  const why = itself
     ? "It isn't versioned, so Main and every version have the same copy."
     : `${paths.length === 1 ? "1 file here isn't" : `${paths.length} files here aren't`} versioned, so Main and every version have the same copy.`;
+  const body = action === "delete"
+    ? `${why} Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.`
+    : why;
   const confirmLabel = action === "delete" ? "Delete anyway" : action === "rename" ? "Rename anyway" : "Move anyway";
   return { title, body, confirmLabel };
 }

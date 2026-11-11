@@ -12,7 +12,7 @@ import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } fr
 import { MiddleCutName } from "../ui/MiddleCutName";
 import { SAVE_STATE } from "../ui/StateMark";
 import { usePendingShareMark } from "./pendingShareMarks";
-import { NotVersionedMarks, notVersionedConfirmText, useNotVersionedMark } from "./notVersionedMarks";
+import { NOT_VERSIONED, NOT_VERSIONED_TITLE, NotVersionedMarks, notVersionedConfirmText, useNotVersionedMark } from "./notVersionedMarks";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -407,9 +407,6 @@ type AskNotVersioned = {
 
 const NOT_VERSIONED_ICON = { delete: Trash2, rename: PenLine, move: FolderInput } as const;
 
-const NOT_VERSIONED = "Not versioned";
-const NOT_VERSIONED_TITLE = "Main and every version have the same copy, so changing it here changes it in Main too.";
-
 // Memoized row: primitives + stable callbacks only, so a selection change
 // re-renders the rows whose state changed, not the whole tree. Exported for
 // the states page, which shows it in each of its states.
@@ -737,7 +734,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const notVersionedMarks = useContext(NotVersionedMarks);
-  const [askNotVersioned, setAskNotVersioned] = useState<AskNotVersioned | null>(null);
+  // One question at a time. A change refused while another waits queues
+  // behind it, so neither is lost.
+  const [notVersionedAsks, setNotVersionedAsks] = useState<AskNotVersioned[]>([]);
+  const askNotVersioned = notVersionedAsks[0] ?? null;
+  const queueNotVersioned = useCallback((ask: AskNotVersioned) => setNotVersionedAsks((asks) => [...asks, ask]), []);
+  const answerNotVersioned = useCallback(() => setNotVersionedAsks((asks) => asks.slice(1)), []);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   // The newest menu request is the only one that may open; closing the menu
   // or leaving the workspace retires it.
@@ -1193,7 +1195,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }
         if (unversioned.length > 0) {
           const asked = unversioned.map(({ change }) => change);
-          setAskNotVersioned({
+          queueNotVersioned({
             action: asked.every(({ kind }) => kind === "delete-file" || kind === "delete-folder") ? "delete" : action,
             sources: asked.map(sourcePath),
             paths: [...new Set(unversioned.flatMap(({ paths }) => paths))],
@@ -1255,7 +1257,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options.answered?.(succeeded);
       return succeeded;
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh],
+    [onBeginChanges, onError, onPathsChanged, onRefresh, queueNotVersioned],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row
@@ -1345,10 +1347,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (confirmed) return false;
       const paths = notVersionedMarks.under(sources);
       if (paths.length === 0) return false;
-      setAskNotVersioned({ action, sources, paths, go });
+      queueNotVersioned({ action, sources, paths, go });
       return true;
     },
-    [notVersionedMarks],
+    [notVersionedMarks, queueNotVersioned],
   );
 
   const performMoves = useCallback(
@@ -2692,9 +2694,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       {askNotVersioned ? (
         <NotVersionedConfirm
           ask={askNotVersioned}
-          onCancel={() => setAskNotVersioned(null)}
+          onCancel={answerNotVersioned}
           onConfirm={() => {
-            setAskNotVersioned(null);
+            answerNotVersioned();
             askNotVersioned.go();
           }}
         />

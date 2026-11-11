@@ -108,3 +108,15 @@ it("an agent's confirmed delete goes ahead", async () => {
   expect(f.capture.notVersioned).not.toHaveBeenCalled();
   expect(f.reachedCapture()).toBe(true);
 });
+
+it("an agent is not told to confirm a file History's rules leave out, which its change refuses anyway", async () => {
+  const f = await workspace(["Media/clip.mp4", "Media/cover.png"]);
+  await mkdir(join(f.rootPath, ".dohc"), { recursive: true });
+  await writeFile(join(f.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "Media/cover.png"\ntracked = false\n');
+  const deleted = await (await prepareDeleteWorkspacePathAs(f.operation, "Media", agent, f.options))();
+  expect(deleted).toEqual({ ok: false, deleted: [], path: "Media", reason: expect.stringContaining("Media/clip.mp4 isn't versioned") });
+  expect(f.asked).toEqual([["Media/clip.mp4"]]);
+  // The app moves a left-out file along, so it still asks about it.
+  await expect(deleteWorkspacePathByHand(f.operation, "Media", person, f.options))
+    .rejects.toMatchObject({ paths: ["Media/clip.mp4", "Media/cover.png"] });
+});

@@ -199,6 +199,20 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     await engine.stop();
   });
 
+  it("counts .env as versioned in a version, since it follows each version", async () => {
+    const root = await createTestScratch("dohc-engine-secret-");
+    await write(root, ".env", ENV_A);
+    await write(root, "notes.md", "# Notes\n");
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    engine.start();
+    await engine.flush();
+    const listed = async () => [".env", "notes.md", "loose.bin"];
+    expect(await engine.notVersioned(listed)).toBeNull();
+    await engine.createVersion("Experiment");
+    expect(await engine.notVersioned(listed)).toEqual(["loose.bin"]);
+    await engine.stop();
+  });
+
   it("compareVersions reports protected changes without contents", async () => {
     const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);

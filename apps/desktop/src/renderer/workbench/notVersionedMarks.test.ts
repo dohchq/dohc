@@ -28,7 +28,7 @@ describe("the question before changing them", () => {
   it("names the file and says Main changes too", () => {
     expect(notVersionedConfirmText("delete", ["Media/clip.mp4"], ["Media/clip.mp4"])).toEqual({
       title: "Delete clip.mp4 from Main too?",
-      body: "It isn't versioned, so Main and every version have the same copy.",
+      body: "It isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.",
       confirmLabel: "Delete anyway",
     });
     expect(notVersionedConfirmText("rename", ["Media/clip.mp4"], ["Media/clip.mp4"]).title).toBe("Rename clip.mp4 in Main too?");
@@ -41,7 +41,7 @@ describe("the question before changing them", () => {
       confirmLabel: "Move anyway",
     });
     expect(notVersionedConfirmText("delete", ["Media"], ["Media/clip.mp4"]).body)
-      .toBe("1 file here isn't versioned, so Main and every version have the same copy.");
+      .toBe("1 file here isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.");
   });
 });
 

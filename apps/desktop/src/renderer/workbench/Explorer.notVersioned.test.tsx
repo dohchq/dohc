@@ -154,3 +154,42 @@ describe("Explorer, in a version, for files it does not track", () => {
     }));
   });
 });
+
+describe("Explorer Home, in a version", () => {
+  it("marks a file it does not track, and no others", async () => {
+    const marks = createNotVersionedMarks();
+    marks.set(["clip.mp4"]);
+    render(
+      <NotVersionedMarks.Provider value={marks}>
+        <Explorer {...explorerProps()} mode="home" />
+      </NotVersionedMarks.Provider>,
+    );
+    const homeRow = (path: string) => screen.getAllByTestId("home-row").find((candidate) => candidate.dataset.path === path);
+    await waitFor(() => expect(homeRow("clip.mp4")?.dataset.notVersioned).toBe("true"));
+    expect(homeRow("clip.mp4")!.querySelector("[data-testid=home-row-not-versioned]")?.textContent).toBe("Not versioned");
+    expect(homeRow("clip.mp4")!.title).toContain("changes it in Main too");
+  });
+});
+
+it("a second refusal waits behind the first question, and neither is lost", async () => {
+  const refusal = (path: string) => new Error(
+    `Error invoking remote method 'desktop:move-workspace-path': NotVersionedError: This change also happens in Main, because ${path} isn't versioned.\n${path}`,
+  );
+  const { props } = renderExplorer([]);
+  moveWorkspacePath.mockRejectedValueOnce(refusal("notes.md"));
+  deleteWorkspacePath.mockRejectedValueOnce(refusal("clip.mp4"));
+  await renameTo("notes.md", "renamed.md");
+  await screen.findByTestId("not-versioned-confirm");
+  fireEvent.click(row("clip.mp4"));
+  fireEvent.keyDown(row("clip.mp4"), { key: "Delete" });
+  await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(1));
+  expect(screen.getByTestId("not-versioned-confirm").textContent).toContain("Rename notes.md in Main too?");
+  fireEvent.click(screen.getByTestId("cancel-not-versioned"));
+  await waitFor(() => expect(screen.getByTestId("not-versioned-confirm").textContent).toContain("Delete clip.mp4 from Main too?"));
+  expect(screen.getByTestId("not-versioned-confirm").textContent).toContain("system trash");
+  fireEvent.click(screen.getByTestId("confirm-not-versioned"));
+  await waitFor(() => expect(deleteWorkspacePath).toHaveBeenLastCalledWith({
+    workspaceId: "workspace-1", relativePath: "clip.mp4", confirmNotVersioned: true,
+  }));
+  expect(props.onError).not.toHaveBeenCalled();
+});

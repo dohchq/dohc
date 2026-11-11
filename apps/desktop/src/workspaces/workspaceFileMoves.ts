@@ -12,7 +12,7 @@ import { HISTORY_OFF_FOLDER_BODY, HISTORY_OFF_PAGE_BODY, historyOffTitle, isLive
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveDocumentMutationError, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
+import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { assertMoveParentCase, checkCaseRename, deleteIdentityUnavailable, deletePath, moveIdentityUnavailable, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -180,12 +180,16 @@ export function notVersionedReason(paths: readonly string[]): string {
 
 // The files at or under the entries, which `spell` names as on disk, that the
 // active version does not track. None on Main, which reads no disk for it, or
-// without capture.
+// without capture. An agent's change refuses files the History policy leaves
+// out, so for an agent only files the policy admits count.
 async function notVersionedAt(rootPath: string, capture: Partial<Pick<WorkspaceEngineCapture, "notVersioned">> | null,
-  spell: () => Promise<readonly (string | null)[]>): Promise<string[]> {
+  spell: () => Promise<readonly (string | null)[]>, agent = false): Promise<string[]> {
   if (!capture?.notVersioned) return [];
-  return await capture.notVersioned(async () => (await Promise.all((await spell()).map(entry => entry === null ? []
-    : historyFilesUnder(rootPath, entry, () => true, () => false).catch(() => [])))).flat()) ?? [];
+  return await capture.notVersioned(async () => {
+    const allowed = agent ? historyPathAdmission(await readWorkspaceEnginePolicy(rootPath)) : () => true;
+    return (await Promise.all((await spell()).map(entry => entry === null ? []
+      : historyFilesUnder(rootPath, entry, allowed, () => false).catch(() => [])))).flat();
+  }) ?? [];
 }
 
 // An agent's path as it is spelled on disk, or null where it leads nowhere
@@ -309,7 +313,7 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
     if (refusal) return async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: refusal.message });
     if (!input.confirmNotVersioned) {
       const paths = await notVersionedAt(rootPath, options.capture, () =>
-        Promise.all([input.fromPath, ...(input.overwrite ? [input.toPath] : [])].map(path => spelledOnDisk(rootPath, path))));
+        Promise.all([input.fromPath, ...(input.overwrite ? [input.toPath] : [])].map(path => spelledOnDisk(rootPath, path))), true);
       if (paths.length) return async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: notVersionedReason(paths) });
     }
     return prepareMoveWorkspacePath(operation, input, author, options);
@@ -747,7 +751,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   try {
     assertWritable(operation);
     if (!confirmNotVersioned) {
-      const paths = await notVersionedAt(rootPath, options.capture, async () => [await spelledOnDisk(rootPath, path)]);
+      const paths = await notVersionedAt(rootPath, options.capture, async () => [await spelledOnDisk(rootPath, path)], true);
       if (paths.length) {
         releaseRecovery();
         return async () => ({ ok: false, deleted: [], path, reason: notVersionedReason(paths) });

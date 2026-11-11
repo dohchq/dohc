@@ -7985,21 +7985,29 @@ export function createWorkspaceEngineCapture(
       // Main tracks every file it can, so a change there neither waits for
       // capture nor reads the disk.
       const engine = await engineStore();
-      const versionId = await activeVersionIdOf(engine);
-      if (versionId === ENGINE_MAIN_VERSION_ID) return null;
-      // Drain capture work, so a file saved a moment ago reads as tracked.
+      if (await activeVersionIdOf(engine) === ENGINE_MAIN_VERSION_ID) return null;
+      // Drain capture work, so a file saved a moment ago reads as tracked. A
+      // switch queued there may have left the version.
       await chain;
       await engine.flushCapture?.();
+      const versionId = await activeVersionIdOf(engine);
+      if (versionId === ENGINE_MAIN_VERSION_ID) return null;
       const files = await listFiles();
       if (files.length === 0) return [];
       // A few files resolve by path. Past that, one listing of the version
       // takes fewer engine calls than resolving each file.
+      let untracked: string[];
       if (files.length > MAX_FILE_RESOLVE_TARGETS * 4) {
         const tracked = new Set((await listTextFileMetadata(engine, versionId)).map(file => file.path));
-        return files.filter(file => !tracked.has(file));
+        untracked = files.filter(file => !tracked.has(file));
+      } else {
+        const results = await resolveEngineFileTargets(engine, workspaceId, files.map(path => ({ path })), undefined, versionId);
+        untracked = files.filter((_, index) => results[index]?.status !== "found");
       }
-      const results = await resolveEngineFileTargets(engine, workspaceId, files.map(path => ({ path })), undefined, versionId);
-      return files.filter((_, index) => results[index]?.status !== "found");
+      // Protected files, such as .env, follow each version in the secret store.
+      if (!untracked.some(isSecretPath)) return untracked;
+      const secrets = new Set((await secretStoreFor().listSecretFiles({ workspaceId, versionId })).map(stat => stat.path));
+      return untracked.filter(file => !secrets.has(file));
     },
 
     async fileObjectIdForPath(path) {
