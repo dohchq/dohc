@@ -189,29 +189,58 @@ for (const unanswered of ["push", "push and host read"] as const) {
       };
       const synced = () => expect.poll(() => syncStatus(page, workspaceId), { timeout: 60_000 })
         .toEqual({ state: "synced", pendingChangeCount: 0 });
+      // Writes a file and waits until the relay has its push and the pass,
+      // which pulls after it pushes, has finished.
+      const passThroughRelay = async (path: string, contents: string) => {
+        const before = sync.seen.length;
+        await writeFile(join(temp.rootPath, path), contents);
+        await expect.poll(() => sync.seen.slice(before).some((line) => pushed.test(line)), {
+          timeout: 60_000,
+          message: `The push of ${path} reaches the relay`,
+        }).toBe(true);
+        await synced();
+      };
+      // Polls a condition, giving up after `ms`.
+      const until = async (ready: () => boolean, ms: number) => {
+        const end = Date.now() + ms;
+        while (!ready()) {
+          if (Date.now() > end) return false;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return true;
+      };
 
       let readLine: string | null = null;
       if (unanswered === "push") {
-        // The host read was answered, so nothing reads it again before quit.
         await expect.poll(() => sync.seen.some((line) => line.startsWith(hostRead)), {
           timeout: 60_000,
           message: "This computer claims the automation host and the relay answers its read",
         }).toBe(true);
         await synced();
+        // Taking the host makes more than one read. Listing the automations
+        // waits for the executor's queued work, so every read has been
+        // answered and nothing reads the host record again before quit.
+        await page.evaluate(async (id) => {
+          await window.dohcDesktop!.listCollectionAutomations({ workspaceId: id, collectionPath: "Tasks" });
+        }, workspaceId);
         await holdPush(1);
         expect(sync.openRead(), "No automation host read is waiting").toBeUndefined();
       } else {
         // #3406: after a host read fails, the executor reads again only once
         // a pull reaches the relay. A pass pulls after it pushes, so a write
-        // the relay answers makes the next read. The client gives up on a
-        // read after 15 s, so quit needs that read and the push open at once.
+        // the relay answers makes the next read. A read still pending when
+        // the pull lands keeps the next one queued behind it, and once it
+        // fails the queued one doesn't read, so another pull may be needed.
+        // The client gives up on a read after 15 s, so quit needs that read
+        // and the push open at once.
+        await synced();
         for (let round = 1; ; round++) {
-          await writeFile(join(temp.rootPath, "notes/warm-up.md"), `round ${round}\n`);
-          await synced();
-          await expect.poll(() => sync.openRead() !== undefined, {
-            timeout: 60_000,
-            message: "The automation host read waits on the server that never answers",
-          }).toBe(true);
+          let pulls = 0;
+          while (sync.openRead() === undefined) {
+            if (++pulls > 3) throw new Error(`In round ${round}, 3 pulls through the relay started no automation host read.`);
+            await passThroughRelay("notes/warm-up.md", `round ${round}, pull ${pulls}\n`);
+            await until(() => sync.openRead() !== undefined, 20_000);
+          }
           await holdPush(round);
           const read = sync.openRead();
           if (read) {
