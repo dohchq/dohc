@@ -18,6 +18,10 @@ import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
   type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+/** A retained activation whose stored record can't be read back. Only the operator can repair it. */
+export class ServiceActivationDamaged extends Error {
+  constructor(options?: ErrorOptions) { super("Retained service activation is damaged.", options); }
+}
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
@@ -311,18 +315,22 @@ export class ServiceActivationStore {
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
       ${where}`).get(...params);
     if (!row) return null;
-    const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
-    const document = key(source);
-    if (source.workspaceId !== workspaceId || source.currentPath !== path || source.relayDatabaseNamespace !== this.history.namespace ||
-        !isDeepStrictEqual(document, {workspaceId:row.workspace_id,mainVersionId:row.main_version_id,objectId:row.object_id,lineageClaimId:row.lineage_claim_id}) ||
-        !(row.state_bytes instanceof Uint8Array) || row.state_bytes.byteLength !== source.fullStateByteLength ||
-        row.state_digest !== source.fullStateDigest || digest(row.state_bytes) !== source.fullStateDigest ||
-        !(row.baseline_bytes instanceof Uint8Array) || digest(row.baseline_bytes) !== source.lineageClaimId) {
-      throw new Error("Retained service activation is damaged.");
+    try {
+      const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
+      const document = key(source);
+      if (source.workspaceId !== workspaceId || source.currentPath !== path || source.relayDatabaseNamespace !== this.history.namespace ||
+          !isDeepStrictEqual(document, {workspaceId:row.workspace_id,mainVersionId:row.main_version_id,objectId:row.object_id,lineageClaimId:row.lineage_claim_id}) ||
+          !(row.state_bytes instanceof Uint8Array) || row.state_bytes.byteLength !== source.fullStateByteLength ||
+          row.state_digest !== source.fullStateDigest || digest(row.state_bytes) !== source.fullStateDigest ||
+          !(row.baseline_bytes instanceof Uint8Array) || digest(row.baseline_bytes) !== source.lineageClaimId) {
+        throw new ServiceActivationDamaged();
+      }
+      return {activationId: String(row.activation_id), source, baselineBytes: new Uint8Array(row.baseline_bytes),
+        fullState: new Uint8Array(row.state_bytes), binding: parseLiveObjectBinding(JSON.parse(String(row.binding_json))),
+        completed: row.completion_json !== null, ownerUserId: String(row.owner_user_id)};
+    } catch (error) {
+      throw error instanceof ServiceActivationDamaged ? error : new ServiceActivationDamaged({cause: error});
     }
-    return {activationId: String(row.activation_id), source, baselineBytes: new Uint8Array(row.baseline_bytes),
-      fullState: new Uint8Array(row.state_bytes), binding: parseLiveObjectBinding(JSON.parse(String(row.binding_json))),
-      completed: row.completion_json !== null, ownerUserId: String(row.owner_user_id)};
     });
   }
 

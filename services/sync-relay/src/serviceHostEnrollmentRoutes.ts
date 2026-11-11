@@ -13,6 +13,7 @@ import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, RelayError, relayError} from "./errors";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 import {RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
+import {ServiceActivationDamaged} from "./storage/serviceActivation";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -215,7 +216,10 @@ export function createServiceHostEnrollmentRoutes(options: {
     // A damaged activation record stops its own document, not the list. Only the operator can repair it.
     let saved: ReturnType<typeof activation.read>;
     try {saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);}
-    catch {return {...base, status: "unavailable", reason: "session-host-diverged"};}
+    catch (error) {
+      if (!(error instanceof ServiceActivationDamaged)) throw error;
+      return {...base, status: "unavailable", reason: "session-host-diverged"};
+    }
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId}});
