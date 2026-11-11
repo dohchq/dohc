@@ -5576,6 +5576,7 @@ mod tests {
             on_behalf_of: Some("owner-1".into()),
             depth: Some(0),
         }]);
+        sees(&mut update, &Ydoc::wire());
         ack(apply(&mut store, &mut cache, &handle, update.clone()));
         assert_eq!(
             newest_field_author(&store),
