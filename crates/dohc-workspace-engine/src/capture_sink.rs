@@ -382,8 +382,46 @@ pub struct StoreCaptureSink {
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
+    /// Why this run's last attempt to load or create the key failed.
+    secret_key_failure: Option<SecretKeyFailure>,
     self_writes: SelfWriteSuppression,
     provenance: CaptureProvenance,
+}
+
+/// Why the workspace's secret key is unavailable, as a stable code. Never
+/// built from key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecretKeyFailure {
+    /// The key file or its folder failed a crypto check, such as
+    /// `volume-shares-new-files` or `key-corrupt`.
+    Crypto(&'static str),
+    /// History holds protected files, but the key file is gone, so a new key
+    /// would leave them unreadable.
+    Missing,
+    /// The store couldn't say whether History holds protected files. A busy
+    /// store, not a fact about the key.
+    StoreCheck,
+}
+
+impl SecretKeyFailure {
+    /// The code a person's words are chosen by, or `None` for a transient
+    /// store failure that names nothing about the key.
+    pub(crate) fn code(self) -> Option<&'static str> {
+        match self {
+            Self::Crypto(code) => Some(code),
+            Self::Missing => Some("key-missing"),
+            Self::StoreCheck => None,
+        }
+    }
+}
+
+/// What a capture run learned about the workspace's secret key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecretKeyHealth {
+    /// No protected file needed the key this run.
+    Untried,
+    Loaded,
+    Unavailable(SecretKeyFailure),
 }
 
 pub(crate) struct StoreCaptureSinkParams {
@@ -485,8 +523,17 @@ impl StoreCaptureSink {
             automation_claims: std::cell::RefCell::new(Vec::new()),
             pending_placement_paths: std::cell::RefCell::new(Vec::new()),
             secret_key: None,
+            secret_key_failure: None,
             self_writes,
             provenance,
+        }
+    }
+
+    pub(crate) fn secret_key_health(&self) -> SecretKeyHealth {
+        match (&self.secret_key, self.secret_key_failure) {
+            (Some(_), _) => SecretKeyHealth::Loaded,
+            (None, Some(failure)) => SecretKeyHealth::Unavailable(failure),
+            (None, None) => SecretKeyHealth::Untried,
         }
     }
 
@@ -564,40 +611,57 @@ impl StoreCaptureSink {
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
         if self.secret_key.is_none() {
-            // Key I/O is workspace-scoped state, not a best-effort read. Check
-            // the physical root before and after every path-based operation so
-            // a renamed-and-recreated workspace cannot supply or receive this
-            // workspace's encryption key.
-            self.require_captured_root()?;
-            let loaded =
-                load_key_file(self.actor.store_folder()).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
-            self.require_captured_root()?;
-            let key = match loaded {
-                Some(key) => key,
-                None => {
-                    // Never mint over existing encrypted state: a missing key
-                    // file with live secret rows (a backup restored without
-                    // the key, an accidental deletion) must fail closed and
-                    // stay dirty for retry — silently minting would strand
-                    // the whole history under a fresh key (TS parity:
-                    // `loadSecretDataKey` checks protected rows first).
-                    let has_state = self
-                        .actor
-                        .secret_state_exists_blocking(self.workspace_id.clone())
-                        .map_err(|_| SECRET_KEY_UNAVAILABLE)?;
-                    if has_state {
-                        return Err(SECRET_KEY_UNAVAILABLE);
-                    }
-                    self.require_captured_root()?;
-                    let key = create_key_file(self.actor.store_folder())
-                        .map_err(|_| SECRET_KEY_UNAVAILABLE)?;
-                    self.require_captured_root()?;
-                    key
-                }
-            };
-            self.secret_key = Some(key);
+            let mut failed = None;
+            let key = self.load_or_create_secret_key(&mut failed);
+            if failed.is_some() {
+                self.secret_key_failure = failed;
+            }
+            self.secret_key = Some(key?);
         }
         Ok(self.secret_key.as_ref().expect("key just ensured"))
+    }
+
+    /// Load the key, or create it when History holds no protected file.
+    /// Records in `failed` why the key is unavailable.
+    fn load_or_create_secret_key(
+        &self,
+        failed: &mut Option<SecretKeyFailure>,
+    ) -> Result<SecretDataKey, CaptureError> {
+        let mut unavailable = |failure| {
+            *failed = Some(failure);
+            SECRET_KEY_UNAVAILABLE
+        };
+        let crypto =
+            |error: dohc_engine_crypto::CryptoError| SecretKeyFailure::Crypto(error.code());
+        // Key I/O is workspace-scoped state, not a best-effort read. Check
+        // the physical root before and after every path-based operation so
+        // a renamed-and-recreated workspace cannot supply or receive this
+        // workspace's encryption key.
+        self.require_captured_root()?;
+        let loaded =
+            load_key_file(self.actor.store_folder()).map_err(|error| unavailable(crypto(error)))?;
+        self.require_captured_root()?;
+        if let Some(key) = loaded {
+            return Ok(key);
+        }
+        // Never mint over existing encrypted state: a missing key
+        // file with live secret rows (a backup restored without
+        // the key, an accidental deletion) must fail closed and
+        // stay dirty for retry — silently minting would strand
+        // the whole history under a fresh key (TS parity:
+        // `loadSecretDataKey` checks protected rows first).
+        let has_state = self
+            .actor
+            .secret_state_exists_blocking(self.workspace_id.clone())
+            .map_err(|_| unavailable(SecretKeyFailure::StoreCheck))?;
+        if has_state {
+            return Err(unavailable(SecretKeyFailure::Missing));
+        }
+        self.require_captured_root()?;
+        let key = create_key_file(self.actor.store_folder())
+            .map_err(|error| unavailable(crypto(error)))?;
+        self.require_captured_root()?;
+        Ok(key)
     }
 
     /// Whether any op this run was held on an unavailable policy.

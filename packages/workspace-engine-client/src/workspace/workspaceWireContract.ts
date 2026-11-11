@@ -1376,6 +1376,9 @@ const WorkspaceResultSchemas = {
     // happen, but a file another program changes at that moment can be lost.
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
+    // Why protected files such as `.env` can't be captured, such as
+    // `volume-shares-new-files` or `key-missing`. Absent while the key is fine.
+    secretKeyUnavailable: Schema.optionalKey(Schema.NonEmptyString),
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
     // Old versions of files kept on a drive that cannot tell dohc whether a
     // program still has one open. dohc never deletes them itself.
