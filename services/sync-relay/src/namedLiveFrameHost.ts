@@ -127,11 +127,10 @@ function captureLiveFrameHost(options: {
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
-  // A recipient sees the document through its own share. Accepted events carry
-  // binding, the lineage's one recorded binding, for every editor.
-  const view = () => actor.kind === "owner" ? binding : storage.readLiveRecipientView({ document, actor }, binding);
-  const wireBinding = view();
-  if (!wireBinding) throw new Error("Named host standing changed.");
+  // What this editor is shown, which the opening check reads from its current
+  // binding: an owner sees binding, a recipient its own share's view. Accepted
+  // events carry binding, the lineage's one recorded binding, for every editor.
+  let wireBinding: LiveObjectBinding | undefined;
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -148,14 +147,14 @@ function captureLiveFrameHost(options: {
       standing();
       // A recipient's share stands while it covers the document under the same
       // grant generation. The session also ends when what that share shows
-      // changes, so a reconnect opens with the new view. One read snapshot holds both.
-      const changed = storage.readLiveAuthority(() => {
-        const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
-        return native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
-          !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
-          !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(view(), wireBinding);
-      });
-      if (changed) throw new Error("Named host standing changed.");
+      // changes, so reopening shows the new view.
+      const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+      if (current.kind === "current") wireBinding ??= current.view;
+      if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
+        !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
+        !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(current.view, wireBinding)) {
+        throw new Error("Named host standing changed.");
+      }
     } catch (error) { close(); throw error; }
   }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });
@@ -192,7 +191,7 @@ function captureLiveFrameHost(options: {
       const feed = new AbortController();
       const feedSignal = AbortSignal.any([signal, feed.signal]);
       return {
-        binding: wireBinding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
+        binding: wireBinding!, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
         appliedThroughJournalCursor: position.journalCursor,
         close() { feed.abort(); },
         async nextApplied(callerSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> {

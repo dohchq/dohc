@@ -85,6 +85,8 @@ export type CurrentLiveBindingResult =
   | {
       readonly kind: "current";
       readonly binding: LiveObjectBinding;
+      /** What this editor is shown of `binding`: the binding itself for an owner, the recipient's share's view for a named or link recipient. */
+      readonly view: LiveObjectBinding;
       readonly authority: ServerDerivedLiveUpdateAuthority;
       readonly host: LiveHostConnectionCoordinate;
     }
@@ -815,8 +817,6 @@ export interface SyncRelayStorage {
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
-  /** What a named or link recipient's own share shows of the lineage's binding, or null when it no longer admits them or can't form that view. */
-  readLiveRecipientView(input: CurrentLiveBindingRequest, binding: LiveObjectBinding): LiveObjectBinding | null;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;

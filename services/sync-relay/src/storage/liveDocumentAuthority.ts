@@ -686,7 +686,7 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
     stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined)) return {kind: "refused", reason: "host-unavailable"};
-    let bound: ReturnType<typeof bindLiveDocument>;
+    let bound: BoundLiveDocument | LiveBindingRefusal;
     let authority: ServerDerivedLiveUpdateAuthority;
     if (actor.kind === "named") {
       const named = authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: actor.userId, grantId: actor.grantId });
@@ -709,11 +709,11 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       bound = bindOwnedLiveDocument(storage, document, stored);
     }
     if (bound.kind !== "bound") return bound;
-    const { binding } = bound;
+    const { binding, view } = bound;
     const coordinate = { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
       instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
     if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
-    return { kind: "current", binding, authority, host: coordinate };
+    return { kind: "current", binding, view, authority, host: coordinate };
   }
 
 type StoredLiveBinding = Pick<StoredLiveDocumentAuthority, "binding" | "current" | "open" | "baselineSequence">;
@@ -750,16 +750,20 @@ function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey):
   return row === undefined ? undefined : String(row.origin_json);
 }
 
+/** An editor's binding, and what that editor is shown of it. */
+type BoundLiveDocument = { kind: "bound"; binding: LiveObjectBinding; view: LiveObjectBinding };
+
 function bindOwnedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null):
-  { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
+  BoundLiveDocument | LiveBindingRefusal {
     if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
     return bindRecordedLiveDocument(storage, document, stored);
   }
 
+// An owner is shown the binding itself.
 function bindRecordedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding):
-  { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
+  BoundLiveDocument | LiveBindingRefusal {
     const binding = recordedLiveBinding(storage, document, stored.binding);
-    return binding ? { kind: "bound", binding } : { kind: "refused", reason: "stale-document" };
+    return binding ? { kind: "bound", binding, view: binding } : { kind: "refused", reason: "stale-document" };
   }
 
 /**
@@ -788,15 +792,16 @@ type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner"
  */
 function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null,
   actor: LiveRecipient, share: SyncRelayShareRow, selector: ShareSelector):
-  { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
+  BoundLiveDocument | LiveBindingRefusal {
     if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
     if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
     if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
       return { kind: "refused", reason: "stale-selector" };
     }
     const bound = bindRecordedLiveDocument(storage, document, stored);
-    if (bound.kind === "bound" && !liveRecipientView(bound.binding, actor, selector.paths)) return { kind: "refused", reason: "stale-selector" };
-    return bound;
+    if (bound.kind !== "bound") return bound;
+    const view = liveRecipientView(bound.binding, actor, selector.paths);
+    return view ? { ...bound, view } : { kind: "refused", reason: "stale-selector" };
 }
 
 /**
@@ -811,20 +816,4 @@ function liveRecipientView(binding: LiveObjectBinding, actor: LiveRecipient, pat
     return parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
       currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths });
   } catch { return null; }
-}
-
-/**
- * What a named or link recipient's own share now shows of `binding`, the
- * lineage's recorded binding. Null when the share no longer admits them to
- * live editing in the document's workspace, or can't form that view.
- */
-export function readLiveRecipientView(storage: StorageContext, input: CurrentLiveBindingRequest, binding: LiveObjectBinding): LiveObjectBinding | null {
-  const { document, actor } = snapshotCurrentBindingRequest(input);
-  if (actor.kind === "owner") throw new TypeError("An owner has no recipient view.");
-  const paths = storage.readLiveAuthority(() => {
-    const shared = actor.kind === "named"
-      ? authorizeNamedLiveEditShareGrant({ storage, actorUserId: actor.userId, grantId: actor.grantId }) : currentLinkEdit(storage, actor);
-    return shared?.ok && shared.share.workspaceId === document.workspaceId ? shared.effectiveSelector.paths : null;
-  });
-  return paths && liveRecipientView(binding, actor, paths);
 }
