@@ -269,6 +269,34 @@ describe("BoardView", () => {
     expect(within(card).queryByText("todo")).toBeNull();
   });
 
+  it("names fields through fieldLabel when the host keys them by id", () => {
+    const names: Record<string, string> = { status: "Stage", estimate: "Points", done: "Shipped" };
+    const groups = [
+      makeGroup(null, [
+        makeRecord("rec-1", [
+          indexedValue("title", "Write the spec"),
+          indexedValue("estimate", 3),
+          indexedValue("done", false),
+        ]),
+      ]),
+    ];
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={groups}
+        groupBy="status"
+        visibleFields={["title", "estimate", "done"]}
+        fieldLabel={(field) => names[field] ?? field}
+      />,
+    );
+    expect(screen.getAllByRole("list")[0]?.getAttribute("aria-label")).toBe("No Stage");
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    expect(within(card).getByText("Points")).toBeDefined();
+    expect(within(card).getByText("Shipped")).toBeDefined();
+    expect(within(card).queryByText("estimate")).toBeNull();
+    expect(within(card).queryByText("done")).toBeNull();
+  });
+
   it("labels the null group after the field and marks a flagged card with a warning dot", () => {
     const groups = [
       makeGroup(null, [makeRecord("rec-none", [indexedValue("title", "No status yet")])]),
