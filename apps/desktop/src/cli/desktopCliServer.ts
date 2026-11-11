@@ -157,7 +157,8 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
+      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "restoreProtectedCopy" | "discardProtectedCopy"
+      | "listRetainedCopies" | "deleteRetainedCopies"
       | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
       | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
@@ -676,6 +677,14 @@ export function createDesktopCliServer<State>(
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
+              restoreProtected: async (id, restoredBy) => {
+                const restored = await capture.restoreProtectedCopy(id, restoredBy);
+                // As the window's Restore does: the other computer hears of it promptly.
+                activity.queueCloudSync(workspace.workspaceId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return restored;
+              },
+              discardProtected: (id) => capture.discardProtectedCopy(id),
             },
             heldNoteChange: input => capture.heldNoteChange(input),
             retainedCopies: {

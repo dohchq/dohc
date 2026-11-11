@@ -458,6 +458,7 @@ it.skipIf(engineBinary.missing)(
         "sync.push",
         "sync.materializePendingCursor",
         "secrets.materialize",
+        "secrets.recorded",
       ]) {
         await expect(rpc(r, method, { workspaceId })).rejects.toThrow(
           "passive store",

@@ -2017,6 +2017,7 @@ mod tests {
             "ydoc.project",
             "secrets.write",
             "secrets.materialize",
+            "secrets.recorded",
             "secrets.list",
             "secrets.moments.get",
             "automations.subscribe",

@@ -444,6 +444,14 @@ export function isAgentIdTaken(error: unknown): boolean {
   return parse(error).name === AGENT_ID_TAKEN_ERROR;
 }
 
+/** The class of a protected copy's Restore or Discard that fails the same way every time. */
+export const PROTECTED_COPY_FINAL_ERROR = "ProtectedCopyFinalError";
+
+/** Whether Try again would give a protected copy's Restore or Discard the same answer. */
+export function isProtectedCopyFinal(error: unknown): boolean {
+  return parse(error).name === PROTECTED_COPY_FINAL_ERROR;
+}
+
 export const GROUP_NAME_TAKEN_ERROR = "GroupNameTakenError";
 
 export function isGroupNameTaken(error: unknown): boolean {

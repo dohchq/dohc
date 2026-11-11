@@ -56,6 +56,14 @@ struct SecretsWriteParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsRecordedParams {
+    workspace_id: String,
+    path: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecretsDeleteParams {
     workspace_id: String,
     version_id: String,
@@ -817,5 +825,70 @@ impl EngineService {
                 }),
             },
         })
+    }
+
+    /// Whether protected History for a path, in any version, holds this exact
+    /// text. Desktop main asks before a sync replaces a protected file, so it
+    /// keeps a copy only of text History lacks. The
+    /// answer is a boolean; the text never reaches a log or an error.
+    pub(super) async fn secrets_recorded(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsRecordedParams = parse(params)?;
+        let text = dohc_engine_crypto::SecretPlaintext::new(params.text.into_bytes());
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+            != dohc_engine_files::policy::PathClassification::Secret
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "not a secret path",
+            ));
+        }
+        // Protected History holds nothing larger than this.
+        if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
+            return Ok(json!({ "recorded": false }));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let held = open.actor.location();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(held.folder()));
+        let key = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.recorded (key load)"));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| WireError::new(ErrorCode::Internal, "secret key unavailable"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "secret key unavailable"))?,
+        };
+        let Some(key) = key else {
+            // No key and no protected state means no History to hold it.
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.recorded",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
+            if has_state {
+                return Err(WireError::new(
+                    ErrorCode::Internal,
+                    "secret key unavailable",
+                ));
+            }
+            return Ok(json!({ "recorded": false }));
+        };
+        let recorded = Self::read_under_ctx(
+            &cancellation,
+            "secrets.recorded",
+            open.actor
+                .secret_text_recorded(open.workspace_id.clone(), params.path, text, key),
+        )
+        .await?;
+        Ok(json!({ "recorded": recorded }))
     }
 }

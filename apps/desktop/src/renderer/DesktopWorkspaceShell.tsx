@@ -1,5 +1,6 @@
 import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
+import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -6314,6 +6315,14 @@ export function DesktopWorkspaceShell(props: {
       details: [["Cause", error]], retry: () => void refreshKeptCopies(),
     });
   }, [syncStatus?.outsideWriteCopyReadError, reportShellFailure, clearIdentity, refreshKeptCopies]);
+  const retryProtectedCopyRead = useCallback(() => void refreshKeptCopies(), [refreshKeptCopies]);
+  const protectedCopyConfirmation = useProtectedCopyNotices({
+    workspaceId,
+    copies: syncStatus?.protectedCopies,
+    readError: syncStatus?.protectedCopyReadError,
+    retryRead: retryProtectedCopyRead,
+    reportShellFailure, showSuccessNotice, clearIdentity,
+  });
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -7527,6 +7536,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
 
       {typingRecoveryConfirmation}
+      {protectedCopyConfirmation}
       {sentNoticeRetryDialog}
 
       {engineRebuild ? (

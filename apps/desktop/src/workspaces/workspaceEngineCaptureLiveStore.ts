@@ -1674,6 +1674,10 @@ export function createCaptureLiveStores(
       input: Parameters<SecretFileStore["materializeSecretFile"]>[0],
     ) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
+    secretTextRecorded: (
+      input: Parameters<SecretFileStore["secretTextRecorded"]>[0],
+    ) =>
+      runRawRead(async (adapter) => await adapter.secretTextRecorded(input)),
     close: async () => await sessions.closeWorkspace(workspace),
   } satisfies SecretFileStore;
 

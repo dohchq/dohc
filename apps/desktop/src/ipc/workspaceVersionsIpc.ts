@@ -23,6 +23,8 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "resolveConflict"
   | "listKeptCopies"
   | "saveKeptCopy"
+  | "restoreProtectedCopy"
+  | "discardProtectedCopy"
   | "heldNoteChange"
   | "listRetainedCopies"
   | "deleteRetainedCopies"
@@ -146,6 +148,19 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
       const saved = await capture.saveKeptCopy(input.id);
       if (saved.status === "saved") notifyRenderer({ workspaceId: input.workspaceId });
       return saved;
+    },
+
+    async restoreProtectedCopy(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const restored = await capture.restoreProtectedCopy(input.id);
+      activity.queueCloudSync(input.workspaceId);
+      notifyRenderer({ workspaceId: input.workspaceId });
+      return restored;
+    },
+
+    async discardProtectedCopy(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.discardProtectedCopy(input.id);
     },
 
     async listRetainedCopies(input) {

@@ -1470,6 +1470,10 @@ const SYNC_STATUS_BASE_FIELDS = {
   recoveryUnavailable: z.boolean().optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
+  // A protected file's change a sync replaced, kept on this computer, as
+  // [path, id, keptAtMs]. Paths and ids only, never the kept text.
+  protectedCopies: z.array(z.tuple([z.string(), z.string(), z.number().int()])).optional(),
+  protectedCopyReadError: z.string().nullable().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Old versions of files the engine keeps on a drive that cannot tell it
   // whether a program still has one open, so it never deletes them: how
@@ -3322,6 +3326,16 @@ export const SaveKeptCopyResult = z.discriminatedUnion("status", [
 ]);
 export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
 
+// A protected file's change a sync replaced, kept on this computer under a
+// UUID until Restore writes it back or Discard removes it for good. Answers
+// name the path only; the text never crosses IPC.
+export const ProtectedCopyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+});
+export const RestoreProtectedCopyResult = z.object({ status: z.literal("restored"), path: z.string().min(1) });
+export const DiscardProtectedCopyResult = z.object({ status: z.literal("discarded"), path: z.string().min(1) });
+
 // Old versions of files the engine keeps on a drive that cannot tell it
 // whether a program still has one open. dohc never deletes them itself. A
 // list names those a delete may remove now, each with the revision the
@@ -3441,6 +3455,16 @@ export const workspaceVersionOperations = {
     capabilityId: "file.kept.save",
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
+  },
+  restoreProtectedCopy: {
+    capabilityId: "file.protected.restore",
+    channel: "desktop:restore-protected-copy",
+    payload: ProtectedCopyPayload, result: RestoreProtectedCopyResult, ...versionGuard,
+  },
+  discardProtectedCopy: {
+    capabilityId: "file.protected.discard",
+    channel: "desktop:discard-protected-copy",
+    payload: ProtectedCopyPayload, result: DiscardProtectedCopyResult, ...versionGuard,
   },
   listRetainedCopies: {
     capabilityId: "file.retained.list",
