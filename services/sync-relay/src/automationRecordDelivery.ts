@@ -1,4 +1,5 @@
 import {isDeepStrictEqual} from "node:util";
+import {DOCUMENT_TOO_DENSE_CAUSE, DOCUMENT_TOO_DENSE_NEXT} from "@dohc/live-session-contract/live-refusal-words";
 import {AutomationRunWait} from "@dohc/automation-executor/button-presser";
 import {OwnerYDocOutbox, isTransientEngineRefusal} from "@dohc/workspace-engine-client";
 import {OwnerKnownRefusals, OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
@@ -121,7 +122,8 @@ export function automationRecordDelivery(options: {
           if (result.reason === "stale-session") return {kind: "retry"};
           return retire({outboxId: entry.outboxId, deliveryId: entry.deliveryId, updateDigest: entry.updateDigest,
             reason: result.reason === "capacity-refused"
-              ? "This update exceeds the shared file's limits. Reduce the change, then try again." : result.reason}, signal);
+              ? "This update exceeds the shared file's limits. Reduce the change, then try again."
+              : result.reason === "document-too-dense" ? `${DOCUMENT_TOO_DENSE_CAUSE} ${DOCUMENT_TOO_DENSE_NEXT}` : result.reason}, signal);
         }
         // Install incremental accepted frames before acknowledging this exact receipt.
         let state = await replica.client.ownerYDocReadState(request(), target(binding), signal);

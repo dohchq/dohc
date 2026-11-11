@@ -78,6 +78,7 @@ function liveDeliveryLabel(
   if (reason === "session-host-refused" || reason === "session-host-diverged" || reason === "live-edit-unadmitted") return "Live editing stopped";
   if (reason === "live-document-without-lineage") return "Live editing can't start";
   if (reason === "conflict-parent-withheld") return "Live editing can't resume";
+  if (reason === "document-too-dense") return "Too large to edit live";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 

@@ -82,7 +82,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required" | "unsent-edits-limit";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "document-too-dense" | "restart-required" | "unsent-edits-limit";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -400,10 +400,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
                 unavailableFor("conflict-parent-withheld") ? "conflict-parent-withheld" :
+                unavailableFor("document-too-dense") ? "document-too-dense" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
               const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
-                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld";
+                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld" || reason === "document-too-dense";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);

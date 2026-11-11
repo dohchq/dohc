@@ -1,3 +1,4 @@
+import {DOCUMENT_TOO_DENSE_CAUSE} from "@dohc/live-session-contract/live-refusal-words";
 export const LIVE_STOP_EDITS_PENDING = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
 /** A Stop with no answer, which dohc keeps and sends again. The cause stays out of the words. */
 export const LIVE_STOP_WAITING = "dohc is waiting for the server to stop live editing and will keep trying.";
@@ -20,7 +21,7 @@ export type LiveStopRefusal = {
   sessionHost?: string;
   path?: string;
   resume?: true;
-  pending?: "conflict-parent-withheld";
+  pending?: "conflict-parent-withheld" | "document-too-dense";
 };
 type LiveStopRow = {canResume: boolean; reason?: string};
 
@@ -28,7 +29,7 @@ export function liveStopRefusalForRow(refusal: LiveStopRefusal, row?: LiveStopRo
   if (refusal.code !== "edits-pending" || row === undefined) return refusal;
   const {resume: _resume, pending: _pending, ...base} = refusal;
   return {...base, ...(row.canResume ? {resume: true as const}
-    : row.reason === "conflict-parent-withheld" ? {pending: "conflict-parent-withheld" as const}
+    : row.reason === "conflict-parent-withheld" || row.reason === "document-too-dense" ? {pending: row.reason}
     : {})};
 }
 
@@ -39,7 +40,7 @@ function isHostStopCode(code: unknown): code is HostStopCode {
 export function liveStopAction(refusal: LiveStopRefusal, row?: LiveStopRow): "resume" | "retry" | "none" {
   if (refusal.code !== "edits-pending") return HOST_STOP_REFUSALS[refusal.code].action;
   const pending = liveStopRefusalForRow(refusal, row);
-  return pending.resume ? "resume" : pending.pending === "conflict-parent-withheld" ? "none" : "retry";
+  return pending.resume ? "resume" : pending.pending ? "none" : "retry";
 }
 
 export function liveStopOffersResume(refusal: LiveStopRefusal, row?: LiveStopRow): boolean {
@@ -51,6 +52,7 @@ export function liveStopMessage(refusal: LiveStopRefusal, row?: LiveStopRow): st
   if (refusal.code === "edits-pending") {
     if (refusal.resume) return LIVE_STOP_EDITS_PENDING_RESUME;
     if (refusal.pending === "conflict-parent-withheld") return "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+    if (refusal.pending === "document-too-dense") return `Live editing didn't stop. ${DOCUMENT_TOO_DENSE_CAUSE} Save a recovery copy, then move its text into new, smaller notes and continue there.`;
     return LIVE_STOP_EDITS_PENDING;
   }
   const message = HOST_STOP_REFUSALS[refusal.code].message;
@@ -98,7 +100,7 @@ function stopRefusal(data: unknown): LiveStopRefusal | null {
   if (code === "edits-pending") {
     const pending: unknown = Reflect.get(data, "pending");
     return {code, ...(Reflect.get(data, "resume") === true ? {resume: true} : {}),
-      ...(pending === "conflict-parent-withheld" ? {pending} : {})};
+      ...(pending === "conflict-parent-withheld" || pending === "document-too-dense" ? {pending} : {})};
   }
   if (!isHostStopCode(code)) return null;
   if (code === "host-moved" && (typeof path !== "string" || path.length === 0)) return null;

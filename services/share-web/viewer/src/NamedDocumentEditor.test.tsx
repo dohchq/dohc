@@ -1,4 +1,5 @@
 import {LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
+import {DOCUMENT_TOO_DENSE_CAUSE} from "@dohc/live-session-contract/live-refusal-words";
 // @vitest-environment jsdom
 import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
@@ -74,5 +75,15 @@ it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))("shows the %s refusal in
     await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => unavailable}} path="docs/a.md" link={link} onState={() => {}}/>));
     expect(container.querySelector('[role="status"]')?.textContent).toBe(message);
     expect(container.querySelector("button")?.textContent).toBe("Try again");
+  }
+});
+
+it("says why editing stopped when the server refuses an edit that makes the note too dense, and offers no retry", async () => {
+  const live = session("Body"), dense: NamedLiveBrowserState = {...live.state(), status: "quarantined", reason: "document-too-dense", pendingUpdates: 1};
+  for (const link of [false, true]) {
+    await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => dense}} path="docs/a.md" link={link} onState={() => {}}/>));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      `${DOCUMENT_TOO_DENSE_CAUSE} Copy any unsynced changes you want to keep. Ask the owner to move its text into new, smaller notes.`);
+    expect(container.querySelector("button")).toBeNull();
   }
 });

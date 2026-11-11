@@ -1,6 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
 import type {AutomationClaimSummary} from "@dohc/workspace-engine-client";
 import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
+import {DOCUMENT_TOO_DENSE_CAUSE, DOCUMENT_TOO_DENSE_NEXT} from "@dohc/live-session-contract/live-refusal-words";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
@@ -193,13 +194,15 @@ it("rejects a moved background draft even after native enrollment no longer reso
   expect(f.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason: "binding-changed"});
 });
 
-it.each(["authority-refused", "invalid-update", "capacity-refused"] as const)("terminally refuses %s without quarantining other presses", async reason => {
+it.each(["authority-refused", "invalid-update", "capacity-refused", "document-too-dense"] as const)("terminally refuses %s without quarantining other presses", async reason => {
   const f = fixture();
   vi.mocked(f.host.submit).mockResolvedValue({result: "refused", reason});
   await f.delivery.drain(binding, new AbortController().signal);
   expect(f.client.ownerYDocRefuseEntry).toHaveBeenCalledWith(expect.anything(), {outboxId: "outbox", deliveryId: "delivery-0",
-    updateDigest: "b".repeat(64), reason: reason === "capacity-refused"
-      ? "This update exceeds the shared file's limits. Reduce the change, then try again." : reason}, expect.anything());
+    updateDigest: "b".repeat(64), reason: {
+      "capacity-refused": "This update exceeds the shared file's limits. Reduce the change, then try again.",
+      "document-too-dense": `${DOCUMENT_TOO_DENSE_CAUSE} ${DOCUMENT_TOO_DENSE_NEXT}`,
+    }[reason as string] ?? reason}, expect.anything());
   expect(f.quarantine).not.toHaveBeenCalled();
   expect(f.acknowledge).not.toHaveBeenCalled();
 });

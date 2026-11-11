@@ -14,7 +14,8 @@ import {linkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease: PublicEditRelease | undefined;
   hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
+  /** Whether the session host cannot continue the document, and "document-too-dense" when its history is over the live bound. */
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean | "document-too-dense";
   /** Authenticates a connected agent, as the link's other routes do. */
   linkAuthority: Pick<LinkAuthorityResolver, "resolve">}) {
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
@@ -55,7 +56,8 @@ export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey:
           const current = options.storage.resolveLiveObjectHostBinding(context, objectId);
           if (current.kind === "refused" && (current.reason === "host-unavailable" || current.reason === "stale-document")) return linkRefusal("link_live_unavailable");
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
-          return options.sessionHostBlocked?.({workspaceId: context.workspaceId, objectId}) ? linkRefusal("link_live_unavailable") : {objectId};
+          const blocked = options.sessionHostBlocked?.({workspaceId: context.workspaceId, objectId});
+          return blocked === "document-too-dense" ? linkRefusal("link_live_too_dense") : blocked ? linkRefusal("link_live_unavailable") : {objectId};
         }
         // Only a browser gateway opens a link session; an agent has no profile.
         if ("agentConnectionId" in context) return null;

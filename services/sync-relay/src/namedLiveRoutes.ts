@@ -75,7 +75,7 @@ type BrowserRouteOptions = LiveRouteOptions & {
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean | "document-too-dense";
 };
 type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
 export function createNamedLiveRoutes(options: BrowserRouteOptions) { return createLiveRoutes(options); }
@@ -161,8 +161,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           if (binding.kind === "refused") return binding.reason === "host-unavailable" || binding.reason === "stale-document"
             ? linkRefusal("link_live_unavailable") : refusal();
         }
-        if (sessionHostBlocked?.({workspaceId: context.workspaceId, objectId: objectId as string}))
-          return context.kind === "link" ? linkRefusal("link_live_unavailable") : refusal();
+        const blocked = sessionHostBlocked?.({workspaceId: context.workspaceId, objectId: objectId as string});
+        if (blocked) return context.kind !== "link" ? refusal() : linkRefusal(blocked === "document-too-dense" ? "link_live_too_dense" : "link_live_unavailable");
         const minted = await options.tickets.mint({ objectId }, context, signal); signal.throwIfAborted(); check();
         if (!minted) return refusal();
         const body = JSON.stringify(minted);

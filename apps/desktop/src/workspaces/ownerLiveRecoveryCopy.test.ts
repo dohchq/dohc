@@ -3,7 +3,8 @@ import {access, readFile, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {expect, it, vi} from "vitest";
 import * as Y from "yjs";
-import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
+import {getDohcYDocBodyFragment, markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
+import {WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity} from "@dohc/ydoc-projection/live-journal-validation";
 import type {OwnerYDocOutboxEntry, OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import {liveRecoveryPackage, parseLiveRecoveryPackage, saveLiveRecoveryCopy} from "./ownerLiveRecoveryCopy";
 import {directDocumentProjection, type DocumentProjection} from "./documentProjection";
@@ -169,4 +170,59 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
   // The recorded source itself travels with each native edit, unchanged.
   expect(written.updates.map(update => update.nativeSource?.origin)).toEqual([undefined, undefined,
     ...[3, 4, 5, 6, 7].map(sequence => kinds[sequence]!.nativeSource!.origin), undefined]);
+});
+
+/** Whether the note these updates build is within the bound the server checks live notes against. */
+function withinBound(...updates: Uint8Array[]): boolean {
+  const doc = new Y.Doc({gc: false});
+  try {
+    for (const update of updates) Y.applyUpdate(doc, update);
+    return withinLiveNoteCapacity(doc, WORKER_LIVE_VALIDATION_POLICY);
+  } finally {doc.destroy();}
+}
+function addLines(body: Y.XmlFragment, label: string, count: number): void {
+  body.insert(body.length, Array.from({length: count}, (_, line) => {
+    const paragraph = new Y.XmlElement("paragraph"); paragraph.insert(0, [new Y.XmlText(`${label} ${line}`)]); return paragraph;
+  }));
+}
+/**
+ * A note the server accepted just under the bound, and one pasted block of
+ * lines the server refused because it took the note over. `history` makes the
+ * note dense with lines that were added and later removed, which still count.
+ */
+function tooDenseQueue(history: boolean): {recovery: OwnerYDocOutboxRecovery; markdown: string; accepted: Uint8Array} {
+  const doc = new Y.Doc({gc: false});
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(markdownToYDoc("# Plan\n\nStart here.")));
+  const body = getDohcYDocBodyFragment(doc);
+  addLines(body, history ? "removed" : "kept", 30_000);
+  if (history) body.delete(2, 30_000);
+  const accepted = Y.encodeStateAsUpdate(doc), before = Y.encodeStateVector(doc);
+  addLines(body, "pasted", 3_000);
+  const update = Y.encodeStateAsUpdate(doc, before), markdown = yDocToMarkdown(doc);
+  doc.destroy();
+  const entry = {sequence: 1, appendKey: "append-1", deliveryId: "delivery-1", updateDigest: sha256(update), update,
+    byteLength: update.byteLength, createdAtMs: 1_001, personEdit: true as const};
+  return {markdown, accepted, recovery: {outboxId: "outbox", binding, baseUpdateDigest: sha256(accepted), baseUpdate: accepted, checkpoint: null,
+    checkpointDigest: null, state: "quarantined", pendingBytes: update.byteLength, oldestEntryAtMs: 1_001, entries: [entry],
+    quarantineReason: "document-too-dense", observedBinding: null, retryDeliveryId: null}};
+}
+
+it.each([
+  ["its past edits", true, true],
+  ["what it holds now", false, false],
+])("saves a readable copy, with the refused paste, of a note too dense through %s", async (_, history, copyWithinBound) => {
+  const {root, writes} = await workspace(), {recovery, markdown, accepted} = tooDenseQueue(history);
+  expect(withinBound(accepted)).toBe(true);
+  expect(withinBound(accepted, recovery.entries[0]!.update)).toBe(false);
+  const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, {...source, reason: "document-too-dense"}), writes, directDocumentProjection);
+  expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
+  const copy = await readFile(join(root, saved.copyPath!), "utf8");
+  expect(copy).toBe(markdown);
+  expect(copy).toContain("pasted 2999");
+  // The copy is a new note. Without the old note's removed lines it can be
+  // edited live again; a note dense through what it holds is still too dense.
+  const reopened = markdownToYDoc(copy);
+  try {
+    expect(withinLiveNoteCapacity(reopened, WORKER_LIVE_VALIDATION_POLICY)).toBe(copyWithinBound);
+  } finally {reopened.destroy();}
 });

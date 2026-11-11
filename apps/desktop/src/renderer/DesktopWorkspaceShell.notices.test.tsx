@@ -522,6 +522,35 @@ describe("edits the server refused", () => {
     expect(within(copied.closest("li")!).queryByRole("button", {name: "Try again"})).toBeNull();
   });
 
+  // Try again would send the same refused history, so the notice never offers it.
+  it.each([
+    {storedOn: "this-computer" as const, lead: "New edits to this note aren't being saved to the file. "},
+    {storedOn: "server" as const, lead: ""},
+  ])("explains edits refused as too dense, kept on $storedOn, and offers only Save", async ({storedOn, lead}) => {
+    const cause = "This note has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const dense = {...quarantine, reason: "document-too-dense", storedOn, incident: "outbox:dense:1"};
+    let status = quarantined(dense);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
+      status = quarantined({...dense, recovery: "copied"});
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn, keptEdits: "copied" as const};
+    });
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText(`${lead}${cause} Save a recovery copy: it appears beside this note with your unsaved edits. Then move its text into new, smaller notes and continue there.`)).toBeTruthy();
+    expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+    const user = userEvent.setup();
+    await user.click(within(toast).getByRole("button", {name: "Save recovery copy"}));
+    act(() => bridge.emitWorkspaceActivity());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const copied = await within(notices).findByText(`A recovery copy with your unsaved edits is beside this note. ${cause} Move its text into new, smaller notes and continue there.`);
+    expect(within(copied.closest("li")!).queryByRole("button", {name: "Try again"})).toBeNull();
+    expect(within(copied.closest("li")!).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+  });
+
   // The release committed, then settlement could not write the file.
   it("says once that a Stop could not write the file, and its Try again writes it", async () => {
     const bridge = makeBridge(Promise.resolve(null));

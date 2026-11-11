@@ -505,6 +505,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "conflict-parent-withheld",
           canResume: false,
         }),
+        row("docs/future.md", {
+          status: "unavailable",
+          reason: "unrecognized",
+          canResume: false,
+        }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
     );
@@ -526,6 +531,7 @@ describe("LiveDocumentsDialog", () => {
       "Server copy doesn't match",
       "Server copy is missing an edit",
       "Can't resume",
+      "Needs a newer dohc",
       "Stopped",
       "Stopped",
     ]);
@@ -543,6 +549,10 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
     expect(actions("docs/held.md")).toEqual(["Stop live editing"]);
+    // A reason this build doesn't know still shows its row, with generic words and no Resume.
+    expect(screen.getByTestId("live-document-row-docs/future.md").textContent).toContain(
+      "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.");
+    expect(actions("docs/future.md")).toEqual(["Stop live editing"]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
@@ -1637,4 +1647,32 @@ it.each((["paused", "copied", "unreadable", "not-written", "cannot-write"] as co
     await user.click(save);
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "held.md", "kept-1");
   }
+});
+
+// Resume and Try again send the same refused history again, so a too-dense row offers neither.
+it("explains a note too dense to edit live and offers only what can help", async () => {
+  const h = harness();
+  const cause = "This note has grown too large to edit live with others, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit.";
+  h.load.mockResolvedValue(page([
+    row("docs/kept.md", {status: "ready", reason: "document-too-dense", quarantine: "paused", storedOn: "this-computer", incident: "kept-1"}),
+    row("docs/hosted.md", {status: "ready", reason: "document-too-dense", quarantine: "paused", storedOn: "server", incident: "kept-2"}),
+    row("docs/copied.md", {status: "ready", reason: "document-too-dense", quarantine: "copied", storedOn: "server", incident: "kept-3"}),
+    row("docs/blocked.md", {status: "unavailable", reason: "document-too-dense"}),
+    row("docs/deferred.md", {status: "unavailable", reason: "document-too-dense", deferredStop: {unsentEdits: 1, editable: false}}),
+  ]));
+  render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+  const kept = await screen.findByTestId("live-document-row-docs/kept.md");
+  expect(kept.children[1]?.textContent).toBe("Too large to edit live");
+  expect(within(kept).getByText(`New edits to this note aren't being saved to the file. ${cause} Save a recovery copy: it appears beside this note with your unsaved edits. Then move its text into new, smaller notes and continue there.`)).toBeDefined();
+  expect(actions("docs/kept.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+  expect(within(screen.getByTestId("live-document-row-docs/hosted.md")).getByText(`${cause} Save a recovery copy: it appears beside this note with your unsaved edits. Then move its text into new, smaller notes and continue there.`)).toBeDefined();
+  expect(within(screen.getByTestId("live-document-row-docs/copied.md")).getByText(`A recovery copy with your unsaved edits is beside this note. ${cause} Move its text into new, smaller notes and continue there.`)).toBeDefined();
+  const blocked = screen.getByTestId("live-document-row-docs/blocked.md");
+  expect(blocked.children[1]?.textContent).toBe("Too large to edit live");
+  expect(within(blocked).getByText(`${cause} Move its text into new, smaller notes and continue there.`)).toBeDefined();
+  expect(actions("docs/blocked.md")).toEqual(["Stop live editing"]);
+  const deferred = screen.getByTestId("live-document-row-docs/deferred.md");
+  expect(within(deferred).getByText("Live editing stopped. 1 unsent edit remains on this computer. Editing is paused.")).toBeDefined();
+  expect(within(deferred).getByText(`${cause} Move its text into new, smaller notes and continue there.`)).toBeDefined();
+  expect(actions("docs/deferred.md")).toEqual([]);
 });

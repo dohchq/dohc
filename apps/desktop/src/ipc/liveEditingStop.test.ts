@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {RELAY_ERROR_MESSAGES} from "../../../../services/sync-relay/src/errors";
-import {liveStopError, liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
+import {liveStopError, liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction, liveStopMessage} from "./liveEditingStop";
+import {DOCUMENT_TOO_DENSE_CAUSE} from "@dohc/live-session-contract/live-refusal-words";
 import {HOST_STOP_CASES, hostStopWireError} from "../testing/liveStopHost.test-helper";
 
 describe("session-host Stop contract", () => {
@@ -32,6 +33,15 @@ it("drops an unknown sessionHost while keeping the Stop answer", () => {
 it("drops a moved sessionHost whose path disagrees with the answer", () => {
   expect(liveStopHostCopy("host-moved", "running without this document (moved from wrong.md)", "old/plan.md"))
     .not.toContain("Server:");
+});
+
+it("offers nothing to try again when a note too dense to edit live holds the Stop, and says why", () => {
+  const row = {canResume: false, reason: "document-too-dense"};
+  expect(liveStopAction({code: "edits-pending"}, row)).toBe("none");
+  expect(liveStopMessage({code: "edits-pending"}, row))
+    .toBe(`Live editing didn't stop. ${DOCUMENT_TOO_DENSE_CAUSE} Save a recovery copy, then move its text into new, smaller notes and continue there.`);
+  const carried = readLiveStopRefusal(liveStopError({code: "edits-pending", pending: "document-too-dense"}));
+  expect(carried).toEqual({code: "edits-pending", pending: "document-too-dense"});
 });
 
 it("does not offer Resume for an ineligible row, even with a Resume hint", () => {

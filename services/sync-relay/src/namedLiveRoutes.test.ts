@@ -341,7 +341,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     },
   };
   const captureNative = vi.fn(async (current?: LiveObjectBinding) => population && current ? {...native, binding: {...current, selectorPaths: [current.currentPath]}} : native);
-  const sessionHostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}) => false);
+  const sessionHostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}): boolean | "document-too-dense" => false);
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
@@ -455,12 +455,14 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   return { ...state, frames, binding, post, discriminator, mint, connect, peer, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked, useCredentials };
 }
 
-it.each([false, true])("refuses a ticket for a document the session host blocked until the block lifts; link=%s", async link => {
+it.each([[false, true], [true, true], [false, "document-too-dense"], [true, "document-too-dense"]] as const)(
+  "refuses a ticket for a document the session host blocked until the block lifts; link=%s, block=%s", async (link, block) => {
   const f = await fixture(limits, link);
   const mint = vi.spyOn(f.tickets, "mint");
-  f.sessionHostBlocked.mockReturnValue(true);
+  f.sessionHostBlocked.mockReturnValue(block);
   const refused = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {discriminator: f.discriminator, objectId: binding.objectId});
-  expect([refused.status, await refused.json()]).toEqual(link ? [503, linkRefusalBody("link_live_unavailable")] : [404, {ok: false, error: "not found"}]);
+  expect([refused.status, await refused.json()]).toEqual(!link ? [404, {ok: false, error: "not found"}]
+    : block === true ? [503, linkRefusalBody("link_live_unavailable")] : [409, linkRefusalBody("link_live_too_dense")]);
   expect(f.sessionHostBlocked).toHaveBeenCalledWith({workspaceId: binding.workspaceId, objectId: binding.objectId});
   expect(mint).not.toHaveBeenCalled();
   if (link) {
@@ -736,6 +738,26 @@ it("submits an agent's live edit under its connection and link principal, never 
   expect(commit.mock.calls[0]![0]).toMatchObject({actor: agent.actor,
     expectedAuthority: {principalKind: "link", principalId: agent.principalId, grantId: agent.grantId, grantGeneration: 4}});
   expect(JSON.stringify(commit.mock.calls[0]![0].actor)).not.toContain("link-session");
+});
+
+// A link holder's edit that takes the note over the bound gets its own reason in one RESULT frame
+// before the socket closes, as every refusal ends a live session, so the browser can say why and keep
+// the person's draft. The note itself isn't blocked, so a new ticket opens the current file.
+it("refuses a link holder's edit that makes the note too dense in one result frame, then opens the note again", async () => {
+  const f = await fixture(limits, true);
+  const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+  await openProductionSync(f, socket);
+  vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockReturnValue({kind: "cut", cut: {checkpoint: {bytes: Uint8Array.of(0, 0)}, suffix: []} as unknown as LiveUpdateJournalCut});
+  const commit = vi.spyOn(f.storage, "commitLiveUpdateJournal").mockReturnValue({result: {kind: "refused", reason: "document-too-dense"}, admitted: null} as never);
+  submitUpdate(f, socket, "dense-edit", 2);
+  await socket.closed;
+  expect(commit).toHaveBeenCalledOnce();
+  expect(socket.received.filter(frame => frame.kind === "result"))
+    .toEqual([expect.objectContaining({deliveryId: "dense-edit", result: "refused", reason: "document-too-dense"})]);
+  expect(socket.received.at(-1)).toMatchObject({kind: "result", reason: "document-too-dense"});
+  const reopened = f.connect((await f.mint()).token); expect(await reopened.status).toBe(101);
+  await openProductionSync(f, reopened);
+  expect(reopened.ws.readyState).toBe(WebSocket.OPEN);
 });
 
 it("refuses an agent's ticket for another MCP address, and a token for another link, without consuming its ticket", async () => {

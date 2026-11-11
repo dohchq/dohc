@@ -67,8 +67,13 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
 const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
+const knownReasons: ReadonlySet<string> = new Set(OwnerLiveDocument.shape.reason.unwrap().options);
+// A reason this build doesn't know still shows its row; an unknown status doesn't, since Stop and Resume depend on it.
 function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
-  return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
+  return rows.flatMap(row => {
+    const parsed = schema.safeParse(row.reason === undefined || knownReasons.has(row.reason) ? row : {...row, reason: "unrecognized"});
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
   ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
@@ -368,12 +373,15 @@ export function createOwnerLiveDocumentActions<
         // Each row speaks for the server's document, never for another that had or has its path.
         const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld" && row.reason !== "document-too-dense"
+            && row.reason !== "unrecognized"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
         if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
-          ...(quarantine.earlier ? {earlier: true} : {})});
+          ...(quarantine.earlier ? {earlier: true} : {}),
+          // The note's history is refused, not one edit, so a Resume would send it again.
+          ...(quarantine.reason === "document-too-dense" ? {reason: "document-too-dense", canResume: false} : {})});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
         nextCursor: stopped.nextCursor});
