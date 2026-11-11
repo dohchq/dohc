@@ -2970,6 +2970,9 @@ describe("notices sent to you", () => {
       expect(screen.getByTestId("chats-archived-toggle").getAttribute("aria-expanded")).toBe("true");
       expect(within(screen.getByTestId("chats-archived-list")).getByTestId("chats-dm-item").dataset.channelId).toBe(DM.channelId);
       expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+      // The person can still close Archived.
+      fireEvent.click(screen.getByTestId("chats-archived-toggle"));
+      expect(screen.getByTestId("chats-archived-toggle").getAttribute("aria-expanded")).toBe("false");
     });
 
     it("opens Archived at an archived Group the invitation joined, and ends once its row is there", async () => {
@@ -3012,10 +3015,56 @@ describe("notices sent to you", () => {
         ...INVITATION_LISTING,
         relay: { ...INVITATION_LISTING.relay, received: [{ ...INVITATION_LISTING.relay.received[0]!, shareId: "share-3", channelWireId: "wire-share-3" }] },
       };
+      const synced = syncs.length;
       await answerEvery(syncs, dmSyncResult());
       await answerEvery(shares, third);
+      // The other reveal's own message sync queued behind a held one.
+      await waitFor(() => expect(syncs.length).toBeGreaterThan(synced));
+      await answerEvery(syncs, dmSyncResult());
       await waitFor(() => expect(screen.getByTestId("chats-join-shared").getAttribute("data-invitation")).toBe("share-3"));
       await act(async () => undefined);
+      expect(ends).toEqual([]);
+      // Both lists answered for the other invitation, which says nothing
+      // about this one.
+      expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+    });
+
+    it("ends the handoff once its own row is on screen, though a notice's Open then showed another invitation", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const OTHER: NoticeRow = {
+        ...MENTION, noticeId: "share:3", kind: "share-received", workspaceId: null, recipientShareId: "share-3",
+        title: "Ana shared a Group with you", target: {},
+      };
+      const notices = { ...sentNotices([OTHER]), toast: OTHER };
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE], { sentNotices: notices });
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await opening();
+      const before = shares.length;
+      fireEvent.click(await screen.findByTestId("sent-notice-toast-open"));
+      await waitFor(() => expect(shares.length).toBeGreaterThan(before));
+      const both: typeof INVITATION_LISTING = {
+        ...INVITATION_LISTING,
+        relay: { ...INVITATION_LISTING.relay, received: [...INVITATION_LISTING.relay.received, { ...INVITATION_LISTING.relay.received[0]!, shareId: "share-3", channelWireId: "wire-share-3" }] },
+      };
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, both);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+    });
+
+    it("says Chats could not be read when a share read that activity started fails", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      await waitFor(() => expect(syncs.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      // The mount's and the reveal's share reads stay out. Activity reads the
+      // channels, then the shares, and that read fails.
+      const before = shares.length;
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(shares.length).toBeGreaterThan(before));
+      await act(async () => { for (const read of shares.slice(before)) read.reject(new Error("offline")); });
+      expect(await screen.findByTestId("handoff-chats-failed")).toBeTruthy();
       expect(ends).toEqual([]);
     });
 

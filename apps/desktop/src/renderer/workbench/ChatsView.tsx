@@ -144,7 +144,7 @@ import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import { ShareRowMark } from "./shareRowMark";
-import { nextInvitationList, type InvitationProgress } from "./invitationOutcome";
+import { nextInvitationList, type InvitationLists } from "./invitationOutcome";
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -672,10 +672,12 @@ export function ChatsView(props: {
   // onInvitationRevealed then reports it handled.
   revealInvitation?: ChatsInvitation;
   onInvitationRevealed?: () => void;
-  // What Chats has seen of the newest reveal's invitation: whether a row for
-  // it is mounted, and what each list's reads since the reveal said. Sent
-  // again whenever that changes.
-  onInvitationProgress?: (shareId: string, progress: InvitationProgress) => void;
+  // What each list's reads since the newest reveal said, sent again whenever
+  // that changes.
+  onInvitationProgress?: (shareId: string, lists: InvitationLists) => void;
+  // While a reveal is owed, each row that stands for a share reports its share
+  // id when it mounts, and again for each newer reveal.
+  onShareRowMounted?: (shareId: string) => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -953,7 +955,7 @@ export function ChatsView(props: {
   // the reveal records whether it answered; nothing waits on a particular
   // read. `owedFrom` holds the share ticket and message pass the reveal began
   // at, so a read already running before it counts for nothing.
-  const [owed, setOwed] = useState<({ reveal: ChatsInvitation } & InvitationProgress) | null>(null);
+  const [owed, setOwed] = useState<({ reveal: ChatsInvitation } & InvitationLists) | null>(null);
   const owedFrom = useRef<{ shareTicket: number; dmPass: number } | null>(null);
   const dmPassClock = useRef(0);
   const noteListing = useCallback((list: "shares" | "dms", startedAt: number, listed: boolean) => {
@@ -1339,6 +1341,9 @@ export function ChatsView(props: {
               .catch(() => null);
             if (seed !== null && isCurrent()) {
               commitShareListing(seedTicket, session, seed, { background: true });
+            } else if (isCurrent() && session === sessionGeneration.current) {
+              // Not committed, but a reveal still learns the read failed.
+              noteListing("shares", seedTicket, false);
             }
           } else {
             const sharesTicket = takeCommitTicket();
@@ -3689,28 +3694,27 @@ export function ChatsView(props: {
   useEffect(() => {
     if (revealInvitation === undefined) return;
     owedFrom.current = { shareTicket: commitTicket.current, dmPass: dmPassClock.current };
-    setOwed({ reveal: revealInvitation, rowMounted: false, shares: "waiting", dms: "waiting" });
+    setOwed({ reveal: revealInvitation, shares: "waiting", dms: "waiting" });
     void refreshShares();
     void refreshDms("open");
   }, [refreshDms, refreshShares, revealInvitation]);
-  const { onInvitationProgress } = props;
+  const { onInvitationProgress, onShareRowMounted } = props;
   const owedReveal = owed?.reveal ?? null;
-  // A row reports itself (ShareRowMark), so `rowMounted` means the row is in
-  // the mounted list.
+  // A row reports itself (ShareRowMark), so a report means the row is in the
+  // mounted list. The newest reveal's row is scrolled into view.
   const reportRow = useMemo(() => {
-    if (owedReveal === null || onInvitationProgress === undefined) return null;
-    let reported = false;
+    if (owedReveal === null || onShareRowMounted === undefined) return null;
+    let scrolled = false;
     return (shareId: string, row: HTMLElement) => {
-      if (shareId !== owedReveal.shareId || reported) return;
-      reported = true;
+      onShareRowMounted(shareId);
+      if (shareId !== owedReveal.shareId || scrolled) return;
+      scrolled = true;
       row.scrollIntoView({ block: "nearest" });
-      setOwed((current) => (current?.reveal === owedReveal && !current.rowMounted ? { ...current, rowMounted: true } : current));
     };
-  }, [owedReveal, onInvitationProgress]);
+  }, [owedReveal, onShareRowMounted]);
   useEffect(() => {
     if (owed === null) return;
-    const { reveal, ...progress } = owed;
-    onInvitationProgress?.(reveal.shareId, progress);
+    onInvitationProgress?.(owed.reveal.shareId, { shares: owed.shares, dms: owed.dms });
   }, [onInvitationProgress, owed]);
   // An archived Group or conversation mounts its row only while Archived is
   // open, so a reveal of one opens Archived, in this render so the row mounts
@@ -3722,7 +3726,11 @@ export function ChatsView(props: {
     return overview.status === "ready" &&
       overview.channels.some((channel) => archivedIds.has(channel.id) && groupShareId(channel) === shareId);
   }, [archivedIds, dms, groupShareId, overview, owedReveal]);
-  if (revealArchived && !archiveOpen) setArchiveOpen(true);
+  const [archiveOpenedFor, setArchiveOpenedFor] = useState<ChatsInvitation | null>(null);
+  if (revealArchived && archiveOpenedFor !== owedReveal) {
+    setArchiveOpenedFor(owedReveal);
+    setArchiveOpen(true);
+  }
   const setChatArchived = useCallback(
     async (channelId: string, label: string, archived: boolean): Promise<void> => {
       try {

@@ -21,6 +21,8 @@ describe("invitationOutcome", () => {
     [false, "failed", "listed", true, true, "failed"],
     [false, "waiting", "waiting", false, false, "off"],
     [false, "listed", "listed", false, true, "off"],
+    // A notice's Open revealed another invitation, so this one's lists are
+    // never read again, but its row mounted.
     [true, "waiting", "waiting", true, false, "shown"],
     [true, "failed", "failed", true, true, "shown"],
     [true, "listed", "listed", false, false, "shown"],

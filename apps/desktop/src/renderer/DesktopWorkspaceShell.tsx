@@ -275,7 +275,7 @@ import type {
   ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
-import { INVITATION_WAIT_MS, invitationOutcome, type InvitationProgress } from "./workbench/invitationOutcome";
+import { INVITATION_WAIT_MS, invitationOutcome, type InvitationLists } from "./workbench/invitationOutcome";
 import {
   parseTab,
   TAB_KINDS,
@@ -3300,12 +3300,13 @@ export function DesktopWorkspaceShell(props: {
   const [handoffChats, setHandoffChats] = useState<{
     shareId: string;
     attempt: number;
-    progress: InvitationProgress | null;
+    rowMounted: boolean;
+    lists: InvitationLists | null;
     late: boolean;
   } | null>(null);
   const handoffAttempts = useRef(0);
   const startHandoffAttempt = (shareId: string) =>
-    setHandoffChats({ shareId, attempt: ++handoffAttempts.current, progress: null, late: false });
+    setHandoffChats({ shareId, attempt: ++handoffAttempts.current, rowMounted: false, lists: null, late: false });
   const openHandoffInChats = (invitation: ChatsInvitation) => {
     if (ownWorkspaceForChats === null) return;
     if (ownWorkspaceForChats.workspaceId !== workspaceId) {
@@ -3316,11 +3317,16 @@ export function DesktopWorkspaceShell(props: {
     startHandoffAttempt(invitation.shareId);
     setOpenedFromLink({ to: "chats-invitation", ...invitation });
   };
-  // Chats reports the newest reveal, which a notice's Open can point at
-  // another invitation, so only this handoff's invitation counts.
-  const handleInvitationProgress = useCallback((shareId: string, progress: InvitationProgress) => {
+  // Chats reports the newest reveal's lists, and a notice's Open can point
+  // that at another invitation, so only this handoff's invitation counts. A
+  // row for it counts whichever reveal is newest.
+  const handleInvitationProgress = useCallback((shareId: string, lists: InvitationLists) => {
     if (handoffInChats.current?.shareId !== shareId) return;
-    setHandoffChats((current) => current?.shareId === shareId ? { ...current, progress } : current);
+    setHandoffChats((current) => current?.shareId === shareId ? { ...current, lists } : current);
+  }, []);
+  const handleShareRowMounted = useCallback((shareId: string) => {
+    if (handoffInChats.current?.shareId !== shareId) return;
+    setHandoffChats((current) => current?.shareId === shareId && !current.rowMounted ? { ...current, rowMounted: true } : current);
   }, []);
   const handoffAttempt = handoffChats?.attempt;
   useEffect(() => {
@@ -3333,7 +3339,11 @@ export function DesktopWorkspaceShell(props: {
   // With chats off, the panel shows why instead of the list, so nothing in
   // Chats can answer and the card says the same at once.
   const handoffOutcome = handoffChats === null ? null : invitationOutcome({
-    progress: handoffChats.progress,
+    progress: {
+      rowMounted: handoffChats.rowMounted,
+      shares: handoffChats.lists?.shares ?? "waiting",
+      dms: handoffChats.lists?.dms ?? "waiting",
+    },
     chatsOn: !(captureDecided && !captureAvailable),
     waitedTooLong: handoffChats.late,
   });
@@ -6060,6 +6070,7 @@ export function DesktopWorkspaceShell(props: {
     suspendPolling: chatsTabIsLive,
     ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
     onInvitationProgress: handleInvitationProgress,
+    onShareRowMounted: handleShareRowMounted,
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,

@@ -14,6 +14,11 @@ export interface InvitationProgress {
   dms: InvitationList;
 }
 
+// What each list's reads since the reveal said, which Chats reports per
+// reveal. Whether the row is mounted is reported by share id instead, so a
+// newer reveal doesn't hide the handoff's own row.
+export type InvitationLists = Pick<InvitationProgress, "shares" | "dms">;
+
 export type InvitationOutcome = "shown" | "off" | "failed" | "absent" | "late" | "pending";
 
 // How long a handoff may stay on "Opening share…". A healthy reveal answers
