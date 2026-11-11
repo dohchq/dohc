@@ -34,13 +34,14 @@ export function liveChangeAlreadyShown(action: LiveChangeAction, status: LiveDoc
  * Settles a change an interrupted action left pending, from the relay's status
  * now: "applied", "refused", or null to wait for more evidence.
  *
- * A change is applied only when the relay shows its result and did not when it
- * began, so it never takes credit for a state another change made. `paused`
- * proves nothing: it is also a Pause, or a Stop the relay is still finishing.
- * `status` is undefined when the relay's list did not include the document;
- * with `complete`, that list was whole, so the document is not there.
- * `stopOwed` says this computer still holds the document's Stop request and
- * sends it again.
+ * No relay status proves which actor caused it: a Stop, ended access and
+ * account deletion all retire a document, and Resume, a share's enrollment
+ * and its Try again all make one ready. So only a Stop this computer still
+ * owes is credited with `retired`; it waits on any other status while Stop
+ * reconciliation sends it again. Every other change is refused rather than
+ * left pending, since nothing later would settle it. `status` is undefined
+ * when the relay's list did not include the document; with `complete`, that
+ * list was whole, so the document is not there.
  */
 export function liveChangeOutcome(
   pending: Pick<PendingLiveChange, "action" | "before">,
@@ -50,8 +51,6 @@ export function liveChangeOutcome(
   const now = status ?? (facts.complete ? "absent" : undefined);
   if (now === undefined) return null;
   if (liveChangeAlreadyShown(pending.action, pending.before)) return "refused";
-  if (liveChangeAlreadyShown(pending.action, now)) return "applied";
-  if (now === "paused") return null;
-  if (pending.action === "stopped" && facts.stopOwed) return null;
-  return "refused";
+  if (pending.action === "resumed" || !facts.stopOwed || now === "absent") return "refused";
+  return now === "retired" ? "applied" : null;
 }
