@@ -361,4 +361,15 @@ describe("when the Collection's rules change",()=>{
     expect(screen.queryByText("Loading view…")).toBeNull();
     await waitFor(()=>expect(screen.getByText("First task")).toBe(card));
   });
+  it("fills in an open record's changed values once a board opens afresh",async()=>{
+    const invoke=vi.fn(async(request:TransactionalInvoke)=>answer(request,"First task"));
+    const result=setup(invoke);
+    await screen.findByText("First task");
+    fireEvent.click(screen.getByRole("button",{name:"Show 1"}));
+    const details=screen.getByRole("dialog",{name:"Record details"});
+    expect(within(details).getByText("Todo")).toBeTruthy();
+    const regrouped=revision(2,dataset.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field));
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
+    await waitFor(()=>expect(within(details).getByText("Todo")).toBeTruthy());
+  });
 });

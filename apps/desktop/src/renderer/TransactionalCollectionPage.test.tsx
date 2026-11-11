@@ -1257,4 +1257,26 @@ describe("when the Collection's fields change", () => {
     await act(async () => byId.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
     expect(within(dialog).getByText("five")).toBeTruthy();
   });
+
+  it("keeps a form for a create action that takes no fields open", async () => {
+    const description = dataset(); description.operations.find(entry => entry.operationId === create)!.fieldIds = [];
+    setup({ dataset: description }); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    await act(async () => undefined);
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  });
+
+  it("saves a value emptied under a field's old type as that field's empty value under its new one", async () => {
+    const description = dataset(); description.operations.find(entry => entry.operationId === create)!.fieldIds.push(secret);
+    const result = setup({ dataset: description }); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.change(screen.getByLabelText("Private note"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText("Private note"), { target: { value: "" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => { operation(next, create).fieldIds.push(secret); retype(secret, "number")(next); })} />);
+    expect(screen.getByLabelText<HTMLInputElement>("Private note").readOnly).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
+    expect(result.invoke.mock.calls.find(([request]) => request.operationId === create)![0]).toMatchObject({ revision: 2, input: { values: { [name]: "Bob", [secret]: null } } });
+  });
 });

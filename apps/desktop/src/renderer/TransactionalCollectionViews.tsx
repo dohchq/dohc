@@ -119,7 +119,8 @@ export function TransactionalCollectionViews(props: Props) {
     const { onError, onBusy } = latest.current;
     setLoaded(null); setBusy(true); onBusy(true); reading.current = true;
     void readView(abort.signal).then(next => {
-      if (request===current.current&&!abort.signal.aborted) { setLoaded(next); latest.current.onLoaded(); }
+      // Record details, open over a view that opens afresh after a change to its fields, take its new values.
+      if (request===current.current&&!abort.signal.aborted) { setLoaded(next); latest.current.onLoaded(); latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows)); }
     }).catch(error => {
       if(request===current.current&&!abort.signal.aborted) onError("dohc could not open this view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
     }).finally(()=>{if(request===current.current&&!abort.signal.aborted){reading.current=false;setBusy(false);onBusy(false);}});

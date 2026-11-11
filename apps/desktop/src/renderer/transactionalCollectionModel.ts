@@ -72,13 +72,20 @@ export function fieldShape(field: TransactionalField): string {
  * any field, and a choice fits while it is still one of the options.
  */
 export function cannotTake(typedUnder: TransactionalField, now: TransactionalField | undefined, value: AppBackendJson): boolean {
-  if (value === null || value === "" || (Array.isArray(value) && value.length === 0)) return false;
+  if (isEmptyValue(value)) return false;
   if (!now || now.type !== typedUnder.type || JSON.stringify(now.relation ?? null) !== JSON.stringify(typedUnder.relation ?? null)) return true;
   if (now.type !== "select" && now.type !== "multi-select") return false;
   return (Array.isArray(value) ? value : [value]).some(option => typeof option !== "string" || !now.options?.includes(option));
 }
 export function initialValue(field: TransactionalField): AppBackendJson {
-  return field.default ?? (field.type === "checkbox" ? false : field.type === "multi-select" || field.relation?.many ? [] : null);
+  return field.default ?? emptyValue(field);
+}
+/** The value a field holds when nothing is chosen or typed. */
+export function emptyValue(field: TransactionalField): AppBackendJson {
+  return field.type === "checkbox" ? false : field.type === "multi-select" || field.relation?.many ? [] : null;
+}
+export function isEmptyValue(value: AppBackendJson): boolean {
+  return value === null || value === "" || (Array.isArray(value) && value.length === 0);
 }
 export function inputProblem(field: TransactionalField, value: AppBackendJson): string | null {
   if (value === null || value === "") return field.required ? `Enter ${field.name}.` : null;

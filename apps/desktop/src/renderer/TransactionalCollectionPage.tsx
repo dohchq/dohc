@@ -17,7 +17,7 @@ import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelation
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
-  cannotTake, display, fieldShape, initialValue, inputProblem, isGeneratedRecordIdField, object, parsePage, supportsInput, supportsSort,
+  cannotTake, display, emptyValue, fieldShape, initialValue, inputProblem, isEmptyValue, isGeneratedRecordIdField, object, parsePage, supportsInput, supportsSort,
   type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField, type TransactionalPage, type TransactionalRow,
 } from "./transactionalCollectionModel";
 
@@ -371,7 +371,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const field = current(fieldId), typed = draft[fieldId];
       if (!typed) return field ? [{ field, value: untouched(field), changed: false }] : [];
       const changed = cannotTake(typed.under, field, typed.value);
-      return field || changed ? [{ field: field ?? typed.under, value: typed.value, changed }] : [];
+      // A value emptied under a field's old definition is empty in the new one's own way, such as null for a number.
+      const value = field && !changed && isEmptyValue(typed.value) && fieldShape(field) !== fieldShape(typed.under) ? emptyValue(field) : typed.value;
+      return field || changed ? [{ field: field ?? typed.under, value, changed }] : [];
     });
   })();
   const typed = form.some(({ field, value, changed }) => draft[field.fieldId] !== undefined && (changed || JSON.stringify(value) !== JSON.stringify(untouched(field))));
@@ -483,8 +485,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }, [props.recordsChanged, busy, visualBusy, resourceBusy]);
 
   function closeEditor(): void { setEditor(null); setInvalid({}); }
-  // An edit whose field the rules dropped, with nothing typed, has nothing left to show.
-  const emptyForm = editor !== null && form.length === 0;
+  // An edit whose field the rules dropped, with nothing typed, has nothing left to show. A create action may take no fields.
+  const emptyForm = editor?.kind === "edit" && form.length === 0;
   useEffect(() => { if (emptyForm) closeEditor(); }, [emptyForm]);
   // A cleared value's field takes focus, now an ordinary input.
   const refocus = useRef<string | null>(null);
