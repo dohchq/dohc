@@ -431,10 +431,10 @@ export function MessageReactions(props: {
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
-          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
+          className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[12px] leading-none transition-colors duration-75 disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
             group.mine
               ? "border-accent/60 bg-accent/15 text-ink"
-              : "border-line bg-bg text-muted hover:border-ink/40 hover:text-ink"
+              : "border-transparent bg-panel-2 text-muted hover:border-line hover:text-ink"
           }`}
         >
           <span aria-hidden>{group.emoji}</span>
@@ -495,15 +495,17 @@ const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
 // A narrow row has no room beside its name, so its hover bar rises above it.
+// A row's fill hangs outside its text: the margin and padding add up to the
+// divider's inset, so faces and day lines keep one left edge.
 export const DENSITY = {
   stream: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-5", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-5",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
   },
   thread: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-4", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-4",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-3",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
   },
 } as const;
 
@@ -838,7 +840,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         ) : null}
         <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div
-          className={`group relative grid ${sizes.row} ${continues ? "pt-px" : "pt-1.5"} pb-1 ${
+          // A new author's row stands 4px off the run before it, outside its fill.
+          className={`group relative grid rounded-md ${sizes.row} ${continues ? "py-0.5" : "mt-1 py-1"} ${
             open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover keyboard:focus-within:bg-hover"
           }`}
         >
