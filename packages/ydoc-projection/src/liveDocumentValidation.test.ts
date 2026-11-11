@@ -386,7 +386,7 @@ describe('public Markdown schema', () => {
       doc.getMap('frontmatter').set('values', new Array(nodes - 3).fill(0))
     })
     accepted(fixture(262_144))
-    refused(fixture(262_145), 'document-too-dense')
+    refused(fixture(262_145), 'capacity-refused')
   }, 60_000)
   it.each(['# Heading', '```\nCode\n```'])('preserves valid empty text after deleting %s', markdown => {
     const checkpoint = encode(markdown, doc => {
@@ -406,7 +406,7 @@ describe('public Markdown schema', () => {
       heading.insert(1, [new Y.XmlText('x')])
       heading.setAttribute('level', 'hidden')
     })
-    refused(checkpoint, 'document-too-dense')
+    refused(checkpoint, 'capacity-refused')
   }, 60_000)
   it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcFrontmatterSource', 1]])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
@@ -455,12 +455,12 @@ describe('public Markdown schema', () => {
     refused(encode('Text', doc => ((doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText).format(0, 1, { unknown: {} })), 'projection-mutated')
   })
   it('accepts a full 2 MiB file as one text run, and refuses one UTF-8 byte over', () => {
-    // The limit counts the projected file, final newline included.
+    // The limit counts the projected file, final newline included. Removing text brings a note back under it, so it isn't too dense.
     const limit = 2 * 1024 * 1024
     expect(accepted(encode('x'.repeat(limit - 1))).projectedMarkdownByteLength).toBe(limit)
-    refused(encode('x'.repeat(limit)), 'document-too-dense')
+    refused(encode('x'.repeat(limit)), 'capacity-refused')
     expect(accepted(encode(`${'é'.repeat(limit / 2 - 1)}x`)).projectedMarkdownByteLength).toBe(limit)
-    refused(encode('é'.repeat(limit / 2)), 'document-too-dense')
+    refused(encode('é'.repeat(limit / 2)), 'capacity-refused')
   }, 60_000)
   it('accepts signed int64 shared values and escaped sentinel keys', () => {
     for (const markdown of [
@@ -476,7 +476,7 @@ describe('public Markdown schema', () => {
       doc.getMap('frontmatter').set('nested', value)
     })
     accepted(fixture(128))
-    refused(fixture(129), 'document-too-dense')
+    refused(fixture(129), 'capacity-refused')
   })
   it('counts 262144 actual public nodes including containers and text runs', () => {
     const fixture = (nodes: number) => encode('Text', doc => {
@@ -484,7 +484,7 @@ describe('public Markdown schema', () => {
       doc.getMap('frontmatter').set('values', new Array(nodes - 4).fill(0))
     })
     accepted(fixture(262_144))
-    refused(fixture(262_145), 'document-too-dense')
+    refused(fixture(262_145), 'capacity-refused')
   }, 60_000)
 })
 
@@ -540,7 +540,7 @@ describe('real scratch finalization', () => {
       try { final = cut.cut.finishAfterProjection() }
       finally { cut.cut.document.destroy() }
       if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
-      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'registration-input' })
+      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
       sawFinalizerCapacity = true
       break
     }
@@ -558,7 +558,7 @@ describe('real scratch finalization', () => {
       try { final = cut.cut.finishAfterProjection() }
       finally { cut.cut.document.destroy() }
       if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
-      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'registration-input' })
+      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
       sawFinalizerCapacity = true
       break
     }
@@ -861,8 +861,8 @@ describe('private journal refusal attribution and cleanup', () => {
       result.cut.document.destroy()
       if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
       const prefix = createLiveMarkdownRegistrationValidator(policy)(input(call.checkpoint))
-      if (prefix.kind !== 'refused' || prefix.reason !== 'document-too-dense') continue
-      expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'admitted-cut' })
+      if (prefix.kind !== 'refused' || prefix.reason !== 'capacity-refused') continue
+      expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
       witnessed = true
       break
     }
@@ -896,7 +896,7 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     const probe = observeJournalCuts()
     const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
     expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused',
-      reason: invalidPrefix ? 'invalid-schema' : 'document-too-dense', source: invalidPrefix ? 'admitted-cut' : 'final' })
+      reason: invalidPrefix ? 'invalid-schema' : 'capacity-refused', source: invalidPrefix ? 'admitted-cut' : 'final' })
     expect(probe.spy).toHaveBeenCalledOnce()
     expect(registration).toHaveBeenCalledOnce()
     expect(probe.scratches).toHaveLength(0)
@@ -958,10 +958,10 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     expect(result.kind).toBe('accepted')
     if (result.kind !== 'accepted') return
     const registration = createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate))
-    expect(registration).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'registration-input' })
+    expect(registration).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
     expect(createLiveMarkdownJournalValidator(policy)({
       ...input(result.evidence.stateUpdate), suffix: [], candidate: new Uint8Array([0, 0]),
-    })).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'admitted-cut' })
+    })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
 
     // Each shape must charge its own work under the same policy.
     const checkpoint = ordered.validateRegistrationCutForProjection({
@@ -979,7 +979,7 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
 
   it('applies the final public body limit and repaired attribute domains to journal cuts', () => {
     const oversized = encode('x'.repeat(2 * 1024 * 1024 + 1))
-    expect(journal({ ...input(), suffix: [], candidate: oversized })).toEqual({ kind: 'refused', reason: 'document-too-dense', source: 'final' })
+    expect(journal({ ...input(), suffix: [], candidate: oversized })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'final' })
     const malformed = encode('Text', doc => (doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'value'))
     expect(journal({ ...input(), suffix: [], candidate: malformed })).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
   }, 60_000)

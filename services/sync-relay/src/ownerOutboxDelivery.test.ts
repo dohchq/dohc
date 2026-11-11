@@ -319,6 +319,14 @@ it.each([undefined, {agentId: "trip-agent", onBehalfOf: null, depth: 0}])("uses 
   expect(changed.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
+// The drain counts base64 characters, a third more than the update, so the profile's budget must carry one update at the frame limit.
+it("drains one update at the frame limit within the self-host profile's byte budget", async () => {
+  const profile = selfHostLiveProfile(), update = Buffer.alloc(profile.frames.receive.maxUpdateBytes, 23);
+  const f = fixture(1, profile.service.activation.maxBytesPerDrain, undefined, undefined, true, undefined, [1], update);
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: false});
+  expect(f.receipts).toHaveLength(1);
+});
+
 it("retains configured entry and byte limits without acknowledging unread updates", async () => {
   const one = fixture(1);
   expect(await one.run()).toEqual({admittedEntries: 1, hasMore: true});
@@ -782,7 +790,7 @@ it("admits an owner-outbox entry when its admitted cut exceeds the former activa
     objectId: f.binding.objectId, lineageClaimId: f.binding.lineageClaimId},
     currentPath: f.binding.currentPath, checkpoint, suffix: [], candidate: Uint8Array.of(0, 0)};
   expect(createLiveMarkdownJournalValidator({...profile.validation, maxIndexOperations: 10_000_000})(input))
-    .toMatchObject({kind: "refused", reason: "document-too-dense", source: "admitted-cut"});
+    .toMatchObject({kind: "refused", reason: "capacity-refused", source: "admitted-cut"});
   f.storage.readLiveUpdateJournalCut = () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array(checkpoint)}, suffix: []}});
   const validate = vi.fn(config.validateAdmission);
   expect(await f.run({admission: {...f.admission, validate}})).toEqual({admittedEntries: 1, hasMore: false});

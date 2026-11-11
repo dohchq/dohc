@@ -45,7 +45,8 @@ export type OrdinaryActivationValidator=(work:OrdinaryActivationWork,signal?:Abo
 export function validateOrdinaryActivation(work:OrdinaryActivationWork,policy:OrderedLiveUpdateCutPolicy):Exclude<OrdinaryActivationValidation,{kind:"capacity-refused"|"retry"}>{
   const {document,currentPath,baselineBytes}=work,validateRegistration=createLiveMarkdownRegistrationValidator(policy);
   const base=validateRegistration({document,currentPath,checkpoint:baselineBytes});
-  if(base.kind!=="accepted")return base.reason==="document-too-dense"?{kind:"document-too-dense"}:{kind:"refused",message:"Native activation does not match the ordinary source."};
+  if(base.kind!=="accepted")return base.reason==="document-too-dense"?{kind:"document-too-dense"}:
+    base.reason==="capacity-refused"?{kind:"refused",message:"Ordinary activation exceeds its configured validation budget."}:{kind:"refused",message:"Native activation does not match the ordinary source."};
   const baseline={checkpoint:{updateDigest:base.evidence.checkpoint.updateDigest,ranges:base.evidence.checkpoint.ranges},
     projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength};
   if(!work.cut)return {kind:"accepted",baseline};
@@ -80,9 +81,9 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
     projected&&=index===next++&&(index<start||projects(evidence));
     if(keep.has(index))projections.push({index,projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
   }});
-  // The note's weight never drops, so with the full state within the bound every prefix is too: a too-dense answer
-  // here means the prefixes ran out the budget they share. That fails activation as before; the note needn't be split.
-  requireValue(result.kind==="accepted"||result.reason!=="document-too-dense","Ordinary activation history exceeds its configured validation budget.");
+  // The note's weight never drops, so with the full state within the bound every prefix is too: a too-dense or
+  // capacity answer here means the prefixes ran out the budget they share. That fails activation as before; the note needn't be split.
+  requireValue(result.kind==="accepted"||(result.reason!=="document-too-dense"&&result.reason!=="capacity-refused"),"Ordinary activation history exceeds its configured validation budget.");
   requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
   const captured=full.evidence,ordinary=result.evidence;
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&

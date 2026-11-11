@@ -1064,7 +1064,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     ), 'invalid-update', { kind: 'input', role: 'checkpoint' })
     refused(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint: valid }, highPolicy({ maxStructVisits: 1 }),
-    ), 'capacity-refused', { kind: 'input', role: 'checkpoint' })
+    ), 'document-too-dense', { kind: 'input', role: 'checkpoint' })
     const acceptedCut = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint: valid }, highPolicy(),
     ))
@@ -1517,13 +1517,15 @@ describe('validateOrderedLiveUpdateCut', () => {
       expect(validateOrderedLiveUpdateCut(
         { mode: 'registration', checkpoint }, highPolicy({ [field]: 3 }),
       ).kind).toBe('accepted')
+      // A note's structs never drop, so running out of struct visits is the only budget that means too dense.
+      const overrun = field === 'maxStructVisits' ? 'document-too-dense' : 'capacity-refused'
       refused(validateOrderedLiveUpdateCut(
         { mode: 'registration', checkpoint }, highPolicy({ [field]: 2 }),
-      ), 'capacity-refused', { kind: 'final' })
+      ), overrun, { kind: 'final' })
       resetProbe()
       refused(validateOrderedLiveUpdateCut(
         { mode: 'registration', checkpoint }, highPolicy({ [field]: 1 }),
-      ), 'capacity-refused', { kind: 'input', role: 'checkpoint' })
+      ), overrun, { kind: 'input', role: 'checkpoint' })
       expect(yjsProbe.documentConstructions).toBe(0)
       expect(yjsProbe.readUpdateV2Calls).toBe(0)
     }
@@ -2426,7 +2428,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     resetProbe()
     const rejection = refused(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy({ maxStructVisits: 1 }),
-    ), 'capacity-refused', { kind: 'input', role: 'checkpoint' })
+    ), 'document-too-dense', { kind: 'input', role: 'checkpoint' })
     expect(rejection.usage.structVisits).toBe(1)
     expect(rejection.usage.decoderPasses).toBe(1)
     expect(yjsProbe.documentConstructions).toBe(0)

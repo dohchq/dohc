@@ -89,7 +89,7 @@ it('caps active lexical output at 2 MiB while allowing a stale historical source
       const result = validate({ document: { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: hash('lineage') }, currentPath: 'owner.md', checkpoint: Y.encodeStateAsUpdate(doc) })
       expect(result.kind).toBe(stale ? 'accepted' : 'refused')
       if (result.kind === 'accepted') expect(result.evidence.projectedMarkdown).toBe(seed.canonical)
-      else expect(result.reason).toBe('document-too-dense')
+      else expect(result.reason).toBe('capacity-refused')
     } finally { doc.destroy() }
   }
 })

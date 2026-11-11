@@ -16,8 +16,9 @@ it("answers document-too-dense for a capture too dense to check live", () => {
   const work = {document, currentPath: "docs/a.md", baselineBytes: state("A **bold** paragraph\n")};
   expect(validateOrdinaryActivation(work, WORKER_LIVE_VALIDATION_POLICY).kind).toBe("accepted");
   expect(validateOrdinaryActivation(work, {...WORKER_LIVE_VALIDATION_POLICY, maxStructVisits: 1})).toEqual({kind: "document-too-dense"});
+  // Markdown over the live limit shrinks when text is removed, so it's a budget, not a note too dense.
   expect(validateOrdinaryActivation({...work, baselineBytes: state("x".repeat(2 * 1024 * 1024))}, WORKER_LIVE_VALIDATION_POLICY))
-    .toEqual({kind: "document-too-dense"});
+    .toEqual({kind: "refused", message: "Ordinary activation exceeds its configured validation budget."});
 });
 
 // Every prefix of an activation's history shares one work budget, so a long history runs it out for a note well within the

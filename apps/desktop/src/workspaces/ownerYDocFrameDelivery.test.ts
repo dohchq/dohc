@@ -110,12 +110,12 @@ it.each(["provenance-refused", "capacity-refused", "invalid-update", "document-t
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason});
 });
 
-// No admitted note can take an edit over the update limit, so it stops as too dense rather than retrying unseen.
-it("freezes an edit over the update limit as too dense without sending it", async () => {
+// A frame can't carry an edit over the update limit, so it stops for visible recovery rather than retrying unseen.
+it("keeps an edit over the update limit as a capacity refusal without sending it", async () => {
   const f = fixture(), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   const update = new Uint8Array(frames.receive.maxUpdateBytes + 1);
-  expect(await f.delivery.deliver(fresh.authority, {...envelope, update, updateDigest: hash(update)})).toEqual({kind: "quarantine", reason: "document-too-dense"});
+  expect(await f.delivery.deliver(fresh.authority, {...envelope, update, updateDigest: hash(update)})).toEqual({kind: "quarantine", reason: "capacity-refused"});
   expect(f.submit).not.toHaveBeenCalled();
 });
 

@@ -189,6 +189,8 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
+  // The activation driver's capture budget, so a saved activation it wrote reads back here.
+  maxCaptureBytes: number;
   host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits" | "stop">;
 }) {
   const {storage, history, host} = options;
@@ -212,7 +214,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : block === "document-too-dense" ? "document-too-dense" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
-    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
+    const saved = activation.read(row.workspaceId, row.path, options.maxCaptureBytes, row.objectId);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
@@ -224,7 +226,7 @@ export function createServiceHostEnrollmentRoutes(options: {
   // the enrollment transaction, which checks the hold again there.
   function heldActivation(row: ServiceHostEnrollment): ServiceHostHeldActivation | undefined {
     if (host.blocked(row) !== "live-edit-unadmitted") return undefined;
-    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId), identity = storage.getWorkspaceIdentity(row.workspaceId);
+    const saved = activation.read(row.workspaceId, row.path, options.maxCaptureBytes, row.objectId), identity = storage.getWorkspaceIdentity(row.workspaceId);
     if (!saved || !identity) return undefined;
     return {activationId: saved.activationId, replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity,
       assertHeld() {if (host.blocked(row) !== "live-edit-unadmitted") throw relayError("conflict", HELD_CHANGED);}};

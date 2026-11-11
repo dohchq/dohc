@@ -80,7 +80,7 @@ it.each(Object.entries(longValidations))("accepts 5000 mixed paragraphs for %s v
 it("refuses 25000 bold paragraphs by the struct budget before exhausting the worker heap", async () => {
   const {pool, input} = fixture(), checkpoint = longCheckpoint(25000, false);
   expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
-    .toMatchObject({kind: "refused", reason: "capacity-refused"});
+    .toMatchObject({kind: "refused", reason: "document-too-dense"});
 }, 30_000);
 
 

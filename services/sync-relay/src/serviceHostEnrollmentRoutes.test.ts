@@ -64,7 +64,7 @@ async function fixture() {
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
-  const handle = createServiceHostEnrollmentRoutes({storage: f.storage, history, host, resolveActor});
+  const handle = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage, history, host, resolveActor});
   const input = {workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId, path: binding.currentPath, nowMs: 10, guard() {}};
   const request = (method = "GET", body?: unknown, headers: Record<string,string> = {}, suffix = "") => new Request(`https://relay.test/sync/${scope.workspaceId}/live-host${suffix}`,
     {method, headers: {authorization: "Bearer account-token", ...(body === undefined ? {} : {"content-type": "application/json"}), ...headers}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});

@@ -11,6 +11,8 @@ import {parseLiveRestoreConfig} from "./liveRestorePreparation";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig";
 import {parseServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
+import {validateOrdinaryActivation, type OrdinaryActivationHistory} from "./storage/ordinaryActivationValidation";
+import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveGatewayLimits} from "../../share-web/src/liveGateway";
 import {parseNamedLiveBrowserClientLimits} from "../../share-web/src/namedLiveBrowserClient";
 
@@ -81,4 +83,17 @@ it("carries the largest note the live bound admits through every transfer limit"
     hostVector: edge.vector, missingStateUpdate: edge.state}, profile.frames.receive);
   expect(sync.byteLength).toBeLessThanOrEqual(profile.frames.maxAssemblyBytes);
   expect(over.state.byteLength).toBeLessThanOrEqual(profile.frames.receive.maxUpdateBytes);
+  // Activation's history read charges the baseline and the source's write (inline Markdown at most), then its
+  // validation charges the full state and the baseline again, all from one drain budget.
+  const registered = validate({document, currentPath: "a.md", checkpoint: edge.state});
+  if (registered.kind !== "accepted") throw new Error("edge note refused");
+  const source = {currentPath: "a.md", sourceDigest: registered.evidence.projectedMarkdownSha256,
+    sourceByteLength: registered.evidence.projectedMarkdownByteLength} as unknown as NativeOwnerActivationSource;
+  const activate = (maxBytesPerDrain: number) => validateOrdinaryActivation({document, currentPath: "a.md", baselineBytes: edge.state,
+    cut: {source, fullState: edge.state, maxBytesPerDrain, history: {updates: [edge.state], from: null, wanted: [], settled: null,
+      charged: size + Buffer.byteLength(paragraph.repeat(1204))} as unknown as OrdinaryActivationHistory}}, profile.validation);
+  // At the profile's budget bytes no longer stop it. The history check's shared work budget still does, as on main.
+  const bytes = {kind: "refused", message: "Ordinary activation history exceeds its configured byte budget."};
+  expect(activate(4 * 1024 * 1024)).toEqual(bytes);
+  expect(activate(profile.service.activation.maxBytesPerDrain)).not.toEqual(bytes);
 }, 120_000);

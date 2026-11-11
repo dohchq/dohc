@@ -862,7 +862,8 @@ export function LiveDocumentsDialog({
                 {tooDense(row) && row.quarantine === undefined && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">{DOCUMENT_TOO_DENSE_CAUSE} {DOCUMENT_TOO_DENSE_NEXT}</p>
                 ) : null}
-                {row.reason === "unrecognized" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                {/* A local too-dense pause replaces the reason, so an unknown status still asks for an update. */}
+                {(row.reason === "unrecognized" || row.status === "unrecognized") && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">{UNRECOGNIZED_REASON_NOTE}</p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

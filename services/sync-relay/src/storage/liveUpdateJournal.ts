@@ -21,6 +21,7 @@ import { parseLiveCheckpointCoverage, type LiveCheckpointAuthorCoverage, parseLi
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
+import { LiveJournalAdmittedCapacityError } from "./errors";
 import {LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
 import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
 import {parseNativeRestoreCancellationAnswer, type NativeRestoreCancellationReceipt} from "../liveRestoreFence";
@@ -704,6 +705,7 @@ function journalValidationRefusal(validation: Extract<LiveJournalValidation, { k
   if (source === "call" || reason === "projection-mutated") throw new Error("Live journal validator integration failed.");
   if (reason === "document-too-dense") return { kind: "refused", reason };
   if (source === "admitted-cut") {
+    if (reason === "capacity-refused") throw new LiveJournalAdmittedCapacityError();
     if (reason === "invalid-update" || reason === "invalid-schema") throw new Error("Admitted live journal storage cannot validate.");
     throw new Error("Impossible admitted journal refusal.");
   }

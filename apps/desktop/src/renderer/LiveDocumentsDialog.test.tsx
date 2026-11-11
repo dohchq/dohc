@@ -63,6 +63,20 @@ function actions(path: string): string[] {
     .map((button) => button.textContent);
 }
 
+it("asks for a newer dohc when a too-dense pause sits on a server status this build doesn't know", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(page([
+    row("docs/dense.md", {status: "unrecognized", reason: "document-too-dense", quarantine: "paused", canResume: false}),
+  ]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const dense = await screen.findByTestId("live-document-row-docs/dense.md");
+  expect(dense.children[1]?.textContent).toBe("Too large to edit live");
+  expect(dense.textContent).toContain(
+    "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.");
+  expect(actions("docs/dense.md")).not.toContain("Resume live editing");
+  expect(actions("docs/dense.md")).not.toContain("Stop live editing");
+});
+
 it("distinguishes retired and hosted held notes and offers no Resume or Stop on retired notes", async () => {
   const h = harness();
   h.load.mockResolvedValue(page([

@@ -152,9 +152,10 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   async deliver(authority: FreshOwnerAuthority, envelopeValue: OwnerYDocDeliveryEnvelope): Promise<OwnerYDocDeliveryResult> {
     const attempt = this.active;
     if (!attempt || !this.current(attempt) || attempt.authority !== authority || attempt.envelope || !isDeepStrictEqual(attempt.binding, envelopeValue.binding)) return {kind: "retry"};
-    // No note within the live bound takes an edit this large, so it can never be admitted.
+    // A frame can't carry an edit this large, so the owner sees it kept rather than retried unseen.
+    // A large paste says nothing about the note's density, so it stays a capacity refusal.
     if (envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes) {
-      const tooDense = {kind: "quarantine", reason: "document-too-dense"} as const; this.stop(attempt, tooDense); return tooDense;
+      const kept = {kind: "quarantine", reason: "capacity-refused"} as const; this.stop(attempt, kept); return kept;
     }
     if (digest(envelopeValue.update) !== envelopeValue.updateDigest) {this.stop(attempt); return {kind: "retry"};}
     const declared = envelopeValue.agentDeclaration;

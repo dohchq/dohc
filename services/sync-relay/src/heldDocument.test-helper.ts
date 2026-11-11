@@ -28,7 +28,7 @@ export async function heldDocumentFixture(workspaceId = ticketScope.workspaceId,
       // No activation is retained here, so Stop needs no preparation.
       async stop<T>(_document: unknown, fence: () => T) {return fence();},
     };
-    const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
+    const handle = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage,
       history: createLiveJournalHistoryAuthority({namespace: "held-document-test", reconciled: true}), host,
       resolveActor: async () => ({workspaceId, userId: "owner-1"})});
     const request = (method = "GET", suffix = "", body?: unknown) => new Request(`https://relay.test/sync/${workspaceId}/live-host${suffix}`, {

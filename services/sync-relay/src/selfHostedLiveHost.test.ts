@@ -281,7 +281,7 @@ it.each([
     if (test.name === "paused after relay restart") expect(f.host.current()).toBeUndefined();
     retainServiceActivation(f.raw, namespace, true);
     const before = f.enrollment(), admission = serviceHostDocumentEnabled(f.storage as StorageContext, binding);
-    const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: f.host,
+    const routes = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage, history: f.history, host: f.host,
       resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
     const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {method: "DELETE",
       headers: {"content-type": "application/json", authorization: "Bearer account-token"}, body: JSON.stringify({path: binding.currentPath, retire: true})}));
@@ -318,7 +318,7 @@ it("answers Stop with a start failure only while the daemon's start failed", asy
     });
   }});
   retainServiceActivation(f.raw, namespace, true);
-  const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: f.host,
+  const routes = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage, history: f.history, host: f.host,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const stop = async () => {
     const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {method: "DELETE",
@@ -912,7 +912,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   expect(restarted.diverged(f.enrollment()!)).toBe(true);
   expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached. ` +
     `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`})]]);
-  const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
+  const routes = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
   expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}]});
@@ -920,6 +920,20 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   await vi.waitFor(() => {restarted.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
   expect(f.starts).toHaveLength(1);
   expect(onError).toHaveBeenCalledTimes(1);
+});
+
+// Proves: the owner's list reads a saved activation the driver's 8 MiB capture budget allowed.
+it("lists a document whose saved activation is over 4 MiB", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  retainServiceActivation(f.raw, namespace, true);
+  const state = new Uint8Array(5 * 1024 * 1024), stateDigest = createHash("sha256").update(state).digest("hex");
+  f.raw.prepare(`UPDATE sync_relay_service_activations SET state_bytes=?, state_digest=?,
+    source_json=json_set(source_json,'$.fullStateByteLength',?,'$.fullStateDigest',?)`).run(state, stateDigest, state.byteLength, stateDigest);
+  const routes = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage, history: f.history, host: f.host,
+    resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
+  const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ok: true, documents: [{path: binding.currentPath, objectId: binding.objectId}]});
 });
 
 // A relay that starts again on the fixture's storage and stores.

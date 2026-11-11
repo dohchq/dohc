@@ -675,7 +675,8 @@ const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
 const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
   storage.getLiveHostControl()?.configuredMode === "service" &&
   (selfHost.blocked(document) === "document-too-dense" ? "document-too-dense" as const : selfHost.stopped(document)) : undefined;
-if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
+if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor,
+  maxCaptureBytes: selfHostLiveProfile().service.activation.maxCaptureBytes});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;

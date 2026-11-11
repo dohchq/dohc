@@ -122,7 +122,7 @@ it("does not retire at the old generation while a restore has begun", async () =
 
 it.each([7, undefined])("answers DELETE with a retryable restore-in-progress conflict at generation %s", async restoreFenceGeneration => {
   const f = await fixture(); enrollService(f); f.begin();
-  const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
+  const handle = createServiceHostEnrollmentRoutes({maxCaptureBytes: 8 * 1024 * 1024, storage: f.storage,
     history: f.history,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: ownerUserId}),
     host: {ready: () => false, reconcile() {}, unavailable: false, blocked: () => undefined, holdReason: () => undefined, unblock: () => false, diverged: () => false,

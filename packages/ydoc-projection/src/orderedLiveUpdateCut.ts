@@ -313,14 +313,22 @@ function checkedProjectedAdd(
   delta: number,
   policy: number,
   stage: OrderedLiveUpdateCutFailureStage,
+  overrun: OrderedLiveUpdateCutRefusalReason = 'capacity-refused',
 ): number {
   if (!safeNonnegative(current)) fail('capacity-refused', stage)
   if (!safeNonnegative(delta)) fail('capacity-refused', stage)
   if (!safeNonnegative(policy)) fail('capacity-refused', stage)
-  if (current > policy) fail('capacity-refused', stage)
+  if (current > policy) fail(overrun, stage)
   const remaining = policy - current
-  if (delta > remaining) fail('capacity-refused', stage)
+  if (delta > remaining) fail(overrun, stage)
   return current + delta
+}
+
+// A state's structs never drop, and the policy allows each three visits, so a state alone that runs out of struct
+// visits is past the live bound (withinLiveNoteCapacity). Edits since the checkpoint can merge into fewer structs
+// at the next one, so a cut with them keeps capacity-refused, as does every other budget.
+function overrunReason(field: keyof CappedUsage, stateOnly: boolean): OrderedLiveUpdateCutRefusalReason {
+  return field === 'structVisits' && stateOnly ? 'document-too-dense' : 'capacity-refused'
 }
 
 class ValidationBudget {
@@ -338,6 +346,9 @@ class ValidationBudget {
     stateVectorByteVisits: 0,
     measuredStateByteVisits: 0,
   }
+
+  /** Whether the cut is one state with no edits after it. */
+  stateOnly = false
 
   constructor(readonly policy: OrderedLiveUpdateCutPolicy, readonly fatalUnexpectedErrors = false) {}
 
@@ -474,6 +485,7 @@ class ValidationBudget {
       delta,
       this.policy[policyField],
       stage,
+      overrunReason(field, this.stateOnly),
     )
   }
 }
@@ -3481,6 +3493,7 @@ function addProjectedContribution(
   delta: CappedUsage,
   policy: OrderedLiveUpdateCutPolicy,
   stage: OrderedLiveUpdateCutFailureStage,
+  stateOnly: boolean,
 ): CappedUsage {
   const next = {} as CappedUsage
   for (const field of CAPPED_USAGE_FIELDS) {
@@ -3489,6 +3502,7 @@ function addProjectedContribution(
       delta[field],
       policy[POLICY_FOR_USAGE[field]],
       stage,
+      overrunReason(field, stateOnly),
     )
   }
   return next
@@ -3593,7 +3607,7 @@ function createFinalizer(
     } catch (error) {
       state.budget.unexpected(error)
       const failure = error instanceof CutFailure
-        ? error.reason === 'capacity-refused'
+        ? error.reason === 'capacity-refused' || error.reason === 'document-too-dense'
           ? error
           : new CutFailure('projection-mutated', { kind: 'final' })
         : new CutFailure('projection-mutated', { kind: 'final' })
@@ -3642,6 +3656,7 @@ function validateCut(
     const ownedPolicy = snapshotPolicy(hostilePolicy)
     budget = new ValidationBudget(ownedPolicy, fatalUnexpectedErrors)
     const snapshot = snapshotInput(hostileInput, budget, projectionMode)
+    budget.stateOnly = snapshot.entries.length === 1
     const preEvidenceUsage = budget.cappedSnapshot()
     let projectedUsage = { ...preEvidenceUsage }
     const frontier = new ReplayFrontier()
@@ -3665,12 +3680,14 @@ function validateCut(
         evidenceDelta,
         ownedPolicy,
         entry.stage,
+        budget.stateOnly,
       )
       projectedUsage = addProjectedContribution(
         projectedUsage,
         decoderAsCapped(decoded.normalized.decoderForecast),
         ownedPolicy,
         entry.stage,
+        budget.stateOnly,
       )
       inputEvidence.push({ updateDigest: decoded.updateDigest, ranges: decoded.normalized.ranges })
       evidenceDeltas.push(evidenceDelta)
@@ -3686,12 +3703,14 @@ function validateCut(
         evidenceDeltas[index] as CappedUsage,
         ownedPolicy,
         stage,
+        budget.stateOnly,
       )
       fromParts = addProjectedContribution(
         fromParts,
         decoderAsCapped(applyForecasts[index] as DecoderUsage),
         ownedPolicy,
         stage,
+        budget.stateOnly,
       )
     }
     let fromActual = budget.cappedSnapshot()
@@ -3701,6 +3720,7 @@ function validateCut(
         decoderAsCapped(applyForecasts[index] as DecoderUsage),
         ownedPolicy,
         (snapshot.entries[index] as InputBytes).stage,
+        budget.stateOnly,
       )
     }
     if (
