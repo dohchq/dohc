@@ -56,11 +56,11 @@ fn nested_contract_r23_content_tabs_keep_inline_spelling() {
         MarkdownReading::Successor,
     ] {
         for source in [
-            "- a *b\t* c",
-            "- a\t_b_ c",
-            "- a\t\n\nAfter",
-            "1. a\t\n\nAfter",
-            "- [ ] a\t\n\nAfter",
+            "- a *b\t* c\n",
+            "- a\t_b_ c\n",
+            "- a\t\n\nAfter\n",
+            "1. a\t\n\nAfter\n",
+            "- [ ] a\t\n\nAfter\n",
         ] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
@@ -309,7 +309,7 @@ fn nested_contract_marker_tabs_after_legacy_source_fence() {
     .unwrap();
     let canonical = doc.project_richdoc().unwrap();
     assert!(canonical.contains("body\ttext"));
-    assert!(canonical.ends_with("\n\n- item"), "{canonical}");
+    assert!(canonical.ends_with("\n\n- item\n"), "{canonical}");
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn fix1_ordinary_prose_keeps_its_exact_source_witness() {
 
 #[test]
 fn fix1_public_rewrite_reads_projected_markdown() {
-    for source in ["- one\n\n- two", "| a | b |\n| --- | --- |\n| x | y |"] {
+    for source in ["- one\n\n- two\n", "| a | b |\n| --- | --- |\n| x | y |\n"] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
@@ -477,7 +477,7 @@ fn fix1_projected_fences_are_accepted_unchanged() {
                 text: content.into(),
                 marks: Vec::new(),
             }])];
-            let canonical = render_code_block(&attrs, &children).unwrap();
+            let canonical = format!("{}\n", render_code_block(&attrs, &children).unwrap());
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &canonical)
                 .unwrap();
@@ -488,7 +488,7 @@ fn fix1_projected_fences_are_accepted_unchanged() {
 
 #[test]
 fn fix1_projected_paragraph_indent_is_accepted_unchanged() {
-    for canonical in ["&#32; literal", "&#32;  \\- x", "&#9;literal"] {
+    for canonical in ["&#32; literal\n", "&#32;  \\- x\n", "&#9;literal\n"] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
             .unwrap();
@@ -509,7 +509,7 @@ fn fix1_spaced_rules_keep_root_acceptance() {
 
 #[test]
 fn fix1_projected_item_prose_is_accepted_unchanged() {
-    for source in ["- Mr. Smith arrived.", "- I. Overview", "- a. child"] {
+    for source in ["- Mr. Smith arrived.\n", "- I. Overview\n", "- a. child\n"] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
@@ -551,9 +551,9 @@ fn projected_raw_html_keeps_line_start_entities() {
 #[test]
 fn nested_contract_empty_ordered_ends_before_root_list() {
     for (source, canonical) in [
-        ("1.\n\n- b\n  - c", "1. \n\n- b\n  - c"),
-        ("1. \n\n- b\n  - c", "1. \n\n- b\n  - c"),
-        ("10.\n\n1. b\n   - c", "10. \n\n1. b\n   - c"),
+        ("1.\n\n- b\n  - c", "1. \n\n- b\n  - c\n"),
+        ("1. \n\n- b\n  - c", "1. \n\n- b\n  - c\n"),
+        ("10.\n\n1. b\n   - c", "10. \n\n1. b\n   - c\n"),
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
@@ -731,7 +731,7 @@ fn folded_code_keeps_following_markdown_on_first_edit() {
         doc.richdoc_append_paragraph("Edited");
         assert_eq!(
             doc.project(ContentKind::Richdoc).unwrap().content,
-            format!("{expected}\n\nEdited")
+            format!("{expected}\n\nEdited\n")
         );
     }
 }
@@ -881,7 +881,7 @@ fn nested_contract_r25_multiline_heading_reread_stabilizes() {
         doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
             .unwrap();
         let first = doc.project_richdoc().unwrap();
-        assert_eq!(first, "- \n  ## a\n  b\n\n&#32;x");
+        assert_eq!(first, "- \n  ## a\n  b\n\n&#32;x\n");
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
             &first,
@@ -889,7 +889,7 @@ fn nested_contract_r25_multiline_heading_reread_stabilizes() {
         )
         .unwrap();
         let second = doc.project_richdoc().unwrap();
-        assert_eq!(second, "- \n  ## a\n\n  b\n\n&#32;x");
+        assert_eq!(second, "- \n  ## a\n\n  b\n\n&#32;x\n");
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
             &second,
@@ -978,7 +978,7 @@ fn nested_contract_item_setext_underline_follows_marked() {
                 .unwrap();
             assert_eq!(
                 doc.project_richdoc().unwrap(),
-                canonical,
+                format!("{canonical}\n"),
                 "{source:?}, {reading:?}"
             );
         }
@@ -1007,14 +1007,18 @@ fn nested_contract_item_setext_other_readings_keep_text() {
                 .unwrap();
             assert_eq!(
                 doc.project_richdoc().unwrap(),
-                text,
+                format!("{text}\n"),
                 "{source:?}, {reading:?}"
             );
         }
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .unwrap();
-        assert_eq!(doc.project_richdoc().unwrap(), text, "{source:?}, fold");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            format!("{text}\n"),
+            "{source:?}, fold"
+        );
     }
 }
 

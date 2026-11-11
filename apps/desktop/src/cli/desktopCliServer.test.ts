@@ -770,10 +770,10 @@ describe("desktop CLI workspace context", () => {
       read.mockResolvedValueOnce({ path: "notes.md", state: held });
       const context = await f.create().openCliWorkspace(f.workspace);
       expect(await context.documents!.read("notes.md"))
-        .toEqual({ path: "notes.md", markdown: "# Notes\n\nLive text." });
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\nLive text.\n" });
       // The file answers in the form an edit matches against.
       expect(await context.documents!.read("notes.md"))
-        .toEqual({ path: "notes.md", markdown: "# Notes\n\n- settled item" });
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\n- settled item\n" });
       expect(read.mock.calls).toEqual([
         [{ workspaceId: "workspace", path: "notes.md" }],
         [{ workspaceId: "workspace", path: "notes.md" }],
@@ -798,7 +798,7 @@ describe("desktop CLI workspace context", () => {
       // A document an editor holds before its file exists still reads from the editor.
       vi.mocked(f.dependencies.liveDocuments.readDocument)
         .mockResolvedValueOnce({ path: "draft.md", state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")) });
-      expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft" });
+      expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft\n" });
 
       const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
       await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });
@@ -884,7 +884,7 @@ describe("desktop CLI workspace context", () => {
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
     Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!);
-    expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
+    expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.\n");
     // A note that records no source takes the edit while its head is unknown.
     expect(await input.change(Y.encodeStateAsUpdate(markdownToYDoc("Draft plan.")), { keepBlocks: true }))
       .toBeInstanceOf(Uint8Array);
@@ -914,7 +914,7 @@ describe("desktop CLI workspace context", () => {
 
       await expect(context.documents!.create({ path: "notes/new.md", markdown: "# New\n\nFirst line.", origin }))
         .resolves.toEqual({ path: "notes/new.md" });
-      expect(documentMarkdown(Y.encodeStateAsUpdate(created.get("notes/new.md")!))).toBe("# New\n\nFirst line.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(created.get("notes/new.md")!))).toBe("# New\n\nFirst line.\n");
       expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
       // Unnamed agents still get agent attribution.
       const write = vi.mocked(f.capture.writeAuthoredFile);

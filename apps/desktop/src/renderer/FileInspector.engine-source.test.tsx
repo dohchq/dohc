@@ -417,7 +417,7 @@ describe("engine markdown source view", () => {
 
     await user.click(await screen.findByTestId("markdown-source-toggle"));
     const sourceView = await screen.findByTestId("markdown-source-view");
-    await waitFor(() => expect(codeEditorText(sourceView)).toBe(`${EDGE_FRONTMATTER}Body`));
+    await waitFor(() => expect(codeEditorText(sourceView)).toBe(`${EDGE_FRONTMATTER}Body\n`));
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
@@ -876,7 +876,7 @@ describe("engine markdown source view", () => {
     await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(
-        "---\ntitle: Plan Recipient continued.\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.",
+        "---\ntitle: Plan Recipient continued.\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n",
       ),
     );
   });
@@ -3042,8 +3042,8 @@ describe("engine markdown source view", () => {
     useAutoAdvancingFakeTimers();
     const firstBody = "# Old version\n\nOld paragraph.";
     const secondBody = "# New version\n\nReplacement paragraph.";
-    const typedBody = "# Pending switch edit. Old version\n\nOld paragraph.";
-    const freshBody = "# Fresh edit. New version\n\nReplacement paragraph.";
+    const typedBody = "# Pending switch edit. Old version\n\nOld paragraph.\n";
+    const freshBody = "# Fresh edit. New version\n\nReplacement paragraph.\n";
     const { bridgeMock } = makeEngineBridge(firstBody);
     let releaseSecondRead!: () => void;
     let reads = 0;
@@ -3139,7 +3139,7 @@ describe("engine markdown source view", () => {
   it("retires a lazy WYSIWYG draft when the switch reread lands before its debounce", async () => {
     const firstBody = "# Old version\n\nOld paragraph.";
     const secondBody = "# New version\n\nReplacement paragraph.";
-    const typedBody = "# Zz Old version\n\nOld paragraph.";
+    const typedBody = "# Zz Old version\n\nOld paragraph.\n";
     const { bridgeMock } = makeEngineBridge(firstBody);
     let releaseSecondRead!: () => void;
     let reads = 0;

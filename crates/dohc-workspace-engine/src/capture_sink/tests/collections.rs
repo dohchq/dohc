@@ -2294,7 +2294,7 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
     let supervisor = WorkspaceSupervisor::new();
     let (db, mut sink) = sink_for(&scratch, &supervisor);
     let path = "tasks/nested.md";
-    let original = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n- parent\n  - child\n");
+    let original = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n- parent\n  - child");
     write_file(
         scratch.path(),
         "tasks/collection.yaml",

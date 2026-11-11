@@ -420,6 +420,11 @@ fn replay_into_clean_peer(
         .expect("the clean peer applies every originated op");
     }
 
+    peer_text(&peer, workspace_id, path)
+}
+
+/// The text `peer` materialized for `path` on main.
+fn peer_text(peer: &EngineStore, workspace_id: &str, path: &str) -> String {
     peer.read_with(|conn| {
         conn.query_row(
             "SELECT b.text FROM path_aliases a \
@@ -430,7 +435,7 @@ fn replay_into_clean_peer(
             |row| row.get::<_, String>(0),
         )
     })
-    .expect("the clean peer materialized the document")
+    .expect("the peer materialized the document")
 }
 
 async fn capture_seed(
@@ -466,13 +471,19 @@ async fn capture_seed(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
+    for ending in ["\n", ""] {
+        assert_capture_authored_edit_replicates(ending).await;
+    }
+}
+
+async fn assert_capture_authored_edit_replicates(ending: &str) {
     const WS: &str = "ws-capture-actor-replication";
     const PATH: &str = "tasks/alpha.md";
     const OBJECT: &str = "capture-actor-record-object";
     const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
     const AGENT: &str = "agent-capture-replication";
-    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
-    let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha");
+    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha{ending}");
+    let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha{ending}");
     let source_scratch = ScratchDir::new().expect("source scratch");
     let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
@@ -488,8 +499,15 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
         .actor;
     let key = DocKey::new(WS, "main", OBJECT).expect("collection document key");
     let seed = Ydoc::wire();
-    seed.rewrite_content_to_markdown(ContentKind::Richdoc, &initial)
-        .expect("seed collection rich document");
+    if ending.is_empty() {
+        // The desktop records a file its writer does not reproduce as the
+        // seed's source, so the capture below needs no recovery copy.
+        seed.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &initial)
+            .expect("seed collection rich document");
+    } else {
+        seed.rewrite_content_to_markdown(ContentKind::Richdoc, &initial)
+            .expect("seed collection rich document");
+    }
     handle
         .ydoc_record_update(
             key.clone(),
@@ -516,7 +534,7 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
                 workspace_id: WS.to_owned(),
                 version_id: "main".to_owned(),
                 path: PATH.to_owned(),
-                text: edited,
+                text: edited.clone(),
                 metadata_origin: "capture".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -544,6 +562,25 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
 
     let ops = read_local_ydoc_ops(&source_store);
     assert_eq!(ops.len(), 2, "capture produces one base and one edit");
+    let kinds: Vec<String> = read_local_ops(&source_store)
+        .into_iter()
+        .map(|op| op.op_kind)
+        .collect();
+    assert_eq!(
+        ops[1].origin_seq,
+        ops[0].origin_seq + 1,
+        "no recovery copy lands between the base and the edit: {kinds:?}"
+    );
+    let projected = source_store
+        .read_with(|conn| {
+            let doc = dohc_engine_collab::load_doc_in(conn, &key).expect("source doc");
+            dohc_engine_sync::project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc)
+        })
+        .expect("source projection");
+    assert_eq!(
+        projected.content, edited,
+        "the lineage keeps the captured bytes"
+    );
     assert_eq!(
         ops[1].payload["actorOriginId"],
         serde_json::json!(AGENT),
@@ -574,6 +611,7 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
         )
         .expect("peer applies replicated collection edit");
     }
+    assert_eq!(peer_text(&peer, WS, PATH), edited);
 
     let details = peer
         .read_with(|conn| get_collection_record(conn, WS, "tasks", RECORD, 20, None))

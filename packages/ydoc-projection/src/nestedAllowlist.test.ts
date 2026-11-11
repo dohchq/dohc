@@ -161,7 +161,7 @@ it('holds lone carriage returns that desktop imports as line breaks', () => {
   expect(cases.find(row => row.source === source)).toMatchObject({ held: true, builders: [] })
   const doc = markdownToYDoc(source, { reading: 'source' })
   try {
-    expect(yDocToMarkdown(doc)).toBe('- a\n  b\n  - child')
+    expect(yDocToMarkdown(doc)).toBe('- a\n  b\n  - child\n')
   } finally { doc.destroy() }
 })
 

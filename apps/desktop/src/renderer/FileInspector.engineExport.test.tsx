@@ -203,7 +203,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY.trimEnd()));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY));
     expect(writeText).not.toHaveBeenCalledWith("# Stale disk body\n");
   });
 
@@ -246,7 +246,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY.trimEnd()}`,
+        `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY}`,
       ),
     );
   });
@@ -269,7 +269,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
     await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}Body`),
+      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}Body\n`),
     );
   });
 
@@ -287,7 +287,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
       expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: "markdown",
-          content: `${EDGE_FRONTMATTER}Body`,
+          content: `${EDGE_FRONTMATTER}Body\n`,
         }),
       ),
     );
