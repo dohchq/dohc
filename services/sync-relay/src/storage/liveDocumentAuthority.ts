@@ -17,6 +17,7 @@ import type {
   TicketHostReport,
   LiveTicketMint,
   LiveTicketRedemption,
+  LiveTicketStoragePolicy,
 } from "./types";
 import {
   ticketRecord,
@@ -41,6 +42,7 @@ import {
   SESSION_HOST_CONTROL_TABLE,
   LIVE_TICKET_COLUMNS,
   LIVE_TICKET_INTEGER_COLUMNS,
+  LIVE_TICKET_NULLABLE_COLUMNS,
   LIVE_TICKET_TABLE,
 } from "./schema";
 import { type LiveObjectBinding, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -411,17 +413,21 @@ function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTick
   try {
     for (const column of LIVE_TICKET_COLUMNS) {
       const value = row[column];
-      if ((column === "redeemed_at_ms" || column === "link_session_id" || column === "agent_connection_id") && value === null) continue;
+      if (LIVE_TICKET_NULLABLE_COLUMNS.has(column) && value === null) continue;
       if (LIVE_TICKET_INTEGER_COLUMNS.has(column)) {
         if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error();
       } else if (typeof value !== "string") throw new Error();
     }
     parseTicketHash(row.token_hash);
-    if ((row.principal_kind !== "named" && row.principal_kind !== "link") || row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
-    if (row.principal_kind === "named" ? row.link_session_id !== null || row.agent_connection_id !== null :
-      row.agent_connection_id === null ? parseLiveUpdateIdentifier(row.link_session_id, "link session ID") !== row.link_session_id :
-        row.link_session_id !== null ||
-        parseLiveUpdateIdentifier(row.agent_connection_id, "agent connection ID") !== row.agent_connection_id) throw new Error();
+    if ((row.principal_kind !== "personal" && row.principal_kind !== "named" && row.principal_kind !== "link") ||
+      row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
+    // Each kind names only its own connection. The authority parser below checks its grant.
+    const connections: Record<"personal" | "named" | "link", readonly string[]> = { personal: ["personal_connection_id"], named: [],
+      link: [row.agent_connection_id === null ? "link_session_id" : "agent_connection_id"] };
+    const connection = connections[row.principal_kind as keyof typeof connections];
+    for (const column of ["link_session_id", "agent_connection_id", "personal_connection_id"]) {
+      if (connection.includes(column) ? parseLiveUpdateIdentifier(row[column], column) !== row[column] : row[column] !== null) throw new Error();
+    }
     parseLiveUpdateDigest(row.lineage_claim_id);
     const claims = parseLiveTicketClaims({
       ticketId: row.ticket_id, audience: row.audience,
@@ -517,31 +523,70 @@ export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): 
       const current = currentTicketAuthority(storage, owned.scope, objectId, report);
       const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
         binding: current.binding, hostEpoch: current.host.hostEpoch, mintedAtMs: now, expiresAtMs: now + LIVE_TICKET_LIFETIME_MS });
-      if (storage.db.prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`).get(ticketId, owned.tokenHash)) {
-        throw LIVE_TICKET_REFUSED;
-      }
-      storage.db.prepare(`DELETE FROM ${LIVE_TICKET_TABLE} WHERE ticket_id IN (
-        SELECT ticket_id FROM ${LIVE_TICKET_TABLE} WHERE expires_at_ms <= ? ORDER BY expires_at_ms, ticket_id LIMIT ?
-      )`).run(now, policy.expiredTicketCleanupBatchSize);
-      const count = storage.db.prepare(`SELECT count(*) AS retained_count FROM (
-        SELECT ticket_id FROM ${LIVE_TICKET_TABLE}
-        WHERE workspace_id = ? AND principal_kind = ? AND principal_id = ? AND grant_id = ? AND expires_at_ms > ?
-        ORDER BY expires_at_ms, ticket_id LIMIT ?
-      )`).get(owned.scope.workspaceId, claims.authority.principalKind, claims.authority.principalId, owned.scope.grantId, now, policy.retainedTicketsPerPrincipalGrant);
-      if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
-      storage.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`).run(
-        claims.ticketId, owned.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
-        claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
-        claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
-        claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
-        "sessionId" in owned.scope ? owned.scope.sessionId : null,
-        "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
-      );
+      storeLiveTicketInTransaction(storage, { claims, tokenHash: owned.tokenHash,
+        linkSessionId: "sessionId" in owned.scope ? owned.scope.sessionId : null,
+        agentConnectionId: "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
+        personalConnectionId: null }, now, policy);
       return { expiresAtMs: claims.expiresAtMs,
         ...(current.authority.principalKind === "link" ? {publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority)} : {}) };
     });
   }
+
+/**
+ * A ticket to store, with the connection that may redeem it. A personal
+ * agent's ticket names its connection; a link ticket names a session or an
+ * agent connection.
+ */
+export interface StoredLiveTicketInput {
+  readonly claims: LiveTicketClaims;
+  readonly tokenHash: string;
+  readonly linkSessionId: string | null;
+  readonly agentConnectionId: string | null;
+  readonly personalConnectionId: string | null;
+}
+
+/**
+ * Stores a parsed ticket inside a ticket transaction. Unexpired tickets are
+ * counted per principal and grant, and a personal agent's grant is null.
+ */
+export function storeLiveTicketInTransaction(storage: StorageContext, ticket: StoredLiveTicketInput, now: number, policy: LiveTicketStoragePolicy): void {
+  const { claims } = ticket;
+  if (storage.db.prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`).get(claims.ticketId, ticket.tokenHash)) {
+    throw LIVE_TICKET_REFUSED;
+  }
+  storage.db.prepare(`DELETE FROM ${LIVE_TICKET_TABLE} WHERE ticket_id IN (
+    SELECT ticket_id FROM ${LIVE_TICKET_TABLE} WHERE expires_at_ms <= ? ORDER BY expires_at_ms, ticket_id LIMIT ?
+  )`).run(now, policy.expiredTicketCleanupBatchSize);
+  const count = storage.db.prepare(`SELECT count(*) AS retained_count FROM (
+    SELECT ticket_id FROM ${LIVE_TICKET_TABLE}
+    WHERE workspace_id = ? AND principal_kind = ? AND principal_id = ? AND grant_id IS ? AND expires_at_ms > ?
+    ORDER BY expires_at_ms, ticket_id LIMIT ?
+  )`).get(claims.binding.workspaceId, claims.authority.principalKind, claims.authority.principalId, claims.authority.grantId, now, policy.retainedTicketsPerPrincipalGrant);
+  if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
+  storage.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`).run(
+    claims.ticketId, ticket.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
+    claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
+    claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
+    claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
+    ticket.linkSessionId, ticket.agentConnectionId, ticket.personalConnectionId,
+  );
+}
+
+/**
+ * Consumes a matched ticket inside a ticket transaction. Only the personal
+ * connection the ticket names, or none for a browser ticket, can consume it.
+ */
+export function consumeLiveTicketInTransaction(storage: StorageContext, ticket: {
+  readonly claims: LiveTicketClaims; readonly tokenHash: string; readonly personalConnectionId: string | null;
+}, now: number): RedeemedLiveTicket {
+  const redeemed = parseRedeemedLiveTicket({ ...ticket.claims, redeemedAtMs: now });
+  const updated = storage.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
+    WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?`)
+    .run(now, ticket.claims.ticketId, ticket.tokenHash, ticket.personalConnectionId, now, now);
+  if (updated.changes !== 1) throw LIVE_TICKET_REFUSED;
+  return redeemed;
+}
 
 export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedemption): RedeemedLiveTicket | null {
     const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "report"]);
@@ -554,12 +599,7 @@ export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedem
         JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
         throw LIVE_TICKET_REFUSED;
       }
-      const redeemed = parseRedeemedLiveTicket({ ...claims, redeemedAtMs: now });
-      const updated = storage.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
-        WHERE ticket_id = ? AND token_hash = ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?`)
-        .run(now, claims.ticketId, owned.tokenHash, now, now);
-      if (updated.changes !== 1) throw LIVE_TICKET_REFUSED;
-      return redeemed;
+      return consumeLiveTicketInTransaction(storage, { claims, tokenHash: owned.tokenHash, personalConnectionId: null }, now);
     });
   }
 
