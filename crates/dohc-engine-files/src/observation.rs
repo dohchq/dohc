@@ -48,6 +48,30 @@ impl ObservedEntry {
             &self.path
         }
     }
+
+    /// Whether a write after `started_ms` could keep this entry's size and
+    /// times, because they fall within one clock step of it.
+    fn racy(&self, started_ms: i64) -> bool {
+        let latest = self
+            .modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or_default();
+        #[cfg(unix)]
+        let latest = latest.max(std::time::Duration::new(
+            u64::try_from(self.changed.0).unwrap_or(0),
+            u32::try_from(self.changed.1).unwrap_or(0),
+        ));
+        // A time with a fraction of a second comes from a clock that steps
+        // every few milliseconds. A whole second may come from a volume that
+        // keeps only whole or even seconds, such as FAT.
+        let step_ms = if latest.subsec_nanos() == 0 {
+            2000
+        } else {
+            100
+        };
+        let latest_ms = i64::try_from(latest.as_millis()).unwrap_or(i64::MAX);
+        latest_ms == 0 || latest_ms.saturating_add(step_ms) > started_ms
+    }
 }
 
 /// Metadata-only listing, with no hash workers or capture queue. A walker
@@ -100,13 +124,18 @@ impl ObservationWalker {
         root: &std::path::Path,
         token: &crate::CancellationToken,
     ) -> Result<bool, crate::FilesError> {
-        let previous_len = self
-            .feed
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .listing
-            .len();
+        let started_ms = crate::reconcile::now_ms();
+        let (previous_len, previous_racy) = {
+            let state = self
+                .feed
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                state.listing.len(),
+                state.racy.keys().cloned().collect::<BTreeSet<_>>(),
+            )
+        };
         let mut listing = Vec::with_capacity(previous_len);
         let mut failed = Vec::new();
         let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -231,9 +260,75 @@ impl ObservationWalker {
             }
         }
         observe_visibility_policy(root, &mut listing, &mut failed);
+        // Git's racy-clean rule (#2904): a file written this recently, or
+        // last read while it was, is read again, since a second write in the
+        // same clock step keeps its size and times.
+        let mut digests = BTreeMap::new();
+        for entry in &listing {
+            let recent = entry.racy(started_ms);
+            if entry.symlink
+                || entry.size > self.bounds.max_file_bytes
+                || !(recent || previous_racy.contains(&entry.path))
+            {
+                continue;
+            }
+            if token.is_cancelled() {
+                return Ok(false);
+            }
+            let digest = content_digest(&root.join(&entry.path), self.bounds.max_file_bytes);
+            digests.insert(entry.path.clone(), ContentCheck { recent, digest });
+        }
         self.feed
-            .publish(listing, &failed, self.bounds.max_files, folds)?;
+            .publish(listing, digests, &failed, self.bounds.max_files, folds)?;
         Ok(true)
+    }
+}
+
+/// A file's contents, read because its size and times can't prove it unchanged.
+pub(crate) struct ContentCheck {
+    /// Whether the file's times still fall within one clock step of this
+    /// observation, so the next one reads it again.
+    recent: bool,
+    /// `None` when the file can't be read or is over the size cap.
+    digest: Option<[u8; 32]>,
+}
+
+fn content_digest(path: &std::path::Path, cap: u64) -> Option<[u8; 32]> {
+    use sha2::Digest;
+    use std::io::Read;
+    // An ordinary open of a FIFO waits for a writer and would stall the feed,
+    // so the open doesn't block and only a regular file is read.
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        rustix::fs::open(path, flags, Mode::empty()).map(std::fs::File::from)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path);
+    let mut file = file.ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => {
+                let mut digest = [0; 32];
+                digest.copy_from_slice(&hasher.finalize());
+                return Some(digest);
+            }
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        bytes = bytes.saturating_add(read as u64);
+        if bytes > cap {
+            return None;
+        }
+        hasher.update(&buffer[..read]);
     }
 }
 
@@ -320,6 +415,8 @@ struct Batch {
 
 struct State {
     listing: Vec<ObservedEntry>,
+    /// Digests of the listing's files whose times were recent when read.
+    racy: BTreeMap<String, [u8; 32]>,
     listing_valid: bool,
     ready: bool,
     revision: u64,
@@ -364,6 +461,7 @@ impl ObservationFeed {
             generation,
             state: Arc::new(Mutex::new(State {
                 listing: Vec::new(),
+                racy: BTreeMap::new(),
                 listing_valid: false,
                 ready: false,
                 revision: 0,
@@ -416,6 +514,7 @@ impl ObservationFeed {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.listing.clear();
+        state.racy.clear();
         state.listing_valid = false;
         state.ready = true;
         state.revision += 1;
@@ -434,6 +533,7 @@ impl ObservationFeed {
     pub(crate) fn publish(
         &self,
         mut listing: Vec<ObservedEntry>,
+        digests: BTreeMap<String, ContentCheck>,
         failed: &[FailedPath],
         cap: usize,
         folds: bool,
@@ -488,6 +588,18 @@ impl ObservationFeed {
             listing.sort_unstable_by(ObservedEntry::order);
         }
         listing.dedup_by(|a, b| a.order(b).is_eq());
+        let rewritten: BTreeSet<&str> = digests
+            .iter()
+            .filter(|(path, check)| {
+                check.digest.is_some_and(|digest| {
+                    state
+                        .racy
+                        .get(*path)
+                        .is_some_and(|before| *before != digest)
+                })
+            })
+            .map(|(path, _)| path.as_str())
+            .collect();
         let mut changes = BTreeMap::new();
         let mut bytes = 0;
         let mut overflow = false;
@@ -501,7 +613,7 @@ impl ObservationFeed {
             let before = key_group(&state.listing, &mut old, key);
             let after = key_group(&listing, &mut new, key);
             // A group a listing cannot read makes every reader list again.
-            let Some(group) = key_group_changes(before, after) else {
+            let Some(group) = key_group_changes(before, after, &rewritten) else {
                 overflow = true;
                 break 'diff;
             };
@@ -525,6 +637,10 @@ impl ObservationFeed {
             }
         }
         state.listing = listing;
+        state.racy = digests
+            .into_iter()
+            .filter_map(|(path, check)| Some((path, check.digest.filter(|_| check.recent)?)))
+            .collect();
         let baseline = !state.listing_valid;
         state.listing_valid = true;
         state.ready = true;
@@ -600,9 +716,11 @@ fn key_group<'a>(
 /// appeared or disappeared. When the paths change on both sides, a respell,
 /// which keeps the file, reads the same as a replacement by a name the volume
 /// keeps apart. Windows reports a respell's two spellings as changed.
+/// `rewritten` paths changed contents while keeping their size and times.
 fn key_group_changes<'a>(
     before: &'a [ObservedEntry],
     after: &'a [ObservedEntry],
+    rewritten: &BTreeSet<&str>,
 ) -> Option<Vec<(&'a ObservedEntry, FileChangeKind)>> {
     let same_paths = before.len() == after.len()
         && before
@@ -626,7 +744,7 @@ fn key_group_changes<'a>(
             (Some(a), Some(b)) => {
                 old += 1;
                 new += 1;
-                if a != b {
+                if a != b || rewritten.contains(b.path.as_str()) {
                     changes.push((b, FileChangeKind::Changed));
                 }
             }
@@ -753,7 +871,8 @@ mod tests {
     fn cursor_before_first_listing_requires_resync() {
         let feed = ObservationFeed::new();
         let cursor = feed.changes_since(None).cursor;
-        feed.publish(Vec::new(), &[], 10, FOLDS).unwrap();
+        feed.publish(Vec::new(), BTreeMap::new(), &[], 10, FOLDS)
+            .unwrap();
         let changes = feed.changes_since(Some(&cursor));
         assert!(changes.ready && changes.resync);
     }
@@ -1025,46 +1144,56 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn ctime_detects_same_size_same_mtime_write() {
-        use std::os::unix::fs::MetadataExt;
+    fn a_same_size_write_that_keeps_the_times_reads_as_changed() {
         let f = Fixture::new();
-        f.write("note.md", "a");
-        f.scan(&f.cursor());
         let path = f.root.path().join("note.md");
-        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let cursor = f.cursor();
-        // A coarse filesystem clock can give the next write note.md's ctime,
-        // which the feed can't tell apart (#2904). Write an ignored probe
-        // until its ctime differs, so the clock has passed note.md's tick.
-        let ctime = |path: &std::path::Path| {
-            let metadata = std::fs::metadata(path).unwrap();
-            (metadata.ctime(), metadata.ctime_nsec())
-        };
-        let probe = f.root.path().join(".dohc/ctime-probe");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            std::fs::write(&probe, "").unwrap();
-            if ctime(&probe) != ctime(&path) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the filesystem's ctime clock didn't pass note.md's within 5 s"
-            );
-        }
-        f.write("note.md", "b");
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(modified))
+        // A whole-second time, as FAT keeps, stays within one clock step for
+        // up to 2 s, long enough for the test to run.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now.as_secs());
+        let write = |text: &str| {
+            f.write("note.md", text);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
+        write("a");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        assert_eq!(f.scan(&cursor), vec![]);
+        // Within one clock step, a second write keeps the size and times
+        // (#2904).
+        write("b");
         assert_eq!(
             f.scan(&cursor),
             vec![fact("note.md", FileChangeKind::Changed)]
         );
+        let cursor = f.cursor();
+        assert_eq!(f.scan(&cursor), vec![]);
+    }
+
+    #[test]
+    fn a_whole_second_time_stays_within_a_clock_step_for_longer() {
+        let at = |ms: u64| ObservedEntry {
+            path: "note.md".to_owned(),
+            symlink: false,
+            size: 1,
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms)),
+            #[cfg(unix)]
+            changed: (0, 0),
+            #[cfg(any(windows, target_vendor = "apple"))]
+            key: "note.md".to_owned(),
+        };
+        assert!(at(10_500).racy(10_599));
+        assert!(!at(10_500).racy(10_600));
+        assert!(at(10_000).racy(11_999));
+        assert!(!at(10_000).racy(12_000));
     }
 
     #[test]
@@ -1246,6 +1375,40 @@ mod tests {
         assert!(f.scan(&cursor).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_policy_file_is_listed_without_being_read() {
+        let f = Fixture::new();
+        let cursor = f.cursor();
+        let fifo = f.root.path().join(".dohc/visibility.toml");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // Opening a FIFO to read it waits for a writer. The scan runs on its
+        // own thread, so a scan that opens the FIFO fails this test instead of
+        // hanging it.
+        std::thread::scope(|scope| {
+            let (sent, scanned) = std::sync::mpsc::channel();
+            let (f, cursor) = (&f, &cursor);
+            scope.spawn(move || {
+                let _ = sent.send(f.scan(cursor));
+            });
+            let facts = scanned.recv_timeout(std::time::Duration::from_secs(10));
+            if facts.is_err() {
+                // A writer releases the waiting open, so the thread can end.
+                drop(std::fs::OpenOptions::new().write(true).open(&fifo));
+            }
+            assert_eq!(
+                facts.expect("the scan waits on the FIFO"),
+                vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+            );
+        });
+    }
+
     #[test]
     fn observation_symlink_leaf_does_not_follow_target() {
         let f = Fixture::new();
@@ -1275,10 +1438,12 @@ mod tests {
             #[cfg(any(windows, target_vendor = "apple"))]
             key: "dir/a".to_owned(),
         };
-        feed.publish(vec![entry], &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![entry], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let cursor = feed.changes_since(None).cursor;
         feed.publish(
             vec![],
+            BTreeMap::new(),
             &[FailedPath {
                 path: "dir".to_owned(),
                 kind: std::io::ErrorKind::PermissionDenied,
@@ -1288,7 +1453,8 @@ mod tests {
         )
         .unwrap();
         assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
-        feed.publish(vec![], &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         assert_eq!(
             feed.changes_since(Some(&cursor)).facts,
             vec![fact("dir/a", FileChangeKind::Disappeared)]
@@ -1305,6 +1471,7 @@ mod tests {
         f.feed
             .publish(
                 vec![],
+                BTreeMap::new(),
                 &[FailedPath {
                     path: "DIR".to_owned(),
                     kind: std::io::ErrorKind::PermissionDenied,
@@ -1334,7 +1501,8 @@ mod tests {
     #[test]
     fn observation_escaped_facts_fit_the_response_budget() {
         let feed = ObservationFeed::new();
-        feed.publish(vec![], &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let cursor = feed.changes_since(None).cursor;
         let listing: Vec<_> = (0..400)
             .map(|i| ObservedEntry {
@@ -1348,7 +1516,8 @@ mod tests {
                 key: format!("{i}-{}", "\u{0001}\"\\".repeat(100)),
             })
             .collect();
-        feed.publish(listing.clone(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(listing.clone(), BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(!response.resync);
         assert_eq!(response.facts.len(), 400);
@@ -1365,7 +1534,8 @@ mod tests {
                 e
             })
             .collect();
-        feed.publish(larger, &[], 200_000, FOLDS).unwrap();
+        feed.publish(larger, BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(response.resync);
         assert!(response.facts.is_empty());
@@ -1430,7 +1600,7 @@ mod tests {
         let start = std::time::Instant::now();
         for _ in 0..100 {
             f.feed
-                .publish(listing.clone(), &[], 200_000, FOLDS)
+                .publish(listing.clone(), BTreeMap::new(), &[], 200_000, FOLDS)
                 .unwrap();
         }
         eprintln!(
