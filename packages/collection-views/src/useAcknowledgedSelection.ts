@@ -38,6 +38,20 @@ export function withoutDiscarded(pending: PendingSelection[], writeId: number): 
   return kept;
 }
 
+/** `observed` after each pending change in turn: the selection now, and every value on the way to it. */
+export function replayedSelection(value: CollectionValue, observed: readonly string[], pending: readonly PendingSelection[]) {
+  const previousValues: CollectionValue[] = [value];
+  let selected = [...observed];
+  for (const change of pending) {
+    selected = [
+      ...selected.filter((option) => !change.removed.includes(option)),
+      ...change.added.filter((option) => !selected.includes(option)),
+    ];
+    previousValues.push(selected);
+  }
+  return { selected, previousValues };
+}
+
 export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subscribeToDiscardedWrites, emit, carried }: {
   value: CollectionValue;
   ids: string[];
@@ -68,15 +82,7 @@ export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subs
     };
     setSelection(current);
   }
-  const previousValues: CollectionValue[] = [value];
-  let selected = current.observed;
-  for (const change of current.pending) {
-    selected = [
-      ...selected.filter((option) => !change.removed.includes(option)),
-      ...change.added.filter((option) => !selected.includes(option)),
-    ];
-    previousValues.push(selected);
-  }
+  const { selected, previousValues } = replayedSelection(value, current.observed, current.pending);
   /**
    * Saves `next`. `send` replaces `emit` for a save that goes another way,
    * such as one that adds an option first. A save that returns no edit id

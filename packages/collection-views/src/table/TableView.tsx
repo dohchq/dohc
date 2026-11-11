@@ -25,9 +25,9 @@ import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
 import { Tooltip, useTooltip } from "../tooltip";
-import { withoutDiscarded, type CarriedSelection } from "../useAcknowledgedSelection";
+import { replayedSelection, withoutDiscarded, type CarriedSelection } from "../useAcknowledgedSelection";
 import { FieldTypeIcon } from "../values";
-import { CellEditor, FieldCell } from "./cells";
+import { asText, CellEditor, FieldCell } from "./cells";
 import { composing, pickerWidth, type CellMove, type TablePerson } from "./pickers";
 
 /**
@@ -544,8 +544,18 @@ export function TableView({
     if (!opensEditor(field, relationExecutor) || field.type === "relation") return;
     if (key === "Delete" || key === "Backspace") {
       event.preventDefault();
-      const empty = value === null || (Array.isArray(value) && value.length === 0);
-      if (!empty) onCellChange({ ...cell, value: field.type === "multi-select" ? [] : null });
+      if (field.type === "multi-select") {
+        // Clear what the picker would show, saved picks the index lacks
+        // included, and carry the clear so the next edit starts from it.
+        const carried = carriedSelection({ recordId: record.id, field: field.name });
+        const acknowledged = acknowledgedWriteId?.(record, field.name) ?? 0;
+        const pending = carried.pending.filter((change) => change.writeId > acknowledged);
+        const observed = value === null ? [] : Array.isArray(value) ? value.map(asText) : [asText(value)];
+        const { selected, previousValues } = replayedSelection(value, observed, pending);
+        if (selected.length === 0) return;
+        const writeId = onCellChange({ ...cell, value: [], previousValues });
+        carried.pending = [...pending, { writeId, added: [], removed: selected }];
+      } else if (value !== null) onCellChange({ ...cell, value: null });
     } else if (key.length === 1 && TYPED_INTO.has(field.type)) {
       event.preventDefault();
       startEdit(record.id, at.column, key);

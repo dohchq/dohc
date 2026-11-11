@@ -110,7 +110,8 @@ function PickerFrame({ save, close, children }: {
       onKeyDown={(event) => {
         if (composing(event)) return;
         if (event.key === "Escape") close();
-        else if (event.key === "Tab") {
+        // Ctrl+Tab and the like switch the app's tabs.
+        else if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
           event.preventDefault();
           leave.current(event.shiftKey ? "previous" : "next");
         }

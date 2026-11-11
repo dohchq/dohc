@@ -198,7 +198,8 @@ function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, clo
         onKeyDown={(event) => {
           if (composing(event)) return;
           if (event.key === "Enter") save(event.currentTarget.value, "down");
-          else if (event.key === "Tab") {
+          // Ctrl+Tab and the like switch the app's tabs.
+          else if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
             event.preventDefault();
             save(event.currentTarget.value, event.shiftKey ? "previous" : "next");
           } else if (event.key === "Escape") {
@@ -277,6 +278,9 @@ export function CellEditor({
   relationExecutor,
 }: CellEditorProps) {
   const value = indexed?.value ?? null;
+  // The people list can arrive mid-edit. An edit keeps the editor it opened
+  // with, so a typed id is not lost to the picker.
+  const [listed] = useState(people);
   const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close };
   const picker = { label, typed, emit, close };
   switch (field.type) {
@@ -338,8 +342,8 @@ export function CellEditor({
     // Without the list, edits work on the raw id; the trim keeps a
     // whitespace-only entry from indexing as a flagged empty id.
     case "person":
-      return people
-        ? <PeoplePicker {...picker} people={people} current={value === null ? null : asText(value)} />
+      return listed
+        ? <PeoplePicker {...picker} people={listed} current={value === null ? null : asText(value)} />
         : <CellInput {...textInput} parse={(raw) => raw.trim() || null} />;
     // text, url: a plain text value.
     default:

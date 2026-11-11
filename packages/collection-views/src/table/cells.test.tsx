@@ -722,6 +722,34 @@ describe("CellEditor", () => {
     expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"], [["rec-a"]]);
   });
 
+  it("keeps a typed person id when the people list arrives during the edit", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    const props = { acknowledgedWriteId: 0, field: field("owner"), indexed: undefined, emit, close };
+    const view = render(<CellEditor {...props} />);
+    const input = screen.getByRole<HTMLInputElement>("textbox");
+    fireEvent.change(input, { target: { value: "user-7" } });
+    view.rerender(<CellEditor {...props} people={[{ id: "user-9", name: "Grace" }]} />);
+    expect(screen.getByRole<HTMLInputElement>("textbox")).toBe(input);
+    expect(input.value).toBe("user-7");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith("user-7");
+  });
+
+  it("leaves Ctrl+Tab to the app in a text editor and in a picker", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    const text = renderEditor({ fieldName: "title", value: "Old", emit, close });
+    // fireEvent returns true when the editor left the key to the browser.
+    expect(fireEvent.keyDown(screen.getByDisplayValue("Old"), { key: "Tab", ctrlKey: true })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByDisplayValue("Old"), { key: "Tab", ctrlKey: true, shiftKey: true })).toBe(true);
+    text.unmount();
+    renderEditor({ fieldName: "status", value: "todo", emit, close });
+    expect(fireEvent.keyDown(screen.getByRole("combobox"), { key: "Tab", ctrlKey: true })).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("edits a person as a typed id when the host lists no people", () => {
     renderEditor({ fieldName: "owner", value: "user-7" });
     expect(screen.getByRole<HTMLInputElement>("textbox").value).toBe("user-7");

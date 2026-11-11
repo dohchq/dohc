@@ -925,6 +925,36 @@ describe("pickers", () => {
     expect(chips()).toEqual(["alpha"]);
   });
 
+  it("clears saved tags the index does not show yet with Delete, and starts the next edit empty", () => {
+    const { open, option, search, chips, press, onCellChange } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.keyDown(search(), { key: "Escape" });
+    // Nothing saved yet: Escape dropped the pick, so Delete clears the indexed ["alpha"].
+    press("Delete");
+    expect(onCellChange).toHaveBeenLastCalledWith({
+      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags", value: [], previousValues: [["alpha"]],
+    });
+    // The index still shows ["alpha"], and the picker opens on the clear.
+    open(0, TAGS);
+    expect(chips()).toEqual([]);
+    fireEvent.click(option("gamma"));
+    fireEvent.pointerDown(document.body);
+    expect(onCellChange).toHaveBeenLastCalledWith({
+      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
+      value: ["gamma"], previousValues: [["alpha"], []],
+    });
+    // A saved pick the index lacks is cleared too, and an empty selection has nothing to clear.
+    press("Escape");
+    open(0, TAGS);
+    fireEvent.keyDown(search(), { key: "Escape" });
+    press("Delete");
+    expect(onCellChange).toHaveBeenLastCalledWith(expect.objectContaining({ value: [], previousValues: [["alpha"], [], ["gamma"]] }));
+    const calls = onCellChange.mock.calls.length;
+    press("Delete");
+    expect(onCellChange).toHaveBeenCalledTimes(calls);
+  });
+
   it("forgets a saved tags edit the host discards while the picker is closed, and one the index acknowledges", () => {
     const listeners = new Set<(writeId: number) => void>();
     const subscribeToDiscardedWrites = (listener: (writeId: number) => void) => {
