@@ -409,10 +409,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
               for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
               const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
+              // The renderer keeps a paused note read-only until it reads the list again.
+              const pausedBefore = paused.size;
               for (const path of paused) if (!documents.some(document => document.binding.currentPath === path)) paused.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
               frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
+                if (paused.size < pausedBefore) notifyRenderer({workspaceId});
                 setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
               }
@@ -446,6 +449,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               // A refused queue, which this pass may have found, has its own notice.
               for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) paused.delete(pausedPath);
               if (result === "acknowledged" || result === "frozen") {notifyRenderer({workspaceId}); dependencies.notifyOwnerDraftsChanged?.(workspaceId);}
+              else if (paused.size < pausedBefore) notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || paused.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
                 frozen.size && !ownerMustAct ? "document-unavailable" : paused.size && !reason ? "unsent-edits-limit" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};

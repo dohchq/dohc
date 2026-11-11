@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OwnerLiveQuarantine, SyncStatusResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { LIVE_EDITING_PAUSED_REASON } from "./readOnlyReasons";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // While this computer's queue for a note takes no more edits, the engine
 // refuses each one, so the note's editor stays read-only instead of taking
@@ -40,6 +40,12 @@ describe("a note whose live editing is paused", () => {
     renderShell(bridge);
     const note = await openNote(bridge);
     await expectPaused(note.toggle);
+    // Typing at a read-only note keeps nothing aside and writes nothing.
+    await note.user.click(await note.toggle());
+    await note.user.keyboard("Lost?");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     const toast = await screen.findByTestId("workspace-shell-error");
     await note.user.click(within(toast).getByRole("button", { name: "Try again" }));
     expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledOnce();
@@ -93,8 +99,18 @@ describe("a note whose live editing is paused", () => {
   });
 
   it.each([
-    ["kept after a restore", { ...ROW, saveOnly: true as const }],
     ["the server keeps", { ...ROW, storedOn: "server" as const, incident: "server:1" }],
+    ["the server keeps, with a recovery copy saved", { ...ROW, storedOn: "server" as const, incident: "server:1", recovery: "copied" as const }],
+  ])("stays read-only while %s", async (_case, row) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => withRows(row));
+    renderShell(bridge);
+    await expectPaused((await openNote(bridge)).toggle);
+  });
+
+  it.each([
+    ["kept after a restore", { ...ROW, saveOnly: true as const }],
+    ["the server keeps in an earlier copy of the workspace", { ...ROW, storedOn: "server" as const, incident: "server:1", earlier: true as const }],
     ["a finished Stop could not write", { ...ROW, recovery: "not-written" as const }],
   ])("edits a note whose edits %s", async (_case, row) => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -102,6 +118,18 @@ describe("a note whose live editing is paused", () => {
     renderShell(bridge);
     const note = await openNote(bridge);
     expect(await enterMarkdownSource(note.user)).toBeTruthy();
+  });
+
+  it("edits a received share's note at a listed path", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // Main answers with the owner's own lists, whose path a share's note shares.
+    bridge.openWorkspace = vi.fn(async () => withRows(ROW));
+    bridge.getSyncStatus = vi.fn(async () => withRows(ROW));
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } });
+    const note = await openNote(bridge);
+    await note.status(withRows(ROW));
+    expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true");
+    expect((await note.toggle()).getAttribute("title")).not.toBe(LIVE_EDITING_PAUSED_REASON);
   });
 
   it("edits the same path in another workspace", async () => {

@@ -1403,6 +1403,28 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
   });
 
+  // The renderer keeps a paused note read-only until it reads the list again.
+  it("tells the renderer when one paused note takes edits again while another still waits", async () => {
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}]);
+    quarantineMock.read.mockResolvedValue([]);
+    ownerDeliveryMock.pass.mockImplementation(async options => options.document.binding.currentPath === "notes/plan.md" ? "empty" : "retry");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/other.md");
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
+      while (f.engine.ownerLivePausedPaths("owner").includes("notes/plan.md")) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      }
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/other.md"]);
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({workspaceId: "owner"});
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
   it("leaves a note the server refused to its own notice", async () => {
     const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
     quarantineMock.read.mockResolvedValue([]);
