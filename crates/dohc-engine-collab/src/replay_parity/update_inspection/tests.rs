@@ -158,7 +158,8 @@ fn note_and_title() -> Ydoc {
 }
 
 /// The production desktop fold over canonical Markdown with no metadata writes
-/// removes every body block the head holds; the delete set alone holds it.
+/// removes the body block it changed, which the head holds; the delete set
+/// alone holds it.
 #[test]
 fn a_desktop_fold_holds_on_its_deletions_alone() {
     let markdown = "First paragraph.\n\nSecond paragraph.\n";

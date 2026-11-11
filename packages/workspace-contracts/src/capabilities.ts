@@ -194,6 +194,7 @@ export const CAPABILITIES = {
   "chat.decision.resolve": capability("Resolve a question or poll in a thread.", {ipc: ["resolveChatDecision"]}),
   "chat.attachments.list": capability("List file attachments in a thread.", {ipc: ["listChatThreadAttachments"]}),
   "chat.navigation.list": capability("List Groups and file-linked threads for chat navigation.", {ipc: ["listChatChannels"]}),
+  "chat.unread.list": capability("List each chat's unread message count on this computer.", {ipc: ["listChatUnread"]}),
   "chat.follows.list": capability("List the local person's chat follows.", {ipc: ["listChatFollows"]}),
   "chat.follow.set": capability("Set whether the local person follows a Group, thread, or author.", {ipc: ["setChatFollow"]}),
   "chat.inbox.seen.mark": capability("Mark the personal chat feed seen through its head cursor.", {ipc: ["markPersonalChatFeedSeen"]}),

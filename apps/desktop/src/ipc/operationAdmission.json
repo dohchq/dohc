@@ -51,6 +51,7 @@
   "desktop:list-chat-thread-decisions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-thread-attachments": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-channels": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-chat-unread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-follows": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:set-chat-follow": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:mark-personal-chat-feed-seen": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

@@ -52,6 +52,11 @@ export function TransactionalCollectionViews(props: Props) {
   const reading = useRef(false);
   const fieldKey = JSON.stringify(props.fields);
   const schema = useMemo(() => visualSchema(props.fields), [fieldKey]);
+  // The schema keys fields by id, so the board asks here for the names people read.
+  const fieldLabel = useMemo(() => {
+    const names = new Map(props.fields.map(field => [field.fieldId, field.name]));
+    return (fieldId: string) => names.get(fieldId) ?? fieldId;
+  }, [fieldKey]);
   const queryKey = JSON.stringify([props.view,props.search,props.refresh,offset,groupAfter,positions,calendarPosition,month.getFullYear(),month.getMonth(),attempt]);
   useLayoutEffect(() => () => { current.current++; }, []);
   /** Reads what the view shows now, at this render's months, groups, and pages. */
@@ -173,7 +178,7 @@ export function TransactionalCollectionViews(props: Props) {
   const visibleFields = [...props.fields.filter(field=>field.type==="text"),...props.fields.filter(field=>field.type!=="text")].map(field=>field.fieldId);
   return <div className="flex min-h-0 flex-1 flex-col gap-2" aria-busy={busy}>
     {props.view.kind==="board" ? <>
-      <div className="min-h-0 flex-1"><BoardView schema={schema} groups={groups} groupBy={props.view.groupBy!} visibleFields={visibleFields.length > 1 ? visibleFields.filter(fieldId=>fieldId!==props.view.groupBy) : visibleFields}
+      <div className="min-h-0 flex-1"><BoardView schema={schema} groups={groups} groupBy={props.view.groupBy!} fieldLabel={fieldLabel} visibleFields={visibleFields.length > 1 ? visibleFields.filter(fieldId=>fieldId!==props.view.groupBy) : visibleFields}
         onCellChange={!disabled&&props.canMove(props.view.groupBy!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}}
         groupCount={(_group,index)=>`${loaded.columns[index]!.page.rows.length}${loaded.columns[index]!.page.nextCursor ? "+" : ""}`}
         groupFooter={(_group,index)=>{const column=loaded.columns[index]!,key=JSON.stringify(column.value);return pageControls(positions[key]??beginning(),column.page,next=>setPositions({...positions,[key]:next}),display(column.value)||"No value",false);}} /></div>

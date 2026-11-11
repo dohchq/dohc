@@ -34,7 +34,7 @@ afterEach(cleanup);
 
 const noop = () => {};
 
-function strip(paths: string[], options: { active?: string; dirty?: boolean; files?: WorkspaceFileEntry[]; onActivate?: (groupId: string, path: string) => void } = {}) {
+function strip(paths: string[], options: { active?: string; dirty?: boolean; files?: WorkspaceFileEntry[]; unread?: ReadonlyMap<string, number>; onActivate?: (groupId: string, path: string) => void } = {}) {
   return (
     <EditorTabs
       groupId="left"
@@ -44,6 +44,7 @@ function strip(paths: string[], options: { active?: string; dirty?: boolean; fil
       activeTabDirty={options.dirty ?? false}
       recoveryPaths={new Set<string>()}
       files={options.files ? new Map(options.files.map((file) => [file.path, file])) : undefined}
+      tabUnread={options.unread}
       onActivate={options.onActivate ?? noop}
       onClose={noop}
       onContextMenu={noop}
@@ -156,5 +157,22 @@ describe("EditorTabs glyphs", () => {
     rerender(strip(paths, { active: "b.md", dirty: true, files }));
     expect(fileGlyphs.renders - before).toBe(1);
     expect(screen.getByTestId(editorTabTestId("b.md")).querySelector('[data-testid="tab-dirty"]')).not.toBeNull();
+  });
+
+  it("counts a hidden conversation's unread messages, in ink for a person and quiet for a group", () => {
+    const person = chatTabPath({ kind: "dm", id: "alice" });
+    const group = chatTabPath({ kind: "channel", id: "trip" });
+    const unread = new Map([[person, 3], [group, 120]]);
+    const { rerender } = render(strip(["plan.md", person, group], { unread }));
+    const personPill = within(screen.getByTestId(editorTabTestId(person))).getByRole("img", { name: "3 unread" });
+    expect(personPill.textContent).toBe("3");
+    expect(personPill.className).toContain("bg-ink");
+    const groupPill = within(screen.getByTestId(editorTabTestId(group))).getByRole("img", { name: "120 unread" });
+    expect(groupPill.textContent).toBe("99+");
+    expect(groupPill.className).not.toContain("bg-ink");
+    // The open conversation is reading them, so its tab shows no count.
+    rerender(strip(["plan.md", person, group], { active: person, unread }));
+    expect(within(screen.getByTestId(editorTabTestId(person))).queryByTestId("tab-unread")).toBeNull();
+    expect(within(screen.getByTestId(editorTabTestId(group))).getByTestId("tab-unread")).toBeTruthy();
   });
 });
