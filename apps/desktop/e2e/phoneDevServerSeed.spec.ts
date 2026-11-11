@@ -66,15 +66,18 @@ async function listedWorkspace(response: Response, workspaceId: string) {
 test("@phone-dev-server seeds a synced workspace for the phone and holds it until the round stops", async () => {
   test.setTimeout(HOLD_MS + 10 * 60 * 1000);
   const origin = setting("DOHC_PHONE_DEV_SERVER");
+  // The runner sends the account's password to this origin.
+  if (new URL(origin).protocol !== "https:") throw new Error("The server origin must be https.");
   const caPath = process.env.DOHC_PHONE_DEV_SERVER_CA;
   const readyPath = setting("DOHC_PHONE_DEV_SERVER_READY");
   const stopPath = setting("DOHC_PHONE_DEV_SERVER_STOP");
   const account = await readAccount(setting("DOHC_PHONE_DEV_SERVER_ACCOUNT"));
-  // With a test authority, this runner's requests trust it. The desktop gets the same trust from its environment, and
-  // the debug engine accepts it only for an HTTPS loopback relay, so the plaintext loopback opt-in is off.
+  // The harness allows a plaintext loopback relay by default; this server is HTTPS, so that is off. With a test
+  // authority, this runner's requests trust it, and the desktop gets the same trust from its environment. The debug
+  // engine accepts that authority only for an HTTPS loopback relay.
   const trust = caPath ? trustFixtureCa(await readFile(caPath, "utf8")) : undefined;
-  const trustEnv = caPath ? { NODE_EXTRA_CA_CERTS: caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: caPath,
-    DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" } : {};
+  const trustEnv = { DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+    ...(caPath ? { NODE_EXTRA_CA_CERTS: caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: caPath } : {}) };
   let temp: TempWorkspace | undefined;
   let desktop: LaunchedDesktopApp | undefined;
   try {
