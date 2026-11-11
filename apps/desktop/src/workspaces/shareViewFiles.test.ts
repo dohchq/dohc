@@ -1581,6 +1581,8 @@ describe("ShareViewFiles", () => {
         pendingPaths: [path],
         collisionPathCount: 0,
         collisionPaths: [],
+        heldPathCount: 0,
+        heldPaths: [],
         pullInFlight: false,
       });
       await expect(
@@ -2187,6 +2189,8 @@ describe("ShareViewFiles", () => {
         pendingPaths: [],
         collisionPathCount: 1,
         collisionPaths: [path],
+        heldPathCount: 1,
+        heldPaths: [{ path, reason: "local-collision" }],
         pullInFlight: false,
       });
       expect(result).toMatchObject({
@@ -2225,6 +2229,8 @@ describe("ShareViewFiles", () => {
         pendingPaths: [],
         collisionPathCount: 1,
         collisionPaths: [path],
+        heldPathCount: 1,
+        heldPaths: [{ path, reason: "local-collision" }],
         pullInFlight: false,
       });
 
@@ -2828,6 +2834,8 @@ describe("ShareViewFiles", () => {
           pendingPaths: [],
           collisionPathCount: 0,
           collisionPaths: [],
+          heldPathCount: 0,
+          heldPaths: [],
           pullInFlight: false,
         });
         await expect(readFile(collisionPath, "utf8")).resolves.toBe(serialized);

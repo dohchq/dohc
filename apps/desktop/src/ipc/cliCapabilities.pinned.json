@@ -93,6 +93,9 @@
     "collectionsWaiting": [
       "workspace.status"
     ],
+    "sharedFilesHeld": [
+      "workspace.status"
+    ],
     "saveKeptCopy": [
       "file.kept.save"
     ],

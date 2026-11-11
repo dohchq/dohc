@@ -61,6 +61,7 @@
     "shareAgents",
     "shareCopy",
     "shareDisconnect",
+    "sharedFilesHeld",
     "show",
     "stopAgain",
     "stopSync",
@@ -87,7 +88,8 @@
     "groupsFull",
     "keptCopies",
     "retainedCopies",
-    "saveKeptCopy"
+    "saveKeptCopy",
+    "sharedFilesHeld"
   ],
   "publicSocketVerbs": [
     "accessObject",

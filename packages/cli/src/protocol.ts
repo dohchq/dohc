@@ -645,6 +645,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("sharedFilesHeld"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
@@ -740,6 +741,7 @@ export const CLI_CAPABILITIES = {
   versionResolve: ["version.conflict.resolve"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
+  sharedFilesHeld: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
@@ -1942,6 +1944,24 @@ export const cliResultSchemas = {
   // The engine's answer: Collection updates wait for an unfinished pull.
   collectionsWaiting: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), waiting: z.boolean() }).strict(),
+    rawFailureSchema,
+  ]),
+  // Shared files a shared view holds back until a person acts: a file from
+  // this computer in the way, or two shared names this disk treats as one.
+  // `files` holds the first 20 of `count`; `message` says the step for each.
+  sharedFilesHeld: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      heldFiles: z.object({
+        count: z.number().int().positive(),
+        files: z.array(z.object({
+          path: z.string().min(1),
+          reason: z.enum(["local-collision", "spelling-collision"]),
+          owner: z.string().min(1).optional(),
+        }).strict()),
+        message: z.string().min(1),
+      }).strict().nullable(),
+    }).strict(),
     rawFailureSchema,
   ]),
   saveKeptCopy: saveKeptCopyResultSchema,

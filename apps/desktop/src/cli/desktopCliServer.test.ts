@@ -151,6 +151,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    shareProjection: vi.fn(async () => undefined),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     localPerson: async () => ({ kind: "human", humanId: "local:test" }),
@@ -714,6 +715,21 @@ describe("desktop CLI workspace context", () => {
     collectionsWaiting.mockResolvedValueOnce(false);
     expect(await context.daemonReads.collectionsWaiting()).toBe(false);
     expect(seen).toEqual([f.workspace, f.workspace]);
+  });
+
+  it("reads the shared files held back from the shared view's projection", async () => {
+    const f = fixture();
+    const unshared = await f.create().openCliWorkspace(f.workspace);
+    expect(await unshared.sharedFilesHeld?.()).toBeNull();
+    const files = [{ path: "mine.md", reason: "local-collision" as const }];
+    f.dependencies.shareProjection = vi.fn(async () => ({
+      state: "pending" as const, pendingPathCount: 0, pendingPaths: [], collisionPathCount: 1,
+      collisionPaths: ["mine.md"], heldPathCount: 1, heldPaths: files, pullInFlight: false,
+    }));
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(await context.sharedFilesHeld?.()).toEqual({ count: 1, files });
+    f.dependencies.shareProjection = vi.fn(async () => ({ state: "current" as const }));
+    expect(await (await f.create().openCliWorkspace(f.workspace)).sharedFilesHeld?.()).toEqual({ count: 0, files: [] });
   });
 
   it("refuses both collection reads when the engine adapter is unavailable", async () => {
