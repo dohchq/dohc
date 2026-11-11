@@ -1343,18 +1343,18 @@ impl ActorHandle {
     }
 
     /// Replay the writes `key` still owes its file, oldest first, and answer
-    /// whether the write of `moment_id` has landed. A moment with no write
-    /// of its own owes the file nothing.
-    pub async fn ydoc_write_landed(
+    /// where the write of `moment_id` stands. A moment with no write of its
+    /// own owes the file nothing.
+    pub async fn ydoc_write_state(
         &self,
         key: DocKey,
         moment_id: String,
         materialization: YdocCloseMaterialization,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<YdocWriteState, RuntimeError> {
         self.run(move |store, _cache| {
-            ydoc_write_landed_on_store(
+            ydoc_write_state_on_store(
                 store,
                 &key,
                 &moment_id,
@@ -4688,14 +4688,25 @@ fn head_moment_in(
     .map_err(StorageError::corrupt_public)
 }
 
-fn ydoc_write_landed_on_store(
+/// Where a note's write to its file stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YdocWriteState {
+    /// The file holds it, or a newer write replaced it.
+    Landed,
+    /// Still owed, and a later replay may land it.
+    Owed,
+    /// The file changed outside dohc, so it never lands.
+    Conflicted,
+}
+
+fn ydoc_write_state_on_store(
     store: &mut EngineStore,
     key: &DocKey,
     moment_id: &str,
     materialization: &YdocCloseMaterialization,
     now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<bool, RuntimeError> {
+) -> Result<YdocWriteState, RuntimeError> {
     let writes = store.read_with(|conn| pending_ydoc_writes_in(conn, key))?;
     replay_materializations_in_order(
         store,
@@ -4718,13 +4729,14 @@ fn ydoc_write_landed_on_store(
         format!("sync-mat_{moment_id}"),
     ] {
         if let Some(job) = store.load_materialization_job(&job_id)? {
-            return Ok(matches!(
-                job.status,
-                JobStatus::Complete | JobStatus::Cancelled
-            ));
+            return Ok(match job.status {
+                JobStatus::Complete | JobStatus::Cancelled => YdocWriteState::Landed,
+                JobStatus::Pending => YdocWriteState::Owed,
+                JobStatus::Conflict => YdocWriteState::Conflicted,
+            });
         }
     }
-    Ok(true)
+    Ok(YdocWriteState::Landed)
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination

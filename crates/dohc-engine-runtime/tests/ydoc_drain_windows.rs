@@ -503,11 +503,12 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
 
 /// #2813. A close ends its session before its drain writes the file. When
 /// that write fails, the service keeps the head the file was owed, and a
-/// retried close drains again and asks whether that head's write landed.
-/// A write a passing failure stopped lands on the retry.
+/// retried close drains again and asks where that head's write stands. One a
+/// passing failure stopped stays owed while the failure lasts, so the retry
+/// reports it, and lands on a retry once the failure has passed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retried_close_lands_the_write_a_passing_failure_stopped() {
-    use dohc_engine_runtime::actor::YdocCloseMaterialization;
+    use dohc_engine_runtime::{YdocWriteState, actor::YdocCloseMaterialization};
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
@@ -548,6 +549,22 @@ async fn a_retried_close_lands_the_write_a_passing_failure_stopped() {
         .expect("the note has a head");
     assert_eq!(unfinished_writes(&db), 1, "the head's write is owed");
 
+    // A retry while the failure lasts finds the write still owed.
+    let again = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterTempWrite);
+    let state = handle
+        .ydoc_write_state(
+            key.clone(),
+            head.clone(),
+            materialization(),
+            250,
+            again.clone(),
+        )
+        .await
+        .expect("ask where the write stands");
+    assert!(again.fired(), "the retry reaches the injected fault");
+    assert_eq!(state, YdocWriteState::Owed, "the retry reports it");
+    assert_eq!(unfinished_writes(&db), 1, "the head's write is still owed");
+
     handle
         .ydoc_close_drain(
             key.clone(),
@@ -558,12 +575,16 @@ async fn a_retried_close_lands_the_write_a_passing_failure_stopped() {
         )
         .await
         .expect("the retried drain");
-    let landed = handle
-        .ydoc_write_landed(key, head, materialization(), 300, Arc::new(NoFaults))
+    let state = handle
+        .ydoc_write_state(key, head, materialization(), 300, Arc::new(NoFaults))
         .await
-        .expect("ask whether the write landed");
+        .expect("ask where the write stands");
     supervisor.close(&db).expect("close actor");
-    assert!(landed, "the head's write lands on the retry");
+    assert_eq!(
+        state,
+        YdocWriteState::Landed,
+        "the head's write lands on the retry"
+    );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("file"),
         "before parked",

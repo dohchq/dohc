@@ -34,6 +34,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_runtime::YdocWriteState;
 use dohc_engine_runtime::actor::YdocCloseMaterialization;
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use serde::Deserialize;
@@ -489,6 +490,8 @@ pub(super) struct UnfinishedClose {
     /// The moment whose write the file was owed when the close failed.
     head: Option<String>,
     failure: WireError,
+    /// A retry already reported that the write will never land.
+    reported: bool,
 }
 
 #[derive(Deserialize)]
@@ -2369,6 +2372,7 @@ impl EngineService {
                             key: session_key,
                             head,
                             failure: failure.clone(),
+                            reported: false,
                         },
                     );
                     return Err(failure);
@@ -2391,10 +2395,11 @@ impl EngineService {
     }
 
     /// Retry a close that ended its session but could not write the note's
-    /// file: drain and replay what the note still owes, and report the first
-    /// close's failure until the write it owed has landed. Spawned for the
-    /// reason the close is: the drain's record events must outlive a dropped
-    /// request.
+    /// file: drain and replay what the note still owes. While the write is
+    /// owed, report the first close's failure. One that conflicted with an
+    /// outside edit never lands, so report it once and then answer closed:
+    /// keeping the session would trap the note. Spawned for the reason the
+    /// close is: the drain's record events must outlive a dropped request.
     async fn ydoc_close_unfinished(
         &self,
         open: Arc<OpenWorkspace>,
@@ -2426,9 +2431,9 @@ impl EngineService {
                 emit_record_events(&events, &open.workspace_id, facts);
             }
             if let Some(head) = unfinished.head {
-                let landed = open
+                let state = open
                     .actor
-                    .ydoc_write_landed(
+                    .ydoc_write_state(
                         unfinished.key,
                         head,
                         materialization(),
@@ -2437,8 +2442,16 @@ impl EngineService {
                     )
                     .await
                     .map_err(map_runtime)?;
-                if !landed {
-                    return Err(unfinished.failure);
+                match state {
+                    YdocWriteState::Landed => {}
+                    YdocWriteState::Owed => return Err(unfinished.failure),
+                    YdocWriteState::Conflicted if !unfinished.reported => {
+                        if let Some(close) = lock(&open.unfinished_closes).get_mut(&session_id) {
+                            close.reported = true;
+                        }
+                        return Err(unfinished.failure);
+                    }
+                    YdocWriteState::Conflicted => {}
                 }
             }
             lock(&open.unfinished_closes).remove(&session_id);

@@ -177,6 +177,7 @@ impl OpenWorkspace {
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
+            unfinished_closes: Default::default(),
             local_state: Mutex::new(None),
         }
     }

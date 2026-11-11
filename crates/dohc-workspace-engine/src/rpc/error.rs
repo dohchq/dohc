@@ -424,6 +424,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
                 "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
             );
         }
+        // The change is saved, but a file it owed wasn't written, such as
+        // one changed outside dohc. The caller names the file, not a fault.
+        RuntimeError::ActiveVersionMaterializationIncomplete { .. } => {
+            return WireError::new(ErrorCode::Internal, error.code());
+        }
         // Another held proof holds the workspace; nothing queued, ask again.
         RuntimeError::HeldReadBusy => {
             return WireError::new(ErrorCode::Overloaded, "held-read-busy");
