@@ -7,6 +7,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
+import { WorkLinkText } from "./workReferences";
 import { WorkStatus } from "./WorkCard";
 
 // A post in a group's feed, drawn as a row: who and when on one line, the
@@ -294,14 +295,14 @@ export function PostCard(props: {
               plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
             }`}
           >
-            {heading}
+            <WorkLinkText text={heading} testId="chats-post-title" />
           </span>
           {excerpt ? (
             <span
               data-testid="chats-post-excerpt"
               className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
             >
-              {excerpt}
+              <WorkLinkText text={excerpt} testId="chats-post-excerpt" />
             </span>
           ) : null}
           {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (

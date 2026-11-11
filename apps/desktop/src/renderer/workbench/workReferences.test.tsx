@@ -50,7 +50,7 @@ describe("the work link store", () => {
     answer([chat(ref("A"))]);
     await Promise.resolve();
     expect(links.view(ref("A"))).toBeUndefined();
-    links.open({ to: "chat-channel", channel: "c-1" });
+    await links.open(ref("A"));
     expect(open).not.toHaveBeenCalled();
   });
 
@@ -82,8 +82,8 @@ describe("a work link in a chat message", () => {
     const { view, open } = renderLinks(`See @[work:${ref("A")}] **now**`, [chat(ref("A"))]);
     const chip = await waitFor(() => view.getByRole("button", { name: "Open Trip" }));
     expect(chip.dataset.testid).toBe("body-work-link");
-    act(() => chip.click());
-    expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" });
+    await act(async () => chip.click());
+    await waitFor(() => expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }));
   });
 
   it("names a file by its basename and a thread without a title as Thread", async () => {
@@ -93,6 +93,32 @@ describe("a work link in a chat message", () => {
     ]);
     await waitFor(() => view.getByRole("button", { name: "Open plan.md" }));
     expect(view.getByRole("button", { name: "Open Thread" })).toBeTruthy();
+  });
+
+  it("reads a link again when it is opened, so a click follows a rename", async () => {
+    const views = [{ reference: ref("A"), kind: "file" as const, label: "plan.md", open: { to: "file" as const, path: "plan.md" } }];
+    const { view, open } = renderLinks(`@[work:${ref("A")}]`, views);
+    await waitFor(() => view.getByRole("button", { name: "Open plan.md" }));
+    views[0] = { ...views[0]!, label: "trip.md", open: { to: "file", path: "trip.md" } };
+    await act(async () => view.getByRole("button", { name: "Open plan.md" }).click());
+    await waitFor(() => expect(open).toHaveBeenCalledWith({ to: "file", path: "trip.md" }));
+    expect(view.getByRole("button", { name: "Open trip.md" })).toBeTruthy();
+  });
+
+  it("opens a link whose first read failed once it is read", async () => {
+    const open = vi.fn();
+    const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped"))
+      .mockImplementation(async (references: string[]) => references.map(chat));
+    const links = createWorkReferenceLinks("ws", open, describe);
+    const view = render(
+      <WorkReferences.Provider value={links}>
+        <ChatMarkdown body={`@[work:${ref("A")}]`} candidates={[]} testId="body" onOpenPath={vi.fn()} />
+      </WorkReferences.Provider>,
+    );
+    await waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
+    await act(async () => view.getByRole("button", { name: "Open link" }).click());
+    await waitFor(() => expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }));
+    expect(view.getByRole("button", { name: "Open Trip" })).toBeTruthy();
   });
 
   it("shows work this workspace cannot see as unavailable, with nothing to open", async () => {

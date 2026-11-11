@@ -52,39 +52,52 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await cli("chat", "create-group", "Notes", "--type", "posts");
     const flights = await cli("chat", "post", "Trip", "--agent", "Nova", "--title", "Flights", "Book", "by", "Friday");
     const group = await cli("chat", "link", "--group", "Trip");
-    const thread = await cli("chat", "link", "--thread", flights.threadId);
+    const threadLink = await cli("chat", "link", "--thread", flights.threadId);
     const file = await cli("chat", "link", "--path", "plans/trip.md");
-    expect([group.kind, thread.kind, file.kind]).toEqual(["chat", "thread", "file"]);
+    expect([group.kind, threadLink.kind, file.kind]).toEqual(["chat", "thread", "file"]);
     expect(group.link).toMatch(/^@\[work:[A-Za-z0-9_-]{43}\]$/u);
-    await cli("chat", "post", "Notes", "--agent", "Nova", `Plans live in ${group.link}. See ${thread.link} and ${file.link}.`);
+    await cli("chat", "post", "Notes", "--agent", "Nova", `Plans live in ${group.link}. See ${threadLink.link} and ${file.link}.`);
 
     await page.getByTestId(activityPin("chats")).click();
-    await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
-    await expect(main.getByTestId("chats-channel-title")).toHaveText("Notes");
     const card = main.getByTestId("chats-post-card").filter({ hasText: "Plans live in" });
-    const openGroup = card.getByRole("button", { name: "Open Trip" });
-    await expect(openGroup).toBeVisible();
-    await expect(card.getByRole("button", { name: "Open Flights" })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Open trip.md" })).toBeVisible();
+    const thread = main.getByTestId("chats-thread-view");
+    const openPost = async () => {
+      await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
+      await expect(main.getByTestId("chats-channel-title")).toHaveText("Notes");
+      await card.click();
+      await expect(thread).toContainText("Plans live in");
+    };
+
+    // The post card names each link; the card stays the one button.
+    await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
+    const chips = card.getByTestId("chats-post-title-work-link");
+    await expect(chips).toHaveCount(3);
+    await expect(chips.nth(0)).toContainText("Trip");
+    await expect(chips.nth(1)).toContainText("Flights");
+    await expect(chips.nth(2)).toContainText("trip.md");
+    await expect(card.getByRole("button", { name: "Open Trip" })).toHaveCount(0);
     await shoot(page, "a-post");
 
-    // The Group chip opens the Group.
-    await openGroup.click();
+    // In the post, the Group chip opens the Group.
+    await openPost();
+    await expect(thread.getByRole("button", { name: "Open Flights" })).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Open trip.md" })).toBeVisible();
+    await shoot(page, "b-thread-chips");
+    await thread.getByRole("button", { name: "Open Trip" }).click();
     await expect(main.getByTestId("chats-channel-title")).toHaveText("Trip");
-    await shoot(page, "b-group");
+    await shoot(page, "c-group");
 
     // The thread chip opens the thread.
-    await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
-    await card.getByRole("button", { name: "Open Flights" }).click();
-    await expect(main.getByTestId("chats-thread-view")).toBeVisible();
-    await expect(main.getByTestId("chats-thread-view")).toContainText("Book by Friday");
-    await shoot(page, "c-thread");
+    await openPost();
+    await thread.getByRole("button", { name: "Open Flights" }).click();
+    await expect(thread).toContainText("Book by Friday");
+    await shoot(page, "d-thread");
 
     // The file chip opens the file.
-    await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
-    await card.getByRole("button", { name: "Open trip.md" }).click();
+    await openPost();
+    await thread.getByRole("button", { name: "Open trip.md" }).click();
     await expect(page.getByText("Flights on Friday.")).toBeVisible();
-    await shoot(page, "d-file");
+    await shoot(page, "e-file");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

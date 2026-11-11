@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
+import { extractChatWorkReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkReferenceOpen, WorkReferenceView } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { basenameOf } from "../path";
@@ -6,14 +7,15 @@ import { Ref } from "../ui/Ref";
 import type { ObjectKind } from "../ui/KindGlyph";
 
 // The work links in a window's chat messages, `@[work:REF]`: what each one
-// names, asked of main in batches, and how one opens. One store serves one
-// workspace; the shell makes a new one when its workspace changes, and an
-// answer for the old one is dropped.
+// names, asked of main in batches, and how one opens. A link is read again
+// when it is opened, so a click never follows a rename it has not seen. One
+// store serves one workspace; the shell makes a new one when its workspace
+// changes, and an answer for the old one is dropped.
 export interface WorkReferenceLinks {
   view(reference: string): WorkReferenceView | undefined;
   want(reference: string): void;
   subscribe(listener: () => void): () => void;
-  open(target: WorkReferenceOpen): void;
+  open(reference: string): Promise<void>;
 }
 
 export const WorkReferences = createContext<WorkReferenceLinks | null>(null);
@@ -35,6 +37,13 @@ export function createWorkReferenceLinks(
   let scheduled = false;
   let disposed = false;
 
+  function keep(answer: WorkReferenceView[]) {
+    if (disposed) return;
+    const now = Date.now();
+    for (const view of answer) views.set(view.reference, { view, at: now });
+    for (const listener of listeners) listener();
+  }
+
   function flush() {
     scheduled = false;
     const references = [...queued];
@@ -43,12 +52,7 @@ export function createWorkReferenceLinks(
       const batch = references.slice(at, at + BATCH);
       for (const reference of batch) asking.add(reference);
       // A failed read leaves the link as it was; the next time it shows asks again.
-      void describe(batch).then((answer) => {
-        if (disposed) return;
-        const now = Date.now();
-        for (const view of answer) views.set(view.reference, { view, at: now });
-        for (const listener of listeners) listener();
-      }, () => {}).finally(() => {
+      void describe(batch).then(keep, () => {}).finally(() => {
         for (const reference of batch) asking.delete(reference);
       });
     }
@@ -68,8 +72,12 @@ export function createWorkReferenceLinks(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    open: (target) => {
-      if (!disposed) open(target);
+    async open(reference) {
+      if (disposed) return;
+      const answer = await describe([reference]);
+      keep(answer);
+      const target = answer.find((view) => view.reference === reference)?.open;
+      if (!disposed && target) open(target);
     },
     dispose() {
       disposed = true;
@@ -104,19 +112,29 @@ const FALLBACK_NAMES: Partial<Record<NonNullable<WorkReferenceView["kind"]>, str
 
 // One work link, as the chip a file link shows. It opens what it names
 // unless `interactive` is false, as inside another link or a row that is
-// already a button. A link this workspace cannot show reads as unavailable.
+// already a button. A link this workspace cannot show reads as unavailable;
+// one still being read opens once it is read.
 export function WorkRef(props: { reference: string; interactive: boolean; testId?: string }) {
   const links = useContext(WorkReferences);
   const view = useSyncExternalStore(links?.subscribe ?? noLinks, () => links?.view(props.reference));
   useEffect(() => links?.want(props.reference), [links, props.reference]);
   const testId = props.testId ? `${props.testId}-work-link` : undefined;
+  const onOpen = props.interactive && links ? () => void links.open(props.reference).catch(() => {}) : undefined;
   if (!view || view.kind === null) {
-    return <Ref path="" title={view ? "Unavailable" : "Link"} objectKind="chat" missing={view !== undefined} testId={testId} />;
+    return (
+      <Ref
+        path=""
+        title={view ? "Unavailable" : "Link"}
+        objectKind="chat"
+        missing={view !== undefined}
+        testId={testId}
+        {...(view ? {} : { label: "Open link", onOpen })}
+      />
+    );
   }
   const objectKind = OBJECT_KINDS[view.kind];
   const opensPath = view.kind === "file" || view.kind === "record" || view.kind === "app" || view.kind === "collection";
   const name = opensPath ? basenameOf(view.label) : view.label.trim() || FALLBACK_NAMES[view.kind] || "";
-  const target = view.open;
   return (
     <Ref
       path={opensPath ? view.label : ""}
@@ -124,7 +142,30 @@ export function WorkRef(props: { reference: string; interactive: boolean; testId
       {...(objectKind ? { objectKind } : {})}
       label={`Open ${name}`}
       testId={testId}
-      onOpen={props.interactive && links && target ? () => links.open(target) : undefined}
+      onOpen={view.open ? onOpen : undefined}
     />
+  );
+}
+
+// Text with its work links shown as chips that do not open, for a row that is
+// already a button, such as a post card.
+export function WorkLinkText(props: { text: string; testId?: string }) {
+  const tokens = extractChatWorkReferenceTokens(props.text);
+  if (tokens.length === 0) return <>{props.text}</>;
+  let at = 0;
+  return (
+    <>
+      {tokens.map((token) => {
+        const before = props.text.slice(at, token.start);
+        at = token.end;
+        return (
+          <Fragment key={token.start}>
+            {before}
+            <WorkRef reference={token.reference} interactive={false} testId={props.testId} />
+          </Fragment>
+        );
+      })}
+      {props.text.slice(at)}
+    </>
   );
 }
