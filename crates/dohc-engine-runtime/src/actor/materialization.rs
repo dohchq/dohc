@@ -1352,9 +1352,21 @@ fn replay_materializations(
                             summary.store_busy += 1;
                         }
                         dohc_engine_files::MaterializeError::FileLocked => {}
-                        _ => summary
-                            .hard_errors
-                            .push((job.job_id.clone(), format!("{}: {error}", job.target_path))),
+                        _ => {
+                            // The errors `materialize_one` calls blocked: the
+                            // write stays pending until the path changes.
+                            if matches!(
+                                error,
+                                dohc_engine_files::MaterializeError::SymlinkTarget
+                                    | dohc_engine_files::MaterializeError::RecoveryUnavailable
+                            ) {
+                                summary.blocked += 1;
+                            }
+                            summary.hard_errors.push((
+                                job.job_id.clone(),
+                                format!("{}: {error}", job.target_path),
+                            ));
+                        }
                     }
                 }
             }
