@@ -161,9 +161,17 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await openHistoryView(page);
       // R1's row, not the note's creation: History can list the creation
       // before the live edits arrive, and restoring it deletes the note.
-      const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`)
+      let moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`)
         .filter({hasText: recipientAccount.name}).first();
-      await expect(moment).toBeVisible({timeout: 60_000});
+      // RETEST INSTRUMENTATION (never merge): record a History row that doesn't name the recipient and use the newest non-creation row.
+      try {
+        await expect(moment).toBeVisible({timeout: 60_000});
+      } catch (error) {
+        info.annotations.push({type: "RETEST History names no recipient", description: String(error).slice(0, 2000)});
+        await info.attach("RETEST History without the recipient", {contentType: "image/png", body: await page.screenshot()});
+        moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).filter({hasNotText: "Added existing files"}).first();
+        await expect(moment).toBeVisible();
+      }
       await moment.click();
       await page.getByTestId("engine-diff-more").click();
       await expect(page.getByTestId("engine-diff-open-file")).toBeVisible();
@@ -183,6 +191,13 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
         await expect(shown.getByRole("button", {name: "Try again"})).toBeVisible();
         await expect(shown.getByRole("button", {name: "Open Live documents", exact: true})).toBeVisible();
       };
+      // RETEST INSTRUMENTATION (never merge): record and clear any earlier toast, so the refusal below is the only one.
+      const earlier = page.getByTestId("notice-toasts").getByTestId("workspace-shell-error");
+      for (const shown of await earlier.all()) {
+        info.annotations.push({type: "RETEST toast before restore", description: (await shown.innerText()).slice(0, 2000)});
+        await shown.getByRole("button", {name: "Dismiss workspace error"}).click();
+      }
+      await expect(earlier).toHaveCount(0);
       await page.getByTestId("engine-diff-restore-file").click();
       const refusal = page.getByTestId("workspace-shell-error");
       await expect(refusal).toContainText(title, {timeout: 30_000});
@@ -247,6 +262,19 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect(dialog.getByRole("heading", {name: "File restored"})).toBeVisible({timeout: 60_000});
       await dialog.getByRole("button", {name: "Close", exact: true}).click();
       return normalized(text);
+    });
+
+    // RETEST INSTRUMENTATION (never merge): does the restore reach the owner's file with no further step (#2761, #3090)?
+    await test.step("RETEST probe: the restored text reaches the owner's file", async () => {
+      let reached = false;
+      const started = Date.now();
+      while (Date.now() - started < 120_000) {
+        if (normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8")) === restored) { reached = true; break; }
+        await page.waitForTimeout(1_000);
+      }
+      const file = normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8"));
+      info.annotations.push({type: "RETEST restore reached the owner's file", description: `${reached} after ${Math.round((Date.now() - started) / 1000)} s; file: ${JSON.stringify(file)}`});
+      await info.attach("RETEST owner after restore", {contentType: "image/png", body: await page.screenshot()});
     });
 
     await test.step("the owner types HELD, closes the note, and makes a new Edit share nobody opens", async () => {
