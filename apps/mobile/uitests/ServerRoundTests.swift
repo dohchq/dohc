@@ -178,13 +178,13 @@ final class ServerRoundTests: XCTestCase {
 
   // Connect keeps the last address while the app runs. A relaunch forgets it.
   @MainActor
-  func test7_relaunchAfterSignOutShowsAnEmptyConnect() {
+  func test7_relaunchAfterSignOutShowsAnEmptyConnect() throws {
     let app = XCUIApplication()
     app.launch()
     let field = app.textFields["Server address"]
     XCTAssertTrue(field.waitForExistence(timeout: 30), "After sign-out the phone should open on Connect")
     // An empty field reports its placeholder as its value.
-    let value = field.value as? String ?? ""
+    let value = try XCTUnwrap(field.value as? String, "The server field should report its text")
     XCTAssertTrue(value.isEmpty || value == field.placeholderValue, "The server field should be empty, not \(value)")
   }
 }
