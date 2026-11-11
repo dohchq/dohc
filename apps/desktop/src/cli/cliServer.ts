@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
@@ -61,6 +62,7 @@ import {
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import { versionNameRefusal } from "../ipc/errorWords";
+import { nextStepWords } from "../ipc/bridgeContract";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
@@ -111,6 +113,7 @@ import {
   type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import type { ChatDispatchService } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
@@ -153,6 +156,10 @@ import {
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
+import type { HeldSharePath } from "../workspaces/shareViewFiles";
+import type { CloudSyncFailure } from "../workspaces/relaySyncEngine";
+import { syncFailureWords } from "../workspaces/syncFailureWords";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -309,6 +316,10 @@ export interface CliKeptEditsPort {
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
+// The owner's Live documents list, read as the dialog reads it. Paths are
+// workspace-relative; the cursor is the list's own nextCursor.
+export type CliLiveDocumentsPort = (cursor?: string) => Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
 // Notices row offers the same step after the same warning.
@@ -380,7 +391,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // The run dohc dispatched that this request proved it is, with the run's
   // secret. The socket sets it per request; without it, the request is no run's.
   run?: CliRunCaller;
-  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  stopSync?(author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   shareLinkAgents?: {
     list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
@@ -398,6 +409,12 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // The shared files this shared view holds back, or null outside a shared view.
+  sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
+  // Why the last sync pass failed, until a pass succeeds.
+  syncFailure?(): CloudSyncFailure | null;
+  // A save the engine holds for this path, as the held band's review shows it.
+  heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
   createGroup?(input: { name: string; purpose?: string; type?: ChatChannelType }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -430,8 +447,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
+  heldNoteChange?: (input: HeldNoteChangeInput) => Promise<HeldNoteChangeResult>;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
+  liveDocuments?: CliLiveDocumentsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -462,6 +481,8 @@ export interface CliServerOptions {
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
+  // Try again for a conversation's stopped agent request, as the chat runs it.
+  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun">;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -822,10 +843,21 @@ function retainedCopiesUnavailable() {
   };
 }
 
+function liveDocumentsUnavailable() {
+  return { ok: false as const, reason: "Live documents are listed only in the original workspace. Open it to continue." };
+}
+
 function keptEditsUnavailable() {
   return {
     ok: false as const,
     reason: "Kept edits are kept only in the original workspace. Open it to continue.",
+  };
+}
+
+function heldChangesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Held changes are kept only in the original workspace. Open it to continue.",
   };
 }
 
@@ -2061,7 +2093,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2075,6 +2107,8 @@ async function dispatch(
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
+  if (paths.shared && request.verb === "liveDocuments") return liveDocumentsUnavailable();
+  if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2109,7 +2143,11 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
       case "documentRead":
+      case "documentHeld":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        break;
+      case "heldNoteChange":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentEdit":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
@@ -2703,6 +2741,15 @@ async function dispatchWorkspace(
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
       }
 
+    case "documentHeld":
+      // A share mount's notes are held in their original workspace, not this one.
+      if (!context.heldChange || context.readOnly || isSharedWithMePath(request.args.path)) return heldChangesUnavailable();
+      try {
+        return { ok: true as const, change: await context.heldChange(request.args.path) };
+      } catch (error) {
+        return mcpFailure(error, `dohc could not read the held change for ${request.args.path}.`);
+      }
+
     case "versionList":
     case "versionCompare":
     case "versionConflicts":
@@ -2802,6 +2849,36 @@ async function dispatchWorkspace(
       }
     }
 
+    case "sharedFilesHeld": {
+      if (!context.sharedFilesHeld) return { ok: false as const, reason: "dohc cannot read this workspace's shared files" };
+      try {
+        const held = await context.sharedFilesHeld();
+        return {
+          ok: true as const,
+          heldFiles: held && held.count > 0
+            ? { ...held, message: unjournalablePathMessages(held.files).join(" ") }
+            : null,
+        };
+      } catch (error) {
+        return mcpFailure(error, "failed to read the shared files held back");
+      }
+    }
+
+    case "syncFailure": {
+      // A sync failure can name any path in the workspace. Only the original
+      // workspace reads it, as with kept edits and History: not a shared view,
+      // and not a received share's folder, which resolves to its owner's.
+      const syncStatusUnavailable = { ok: false as const, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+      if (!context.syncFailure || context.readOnly) return syncStatusUnavailable;
+      if ((await callerPaths(context, request.args.cwd)).shared) return syncStatusUnavailable;
+      try {
+        const failure = context.syncFailure();
+        return { ok: true as const, syncFailure: failure && { ...syncFailureWords(failure), detail: failure.detail } };
+      } catch (error) {
+        return mcpFailure(error, "failed to read why sync stopped");
+      }
+    }
+
     case "collectionsWaiting":
       try {
         return { ok: true as const, waiting: await context.daemonReads.collectionsWaiting() };
@@ -2883,6 +2960,34 @@ async function dispatchWorkspace(
         return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits };
       } catch (error) {
         return mcpFailure(error, `failed to stop live editing again for ${request.args.path}`);
+      }
+    }
+
+    case "heldNoteChange": {
+      if (!context.heldNoteChange || context.readOnly || request.args.actor !== "agent") {
+        return {ok: false as const, reason: "Only a local agent in the owner's workspace can drop or restore a held change."};
+      }
+      const path = validateUserWritePath(request.args.path);
+      if (!path.ok) return cliPathRejected(path.reason, request.args.path);
+      try {
+        const input = request.args.action === "review" ? {path: path.normalized, action: "review" as const}
+          : {path: path.normalized, action: request.args.action, token: request.args.token, author: {
+            kind: "agent" as const, agentId: editingAgentId(context), onBehalfOf: options.localPersonId(),
+            ...agentWriteRun(context, options),
+            ...(options.agentRunDepth(context.workspaceId) > 0 ? {depth: options.agentRunDepth(context.workspaceId)} : {}),
+          }};
+        const result = await context.heldNoteChange(input);
+        if (input.action !== "review") await notifyWrite(options, context);
+        return {ok: true as const, ...result};
+      } catch (error) { return mcpFailure(error, "dohc could not change the held note."); }
+    }
+    case "liveDocuments": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        return { ok: true as const, ...await live(request.args.cursor) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list live documents");
       }
     }
 
@@ -3005,6 +3110,28 @@ async function dispatchWorkspace(
         await notifyWrite(options, context);
       }
       return shown.thread;
+    }
+
+    // Try again, for anyone who may post in the conversation: the same
+    // checks a reply makes, then the same two-attempt limit the chat's button
+    // keeps.
+    case "chatRetry": {
+      if (!options.chatRuns) return { ok: false as const, reason: "Agent runs are not available here." };
+      const { threadId } = await readReplyThread(context, chats, request.args.thread);
+      await options.chatWrites.assertMayPost(context, threadId);
+      const { failedRun } = await options.chatRuns.dispatchStateForThread(context.workspaceId, threadId);
+      if (!failedRun) return { ok: false as const, reason: "No agent request in this conversation has stopped." };
+      if (!failedRun.retryable) {
+        const nextStep = failedRun.nextStep ? ` ${nextStepWords(failedRun.nextStep, undefined)}` : "";
+        return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
+      }
+      try {
+        if (!await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId)) {
+          return { ok: false as const, reason: "This request can't run again now. Check dohc chat show for its state." };
+        }
+      } catch (error) { return mcpFailure(error, "dohc could not run this request again."); }
+      await notifyWrite(options, context);
+      return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
     }
   }
 
@@ -3508,7 +3635,7 @@ async function workspaceContextForRequest(
     request.verb === "collectionCreateRecord";
   const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
+    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "heldNoteChange" || fileRequest;
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3516,6 +3643,7 @@ async function workspaceContextForRequest(
     request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
+    request.verb === "chatRetry" ||
     request.verb === "react" ||
     request.verb === "export" ||
     (request.verb === "show" && !request.args.peek);

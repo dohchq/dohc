@@ -40,12 +40,28 @@ fn adopted_signed_out_agent_edit_accepted_after_sign_in_is_one_history_author() 
         // The agent edits while nobody is signed in, so its row and its
         // delivery name this computer's person. The relay binds the agent to
         // the server account.
+        let accepted = accepted_copy(&f.doc);
         let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
         if compacted {
             durable::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 30).unwrap();
             assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
         }
-        native_tail_apply(&mut f, edit.update, edit.delivery_id, 7);
+        let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
+        relay_sees(&mut event, &accepted);
+        let result = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            matches!(result, ApplicationResult::Applied(..)),
+            "compacted: {compacted}"
+        );
         let account = [serde_json::json!(["native-agent", "owner"])];
         let recovered = f
             .store
@@ -124,6 +140,7 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
     f.adopt().unwrap();
     // The agent edits privately, then the accepted interval fills. The
     // delivery's snapshot names only a person it already holds.
+    let accepted = accepted_copy(&f.doc);
     let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
     let full: Vec<Value> = std::iter::once(serde_json::to_value(&person).unwrap())
         .chain((1..crate::author_coverage::MAX_INTERVAL_AUTHORS).map(
@@ -148,6 +165,7 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
         .unwrap();
     let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
     event.metadata.author_snapshot = Some(vec![person]);
+    relay_sees(&mut event, &accepted);
     let interval = |f: &Fixture| {
         f.store
             .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
@@ -929,19 +947,45 @@ fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
     }
 }
 
+/// An adopted delivery with no snapshot keeps an unknown author only when
+/// the relay saw it change content, as the relay's author window does.
 #[test]
 fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
-    let mut f = Fixture::new();
-    f.edit(true);
-    f.adopt().unwrap();
-    let authors = f
-        .store
-        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
-        .unwrap();
-    assert_eq!(
-        authors.moment_json().unwrap(),
-        r#"[{"kind":"unattributed"}]"#
-    );
+    for changed in [true, false] {
+        let mut f = Fixture::new();
+        let before = f.doc.state_vector();
+        // A named local edit, so only the delivery can add the unknown author.
+        f.edit_by(true, 1_000_000, Some(&agent_run("owner-run".into(), None)));
+        if changed {
+            let mut first_seen: Vec<_> = f
+                .doc
+                .state_vector()
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = before.get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
+            assert!(!first_seen.is_empty());
+            f.cut.events[0].metadata.first_seen = first_seen;
+        }
+        f.adopt().unwrap();
+        let authors = f
+            .store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap();
+        assert_eq!(
+            authors.has_unattributed(),
+            changed,
+            "changed: {changed}, authors: {}",
+            authors.json()
+        );
+    }
 }
 
 #[test]
@@ -1247,6 +1291,21 @@ fn native_tail_event(
         },
         update_bytes: bytes.clone(),
     }
+}
+
+/// A copy of the state the relay had accepted, for `relay_sees`.
+fn accepted_copy(doc: &Ydoc) -> Ydoc {
+    let copy = Ydoc::wire();
+    copy.apply(&doc.encode_full_state()).unwrap();
+    copy
+}
+
+/// Names the ranges the relay finds new in `event` against `accepted`.
+fn relay_sees(event: &mut AdmittedLiveUpdate, accepted: &Ydoc) {
+    let (structs, deletes) =
+        crate::live_update_application::first_seen_for_test(accepted, &event.update_bytes);
+    event.metadata.first_seen = structs;
+    event.metadata.first_seen_deletes = Some(deletes);
 }
 
 fn native_tail_apply(
@@ -3904,13 +3963,15 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     mark("register-resumed");
     let peer = Ydoc::wire();
     peer.apply(&f.doc.encode_full_state()).unwrap();
+    let accepted = accepted_copy(&peer);
     native_tail_edit(&mut f, "Private after restore", events + 4);
-    let remote = peer.richdoc_append_paragraph("Accepted after restore");
     let mut cursor = events + 2;
     let mut terminal = None;
     let blocked = loop {
         assert!(cursor < events + 82);
-        let event = AdmittedLiveUpdate {
+        // Each delivery adds a paragraph, so each credits its agent.
+        let remote = peer.richdoc_append_paragraph(&format!("Accepted after restore {cursor}"));
+        let mut event = AdmittedLiveUpdate {
             metadata: AdmittedLiveUpdateMetadata {
                 accepted: RelayAcceptedLiveUpdate {
                     receipt: LiveUpdateReceipt {
@@ -3946,6 +4007,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             },
             update_bytes: remote.clone(),
         };
+        relay_sees(&mut event, &accepted);
         let result = apply_committed(
             &mut f.store,
             &mut WriterDocCache::new(),
@@ -3958,6 +4020,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         .unwrap();
         match result {
             ApplicationResult::Applied(..) => {
+                accepted.apply(&remote).unwrap();
                 terminal = Some(event.metadata.accepted.receipt);
                 cursor += 1;
             }

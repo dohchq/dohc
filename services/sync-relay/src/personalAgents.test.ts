@@ -13,12 +13,13 @@ import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-a
 import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
 import type { AutomationReplica } from "./automationReplicas";
+import { PERSONAL_WRITE_WORKSPACE_HEADER } from "./collectionWriteRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
 import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
 import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, type PersonalRunningEntry } from "./personalAgents";
-import { personalAgentOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
+import { personalAgentOrigin, personalCollectionOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies, type ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
@@ -420,7 +421,7 @@ describe("personal agent sign-in", () => {
     await ok(await begin(f, clientId, resourceFor(WS_A), "198.51.100.8"));
   });
 
-  it("asks only the workspace's owner, and offers View and Comment over the workspaces it owns", async () => {
+  it("asks only the workspace's owner, and offers View, Comment, and Edit over the workspaces it owns", async () => {
     const f = await fixture();
     const clientId = await registerClient(f);
     const requestId = await beginRequest(f, clientId);
@@ -428,7 +429,7 @@ describe("personal agent sign-in", () => {
       reportedClientName: "Test agent",
       redirectUri: REDIRECT,
       workspaceId: WS_A,
-      levels: ["view", "comment"],
+      levels: ["view", "comment", "edit"],
       workspaces: [{ workspaceId: WS_A, name: null }, { workspaceId: WS_B, name: null }],
       agents: [],
     });
@@ -446,11 +447,11 @@ describe("personal agent sign-in", () => {
       workspaces: [{ workspaceId: OTHER_WS, name: null }],
     });
 
-    // A reach naming another account's workspace, Edit, or nothing.
+    // A reach naming another account's workspace, a level there is none of, or nothing.
     await expectRefused(await allow(f, requestId, { reach: [{ workspaceId: OTHER_WS, level: "view" }] }));
-    await expectRefused(await allow(f, requestId, { reach: [{ workspaceId: WS_A, level: "edit" }] }));
+    await expectRefused(await allow(f, requestId, { reach: [{ workspaceId: WS_A, level: "admin" as Level }] }));
     await expectRefused(await allow(f, requestId, { reach: [] }));
-    await ok(await allow(f, requestId, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] }));
+    await ok(await allow(f, requestId, { reach: [{ workspaceId: WS_A, level: "edit" }, { workspaceId: WS_B, level: "view" }] }));
   });
 
   it("refuses redemption when the account no longer owns a workspace in the reach", async () => {
@@ -1026,16 +1027,18 @@ describe("the owner's controls", () => {
     await expectPersonal(f, agent).resolves.toMatchObject({ agentId: agent.agentId });
   });
 
-  it("sets reach only to the account's own workspaces, at View or Comment", async () => {
+  it("sets reach only to the account's own workspaces, at View, Comment, or Edit", async () => {
     const f = await fixture();
     const agent = await signIn(f);
     const setReach = (reach: unknown) => owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
     expect((await setReach([{ workspaceId: OTHER_WS, level: "view" }])).status).toBe(400);
-    expect((await setReach([{ workspaceId: WS_A, level: "edit" }])).status).toBe(400);
+    expect((await setReach([{ workspaceId: WS_A, level: "admin" }])).status).toBe(400);
     expect((await setReach([{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_A, level: "comment" }])).status).toBe(400);
     expect((await setReach([{ workspaceId: WS_A, level: "view", extra: 1 }])).status).toBe(400);
     expect((await owner(f, `/${agent.agentId}/reach`, { method: "POST" })).status).toBe(405);
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    await ok(await setReach([{ workspaceId: WS_A, level: "edit" }]));
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
   });
 
   it("ends running work in a workspace leaving reach, and wakes the logs it held", async () => {
@@ -1186,6 +1189,7 @@ function chats(f: Fixture, workspaceId: string, agentId: string): void {
 /** A personal agent's tool call, as share-web forwards it. A stream is sent as the body as it arrives. */
 function tool(
   f: Fixture, agent: Pick<Signed, "accessToken" | "resource">, action: string, body: unknown, signal?: AbortSignal,
+  headers: Record<string, string> = {},
 ): Promise<Response> {
   return f.h(request(null, `/sync/link/personal-agent/${action}`, {
     method: "POST",
@@ -1194,6 +1198,7 @@ function tool(
       "x-dohc-agent-resource": agent.resource,
       "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
       "content-type": "application/json",
+      ...headers,
     },
     ...(body instanceof ReadableStream ? { body, duplex: "half" } : { body: JSON.stringify(body) }),
     ...(signal === undefined ? {} : { signal }),
@@ -1648,6 +1653,154 @@ describe("a personal agent's posts", () => {
       // No notification: the read of the fence after the body refuses.
       await expectRefused(await tool(f, agent, action, arriving(() => { f.fence.changePassword(OWNER); })));
     }
+  });
+});
+
+describe("a personal agent's Collection writes", () => {
+  const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
+  const RECORD = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nSocks\n";
+  const created = (path = "trip/packing/Socks.md", text = RECORD) => ({
+    basedOnPath: null, basedOnBlobSha256: null, operation: "write", afterPath: path,
+    afterContentKind: "text", afterContentBase64: Buffer.from(text).toString("base64"), recordedAtMs: 1,
+  });
+  const body = (changes: unknown[], fields: Record<string, unknown> = {}) => ({ workspaceId: WS_A, submitId: "submit-1", changes, ...fields });
+  const writingTo = (workspaceId: string) => ({ [PERSONAL_WRITE_WORKSPACE_HEADER]: encodeURIComponent(workspaceId) });
+  const write = (f: Fixture, agent: Signed, changes: unknown[], fields: Record<string, unknown> = {}) =>
+    tool(f, agent, "collection-writes", body(changes, fields), undefined, writingTo(String(fields.workspaceId ?? WS_A)));
+  const written = (f: Fixture, agent: Signed) => logOf(f, WS_A).filter((row) => row.originId === personalCollectionOrigin(agent.agentId));
+
+  async function packing(f: Fixture): Promise<void> {
+    await putBlob(f.h, OWNER, WS_A, SCHEMA);
+    await appendLog(f.h, OWNER, WS_A, [moment("trip/packing/collection.yaml", SCHEMA, { originSeq: 0 })]);
+  }
+
+  it("writes at Edit from the agent's own origin, as the agent on its owner's behalf, once per submit", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+    await packing(f);
+    expect(await ok(await write(f, agent, [created()])))
+      .toMatchObject({ ok: true, submitId: "submit-1", paths: ["trip/packing/Socks.md"], created: true });
+    const rows = written(f, agent);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ opKind: "moment.append" });
+    expect(payloadOf(rows[0]!)).toMatchObject({ path: "trip/packing/Socks.md", authors: [{ kind: "agent", agentId: agent.agentId, onBehalfOf: OWNER }] });
+    // A retry answers the same write, and another write under its submit ID is refused.
+    expect(await ok(await write(f, agent, [created()]))).toMatchObject({ submitId: "submit-1", created: false });
+    await expectCode(await write(f, agent, [created("trip/packing/Hats.md")]), 409, "conflict");
+    expect(written(f, agent)).toHaveLength(1);
+  });
+
+  it("names the agent and its owner in the stored moment and to a share's readers", async () => {
+    const f = await fixture({ lookupUserDisplayName: (userId) => userId === OWNER ? "Owner name" : null });
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+    await packing(f);
+    const shareId = await createShare(f.h, OWNER, WS_A, { recipientUserId: "recipient", paths: ["trip"] });
+    await ok(await write(f, agent, [created()]));
+    const named = { kind: "agent", agentId: agent.agentId, agentName: "Helper", onBehalfOf: OWNER };
+    // Signed out, History has only the moment's own author to name.
+    expect(payloadOf(written(f, agent)[0]!).authors).toEqual([named]);
+    const response = await f.h(request("recipient", `/sync/shares/${shareId}/log?since=0`));
+    expect(response.status).toBe(200);
+    const ops = (await json(response)).ops as Array<{ payload: Record<string, unknown> }>;
+    expect(ops.at(-1)?.payload).toMatchObject({ path: "trip/packing/Socks.md",
+      authors: [{ kind: "human", humanId: OWNER, humanName: "Owner name" }, named] });
+  });
+
+  it("refuses at View and Comment, any file outside a Collection, a workspace out of reach, and a field it does not take", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    await packing(f);
+    await expectCode(await write(f, agent, [created()]), 403, "personal_agent_edit_needed");
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]));
+    await expectCode(await write(f, agent, [created()]), 403, "personal_agent_edit_needed");
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "edit" }]));
+    for (const path of ["notes.md", "notes/a.md", "trip/packing/photo.png"]) {
+      await expectCode(await write(f, agent, [created(path)]), 403, "personal_agent_not_collection");
+    }
+    await expectCode(await write(f, agent, [created()], { workspaceId: OTHER_WS }), 403, "personal_agent_out_of_reach");
+    expect((await write(f, agent, [created()], { note: "extra" })).status).toBe(400);
+    // Its tool passes this reason on, so it says what to fix.
+    const unread = await write(f, agent, [{ ...created(), afterContentBase64: "QR==" }]);
+    expect({ status: unread.status, body: await json(unread) }).toMatchObject({ status: 403,
+      body: { code: "share_op_rejected", error: expect.stringContaining("standard base64") } });
+    expect(written(f, agent)).toEqual([]);
+  });
+
+  it("refuses a write when its reach narrows, it signs out, a password changes, or the workspace changes hands or is deleted while its body arrives", async () => {
+    const outOfReach = (response: Response) => expectCode(response, 403, "personal_agent_out_of_reach");
+    const cases: Array<[(f: Fixture, agent: Signed) => Promise<unknown> | void, (response: Response) => Promise<void>]> = [
+      [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
+      [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
+      [(f) => { f.fence.changePassword(OWNER); }, expectRefused],
+      [(f) => { setOwner(f, WS_A, OTHER); }, outOfReach],
+      [(f) => {
+        const context = f.storage as StorageContext;
+        initializeAccountDeletion(context, DELETION_KEY);
+        context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
+          .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
+      }, outOfReach],
+    ];
+    for (const [meanwhile, refused] of cases) {
+      const f = await fixture();
+      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+      await packing(f);
+      // The body's bytes come only when the relay reads them, after it authenticated the request.
+      const arriving = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const changed = await meanwhile(f, agent);
+          if (changed instanceof Response) await ok(changed);
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body([created()]))));
+          controller.close();
+        },
+      }, { highWaterMark: 0 });
+      await refused(await tool(f, agent, "collection-writes", arriving, undefined, writingTo(WS_A)));
+      expect(written(f, agent)).toEqual([]);
+    }
+  });
+
+  it("refuses a retry of a write once the agent loses Edit or signs out, and never answers it as written", async () => {
+    const cases: Array<[(f: Fixture, agent: Signed) => Promise<Response>, (response: Response) => Promise<void>]> = [
+      [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "view" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
+      [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
+    ];
+    for (const [revoke, refused] of cases) {
+      const f = await fixture();
+      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+      await packing(f);
+      await ok(await write(f, agent, [created()]));
+      // A retry that passed the check before its body loses its access while the body arrives.
+      const retry = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await ok(await revoke(f, agent));
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body([created()]))));
+          controller.close();
+        },
+      }, { highWaterMark: 0 });
+      await refused(await tool(f, agent, "collection-writes", retry, undefined, writingTo(WS_A)));
+      await refused(await write(f, agent, [created()]));
+      expect(written(f, agent)).toHaveLength(1);
+    }
+  });
+
+  it("refuses a workspace the agent may not edit before reading any of the body", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "edit" }] });
+    let pulled = false;
+    // A large body, whose bytes come only if the relay reads them.
+    const unread = () => new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled = true;
+        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(WS_A)), 403, "personal_agent_edit_needed");
+    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(OTHER_WS)), 403, "personal_agent_out_of_reach");
+    await expectCode(await tool(f, agent, "collection-writes", unread()), 400, "bad_request");
+    expect(pulled).toBe(false);
+    // The body names the workspace the relay checked, or nothing is written.
+    await expectCode(await tool(f, agent, "collection-writes", body([created()]), undefined, writingTo(WS_B)), 400, "bad_request");
+    expect(written(f, agent)).toEqual([]);
   });
 });
 

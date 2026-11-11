@@ -7,7 +7,7 @@ use super::{
     object_has_live_alias, record_request, reject_reserved_capture_origin, text_blob_sha256,
     validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
     validate_moment_metadata, validate_plaintext_storable_path, version_exists,
-    write_result_from_moment,
+    write_result_from_moment, write_result_with_text,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -17,7 +17,8 @@ use crate::records::{
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, put_binary_blob,
+    EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
+    hex_sha256, put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::borrow::Cow;
@@ -387,9 +388,9 @@ pub fn capture_ingest_in_tx(
 /// A head with a different `metadata_origin` is refused unless
 /// `claim_foreign_head` is set or the head is a local Y.Doc recovery copy the
 /// materializer refused to place, see [`refused_local_recovery_occupies`]. The
-/// request payload hashes the caller's flag only. Equal text returns the
-/// existing head; a claimed equal-text head can still update its stored
-/// origin. The caller supplies the disk observation and owns lease policy and
+/// request payload hashes the caller's flag only. Equal bytes return the
+/// existing head, even a binary one; a claimed equal head can still update its
+/// stored origin. The caller supplies the disk observation and owns lease policy and
 /// related transaction effects.
 /// Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_with_admission_in_tx<E>(
@@ -485,8 +486,13 @@ where
         if recorded.payload_hash != payload_hash {
             return Err(DomainError::IdempotencyKeyReuseMismatch.into());
         }
-        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq)
-            .map_err(E::from);
+        return reconstruct_capture_write(
+            tx,
+            &input.workspace_id,
+            recorded.result_seq,
+            &input.text,
+        )
+        .map_err(E::from);
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
@@ -542,8 +548,7 @@ where
     }
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
-        && before.content_kind == "text"
-        && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
+        && head_sha256(before) == Some(content_sha256.as_str())
     {
         // A claimed dedupe transfers ownership: capture observed the disk
         // transition and the content already matches, so the head becomes
@@ -563,7 +568,7 @@ where
             )
             .map_err(DomainError::sql_persist)?;
         }
-        let result = write_result_for_existing_head(tx, before)?;
+        let result = write_result_for_existing_head(tx, before, &input.text)?;
         record_request(
             tx,
             input.request_id.as_deref(),
@@ -1277,8 +1282,8 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// Other origins are excluded because their content may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
 /// Matching pending rollback restores also exclude their destination heads,
-/// and so do pending plaintext switch writes with no file to replace, such as
-/// one that waits for a held file in the folder at its path.
+/// and so do this version's pending plaintext switch writes with no file to
+/// replace, such as one that waits for a held file in the folder at its path.
 ///
 /// Pending rollback deletes contribute transient last-known-disk entries when
 /// their target has no alias in this version. These entries keep that path out
@@ -1300,7 +1305,7 @@ pub fn capture_manifest_seed(
             .prepare(
                 "SELECT a.path, COALESCE(s.content_kind, 'text'), \
                         s.blob_sha256, tb.byte_length, \
-                        s.binary_sha256, bb.byte_length \
+                        s.binary_sha256, bb.byte_length, 1 \
                  FROM path_aliases a \
                  JOIN snapshots s ON s.workspace_id = a.workspace_id \
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
@@ -1337,12 +1342,10 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3 \
-                              OR (j.job_id GLOB 'version-switch-mat_*' \
-                                  AND j.preimage_present = 0))) \
+                                    length(?3)) = ?3)) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
-                        j.content_sha256, bb.byte_length \
+                        j.content_sha256, bb.byte_length, 0 \
                  FROM materialization_jobs j \
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
                   WHERE j.status = 'pending' AND j.operation = 'delete' \
@@ -1358,6 +1361,7 @@ pub fn capture_manifest_seed(
                  ORDER BY 1",
             )
             .map_err(DomainError::sql_corrupt)?;
+        let unwritten = unwritten_switch_writes(conn, &ws, &version)?;
         let rows = stmt
             .query_map(params![ws, version, rollback_version_prefix], |row| {
                 Ok((
@@ -1367,11 +1371,12 @@ pub fn capture_manifest_seed(
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             })
             .map_err(DomainError::sql_corrupt)?;
         for row in rows {
-            let (path, kind, text_sha, text_len, binary_sha, binary_len) =
+            let (path, kind, text_sha, text_len, binary_sha, binary_len, head) =
                 row.map_err(DomainError::sql_corrupt)?;
             let (sha256, size) = match kind.as_str() {
                 "binary" => match (binary_sha, binary_len) {
@@ -1383,6 +1388,10 @@ pub fn capture_manifest_seed(
                     _ => continue,
                 },
             };
+            if head && !unwritten.is_empty() && unwritten.contains(&(path.clone(), sha256.clone()))
+            {
+                continue;
+            }
             entries.push(CaptureManifestSeedEntry { path, size, sha256 });
         }
         // Same capture-ownership rule for the encrypted store: a tip written
@@ -1414,6 +1423,71 @@ pub fn capture_manifest_seed(
         }
         Ok(entries)
     })
+}
+
+/// The id of a version switch's job that projects `content_sha256` to `path`
+/// for `version_id`. The id is the only place a switch job names its version.
+pub fn switch_projection_job_id(
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    operation: MaterializationOperation,
+    content_sha256: &str,
+    secret: bool,
+) -> String {
+    let operation = match operation {
+        MaterializationOperation::Write => "write",
+        MaterializationOperation::Delete => "delete",
+    };
+    let identity = format!(
+        "{workspace_id}\0{version_id}\0{path}\0{operation}\0{content_sha256}\0{}",
+        if secret { "secret" } else { "plain" }
+    );
+    let prefix = if secret {
+        "version-switch-secret-mat_"
+    } else {
+        "version-switch-mat_"
+    };
+    format!("{prefix}{}", hex_sha256(identity.as_bytes()))
+}
+
+/// The `(path, sha256)` pairs that `version`'s plaintext switch has yet to
+/// write where no file was. Another version's pending write at the same path
+/// does not count (dohc#3622).
+fn unwritten_switch_writes(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+) -> Result<std::collections::HashSet<(String, String)>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT job_id, target_path, content_sha256 FROM materialization_jobs \
+             WHERE workspace_id IN (?1, '') AND status = 'pending' AND operation = 'write' \
+               AND preimage_present = 0 AND job_id GLOB 'version-switch-mat_*'",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let mut rows = stmt
+        .query(params![workspace])
+        .map_err(DomainError::sql_corrupt)?;
+    let mut writes = std::collections::HashSet::new();
+    while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+        let job: String = row.get(0).map_err(DomainError::sql_corrupt)?;
+        let path: String = row.get(1).map_err(DomainError::sql_corrupt)?;
+        let sha: String = row.get(2).map_err(DomainError::sql_corrupt)?;
+        if job
+            == switch_projection_job_id(
+                workspace,
+                version,
+                &path,
+                MaterializationOperation::Write,
+                &sha,
+                false,
+            )
+        {
+            writes.insert((path, sha));
+        }
+    }
+    Ok(writes)
 }
 
 fn reconstruct_capture_binary(
@@ -2117,24 +2191,56 @@ fn reconstruct_capture_write(
     conn: &Connection,
     workspace_id: &str,
     moment_order: i64,
+    text: &str,
 ) -> Result<WriteResult, DomainError> {
     let moment =
         moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
             reason: "deduped capture has no moment",
         })?;
-    write_result_from_moment(conn, workspace_id, moment, true)
+    capture_result_for_moment(conn, workspace_id, moment, text)
 }
 
 fn write_result_for_existing_head(
     conn: &Connection,
     snapshot: &SnapshotRecord,
+    text: &str,
 ) -> Result<WriteResult, DomainError> {
     let moment = get_moment(conn, &snapshot.workspace_id, &snapshot.latest_moment_id)?.ok_or(
         DomainError::StateCorrupt {
             reason: "snapshot points at a missing moment",
         },
     )?;
-    write_result_from_moment(conn, &snapshot.workspace_id, moment, true)
+    capture_result_for_moment(conn, &snapshot.workspace_id, moment, text)
+}
+
+/// The sha256 of a head's bytes, whether it stores them as text or binary.
+fn head_sha256(head: &SnapshotRecord) -> Option<&str> {
+    match head.content_kind.as_str() {
+        "text" => head.blob_sha256.as_deref(),
+        "binary" => head.binary_sha256.as_deref(),
+        _ => None,
+    }
+}
+
+/// Text capture's result for a head that already holds `text`. A file recorded
+/// as binary before code files were stored as text (#2666) keeps its binary
+/// head, so its result pairs the captured text with that head's moment.
+fn capture_result_for_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    text: &str,
+) -> Result<WriteResult, DomainError> {
+    if moment.after_content_kind != "binary" {
+        return write_result_from_moment(conn, workspace_id, moment, true);
+    }
+    let sha256 = text_blob_sha256(text);
+    if moment.after_binary_sha256.as_deref() != Some(sha256.as_str()) {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped text capture points at other binary content",
+        });
+    }
+    write_result_with_text(conn, workspace_id, moment, text.to_owned(), sha256, true)
 }
 
 fn reconstruct_capture_delete(

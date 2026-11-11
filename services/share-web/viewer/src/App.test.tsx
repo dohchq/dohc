@@ -427,6 +427,8 @@ describe("App", () => {
     await renderApp();
     const entry = container.querySelector('section[aria-labelledby="link-entry-title"]');
     expect(entry).not.toBeNull();
+    expect(entry?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
+    expect(entry?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
     const copy = entry?.textContent ?? "";
     expect(copy).toContain(access === "view" ? "You can read files and comments." :
       access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
@@ -442,6 +444,21 @@ describe("App", () => {
     }
     expect(copy).toContain(access === "view" ? "Read the discussion in Comments." : "Use Comments to read or post comments.");
     expect(buttonNamed("Open in dohc")).toBeDefined();
+  });
+
+  it("hides agent guidance while loading and after a refusal", async () => {
+    let deliver: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Promise<Response>(resolve => {deliver = resolve;})));
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+    });
+    expect(container.textContent).toContain("Opening shared files");
+    expect(container.querySelector("#link-agent-title")).toBeNull();
+    await act(async () => deliver?.(new Response(null, {status: 404})));
+    await settle(() => container.textContent.includes("This link isn't available."));
+    expect(container.querySelector("#link-agent-title")).toBeNull();
+    expect(container.textContent).not.toContain("/mcp/s/");
   });
 
   it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
@@ -1804,6 +1821,61 @@ describe("App", () => {
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
     expect(container.textContent).not.toContain("This link isn't available.");
+    await settle(() => container.querySelector("#link-agent-title") !== null);
+    expect(container.textContent).toContain(`${location.origin}/mcp/s/${secret}`);
+    expect(container.textContent).not.toContain("Replace <secret>");
+  });
+
+  it.each(["same page", "reload", "another link refused"] as const)("keeps the real MCP address only for the admitted page: %s", async scenario => {
+    const secret = "m".repeat(43), refusedSecret = "n".repeat(43);
+    const address = `${location.origin}/mcp/s/${secret}`;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
+    const store = vi.spyOn(Storage.prototype, "setItem");
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    let refuse = false;
+    const exchange = vi.fn(() => refuse ? new Response(null, {status: 403}) : jsonResponse({session: SESSION}));
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) =>
+      requestPath(input) === "/api/exchange" ? exchange() : fallback(input, init)));
+    history.replaceState(null, "", `/s/#${secret}`);
+    await renderApp();
+    const entry = () => container.querySelector('section[aria-labelledby="link-agent-title"]');
+    expect(entry()?.querySelector("code")?.textContent).toBe(address);
+    // The address text is the only place the secret appears on the page.
+    expect(container.innerHTML.split(secret).length).toBe(2);
+    expect(entry()?.textContent).not.toContain("Replace <secret>");
+    expect(entry()?.textContent).toContain("Anyone with the full address gets this link's access");
+    expect(location.hash).toBe("");
+    expect(location.href).not.toContain(secret);
+    await act(async () => (entry()?.querySelector("button") as HTMLButtonElement).click());
+    expect(writeText).toHaveBeenLastCalledWith(address);
+    expect(store).not.toHaveBeenCalled();
+    if (scenario === "same page") return;
+
+    await act(async () => root?.unmount());
+    root = null;
+    writeText.mockClear();
+    if (scenario === "another link refused") {
+      refuse = true;
+      history.replaceState(null, "", `/s/#${refusedSecret}`);
+    }
+    await renderApp();
+    expect(location.hash).toBe("");
+    expect(container.innerHTML).not.toContain(secret);
+    expect(container.innerHTML).not.toContain(refusedSecret);
+    if (scenario === "another link refused") {
+      expect(container.textContent).toContain("This link isn't available.");
+      expect(entry()).toBeNull();
+      expect(writeText).not.toHaveBeenCalled();
+    } else {
+      const template = `${location.origin}/mcp/s/<secret>`;
+      expect(entry()?.querySelector("code")?.textContent).toBe(template);
+      expect(entry()?.textContent).toContain("Replace <secret> with the text after # in the original share link.");
+      await act(async () => (entry()?.querySelector("button") as HTMLButtonElement).click());
+      expect(writeText).toHaveBeenLastCalledWith(template);
+      expect(exchange).toHaveBeenCalledTimes(1);
+    }
+    expect(store).not.toHaveBeenCalled();
   });
 
   it.each(["exchange", "current"] as const)("renders server-supplied reload recovery for a share-web mismatch at %s", async (step) => {

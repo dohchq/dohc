@@ -219,24 +219,34 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
   });
 }
 
-export function disableAppPublication(storage: StorageContext, input: DisableAppPublicationInput): AppPublicationState {
+/** The takedown reply lists at most this many copies, so it fits the operator socket's reply limit. */
+export const TAKEDOWN_LISTED_COPIES = 50;
+export interface AppPublicationTakedownResult extends AppPublicationState {
+  /** The owner's other active publications of the same bundle, such as the app on another share link. */
+  otherActiveCopies: {publicationIds: string[]; total: number};
+}
+export function disableAppPublication(storage: StorageContext, input: DisableAppPublicationInput): AppPublicationTakedownResult {
   if (!/^[a-f0-9]{64}$/.test(input.publicationId) || typeof input.reason !== "string" ||
       !input.reason.trim() || input.reason.length > 1024 || Buffer.byteLength(input.reason) > 4096 || input.reason.includes("\0")) throw badRequest("Invalid publication takedown.");
   const now = integer(input.nowMs);
   return storage.tx(() => {
-    const row = storage.db.prepare("SELECT workspace_id,owner_user_id FROM sync_relay_app_publications WHERE publication_id=?").get(input.publicationId);
+    const row = storage.db.prepare("SELECT workspace_id,owner_user_id,manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?").get(input.publicationId);
     if (!row) throw notFound();
     const current = withOperatorTakedown(storage, header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id)).state);
     // A takedown holds the owner's app publishing, and a retry after a lift holds it again.
     storage.db.prepare("INSERT OR IGNORE INTO sync_relay_app_publishing_holds(publication_id,owner_user_id,held_at_ms) VALUES(?,?,?)")
       .run(input.publicationId, String(row.owner_user_id), now);
-    if (current.operatorTakedown) return current;
+    const copies = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
+      WHERE owner_user_id=? AND manifest_sha256=? AND active=1 AND publication_id<>? ORDER BY publication_id`)
+      .all(String(row.owner_user_id), String(row.manifest_sha256), input.publicationId).map(copy => String(copy.publication_id));
+    const otherActiveCopies = {publicationIds: copies.slice(0, TAKEDOWN_LISTED_COPIES), total: copies.length};
+    if (current.operatorTakedown) return {...current, otherActiveCopies};
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     const operatorTakedown: AppPublicationTakedown = {actor: "operator", disabledAtMs: now, reason: input.reason.trim()};
     storage.db.prepare("INSERT INTO sync_relay_app_publication_takedowns(publication_id,actor,disabled_at_ms,reason) VALUES(?,'operator',?,?)")
       .run(input.publicationId, now, operatorTakedown.reason);
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
-    return {...current, active: false, authorityRevision: current.authorityRevision + 1, operatorTakedown};
+    return {...current, active: false, authorityRevision: current.authorityRevision + 1, operatorTakedown, otherActiveCopies};
   });
 }
 

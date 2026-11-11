@@ -7,6 +7,16 @@ it("parses Access refresh without operands", () => {
 });
 
 describe("parseCliArguments", () => {
+  it("requires the reviewed token before dropping or undoing a held change", () => {
+    expect(parseCliArguments(["document", "held-change", "note.md", "--as-agent"], {}))
+      .toMatchObject({verb: "heldNoteChange", path: "note.md", action: "review", actor: "agent"});
+    for (const action of ["drop", "undo"]) {
+      expect(() => parseCliArguments(["document", "held-change", "note.md", "--action", action], {})).toThrow("--token");
+      expect(() => parseCliArguments(["document", "held-change", "note.md", "--action", action, "--token", "wrong"], {})).toThrow("--token");
+      expect(parseCliArguments(["document", "held-change", "note.md", "--action", action, "--token", "a".repeat(64)], {}))
+        .toMatchObject({verb: "heldNoteChange", action, token: "a".repeat(64)});
+    }
+  });
   it("parses Access references and pages without workspace or account selectors", () => {
     expect(parseCliArguments(["access", "object", '{"kind":"path","path":"Notes/a.md"}', "--cursor", "page"], {}))
       .toMatchObject({ verb: "accessObject", ref: { kind: "path", path: "Notes/a.md", versionId: null }, cursor: "page" });

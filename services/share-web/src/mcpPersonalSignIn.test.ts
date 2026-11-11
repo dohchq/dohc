@@ -189,7 +189,8 @@ it("signs a signed-out browser in first, then returns to the same sign-in reques
   expect(html).toContain(`<bdi class="k">${ADA.email}</bdi><button type="submit" form="sign-out" class="link">Not you?</button>`);
   expect(formField(html, "name")).toBe("Trip helper");
   expect(html).toContain(`<p class="cap">@${handleForName("Trip helper")}</p>`);
-  expect(html).toContain("<p class=\"cap\">View reads files and chats. Comment also posts in chats and Comments.</p>");
+  expect(html).toContain("<p class=\"cap\">View reads files and chats. Comment also posts in chats and Comments. " +
+    "Edit also changes Collections, but no other files.</p>");
   expect(html).toContain("<bdi>Trip helper</bdi> runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.");
   // The redirect goes to a loopback address, so the page names this computer, not the address.
   expect(html).toContain("<span class=\"to\">Returns to an app on this computer</span>");
@@ -206,16 +207,15 @@ it("signs a signed-out browser in first, then returns to the same sign-in reques
   expect(await (await as(path)).text()).toContain("<h1>Sign in to dohc</h1>");
 });
 
-it("starts the address's workspace at Comment and every other at None, and offers only None, View and Comment", async () => {
+it("starts the address's workspace at Edit and every other at None, and offers None, View, Comment and Edit", async () => {
   const s = await stack();
   const { page, html } = await s.open(new CookieJar(), FUNDRAISER);
   expect(page.status).toBe(200);
   // Only the account's own workspaces, never another account's.
   expect(reachOf(html)).toEqual({
-    [TRIP]: { offered: ["none", "view", "comment"], selected: "none" },
-    [FUNDRAISER]: { offered: ["none", "view", "comment"], selected: "comment" },
+    [TRIP]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
+    [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "edit" },
   });
-  expect(html).not.toMatch(/value="edit"|>Edit</u);
   expect(html).not.toContain(GARDEN);
   // With no agent signed in yet, there is no one to choose.
   expect(html).not.toContain("Who it is");
@@ -310,7 +310,7 @@ it("signs an agent in again from its current reach", async () => {
   expect(opened.html).toContain(`name="as" value="${agentId}" class="opt" aria-pressed="false"><span class="tick" aria-hidden="true"></span>` +
     `<span class="av agent hue-olive" aria-hidden="true">H</span><span class="k"><bdi>Helper</bdi> <span class="sub">@${handleForName("Helper")}`);
   // A new agent starts from the address.
-  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "comment" });
+  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "edit" });
 
   const chosen = await s.choose(opened.as, opened.html, { as: agentId, decision: "choose" });
   expect(chosen.status).toBe(200);
@@ -425,6 +425,35 @@ it("keeps a personal agent working after share-web restarts: it waits, replies, 
   const again = await s.connect(accessToken, agent.resource);
   expect((await again.callTool({ name: "dohc_list_workspaces", arguments: {} })).structuredContent)
     .toMatchObject({ ok: true, agent: { name: "Trip helper", handle: "Triphelper" }, workspaces: [{ workspace: TRIP, level: "comment", dmChannel: dm }] });
+});
+
+it("holds one large body per personal agent, whichever of its tokens sends it", async () => {
+  const s = await stack();
+  const agent = await signInPersonalAgent({ send: s.send, origin: ORIGIN, workspaceId: TRIP, account: ADA, choices: { [`w:${TRIP}`]: "edit" } });
+  // A refresh leaves the first access token working, so the agent has two.
+  const refreshed = await tokenRequest(s.send, { grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken,
+    resource: agent.resource });
+  expect(refreshed.status).toBe(200);
+  const { access_token: second } = await refreshed.json() as { access_token: string };
+  const path = new URL(agent.resource).pathname;
+  const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" });
+  let finish!: () => void;
+  // A body past an ordinary request's size takes the agent's one large slot while it arrives.
+  const held = s.send(path, { method: "POST", headers: headers(agent.accessToken), duplex: "half", body: new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
+      finish = () => {
+        controller.enqueue(new TextEncoder().encode(`"jsonrpc":"2.0","id":1,"method":"tools/list"}`));
+        controller.close();
+      };
+    },
+  }) } as RequestInit);
+  const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
+  // The agent's other token waits its turn too.
+  await expect.poll(async () => (await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(429);
+  finish();
+  expect((await held).status).toBe(200);
+  expect((await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(200);
 });
 
 it("keeps the personal address, its tokens and the password out of the logs", async () => {

@@ -8,7 +8,7 @@ export const OPERATOR_MAX_RESPONSE_BYTES = 16384;
 export interface DisablePublicationRequest { type: "disable-publication"; publicationId: string; reason: string }
 export interface LiftPublishingHoldRequest { type: "lift-publishing-hold"; publicationId: string }
 export type OperatorRequest = DisablePublicationRequest | LiftPublishingHoldRequest;
-export interface OperatorResponse { code: 0 | 1 | 2 | 3; message: string; publicationId?: string; authorityRevision?: number; operatorTakedown?: {actor: "operator"; disabledAtMs: number; reason: string} }
+export interface OperatorResponse { code: 0 | 1 | 2 | 3; message: string; publicationId?: string; authorityRevision?: number; operatorTakedown?: {actor: "operator"; disabledAtMs: number; reason: string}; otherActiveCopies?: {publicationIds: string[]; total: number} }
 
 export function operatorSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   const identity = resolve(env.DOHC_RELAY_DEPLOYMENT_CONFIG ?? env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite"));

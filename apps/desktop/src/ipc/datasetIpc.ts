@@ -11,6 +11,7 @@ import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
 import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
@@ -168,14 +169,14 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       };
       const addressed = <T extends { dataset: import("@dohc/security-contract/dataset").DatasetDescription }>(result: T) => ({ ...result, dataset: { ...result.dataset, datasetPath: "datasetPath" in request ? request.datasetPath : null } });
       if (input.action === "export") {
-        if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
+        if (shareViewIsPresent(operation.workspace.shareView)) throw datasetOwnerOnlyError();
         if (!dependencies.exportArchive) throw new Error("Collection recovery export is unavailable. Restart dohc and try again.");
         const savedPath = await dependencies.exportArchive(operation.workspace, input, operation.signal, current);
         current();
         return { kind: "exported" as const, savedPath };
       }
       if (shareViewIsPresent(operation.workspace.shareView)) {
-        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
+        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw datasetOwnerOnlyError();
         const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
         current();
         if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...await addressPage(page) }; }

@@ -55,6 +55,16 @@ it("keeps a trusted automation on the owner's bound client refused, so its retry
     expect(f.journalRows().journal.some(row => row.delivery_id === input.metadata.deliveryId)).toBe(false);
   } finally {f.close();}
 });
+it("refuses an owner context that declares a personal agent and journals nothing", () => {
+  const f = setup();
+  try {
+    const bytes = f.update("claimed"), before = f.journalRows().journal.length;
+    const declaring = (agentId: string) => ({kind: "account" as const, accountId: "owner", agent: {agentId, agentName: "Helper", depth: 0}});
+    expect(credit(f, bytes, "claimed", declaring(`p-${"a".repeat(26)}`)).result).toMatchObject({kind: "refused", reason: "provenance-refused"});
+    expect(f.journalRows().journal).toHaveLength(before);
+    expect(credit(f, bytes, "own-agent", declaring("helper")).result.kind).toBe("accepted");
+  } finally {f.close();}
+});
 it("keeps recipient client binding strict", () => {
   const f = setup();
   try {

@@ -38,7 +38,8 @@ mod refusal_notices;
 mod relay;
 pub mod replica_cut;
 pub use refusal_notices::{
-    RefusalCoordinate, RefusalDocument, RefusalNotice, dismiss_refusal_notice, list_refusal_notices,
+    RefusalCoordinate, RefusalDocument, RefusalNotice, clear_markdown_hold_refusals_in_tx,
+    dismiss_refusal_notice, list_refusal_notices,
 };
 mod router;
 mod secret_apply;

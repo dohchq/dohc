@@ -1241,8 +1241,9 @@ describe("the owner's read of a grant's direct writes", () => {
     expect(migrated.prepare(
       "SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?",
     ).get(WORKSPACE)).toEqual(quota);
+    // The share ledger is as a new store makes it, with nothing of the earlier one left. A personal agent's ledger is apart.
     expect(migrated.prepare(
-      "SELECT name FROM sqlite_master WHERE name LIKE '%collection_writes%' ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE name LIKE '%collection_writes%' AND name NOT LIKE '%personal_collection_writes%' ORDER BY name",
     ).all().map((row) => row.name)).toEqual([
       "idx_sync_relay_collection_writes_grant_seq",
       "sqlite_autoindex_sync_relay_collection_writes_1",

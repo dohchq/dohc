@@ -1772,3 +1772,354 @@ async fn a_held_plain_file_keeps_its_folder_from_a_secret_write() {
         "the secret write does not wait"
     );
 }
+
+// dohc#3621. A crash after a switch commits a job, before it changes the
+// file, leaves the previous version's bytes on disk. Capture must not record
+// them in the active version. Replay lands the switch's change, and capture
+// then sees the active version's own bytes.
+const WAITING_PATH: &str = "ordered.md";
+// CRLF: the switch hashes the raw file, and capture must compare the same bytes.
+const WAITING_MAIN: &str = "main line\r\nsecond\r\n";
+const WAITING_FEATURE: &str = "feature line\r\nsecond\r\n";
+
+/// Main holds `WAITING_MAIN` on disk. The feature version holds
+/// `WAITING_FEATURE`, or no file when `feature_text` is `None`. The switch to
+/// the feature version crashes after its job commits, and the actor reopens.
+async fn crash_switch_before_its_write(
+    scratch: &ScratchDir,
+    supervisor: &WorkspaceSupervisor,
+    feature_text: Option<&str>,
+) -> dohc_engine_runtime::ActorHandle {
+    let database = engine_db_path(scratch).expect("database");
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    let fork = |now_ms| {
+        actor.create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+    };
+    if feature_text.is_none() {
+        fork(2).await.expect("feature");
+    }
+    actor
+        .versioned_text_write(
+            write("main", WAITING_MAIN, "waiting-main", 3),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main write");
+    if let Some(text) = feature_text {
+        fork(4).await.expect("feature");
+        actor
+            .versioned_text_write(
+                write("feature", text, "waiting-feature", 5),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("feature write");
+    }
+    std::fs::write(scratch.path().join(WAITING_PATH), WAITING_MAIN).expect("seed disk");
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 6,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the crash fails the switch");
+    assert!(faults.fired(), "the switch's change starts");
+    drop(actor);
+    supervisor.close(&database).expect("close");
+    assert_eq!(pending_switch_jobs(&database, WAITING_PATH), 1);
+    supervisor.open(&database, 7).expect("reopen").actor
+}
+
+fn waiting_capture(text: &str, now_ms: i64) -> dohc_engine_runtime::CaptureIngest {
+    dohc_engine_runtime::CaptureIngest {
+        workspace_id: WORKSPACE.to_owned(),
+        version_id: "feature".to_owned(),
+        path: WAITING_PATH.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: None,
+        claim_foreign_head: true,
+    }
+}
+
+fn path_moments(database: &std::path::Path, table: &str, path: &str) -> i64 {
+    Connection::open(database)
+        .expect("sqlite")
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
+            [WORKSPACE, path],
+            |row| row.get(0),
+        )
+        .expect("moments")
+}
+
+fn waits_for_switch<T: std::fmt::Debug>(result: Result<T, RuntimeError>) {
+    match result {
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason }))
+            if reason == dohc_engine_runtime::actor::CAPTURE_WAITS_FOR_SWITCH => {}
+        other => panic!("capture must wait for the switch, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_waits_for_a_switch_to_replace_the_previous_versions_file() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = crash_switch_before_its_write(&scratch, &supervisor, Some(WAITING_FEATURE)).await;
+    let moments = path_moments(&database, "moments", WAITING_PATH);
+
+    waits_for_switch(
+        actor
+            .capture_ingest(
+                waiting_capture(WAITING_MAIN, 8),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await,
+    );
+    assert_eq!(path_moments(&database, "moments", WAITING_PATH), moments);
+    assert_eq!(
+        pending_switch_jobs(&database, WAITING_PATH),
+        1,
+        "the refusal leaves the switch's write waiting"
+    );
+
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 9)
+        .await
+        .expect("replay");
+    assert_eq!(
+        std::fs::read(scratch.path().join(WAITING_PATH)).expect("disk"),
+        WAITING_FEATURE.as_bytes()
+    );
+    let landed = actor
+        .capture_ingest(
+            waiting_capture(WAITING_FEATURE, 10),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture the landed write");
+    assert!(landed.deduped, "the landed bytes are the feature head");
+    assert_eq!(path_moments(&database, "moments", WAITING_PATH), moments);
+    assert_eq!(pending_switch_jobs(&database, WAITING_PATH), 0);
+    let holds: i64 = Connection::open(&database)
+        .expect("sqlite")
+        .query_row(
+            "SELECT COUNT(*) FROM capture_file_holds WHERE workspace_id = ?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("holds");
+    assert_eq!(holds, 0, "the wait leaves no hold behind");
+    supervisor.close(&database).expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_waits_for_a_switch_to_delete_the_previous_versions_file() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = crash_switch_before_its_write(&scratch, &supervisor, None).await;
+    let moments = path_moments(&database, "moments", WAITING_PATH);
+
+    waits_for_switch(
+        actor
+            .capture_ingest(
+                waiting_capture(WAITING_MAIN, 8),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await,
+    );
+    assert_eq!(path_moments(&database, "moments", WAITING_PATH), moments);
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 9)
+        .await
+        .expect("replay");
+    assert!(!scratch.path().join(WAITING_PATH).exists());
+    assert_eq!(pending_switch_jobs(&database, WAITING_PATH), 0);
+    supervisor.close(&database).expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_records_an_edit_made_while_a_switch_write_waits() {
+    const EDITED: &str = "edited after the switch\r\n";
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = crash_switch_before_its_write(&scratch, &supervisor, Some(WAITING_FEATURE)).await;
+    let moments = path_moments(&database, "moments", WAITING_PATH);
+    std::fs::write(scratch.path().join(WAITING_PATH), EDITED).expect("edit");
+
+    let captured = actor
+        .capture_ingest(
+            waiting_capture(EDITED, 8),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("an edit after the switch is captured");
+    assert!(!captured.deduped);
+    assert_eq!(
+        path_moments(&database, "moments", WAITING_PATH),
+        moments + 1
+    );
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 9)
+        .await
+        .expect("replay");
+    assert_eq!(
+        std::fs::read(scratch.path().join(WAITING_PATH)).expect("disk"),
+        EDITED.as_bytes(),
+        "replay keeps the edit"
+    );
+    supervisor.close(&database).expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_capture_waits_for_a_switch_to_replace_the_previous_versions_secret() {
+    const MAIN_SECRET: &str = "TOKEN=main\r\n";
+    const FEATURE_SECRET: &str = "TOKEN=feature\r\n";
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let env = scratch.path().join(".env");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
+    write_secret(
+        &actor,
+        "main",
+        ".env",
+        MAIN_SECRET,
+        "waiting-secret-main",
+        2,
+        key.clone(),
+        SecretDiskIntent::AlreadyOnDisk,
+    )
+    .await;
+    std::fs::write(&env, MAIN_SECRET).expect("seed disk");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    write_secret(
+        &actor,
+        "feature",
+        ".env",
+        FEATURE_SECRET,
+        "waiting-secret-feature",
+        4,
+        key.clone(),
+        SecretDiskIntent::Materialize,
+    )
+    .await;
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 5,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the crash fails the switch");
+    assert!(faults.fired(), "the secret write starts");
+    assert_eq!(std::fs::read(&env).expect("disk"), MAIN_SECRET.as_bytes());
+    let moments = path_moments(&database, "secret_moments", ".env");
+
+    waits_for_switch(
+        actor
+            .capture_secret(
+                dohc_engine_domain::CaptureSecret {
+                    workspace_id: WORKSPACE.to_owned(),
+                    version_id: "feature".to_owned(),
+                    path: ".env".to_owned(),
+                    text: MAIN_SECRET.to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 6,
+                    claim_foreign_head: true,
+                },
+                key,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await,
+    );
+    assert_eq!(path_moments(&database, "secret_moments", ".env"), moments);
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 7)
+        .await
+        .expect("replay");
+    assert_eq!(
+        std::fs::read(&env).expect("disk"),
+        FEATURE_SECRET.as_bytes()
+    );
+    supervisor.close(&database).expect("close");
+}

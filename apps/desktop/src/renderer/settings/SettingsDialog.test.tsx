@@ -112,11 +112,13 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
+  listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
   readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
   requestAccessRefresh: vi.fn(async () => undefined),
   listSharingAccess: vi.fn(async ({ lane }: { workspaceId: string; lane: "granted" | "received" }) => sharingAnswer(lane)),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+  listSites: vi.fn(async (_payload: { workspaceId: string }) => ({ sites: [] as unknown[] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
@@ -289,7 +291,7 @@ describe("SettingsDialog", () => {
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
   });
 
-  it.each(["agents", "files", "workbench", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
+  it.each(["agents", "files", "apps", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
     const onError = vi.fn();
     const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection, onClose: vi.fn(), onError, onOpenSharing: vi.fn() };
     const view = render(<SettingsDialog {...props} workspaceIsReady={false} />);
@@ -298,6 +300,7 @@ describe("SettingsDialog", () => {
     expect(bridge.getMcpConfig).not.toHaveBeenCalled();
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
     expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    expect(bridge.listSites).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: initialSection } });
     expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
     expect(bridge.listSharingAccess).not.toHaveBeenCalled();
@@ -338,7 +341,7 @@ describe("SettingsDialog", () => {
       "settings-nav-agents",
       "settings-row-current-workspace",
       "settings-nav-files",
-      "settings-nav-workbench",
+      "settings-nav-apps",
       "settings-nav-privacy",
       "settings-nav-cloud",
       "hairline",
@@ -449,7 +452,7 @@ describe("SettingsDialog", () => {
     const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
     const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
       render(
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
         </Overlay>,
       );
@@ -541,7 +544,7 @@ describe("SettingsDialog", () => {
         const [open, setOpen] = useState(true);
         const close = () => setOpen(false);
         return open ? (
-          <Overlay onClose={close} closeOnBackdrop>
+          <Overlay onClose={close}>
             <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
           </Overlay>
         ) : null;
@@ -717,7 +720,7 @@ describe("SettingsDialog", () => {
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
-    pushOverlay(higherOverlay);
+    pushOverlay(higherOverlay, () => undefined);
     try {
       const tab = new KeyboardEvent("keydown", {
         key: "Tab",
@@ -1017,10 +1020,10 @@ describe("SettingsDialog", () => {
 
   it("drops the History rail and Current workspace rows", async () => {
     const view = render(
-      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="apps" onClose={() => {}} />,
     );
-    const workbench = await screen.findByTestId(settingsSectionPin("workbench"));
-    expect(workbench.textContent).not.toContain("History rail");
+    const apps = await screen.findByTestId(settingsSectionPin("apps"));
+    expect(apps.textContent).not.toContain("History rail");
     view.unmount();
 
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
@@ -1045,7 +1048,7 @@ describe("SettingsDialog", () => {
     await user.clear(search);
     await user.type(search, "sidebar");
     expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid))
-      .toEqual(["settings-nav-appearance", "settings-nav-keyboard", "settings-nav-workbench"]);
+      .toEqual(["settings-nav-appearance", "settings-nav-keyboard"]);
 
     // A search that found the page by its own words shows every shortcut.
     await user.clear(search);
@@ -1585,8 +1588,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     expect(Object.keys(file.agents)).toEqual(["default"]);
 
@@ -1615,8 +1618,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
 
     await act(async () => onNotice.mock.calls[0]![1]!());
@@ -1649,8 +1652,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     await user.click(await screen.findByTestId("agent-add"));
     await user.click(screen.getByTestId("agent-runs-with-codex"));
@@ -2931,7 +2934,13 @@ describe("SettingsDialog", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  it("persists the attachment location and hides the folder name for same-folder", async () => {
+  // The text of the path that describes one attachment location radio.
+  const examplePath = (location: string) =>
+    document.getElementById(
+      screen.getByTestId(`attachment-location-${location}`).getAttribute("aria-describedby")!,
+    )?.textContent;
+
+  it("persists the attachment location and shows where each choice saves", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
@@ -2942,13 +2951,15 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    // Folder name is visible for the default (per-document) location.
-    expect(await screen.findByTestId("attachment-folder-input")).toBeTruthy();
+    const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
+    const radio = (name: string) => within(group).getByRole("radio", { name });
+    expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
+    // Each choice is described by the path a paste writes.
+    expect(examplePath("per-document")).toBe("Trips/Lisbon/assets/photo.png");
+    expect(examplePath("global-folder")).toBe("assets/photo.png");
+    expect(examplePath("same-folder")).toBe("Trips/Lisbon/photo.png");
 
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(radio("In one folder for the whole workspace"));
     // The save carries the changed control only — main merges it onto the
     // file, so the dialog's copy of the other fields never rides along.
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
@@ -2956,45 +2967,92 @@ describe("SettingsDialog", () => {
       patch: { files: { attachmentLocation: "global-folder" } },
     });
 
-    // Switching to same-folder removes the (now meaningless) folder-name row.
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "same-folder",
-    );
-    await waitFor(() =>
-      expect(screen.queryByTestId("attachment-folder-input")).toBeNull(),
-    );
+    // The arrow keys move the choice. Beside the document uses no folder, so
+    // the folder name stays in place but cannot be edited.
+    await user.keyboard("{ArrowDown}");
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { files: { attachmentLocation: "same-folder" } },
+    });
+    const input = screen.getByTestId("attachment-folder-input") as HTMLInputElement;
+    await waitFor(() => expect(input.disabled).toBe(true));
+    expect(
+      document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
+    ).toBe("Not used when images go beside the document.");
   });
 
-  it("saves and resets the default site preview mode", async () => {
+  it("names the typed folder in each example path", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
-        initialSection="workbench"
+        initialSection="files"
         onClose={() => {}}
       />,
     );
 
-    const select = await screen.findByTestId("site-preview-mode-select");
-    expect(
-      Array.from((select as HTMLSelectElement).options).map((option) => option.value),
-    ).toEqual(["auto", "static", "dev", "build"]);
+    const input = await screen.findByTestId("attachment-folder-input");
+    await user.clear(input);
+    await user.type(input, "media");
+    await waitFor(() => expect(examplePath("per-document")).toBe("Trips/Lisbon/media/photo.png"));
+    expect(examplePath("global-folder")).toBe("media/photo.png");
+  });
 
-    await user.selectOptions(select, "build");
+  it("saves and resets the default app preview mode, and says what each mode does", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="apps"
+        onClose={() => {}}
+      />,
+    );
+
+    const control = await screen.findByTestId("site-preview-mode-control");
+    expect(within(control).getAllByRole("radio").map((radio) => radio.textContent))
+      .toEqual(["Auto", "Dev", "Build", "Static"]);
+    const row = screen.getByTestId("settings-row-site-preview-mode");
+    expect(row.textContent).toContain("Dev when an app has a dev script.");
+
+    await user.click(within(control).getByRole("radio", { name: "Static" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      patch: { sites: { defaultPreviewMode: "build" } },
+      patch: { sites: { defaultPreviewMode: "static" } },
     });
-
-    const row = screen.getByTestId("settings-row-site-preview-mode");
+    await waitFor(() => expect(row.textContent).toContain("Shows each app's files without running commands."));
     await waitFor(() => expect(row.textContent).toContain("Modified"));
-    await user.click(screen.getByRole("button", { name: "Reset" }));
+    await user.click(within(row).getByRole("button", { name: "Reset" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
       patch: { sites: { defaultPreviewMode: "auto" } },
     });
+  });
+
+  it("finds the Apps page by its words, not by layout words it has no setting for", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    const nav = screen.getByTestId("settings-sidebar").querySelector("nav")!;
+    const found = () => [...nav.querySelectorAll("button")].map((item) => item.dataset.testid);
+    await user.type(search, "preview");
+    expect(found()).toEqual(["settings-nav-apps"]);
+    for (const word of ["tabs", "history", "layout"]) {
+      await user.clear(search);
+      await user.type(search, word);
+      expect(found()).not.toContain("settings-nav-apps");
+    }
+  });
+
+  it("sends the Apps page's trust button to Privacy, even from a search", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="apps" onClose={() => {}} />);
+    await user.type(await screen.findByTestId(desktopPins.settingsSearch), "preview");
+    const trust = await screen.findByTestId("settings-row-apps-trust");
+    await waitFor(() => expect(within(trust).getByTestId("apps-trust-state").textContent).toBe("Restricted Mode"));
+    await user.click(within(trust).getByRole("button", { name: "Change" }));
+    expect(await screen.findByTestId(settingsSectionPin("privacy"))).toBeTruthy();
   });
 
   // Over a settings file dohc cannot read, the dialog's resolved copy is the
@@ -3024,10 +3082,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
 
     await waitFor(() =>
       expect(
@@ -3044,8 +3099,8 @@ describe("SettingsDialog", () => {
     // edit that never landed.
     await waitFor(() =>
       expect(
-        (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-      ).toBe("per-document"),
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
     );
   });
 
@@ -3063,10 +3118,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     const input = await screen.findByTestId("attachment-folder-input");
     await user.clear(input);
     await user.type(input, "media");
@@ -3075,8 +3127,8 @@ describe("SettingsDialog", () => {
       expect((input as HTMLInputElement).value).toBe("media"),
     );
     expect(
-      (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-    ).toBe("global-folder");
+      screen.getByTestId("attachment-location-global-folder").getAttribute("aria-checked"),
+    ).toBe("true");
   });
 
   it("shows one scoped reset action for each settings scope", async () => {
@@ -3225,15 +3277,18 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const select = await screen.findByTestId("attachment-location-select");
-    await user.selectOptions(select, "global-folder");
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
     expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
       `Settings error: ${words}`,
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
-    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("per-document"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
 
     await act(async () => {
       await onError.mock.calls[0]![2]();

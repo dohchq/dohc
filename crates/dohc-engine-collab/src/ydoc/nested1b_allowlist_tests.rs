@@ -136,7 +136,7 @@ fn nested1b_frontmatter_repairs_missing_schema_version() {
 
 #[test]
 fn nested1b_canonical_frontmatter_fold_drops_redundant_witness() {
-    let source = "---\nstatus: open\n---\n- parent\n  - child";
+    let source = "---\nstatus: open\n---\n- parent\n  - child\n";
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
         .unwrap();

@@ -90,15 +90,16 @@ async function removeFolder(path: string): Promise<"done" | "missing"> {
   return "done";
 }
 
-const Saved = z.object({ folders: z.array(z.string()), sweepPending: z.literal(true).optional(), departed: z.array(z.string().regex(/^[0-9a-f]{16}$/)).optional() });
+const Saved = z.object({ folders: z.array(z.string()), sweepPending: z.literal(true).optional(), departed: z.array(z.string().regex(/^[0-9a-f]{16}$/)).optional(),
+  account: z.string().regex(/^[0-9a-f]{16}$/).optional() });
 const rejected = (result: PromiseSettledResult<unknown> | undefined): result is PromiseRejectedResult => result?.status === "rejected";
 const settled = (work: Promise<unknown>) => work.then((): undefined => undefined, (reason: unknown): PromiseRejectedResult => ({ status: "rejected", reason }));
 
 /** Owns replica locks across workspace lifetimes and removes copies when the account changes. */
 export function createOwnerDatasetCopyRegistry(options: {
   // This installation's record of the folders an account change has not
-  // removed yet, and of the accounts that left, outside every workspace. The
-  // next start removes those folders first.
+  // removed yet, of the accounts that left, and of the account signed in
+  // last, outside every workspace. The next start removes those folders first.
   record: string;
   // The registered workspaces. Leaving an account removes the copies in each.
   workspaces(): string[];
@@ -126,6 +127,11 @@ export function createOwnerDatasetCopyRegistry(options: {
   // removes their copies. One short tag per account that signed out here. An
   // account that signs in again is no longer one.
   const departed = new Set<string>();
+  // The tag of the account signed in here last, kept across a restart. Its
+  // sign-in can be cleared outside dohc, so it never signs out here, and the
+  // next account to sign in removes its copies. Undefined until the record
+  // or an account change says.
+  let account: string | null | undefined;
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
   let ownerKey: string | null = null, stopped = false;
@@ -146,6 +152,10 @@ export function createOwnerDatasetCopyRegistry(options: {
     for (const path of saved.folders) if (placeOf(path) && !left.has(path)) left.set(path, false);
     owed ||= saved.sweepPending === true;
     for (const tag of saved.departed ?? []) departed.add(tag);
+    // A record read after an account signed in can name the account before it.
+    const last = saved.account ?? null;
+    if (account === undefined) account = last;
+    else if (last !== null && last !== account) { departed.add(last); owed = true; }
     // A record read late can name the signed-in account, whose copies are open.
     if (ownerKey !== null) signedIn(ownerTag(ownerKey));
   }
@@ -158,8 +168,8 @@ export function createOwnerDatasetCopyRegistry(options: {
   async function save() {
     if (!loaded) return;
     const folders = [...left.keys()].sort();
-    const text = folders.length || owed || departed.size ? JSON.stringify({ folders, ...(owed ? { sweepPending: true } : {}),
-      ...(departed.size ? { departed: [...departed].sort() } : {}) }) : null;
+    const text = folders.length || owed || departed.size || account ? JSON.stringify({ folders, ...(owed ? { sweepPending: true } : {}),
+      ...(departed.size ? { departed: [...departed].sort() } : {}), ...(account ? { account } : {}) }) : null;
     if (text === recorded) return;
     if (text === null) await rm(options.record, { force: true });
     else { await mkdir(dirname(options.record), { recursive: true }); await atomicWriteFile(options.record, text); }
@@ -172,8 +182,10 @@ export function createOwnerDatasetCopyRegistry(options: {
   // whatever another one did.
   async function sweep(prior: Entry[], roots: string[], leaving: string | null = null, arriving: string | null = null) {
     if (!loaded) await load();
+    if (arriving && account && account !== arriving) leaving ??= account;
     if (leaving) departed.add(leaving);
     if (arriving) signedIn(arriving);
+    if (leaving || arriving) account = arriving;
     // Leaving an account removes its copies in every registered workspace,
     // including ones from earlier runs.
     let listing: PromiseRejectedResult | undefined;
@@ -215,7 +227,8 @@ export function createOwnerDatasetCopyRegistry(options: {
   return {
     credentialsChanged(nextOwner: string | null): Promise<void> {
       if (ownerKey === nextOwner) return barrier;
-      // Signing in after no account removes nothing, so copies last across a restart.
+      // Signing in after no account removes only the copies of the account
+      // signed in here before, if it differs, so copies last across a restart.
       const leaving = ownerKey === null ? null : ownerTag(ownerKey), arriving = nextOwner === null ? null : ownerTag(nextOwner);
       ownerKey = nextOwner;
       const prior = [...entries.values(), ...failed], roots = [...requested];

@@ -17,6 +17,8 @@ import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { NoticeTarget } from "../notices/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
+import { useEngineDoc } from "./collab/useEngineDoc";
+import { useReopenKey } from "./documentVersionKey";
 import { deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
@@ -1061,6 +1063,54 @@ describe("engine store recovery", () => {
     },
   );
 
+  it("moves a cell write's session with the open editor's in the same step when live sessions reopen", async () => {
+    let liveSessionsGeneration = 0;
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
+    bridge.openWorkspace = vi.fn(async () => ({ ...SYNC_STATUS, liveSessionsGeneration }));
+    bridge.getSyncStatus = vi.fn(async () => ({ ...SYNC_STATUS, liveSessionsGeneration }));
+    // Sessions main holds for a.md. Main refuses a second session for one
+    // document, so a write and an editor on different keys collide.
+    let live = 0, overlapped = false;
+    const openEngineYDocSession = vi.fn(async () => {
+      live++; overlapped ||= live > 1;
+      return { available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc("# Doc\n")), lineageGeneration: 1 };
+    });
+    const closeEngineYDocSession = vi.fn(async () => { live--; });
+    Object.assign(bridge, {
+      openEngineYDocSession, closeEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ accepted: true as const, updates: [] })),
+    });
+    // A cell write to a.md opens the record as CollectionRecordFieldWrite does.
+    function CellWrite() {
+      useEngineDoc({ workspaceId: WORKSPACE.workspaceId, path: "a.md", enabled: true, reopenKey: useReopenKey(WORKSPACE.workspaceId) });
+      return null;
+    }
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<>
+      <CellWrite />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+    </>);
+    await screen.findByTestId("markdown-source-toggle");
+    // The write and the editor share one session.
+    await waitFor(() => expect(live).toBe(1));
+    const opened = openEngineYDocSession.mock.calls.length;
+    overlapped = false;
+    // dohc restarts its live sessions, as a rebuild or a shared view's refresh does.
+    await act(async () => {
+      liveSessionsGeneration = 1;
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(opened + 1));
+    await waitFor(() => expect(live).toBe(1));
+    expect(overlapped).toBe(false);
+  });
+
   it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
     const rebuild = deferred<RebuildEngineStoreResult>();
     let liveSessionsGeneration = 0;
@@ -2041,6 +2091,45 @@ describe("notices sent to you", () => {
       </>,
     );
   }
+
+  // A note with parts dohc can't show, so its band appears.
+  const LOSSY_NOTE = ["# Readme", "", "<details>", "<summary>More</summary>", "", "Hidden.", "</details>", ""].join("\n");
+
+  it("keeps a held change's band after its Notice is dismissed, because the band reads the engine's hold", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.readHeldChange.mockImplementation(async ({ path }) => ({ change: { path, file: LOSSY_NOTE, held: `${LOSSY_NOTE}More.\n` } }));
+    // No Notice row names the hold: it was dismissed, and the hold remains.
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    // Only the open note's hold is read, never every hold in the workspace.
+    expect(bridge.readHeldChange).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, path: "b.md" });
+    expect(new Set(bridge.readHeldChange.mock.calls.map(([request]) => request.path))).toEqual(new Set(["b.md"]));
+  });
+
+  it("reads no hold when the workspace opens on a note dohc can show", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    await screen.findByTestId("markdown-editor");
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+    expect(bridge.readHeldChange).not.toHaveBeenCalled();
+  });
+
+  it("clears a note's held band when the engine no longer holds its change", async () => {
+    let listener: () => void = () => {};
+    const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
+      onNoticesChanged: vi.fn((next: () => void) => { listener = next; return () => {}; }),
+    });
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.readHeldChange.mockImplementation(async ({ path }) => ({ change: { path, file: LOSSY_NOTE, held: `${LOSSY_NOTE}More.\n` } }));
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    bridge.readHeldChange.mockImplementation(async () => ({ change: null }));
+    act(() => listener());
+    await waitFor(() => expect(screen.getByTestId("lossy-note-notice").textContent).not.toContain("dohc held a change"));
+  });
 
   it("keeps a held Notice dismissed after the Notice list updates", async () => {
     const user = userEvent.setup();
@@ -3475,6 +3564,92 @@ describe("owner live documents", () => {
     view.rerender(shell(OTHER_WORKSPACE));
     await act(async () => { retry?.(); });
     expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  // Issue 2946: a Stop asked for before the list closed answers after it opens again.
+  it("shows a Stop that is refused after Live documents reopens in its row, without a toast or a Notice", async () => {
+    const notices = vi.spyOn(shellError, "useShellError");
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    const row = await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await within(row).findByText("Stopping live editing…");
+    expect((within(row).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    await within(row).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(within(row).getByRole("button", {name: `Try again to stop live editing for ${LIVE_ROW.path}`})).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const latest: ReturnType<typeof shellError.useShellError> = notices.mock.results.at(-1)!.value;
+    notices.mockRestore();
+    expect(latest.shellErrors.some(error => error.identity === `live-stop-edits-pending:${LIVE_ROW.objectId}`)).toBe(false);
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists a Stop that succeeds after Live documents reopens as stopped", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    let stopped = false;
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [stopped ? {...LIVE_ROW, status: "retired" as const} : LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    const row = await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await within(row).findByText("Stopping live editing…");
+    stopped = true;
+    await act(async () => stopping.resolve({keptEdits: "none"}));
+    await waitFor(() => expect(within(reopened).getByTestId(`live-document-row-${LIVE_ROW.path}`).children[1]?.textContent).toBe("Stopped"));
+    expect(within(reopened).queryByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`})).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a Stop refused after Live documents reopens and closes again in a toast", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    const reopened = await openLiveDocumentsFromSettings(user);
+    await within(reopened).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeTruthy();
+    expect(within(toast).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+  });
+
+  it("keeps a Stop running in one workspace out of another workspace's Live documents", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    const view = render(shell(WORKSPACE)), user = userEvent.setup();
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
+    const other = await openLiveDocumentsFromSettings(user);
+    await waitFor(() => expect(bridge.listOwnerLiveDocuments).toHaveBeenLastCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
+    const row = await within(other).findByTestId(`live-document-row-${LIVE_ROW.path}`);
+    await waitFor(() => expect((within(row).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}) as HTMLButtonElement).disabled).toBe(false));
+    expect(within(row).queryByText("Stopping live editing…")).toBeNull();
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    expect(within(row).queryByText(/^Live editing didn't stop/u)).toBeNull();
+    expect(screen.queryByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeNull();
   });
 
 

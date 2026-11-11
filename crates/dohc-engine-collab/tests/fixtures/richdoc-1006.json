@@ -2,14 +2,14 @@
  "seed": 1006,
  "contentKind": "richdoc",
  "updates": [
-  "AQHn3LbCCwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYA",
-  "AQHn3LbCCwEoAQtmcm9udG1hdHRlcgVjb3VudAF9IwA=",
-  "AQPn3LbCCwIHAQRib2R5AwlwYXJhZ3JhcGgHAOfctsILAgYEAOfctsILAxjwnZSY8J2Uq/CdlKbwnZSY8J2Uq/CdlKYA",
-  "AQXn3LbCCxCH59y2wgsCAwlwYXJhZ3JhcGgHAOfctsILEAYGAOfctsILEQZpdGFsaWMEdHJ1ZYTn3LbCCxINY2Fmw6nwn5iA8J+OiYbn3LbCCxoGaXRhbGljBG51bGwA",
-  "AQPn3LbCCxxG59y2wgsEBGJvbGQEdHJ1ZcTn3LbCCxzn3LbCCwQBWMbn3LbCCx3n3LbCCwQEYm9sZARudWxsAA=="
+  "AQGui6mBCQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYA",
+  "AQGui6mBCQEoAQtmcm9udG1hdHRlcgVjb3VudAF9IwA=",
+  "AQOui6mBCQIHAQRib2R5AwlwYXJhZ3JhcGgHAK6LqYEJAgYEAK6LqYEJAxjwnZSY8J2Uq/CdlKbwnZSY8J2Uq/CdlKYA",
+  "AQWui6mBCRCHroupgQkCAwlwYXJhZ3JhcGgHAK6LqYEJEAYGAK6LqYEJEQZpdGFsaWMEdHJ1ZYSui6mBCRINY2Fmw6nwn5iA8J+OiYaui6mBCRoGaXRhbGljBG51bGwA",
+  "AQOui6mBCRxGroupgQkEBGJvbGQEdHJ1ZcSui6mBCRyui6mBCQQBWMaui6mBCR2ui6mBCQQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "AQ3n3LbCCwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYoAQtmcm9udG1hdHRlcgVjb3VudAF9IwcBBGJvZHkDCXBhcmFncmFwaAcA59y2wgsCBgQA59y2wgsDGPCdlJjwnZSr8J2UpvCdlJjwnZSr8J2Upofn3LbCCwIDCXBhcmFncmFwaAcA59y2wgsQBgYA59y2wgsRBml0YWxpYwR0cnVlhOfctsILEg1jYWbDqfCfmIDwn46JhufctsILGgZpdGFsaWMEbnVsbEbn3LbCCwQEYm9sZAR0cnVlxOfctsILHOfctsILBAFYxufctsILHefctsILBARib2xkBG51bGwA",
- "stateVectorB64": "AefctsILHw==",
+ "mergedUpdateB64": "AQ2ui6mBCQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYoAQtmcm9udG1hdHRlcgVjb3VudAF9IwcBBGJvZHkDCXBhcmFncmFwaAcAroupgQkCBgQAroupgQkDGPCdlJjwnZSr8J2UpvCdlJjwnZSr8J2Upoeui6mBCQIDCXBhcmFncmFwaAcAroupgQkQBgYAroupgQkRBml0YWxpYwR0cnVlhK6LqYEJEg1jYWbDqfCfmIDwn46Jhq6LqYEJGgZpdGFsaWMEbnVsbEaui6mBCQQEYm9sZAR0cnVlxK6LqYEJHK6LqYEJBAFYxq6LqYEJHa6LqYEJBARib2xkBG51bGwA",
+ "stateVectorB64": "Aa6LqYEJHw==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1006",
@@ -40,6 +40,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1006\ncount: 35\n---\n\n**X**𝔘𝔫𝔦𝔘𝔫𝔦\n\n*café😀🎉*"
+  "markdown": "---\nalpha: value-1006\ncount: 35\n---\n\n**X**𝔘𝔫𝔦𝔘𝔫𝔦\n\n*café😀🎉*\n"
  }
 }

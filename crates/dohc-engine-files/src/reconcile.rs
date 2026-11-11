@@ -983,7 +983,7 @@ fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
 }
 
 /// Milliseconds since the Unix epoch, or `0` when the clock is unusable.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

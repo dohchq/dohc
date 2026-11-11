@@ -5526,21 +5526,25 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     assert_eq!(merged["deduped"], false);
     assert_eq!(merged["conflictId"], serde_json::Value::Null);
 
-    // Divergent bytes still go to the user, with both sides addressable.
+    // Divergent bytes still go to the user, with both sides addressable. Both
+    // sides change after the merge: bytes only Main changed are left alone.
     let other = dohc_engine_storage::hex_sha256(&[9, 9]);
-    call(
-        &transport,
-        &handle,
-        4,
-        "versionedBinary.write",
-        json!({
-            "versionId": "main",
-            "path": "asset.bin",
-            "bytes": [9, 9],
-            "origin": "api"
-        }),
-    )
-    .await;
+    let newer = dohc_engine_storage::hex_sha256(&[7, 7, 7, 7]);
+    for (id, version_id, bytes) in [(4, "main", vec![9, 9]), (40, "feature", vec![7, 7, 7, 7])] {
+        call(
+            &transport,
+            &handle,
+            id,
+            "versionedBinary.write",
+            json!({
+                "versionId": version_id,
+                "path": "asset.bin",
+                "bytes": bytes,
+                "origin": "api"
+            }),
+        )
+        .await;
+    }
     let conflicted = call_keyed(
         &transport,
         &handle,
@@ -5577,8 +5581,8 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
         .expect("the opened conflict is listed")
         .clone();
     assert_eq!(conflict["incoming"]["contentKind"], "binary");
-    assert_eq!(conflict["incoming"]["binarySha256"], sha256);
-    assert_eq!(conflict["incoming"]["binaryByteLength"], 3);
+    assert_eq!(conflict["incoming"]["binarySha256"], newer);
+    assert_eq!(conflict["incoming"]["binaryByteLength"], 4);
     assert_eq!(conflict["incoming"]["snapshot"], serde_json::Value::Null);
     assert_eq!(conflict["current"]["contentKind"], "binary");
     assert_eq!(conflict["current"]["binarySha256"], other);

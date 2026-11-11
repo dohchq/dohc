@@ -67,7 +67,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
     const registration = createLiveMarkdownRegistrationValidator(policy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
     const e = registration.evidence;
-    const markdown = Buffer.from("Hello");
+    const markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(e.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
@@ -204,14 +204,14 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       }
       const resumed = await active!.completeRestore(lookup, prepared.proposalDigest);
       if (resumed.kind !== "resumed") throw new Error("Restore did not resume.");
-      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
+      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
       expect(await active!.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
       const restoredCut = deployment.storage.readLiveUpdateJournalCut({document});
       if (restoredCut.kind !== "cut") throw new Error("Restored cut is unavailable.");
       doc.destroy(); doc = new Y.Doc();
       Y.applyUpdate(doc, restoredCut.cut.checkpoint.bytes);
       for (const event of restoredCut.cut.suffix) Y.applyUpdate(doc, event.bytes);
-      expect(yDocToMarkdown(doc)).toBe("Hello");
+      expect(yDocToMarkdown(doc)).toBe("Hello\n");
       admit("after-first-resume");
       expect(await active!.drain(document)).toMatchObject({kind: "done", terminalReceipt: {deliveryId: "after-first-resume"}});
       expect(await active!.settle(document)).toMatchObject({materialized: true});
@@ -231,7 +231,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       const secondResumed = await active!.completeRestore(secondLookup, secondPrepared.proposalDigest);
       if (secondResumed.kind !== "resumed") throw new Error("Second restore did not resume.");
       expect(secondResumed.receipt.binding.restoreFenceGeneration).toBe(resumed.receipt.binding.restoreFenceGeneration + 1);
-      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
+      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
       expect(await active!.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
       await restart();
       expect(await active!.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);

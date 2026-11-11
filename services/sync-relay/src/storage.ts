@@ -917,6 +917,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return accountWorkspaceStorage.setShowOnPhone(this, input);
   }
 
+  endAccountReasonsOfHiddenOrDisownedCopies() {
+    accountWorkspaceStorage.endAccountReasonsOfHiddenOrDisownedCopies(this);
+  }
+
   accountFeedStanding(workspaceId: string) {
     return accountFeedStorage.accountFeedStanding(this, workspaceId);
   }
@@ -963,6 +967,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
+  }
+
+  checkPersonalCollectionWriter(input: collectionWriteStorage.PersonalWriterInput, nowMs: number): void {
+    collectionWriteStorage.checkPersonalCollectionWriter(this, input, nowMs);
+  }
+
+  commitPersonalCollectionWrite(input: collectionWriteStorage.CommitPersonalCollectionWriteInput) {
+    return collectionWriteStorage.commitPersonalCollectionWrite(this, input);
   }
 
   automationSwitchableFolder(workspaceId: string, folder: string): boolean {
@@ -1605,6 +1617,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     limit: number;
   }): FetchLogPageResult {
     return logStorage.fetchLogPage(this, input);
+  }
+
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean {
+    return logStorage.logHasMoreThan(this, input);
   }
 
   hasRefusedSettlement(input: Parameters<SyncRelayStorage["hasRefusedSettlement"]>[0]): boolean {

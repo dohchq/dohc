@@ -369,14 +369,16 @@ function personalReturn(value: string | undefined, origin: string): string | nul
   return typeof auth === "string" || auth.workspaceId === null ? null : authorizeQuery(auth);
 }
 
-// The levels the consent page names. Edit comes with Collection writes and live documents.
-const LEVELS = ["view", "comment"] as const;
+// The levels the consent page names, each adding to the one before. Edit
+// writes Collections only, so it says so: live documents are not offered yet.
+const LEVELS = ["view", "comment", "edit"] as const;
 type PersonalLevel = (typeof LEVELS)[number];
-const LEVEL_LABELS: Readonly<Record<PersonalLevel, string>> = {view: "View", comment: "Comment"};
+const LEVEL_LABELS: Readonly<Record<PersonalLevel, string>> = {view: "View", comment: "Comment", edit: "Edit"};
 const LEVEL_MEANINGS: Readonly<Record<PersonalLevel, string>> = {
   view: "View reads files and chats.", comment: "Comment also posts in chats and Comments.",
+  edit: "Edit also changes Collections, but no other files.",
 };
-const isLevel = (value: unknown): value is PersonalLevel => value === "view" || value === "comment";
+const isLevel = (value: unknown): value is PersonalLevel => (LEVELS as readonly unknown[]).includes(value);
 
 interface PersonalConsent {
   reportedClientName: string | null;

@@ -7,6 +7,7 @@ import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance"
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { LocalAppUnavailableError, type LocalAppAction } from "./localAppLaunch";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStorage, LocalAppStore } from "./localAppStore";
@@ -30,6 +31,13 @@ export interface LocalCollectionEngine {
   moment(momentId: string): Promise<{ workspaceId: string; versionId: string; objectId: string; path: string; operation: string; text: string | null } | null>;
 }
 
+/**
+ * Who a create is made by: the person here, or the agent run active now. During a run, a create that a
+ * person's click or key press in the app started is the person's. dohc's bootstrap, not the app, reports it.
+ */
+export async function localCollectionAuthor(run: ActiveAgentRun | null, activated: boolean, person: () => Promise<MomentWriteAuthor>): Promise<MomentWriteAuthor> {
+  return run && !activated ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : person();
+}
 export type Envelope = { path: string; text: string; versionId: string; author: MomentWriteAuthor; requestId: string; momentId: string };
 type Outcome = { kind: "accepted"; receipt: AppCollectionReceipt } | { kind: "notWritten"; reason: string };
 type Create = { publication_id: string; idempotency_key: string; payload_sha256: string; created_at_ms: number; envelope: string | null; outcome: string | null; storage_bytes: number; submitted: number };
@@ -78,8 +86,8 @@ export function createLocalCollectionApps(options: {
   charge(bytes: number): void;
   /** This attachment's engine. Throws when it is unavailable. */
   engine(): LocalCollectionEngine;
-  /** Who a create is made by: the person here, or the agent run active now. */
-  author(): Promise<MomentWriteAuthor>;
+  /** Who a create is made by. See localCollectionAuthor. */
+  author(activated: boolean): Promise<MomentWriteAuthor>;
   now?(): number;
 }) {
   const { db } = options, now = options.now ?? Date.now;
@@ -207,7 +215,7 @@ export function createLocalCollectionApps(options: {
     if (outcome.kind === "notWritten") throw new Error(`dohc did not save this response. ${outcome.reason}`);
     return outcome.receipt;
   }
-  async function create(publicationId: string, raw: unknown, signal: AbortSignal): Promise<AppCollectionReceipt> {
+  async function create(publicationId: string, raw: unknown, signal: AbortSignal, activated: boolean): Promise<AppCollectionReceipt> {
     const input = parseAppCollectionCreateRequest(raw), key = input.idempotencyKey;
     if (phase !== "open") throw new LocalAppUnavailableError("This workspace is closing.");
     const { capability } = current(publicationId, input.authorityRevision);
@@ -229,7 +237,7 @@ export function createLocalCollectionApps(options: {
     const acceptanceId = `accepted_${derive("acceptance").toString("hex").slice(0, 32)}`, createdAt = now();
     const text = `---\n${JSON.stringify({ ...fields.value, id: `rec_${base32(derive("record")).slice(0, 26)}`, created_at: createdAt, acceptance_id: acceptanceId })}\n---\n`;
     if (Buffer.byteLength(text) > APP_COLLECTION_MAX_RECORD_BYTES) throw new Error("Collection response is too large.");
-    const envelope: Envelope = { path: `${capability.collectionPath}/${acceptanceId}.md`, text, versionId, author: structuredClone(await options.author()),
+    const envelope: Envelope = { path: `${capability.collectionPath}/${acceptanceId}.md`, text, versionId, author: structuredClone(await options.author(activated)),
       requestId: `local-collection-${derive("request").toString("hex").slice(0, 48)}`, momentId: `local-collection-${derive("moment").toString("hex").slice(0, 48)}` };
     signal.throwIfAborted();
     const raced = options.transaction(() => {
@@ -302,9 +310,9 @@ export function createLocalCollectionApps(options: {
       return { publicationId: value.publicationId, authorityRevision: value.authorityRevision, appRoot: value.appRoot, sourceRevision: value.candidate.sourceRevision,
         collectionCapability: capability, approved, active: approved, pendingCreates: pendingCount(value.publicationId) };
     },
-    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal, activated = false): Promise<unknown> {
       if (action !== "list" && action !== "create") throw new Error("This app is not approved for these Collection actions.");
-      return admitted<unknown>(publicationId, signal, active => action === "list" ? list(publicationId, raw as Parameters<typeof list>[1], active) : create(publicationId, raw, active));
+      return admitted<unknown>(publicationId, signal, active => action === "list" ? list(publicationId, raw as Parameters<typeof list>[1], active) : create(publicationId, raw, active, activated));
     },
     /** After authority ends: stops waiting requests, then settles admitted creates within the deadline. */
     confirm(publicationId: string) {

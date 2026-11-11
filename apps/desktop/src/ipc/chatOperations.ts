@@ -37,6 +37,8 @@ import {
   ListChatMessagesResult,
   SendChatMessagePayload,
   SendChatMessageResult,
+  ResolveChatDecisionPayload,
+  ResolveChatDecisionResult,
   ListPersonalChatFeedPayload,
   ListPersonalChatFeedResult,
   ListChannelThreadsPayload,
@@ -51,6 +53,7 @@ export const CHATS_STOPPED = "Chats stopped because this window changed workspac
 // that fails after the save answers with the saved message instead of
 // rejecting.
 const SEND_ADMISSION = "Only the sending window's active workspace can send. A send that saved answers with that message's ids alone when a later step fails.";
+const ANSWER_ADMISSION = "Only the answering window's active workspace can mark its question answered, under the same workspace operation a send holds.";
 
 export const chatOperations = {
   listFileChats: {
@@ -172,6 +175,12 @@ export const chatOperations = {
     scope: "workspace", guard: "trusted-sender",
     handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation", reason: SEND_ADMISSION },
     payload: SendChatMessagePayload, result: SendChatMessageResult,
+  },
+  resolveChatDecision: {
+    capabilityId: "chat.decision.resolve", channel: "desktop:resolve-chat-decision",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation", reason: ANSWER_ADMISSION },
+    payload: ResolveChatDecisionPayload, result: ResolveChatDecisionResult,
   },
   listPersonalChatFeed: {
     capabilityId: "chat.inbox.read", channel: "desktop:list-personal-chat-feed",

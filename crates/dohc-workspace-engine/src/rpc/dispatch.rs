@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "workReferences.make"
                 | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
+                | "documents.heldChange"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -454,6 +455,11 @@ impl EngineService {
                 self.work_references_make(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.liveChange.begin" | "ydoc.liveChange.finish" | "ydoc.liveChange.list" => {
+                let action = request.method.trim_start_matches("ydoc.liveChange.");
+                self.live_change(&ctx, request.workspace, request.params, action)
+                    .await?
+            }
             "workReferences.resolve" => {
                 self.work_references_resolve(&ctx, request.workspace, request.params)
                     .await?
@@ -533,6 +539,10 @@ impl EngineService {
                     request.params,
                 ))
                 .await?
+            }
+            "documents.heldChange" => {
+                self.held_note_change(request.workspace, request.params)
+                    .await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -633,6 +643,10 @@ impl EngineService {
             }
             "ydoc.settle" => {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.heldChange" => {
+                self.ydoc_held_change(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.close" => {
@@ -1271,7 +1285,7 @@ impl EngineService {
             ));
         }
         if projects_collections {
-            if method.starts_with("ydoc.ownerStop.") {
+            if method.starts_with("ydoc.ownerStop.") || method.starts_with("ydoc.liveChange.") {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
                     "received shares do not stop owner documents",
@@ -1296,6 +1310,12 @@ impl EngineService {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
                     "received shares do not open live document sessions",
+                ));
+            }
+            if method == "ydoc.heldChange" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares hold no saves",
                 ));
             }
             if method == "liveApplication.provisionOwner" {
@@ -1475,6 +1495,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "documents.heldChange",
             "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
@@ -1732,6 +1753,7 @@ mod tests {
             "conflicts.open",
             "conflicts.resolve",
             "documents.keepRetainedVersion",
+            "documents.heldChange",
             "engine.ping",
             "files.replace",
             "history.page",
@@ -1814,6 +1836,10 @@ mod tests {
             "ydoc.adoptCollectionRecord",
             "ydoc.close",
             "ydoc.evict",
+            "ydoc.heldChange",
+            "ydoc.liveChange.begin",
+            "ydoc.liveChange.finish",
+            "ydoc.liveChange.list",
             "ydoc.open",
             "ydoc.recordUpdate",
             "ydoc.resync",

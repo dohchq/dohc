@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-atom-and-callout-openers",
  "updates": [
-  "AQyyiPuuCAAHAQRib2R5AwlwYXJhZ3JhcGgHALKI+64IAAMKaW5saW5lQXRvbSgAsoj7rggBBmF0b21JZAF3BWNoYXJ0KACyiPuuCAEGcGFyYW1zAXcAKACyiPuuCAEGc291cmNlAXccYXRvbTpjaGFydCB2YWx1ZT1sZWZ0fX1yaWdodIeyiPuuCAADB2NhbGxvdXQHALKI+64IBQMJcGFyYWdyYXBoBwCyiPuuCAYGBACyiPuuCAcEYm9keSgAsoj7rggFC2NhbGxvdXRUeXBlAXcKbm90ZV1zcG9vZigAsoj7rggFBGZvbGQBdwAoALKI+64IBQV0aXRsZQF3BXRpdGxlAA==",
-  "AQGyiPuuCA8oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYYXRvbS1hbmQtY2FsbG91dC1vcGVuZXJzAA=="
+  "AQyoouaiCgAHAQRib2R5AwlwYXJhZ3JhcGgHAKii5qIKAAMKaW5saW5lQXRvbSgAqKLmogoBBmF0b21JZAF3BWNoYXJ0KACoouaiCgEGcGFyYW1zAXcAKACoouaiCgEGc291cmNlAXccYXRvbTpjaGFydCB2YWx1ZT1sZWZ0fX1yaWdodIeoouaiCgADB2NhbGxvdXQHAKii5qIKBQMJcGFyYWdyYXBoBwCoouaiCgYGBACoouaiCgcEYm9keSgAqKLmogoFC2NhbGxvdXRUeXBlAXcKbm90ZV1zcG9vZigAqKLmogoFBGZvbGQBdwAoAKii5qIKBQV0aXRsZQF3BXRpdGxlAA==",
+  "AQGoouaiCg8oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYYXRvbS1hbmQtY2FsbG91dC1vcGVuZXJzAA=="
  ],
- "mergedUpdateB64": "AQ2yiPuuCAAHAQRib2R5AwlwYXJhZ3JhcGgHALKI+64IAAMKaW5saW5lQXRvbSgAsoj7rggBBmF0b21JZAF3BWNoYXJ0KACyiPuuCAEGcGFyYW1zAXcAKACyiPuuCAEGc291cmNlAXccYXRvbTpjaGFydCB2YWx1ZT1sZWZ0fX1yaWdodIeyiPuuCAADB2NhbGxvdXQHALKI+64IBQMJcGFyYWdyYXBoBwCyiPuuCAYGBACyiPuuCAcEYm9keSgAsoj7rggFC2NhbGxvdXRUeXBlAXcKbm90ZV1zcG9vZigAsoj7rggFBGZvbGQBdwAoALKI+64IBQV0aXRsZQF3BXRpdGxlKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3GGF0b20tYW5kLWNhbGxvdXQtb3BlbmVycwA=",
- "stateVectorB64": "AbKI+64IEA==",
+ "mergedUpdateB64": "AQ2oouaiCgAHAQRib2R5AwlwYXJhZ3JhcGgHAKii5qIKAAMKaW5saW5lQXRvbSgAqKLmogoBBmF0b21JZAF3BWNoYXJ0KACoouaiCgEGcGFyYW1zAXcAKACoouaiCgEGc291cmNlAXccYXRvbTpjaGFydCB2YWx1ZT1sZWZ0fX1yaWdodIeoouaiCgADB2NhbGxvdXQHAKii5qIKBQMJcGFyYWdyYXBoBwCoouaiCgYGBACoouaiCgcEYm9keSgAqKLmogoFC2NhbGxvdXRUeXBlAXcKbm90ZV1zcG9vZigAqKLmogoFBGZvbGQBdwAoAKii5qIKBQV0aXRsZQF3BXRpdGxlKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3GGF0b20tYW5kLWNhbGxvdXQtb3BlbmVycwA=",
+ "stateVectorB64": "Aaii5qIKEA==",
  "coverage": {
   "nodes": [
    "callout",
@@ -19,6 +19,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "{{atom:chart value=left}}right}}\n\n> [!note]spoof] title\n> body"
+  "markdown": "{{atom:chart value=left}}right}}\n\n> [!note]spoof] title\n> body\n"
  }
 }

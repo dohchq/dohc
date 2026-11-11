@@ -80,7 +80,7 @@ struct Fixture {
     capture: Arc<tokio::sync::Mutex<()>>,
 }
 const OP: &str = "dohc-operation:rename";
-const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
+const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)\n";
 async fn retry_undo<T, F>(ws: &str, mut operation: impl FnMut() -> F) -> Result<T, RuntimeError>
 where
     F: std::future::Future<Output = Result<T, RuntimeError>>,
@@ -390,7 +390,7 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
     );
     assert_eq!(
         f.text("source-0000.md").await,
-        "[[new#part|label]] [[./new.md]] [old](old.md)"
+        "[[new#part|label]] [[./new.md]] [old](old.md)\n"
     );
     assert_eq!(f.text("new.md").await, "[[old]]", "self link stays");
     drop(lease);
@@ -631,7 +631,7 @@ async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
     for path in ["source-0000.md", "source-0002.md"] {
         assert_eq!(
             f.text(path).await,
-            "[[new#part|label]] [[./new.md]] [old](old.md)"
+            "[[new#part|label]] [[./new.md]] [old](old.md)\n"
         );
     }
     assert_eq!(f.text("source-0001.md").await, body);
@@ -1921,7 +1921,10 @@ async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
     let f = Fixture::new(1, 1).await;
     let _capture = f.capture.clone().lock_owned().await;
     f.pass("chain-forward", Arc::new(NoFaults)).await.unwrap();
-    let edited = format!("{} typed after rename", f.text("source-0000.md").await);
+    let edited = format!(
+        "{} typed after rename\n",
+        f.text("source-0000.md").await.trim_end()
+    );
     let (ws, body) = (f.ws.clone(), edited.clone());
     f.actor
         .run(move |store, _| {
@@ -1962,7 +1965,7 @@ async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
     assert!(result.not_restored.is_empty());
     assert_eq!(
         f.text("source-0000.md").await,
-        format!("{BODY} typed after rename")
+        format!("{} typed after rename\n", BODY.trim_end())
     );
     f.actor.run(|store,_| {
         store.read_with(|conn| {
@@ -1980,7 +1983,12 @@ async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
     let f = Fixture::new(1, 1).await;
-    let original = format!("{}{BODY}{}", "a".repeat(8192), "b".repeat(8192));
+    let original = format!(
+        "{}{}{}",
+        "a".repeat(8192),
+        BODY.trim_end(),
+        "b".repeat(8192)
+    );
     let (ws, body) = (f.ws.clone(), original.clone());
     f.actor
         .run(move |store, _| {

@@ -184,6 +184,15 @@ fn valid_attribution(value: Option<&dohc_engine_domain::ChangeAttribution>) -> b
     value.is_none_or(|attribution| attribution.validate().is_ok())
 }
 
+/// Only the relay writes a personal agent's changes, so no update names one as its agent.
+fn personal_agent_actor(payload: &YdocUpdatePayload, origin_id: &str) -> bool {
+    use dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX;
+    let kind = payload.attribution.as_ref().map(|a| a.actor_kind);
+    let actor = payload.actor_origin_id.as_deref().unwrap_or(origin_id);
+    kind == Some(dohc_engine_domain::ChangeActorKind::Agent)
+        && actor.starts_with(PERSONAL_AGENT_ID_PREFIX)
+}
+
 /// Admit a valid base only for authenticated, exact-coordinate repair.
 pub(crate) fn is_exact_repairable_ydoc_base_claim(
     payload: &serde_json::Value,
@@ -7335,6 +7344,14 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             "ydoc.update attribution is invalid",
         );
     }
+    if personal_agent_actor(&payload, &envelope.origin_id) {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update agent cannot be a personal agent",
+        );
+    }
     let search_policy = search_policy_for_store(store);
     // Gate on the same floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
@@ -8995,6 +9012,7 @@ pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
         CollabError::MarkdownReaderRetryable => SyncError::RetryableState {
             reason: "markdown-reader-retryable",
         },
+        CollabError::MarkdownReaderCapacity => SyncError::MarkdownReaderCapacity,
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",

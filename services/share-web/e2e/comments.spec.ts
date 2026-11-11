@@ -171,7 +171,8 @@ test("keeps a narrowed Comment link readable without weakening transition invali
         idempotencyKey: "narrowed-comment-must-not-land",
       }),
     });
-    expect(rejected.status).toBe(404);
+    expect(rejected.status).toBe(403);
+    expect(JSON.parse(rejected.body)).toMatchObject({ code: "link_view_access" });
     expect(rejected.body).not.toContain(rejectedBody);
     const discussion = await viewerRequest(page, { path: "/api/view/discussion" });
     expect(discussion.status).toBe(200);

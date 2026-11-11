@@ -19,6 +19,12 @@ import {
 import type { WriteAuthor } from "../versioned/versionedWireContract";
 import type { JsonValue } from "../protocol";
 
+export type HeldNoteChangeInput = {path: string} & (
+  | {action: "review"}
+  | {action: "drop" | "undo"; token: string; author: WriteAuthor}
+);
+export type HeldNoteChangeResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.heldNoteChange];
+
 export const WORKSPACE_METHOD = {
   open: "workspace.open",
   close: "workspace.close",
@@ -38,6 +44,7 @@ export const WORKSPACE_METHOD = {
   captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
+  heldNoteChange: "documents.heldChange",
   retainedCopiesList: "retainedCopies.list",
   retainedCopiesDelete: "retainedCopies.delete",
   captureFlush: "capture.flush",
@@ -70,6 +77,7 @@ export const WORKSPACE_METHOD = {
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
   syncCollectionsWaiting: "sync.collectionsWaiting",
+  ydocHeldChange: "ydoc.heldChange",
   automationsRunNow: "automations.runNow",
 } as const;
 
@@ -194,6 +202,8 @@ export type GranularChatMessageSearchResponse =
 export type WatcherStatusResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
 
+/** One held save, as `ydoc.heldChange` answers for it. */
+export type HeldChange = NonNullable<WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.ydocHeldChange]["change"]>;
 /**
  * A file dohc moved aside while it saved, because another program changed
  * it meanwhile. It waits in the engine's staging directory until
@@ -484,6 +494,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
+  [WORKSPACE_METHOD.heldNoteChange]: HeldNoteChangeInput;
   [WORKSPACE_METHOD.retainedCopiesList]: WorkspaceEmptyParams;
   /**
    * At most 100 listed copies. A program that still has one open may lose
@@ -524,6 +535,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.ydocHeldChange]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
@@ -1372,6 +1384,9 @@ const WorkspaceResultSchemas = {
     // happen, but a file another program changes at that moment can be lost.
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
+    // Why protected files such as `.env` can't be captured, such as
+    // `volume-shares-new-files` or `key-missing`. Absent while the key is fine.
+    secretKeyUnavailable: Schema.optionalKey(Schema.NonEmptyString),
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
     // Old versions of files kept on a drive that cannot tell dohc whether a
     // program still has one open. dohc never deletes them itself.
@@ -1405,6 +1420,11 @@ const WorkspaceResultSchemas = {
     mutableStruct({ status: Schema.Literal("gone") }),
     mutableStruct({ status: Schema.Literal("no-valid-name") }),
   ]),
+  [WORKSPACE_METHOD.heldNoteChange]: mutableStruct({
+    path: Schema.NonEmptyString, token: Schema.NonEmptyString,
+    authors: Schema.mutable(Schema.Array(Schema.Unknown)), held: Schema.Boolean,
+    historyMomentId: Schema.NullOr(Schema.String),
+  }),
   [WORKSPACE_METHOD.retainedCopiesList]: mutableStruct({
     copies: Schema.mutable(
       Schema.Array(mutableStruct({ id: Schema.Int, revision: Schema.Int })),
@@ -1540,6 +1560,21 @@ const WorkspaceResultSchemas = {
   /** Collections updates wait for an ordinary pull to commit its last page. */
   [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
     waiting: Schema.Boolean,
+  }),
+  /**
+   * One held save: `file` is the file's text on disk, and `held` what saving
+   * the waiting change would write. Past the response cap only `tooLarge`.
+   * `unavailable` names why the engine can't reproduce the save's text.
+   */
+  [WORKSPACE_METHOD.ydocHeldChange]: mutableStruct({
+    change: Schema.NullOr(Schema.Union([
+      mutableStruct({ path: Schema.NonEmptyString, file: Schema.NullOr(Schema.String), held: Schema.String }),
+      mutableStruct({ path: Schema.NonEmptyString, tooLarge: Schema.Literal(true) }),
+      mutableStruct({
+        path: Schema.NonEmptyString,
+        unavailable: Schema.Literals(["waitingForSync", "fileUnreadable", "unsupported"]),
+      }),
+    ])),
   }),
   [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
     claim: AutomationClaimSummarySchema,

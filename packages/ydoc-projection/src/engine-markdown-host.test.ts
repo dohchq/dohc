@@ -170,9 +170,12 @@ it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bo
     const second = await success(host, 3)
     expect(second.result.kind).toBe('proved'); expect(second.delta.length).toBe(0)
     expect(second.result.sourceSha256).toBe(hash(source)); expect(second.result.sourceByteLength).toBe(source.length)
+    // A forged projection digest leaves a stale witness, which is ignored. The canonical
+    // source still proves from the document; the BOM spelling needed the witness.
     base.getMap('meta').set('dohcMarkdownSourceProjectionSha256', hash(Buffer.from('forged')))
     request(host.child, 4, 'prove', source, Y.encodeStateAsUpdate(base))
-    expect(await host.json()).toMatchObject({id: 4, kind: 'refused'})
+    if (bom) expect(await host.json()).toMatchObject({id: 4, kind: 'refused'})
+    else expect((await success(host, 4)).result.kind).toBe('proved')
     request(host.child, 5, 'construct', new Uint8Array([255]), Y.encodeStateAsUpdate(base))
     expect(await host.json()).toEqual({id: 5, kind: 'refused', reason: 'invalid-source'})
     await host.expectNoUnreadOutput()
@@ -303,6 +306,57 @@ it('constructs and proves 5000 mixed paragraphs with the shared live validation 
     await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 }, 60000)
+const words = 'the quiet river carried small boats past the old mill while people walked'.split(' ')
+const phrase = (n: number, length: number) => Array.from({length}, (_, i) => words[(n * 7 + i * 3) % words.length]).join(' ')
+function written(bytes: number, block: (n: number) => string) {
+  const blocks: string[] = []
+  for (let size = 0; size < bytes; size += blocks.at(-1)!.length + 2) blocks.push(block(blocks.length))
+  return blocks
+}
+// Tables, nested lists and quotes: many block elements for their bytes.
+const dense = (n: number) => n % 3 === 0
+  ? ['| a | b | c | d | e |', '| --- | --- | --- | --- | --- |', ...Array.from({length: 6}, (_, r) =>
+    `| ${Array.from({length: 5}, (_, c) => `${words[(n + r + c) % words.length]} ${r}.${c}`).join(' | ')} |`)].join('\n')
+  : n % 3 === 1 ? `- ${phrase(n, 5)}\n  - ${phrase(n + 1, 5)}\n    - **${phrase(n + 2, 3)}**\n  1. ${phrase(n + 3, 4)}\n- ${phrase(n + 4, 5)}`
+  : `> ${phrase(n, 20)}\n>\n> - ${phrase(n + 1, 6)}\n> - ${phrase(n + 2, 6)}`
+const ordinary = (n: number) => [`## Section ${n}`, `${phrase(n, 30)} with **a bold phrase**, an *aside* and [a link](https://example.com/${n}).`,
+  `- ${phrase(n, 8)}\n- ${phrase(n + 1, 9)}`, `${phrase(n, 40)}.`][n % 4]!
+// A note typed a character at a time, out of order, so no two edits merge.
+function typed(paragraphs: number, length: number) {
+  const doc = markdownToYDoc('Typed')
+  const body = doc.getXmlFragment('body')
+  for (let p = 0; p < paragraphs; p++) {
+    const text = new Y.XmlText(), paragraph = new Y.XmlElement('paragraph')
+    doc.transact(() => {
+      paragraph.insert(0, [text]); body.insert(body.length, [paragraph])
+      for (let i = length - 1; i >= 0; i--) text.insert(0, words[(p + i) % words.length]![0]!)
+    })
+  }
+  return doc
+}
+it.each([
+  ['dense', () => markdownToYDoc(written(490_000, dense).join('\n\n'))],
+  ['typed', () => typed(1_500, 100)],
+])('refuses a %s note over the reader capacity before its heap fills', async (_, build) => {
+  const host = await start(), base = build()
+  try {
+    await hello(host)
+    const source = Buffer.from(`Edited\n\n${yDocToMarkdown(base)}`)
+    request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
+    expect(await host.json()).toEqual({id: 2, kind: 'refused', reason: 'capacity-refused'})
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 60000)
+it('constructs an ordinary 1.5 MB note under the reader capacity', async () => {
+  const blocks = written(1_500_000, ordinary), host = await start(), base = markdownToYDoc(blocks.join('\n\n'))
+  try {
+    await hello(host)
+    blocks[blocks.length >> 1] = `Edited ${blocks[blocks.length >> 1]}`
+    request(host.child, 2, 'construct', Buffer.from(blocks.join('\n\n')), Y.encodeStateAsUpdate(base))
+    expect((await success(host, 2)).result.kind).toBe('constructed')
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 120000)
 it('ends the child on an allocation RangeError without sending a document verdict', async () => {
   const preload = join(directory, 'allocation-failure.cjs')
   await writeFile(preload, `const decode = TextDecoder.prototype.decode;
@@ -358,7 +412,8 @@ it.runIf(process.platform === 'win32')('starts the bundle through a directory ju
 
 it('accepts a source of exactly 2 MiB', async () => {
   const host = await start(), base = markdownToYDoc('Earlier')
-  const source = Buffer.alloc(2 * 1024 * 1024, 97)
+  // The limit counts the saved file, final newline included.
+  const source = Buffer.concat([Buffer.alloc(2 * 1024 * 1024 - 1, 97), Buffer.from('\n')])
   try {
     await hello(host); request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
     expect((await success(host, 2)).result).toMatchObject({kind: 'constructed', sourceByteLength: source.length, sourceSha256: hash(source)})

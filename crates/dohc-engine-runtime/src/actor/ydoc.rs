@@ -2,7 +2,8 @@ use super::ActorHandle;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
 use super::journal::journal_moment_outbound_in_tx;
 use super::materialization::{
-    MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
+    MaterializationReplayScope, SelfWriteRecorder, replay_materializations_in_order,
+    replay_pending_materializations,
 };
 use super::search::search_domain;
 use super::versions::ensure_mutation_version_on_store;
@@ -1738,6 +1739,44 @@ fn project_ydoc_on_store(
     })
 }
 
+/// The document a settle projects, which a held change's review must project
+/// too. While the adopted owner's own edits wait for the relay, a live
+/// settlement projects only what the relay accepted: its file and moment
+/// never carry the private tail, and the native head keeps it.
+pub(super) fn settle_source<'a>(
+    doc: &'a Ydoc,
+    live_audit: Option<&'a dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+) -> Result<&'a Ydoc, RuntimeError> {
+    let doc = live_audit
+        .and_then(|audit| audit.accepted_prefix())
+        .unwrap_or(doc);
+    // A doc holding unintegrated remote updates (missing cross-origin
+    // dependency) must not settle: the projection would omit pending remote
+    // content and last_settled_sha would record that incomplete artifact as
+    // settled — the CRDT then advances past a stale file.
+    if doc.has_pending_dependencies() {
+        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
+    }
+    Ok(doc)
+}
+
+/// What a settle writes for `doc`. A held change's review projects through
+/// this too, so it shows the bytes the save would write.
+pub(super) fn settle_projection(
+    store: &EngineStore,
+    key: &DocKey,
+    doc: &Ydoc,
+    content_kind: ContentKind,
+    reader_resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    use_reader: bool,
+) -> Result<Projection, RuntimeError> {
+    if use_reader {
+        project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver)
+    } else {
+        project_ydoc_on_store(store, key, doc, content_kind)
+    }
+}
+
 fn project_ydoc_on_store_with_reader(
     store: &EngineStore,
     key: &DocKey,
@@ -3144,28 +3183,20 @@ fn ydoc_settle_attempt_on_store(
             &cold_doc
         }
     };
-    // While the adopted owner's own edits wait for the relay, a live
-    // settlement projects only what the relay accepted. Its file and moment
-    // never carry the private tail, and the native head keeps it.
-    let accepted_prefix = live_audit.and_then(|audit| audit.accepted_prefix());
-    let settles_prefix = accepted_prefix.is_some();
-    let doc = accepted_prefix.unwrap_or(doc);
-    // A doc holding unintegrated remote updates (missing cross-origin
-    // dependency) must not settle: the projection would omit pending remote
-    // content and last_settled_sha would record that incomplete artifact as
-    // settled — the CRDT then advances past a stale file.
-    if doc.has_pending_dependencies() {
-        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
-    }
+    let settles_prefix = live_audit.is_some_and(|audit| audit.accepted_prefix().is_some());
+    let doc = settle_source(doc, live_audit)?;
     // A settlement covering no accepted edit still projects, but publishes
     // nothing. Only its projection is kept locally, for a restore.
     let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
     let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
-    let mut projection = if use_reader {
-        project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
-    } else {
-        project_ydoc_on_store(store, key, doc, content_kind)
-    }?;
+    let mut projection = settle_projection(
+        store,
+        key,
+        doc,
+        content_kind,
+        reader_resolver.as_deref(),
+        use_reader,
+    )?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc
@@ -3278,6 +3309,60 @@ fn ydoc_settle_attempt_on_store(
         // conflicted one already ran its compensation.
         if let Some(job) = pending_job {
             validate_workspace_root(root_dir, root_guard)?;
+            // A resync applies edits without writing, so writes older than the
+            // head's can still be owed, and the head's expects the file to
+            // hold them (#2813). Any of them that doesn't land stops the
+            // settle, so the head's write never passes an owed one. A
+            // conflicted one can't be trusted to make the head's conflict too:
+            // the file may already hold what the head's write expects.
+            let earlier: Vec<String> = store
+                .read_with(|conn| pending_ydoc_writes_in(conn, key))?
+                .into_iter()
+                .filter(|job_id| *job_id != job.job_id)
+                .collect();
+            if !earlier.is_empty() {
+                let stopped = replay_materializations_in_order(
+                    store,
+                    root_dir,
+                    MaterializationReplayScope {
+                        holds: None,
+                        workspace_id: &key.workspace_id,
+                        self_writes: Some(self_writes),
+                        progress: None,
+                        file_outcomes_settled: false,
+                        released_hold_paths: None,
+                        planned_against_active_heads: false,
+                    },
+                    now_ms,
+                    faults,
+                    &earlier,
+                )?;
+                if let Some(stopped) = stopped {
+                    // A conflicted write makes the document's file changed on
+                    // disk, as the head's own would. One that may pass, such
+                    // as on a locked file, is retried; any other needs someone
+                    // to act, so a retry loop can't help.
+                    let job = &earlier[earlier.len() - stopped.unlanded];
+                    let status = store.load_materialization_job(job)?.map(|job| job.status);
+                    return Err(match status {
+                        Some(JobStatus::Conflict) => {
+                            dohc_engine_domain::DomainError::ConflictStaleTarget.into()
+                        }
+                        Some(JobStatus::Pending) if stopped.summary.failed_in_passing() => {
+                            dohc_engine_sync::SyncError::RetryableState {
+                                reason: "settlement-materialization-pending",
+                            }
+                            .into()
+                        }
+                        Some(JobStatus::Pending) if stopped.summary.blocked > 0 => {
+                            MaterializeError::SymlinkTarget.into()
+                        }
+                        _ => RuntimeError::ActiveVersionMaterializationIncomplete {
+                            failed_jobs: stopped.unlanded + 1,
+                        },
+                    });
+                }
+            }
             // Suppression before the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
@@ -4462,23 +4547,9 @@ fn materialize_ydoc_drain(
     if drained.drained == 0 {
         return Ok(());
     }
-    let selected = store.read_with(|conn| {
+    let (writes, selected) = store.read_with(|conn| {
+        let writes = pending_ydoc_writes_in(conn, key)?;
         let mut selected = HashSet::new();
-        let winner_job: Option<String> = conn
-            .query_row(
-                "SELECT job.job_id FROM snapshots AS snapshot \
-                 JOIN materialization_jobs AS job \
-                   ON job.job_id='ydoc-mat_' || snapshot.latest_moment_id \
-                  AND job.workspace_id=snapshot.workspace_id \
-                  AND job.status='pending' \
-                 WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2 \
-                   AND snapshot.object_id=?3",
-                params![key.workspace_id, key.version_id, key.object_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StorageError::corrupt_public)?;
-        selected.extend(winner_job);
         for recovered_path in drained
             .lineage_replacements
             .iter()
@@ -4500,34 +4571,76 @@ fn materialize_ydoc_drain(
                 .map_err(StorageError::corrupt_public)?;
             selected.extend(recovery_job);
         }
-        Ok::<_, StorageError>(selected)
+        Ok::<_, StorageError>((writes, selected))
     })?;
-    if selected.is_empty() {
-        return Ok(());
-    }
-    let replay = replay_pending_materializations(
+    let scope = MaterializationReplayScope {
+        holds: None,
+        workspace_id: &key.workspace_id,
+        self_writes: Some(materialization.self_writes.as_ref()),
+        progress: None,
+        file_outcomes_settled: false,
+        released_hold_paths: None,
+        planned_against_active_heads: false,
+    };
+    // Every write the document still owes its file, not only the head's: a
+    // resync applies edits without writing, and the head's write expects the
+    // file to hold the write before it (#2813).
+    let mut failed_jobs = replay_materializations_in_order(
         store,
         &materialization.root_dir,
-        MaterializationReplayScope {
-            holds: None,
-            workspace_id: &key.workspace_id,
-            self_writes: Some(materialization.self_writes.as_ref()),
-            progress: None,
-            file_outcomes_settled: false,
-            released_hold_paths: None,
-            planned_against_active_heads: false,
-        },
+        scope,
         now_ms,
         faults,
-        Some(&selected),
-        false,
-    )?;
-    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+        &writes,
+    )?
+    .map_or(0, |stopped| stopped.unlanded);
+    if !selected.is_empty() {
+        let replay = replay_pending_materializations(
+            store,
+            &materialization.root_dir,
+            scope,
+            now_ms,
+            faults,
+            Some(&selected),
+            false,
+        )?;
+        failed_jobs += replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    }
     if failed_jobs == 0 {
         Ok(())
     } else {
         Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
     }
+}
+
+/// The document's pending file writes, in the order their moments happened.
+/// Each expects the file to hold the write before it. Their jobs' timestamps
+/// can tie within one drain, and their ids sort by hash, so only the moment
+/// order replays them right.
+fn pending_ydoc_writes_in(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<Vec<String>, StorageError> {
+    // Pending jobs are few: start from them and find each one's moment.
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT job.job_id FROM materialization_jobs AS job \
+             CROSS JOIN moments AS moment \
+             WHERE job.status='pending' AND job.workspace_id=?1 \
+               AND job.job_id GLOB 'ydoc-mat_*' \
+               AND moment.workspace_id=job.workspace_id \
+               AND moment.moment_id=substr(job.job_id, 10) \
+               AND moment.version_id=?2 AND moment.object_id=?3 \
+             ORDER BY moment.moment_order",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .and_then(|rows| rows.collect())
+        .map_err(StorageError::corrupt_public)
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
@@ -5456,4 +5569,130 @@ pub(super) fn journal_recovery_append_in_tx(
         outcome,
         now_ms,
     )
+}
+
+#[cfg(test)]
+mod pending_write_order_tests {
+    use super::*;
+    use dohc_engine_domain::{WriteText, write_text_in_tx};
+    use dohc_engine_testkit::ScratchDir;
+
+    const SCOPE: MaterializationReplayScope<'static> = MaterializationReplayScope {
+        holds: None,
+        workspace_id: "workspace",
+        self_writes: None,
+        progress: None,
+        file_outcomes_settled: false,
+        released_hold_paths: None,
+        planned_against_active_heads: false,
+    };
+
+    /// A note whose file holds "base" and owes it two writes queued in the
+    /// same millisecond, with job ids that sort against the order their
+    /// moments happened. Each write expects the file to hold the one before
+    /// it, so only moment order lands both.
+    fn two_writes_that_tie_in_time() -> (ScratchDir, EngineStore, Vec<String>) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
+            1,
+        )
+        .expect("store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("version");
+        let mut preimage = None;
+        for (moment, text) in [
+            ("moment-base", "base"),
+            ("moment-z", "first edit"),
+            ("moment-a", "second edit"),
+        ] {
+            let input = WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "note.md".into(),
+                text: text.into(),
+                moment_id: moment.into(),
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            };
+            let queued = preimage.clone();
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    let result = write_text_in_tx(tx, &input)?;
+                    if let Some(preimage) = queued {
+                        enqueue_write(tx, &result, preimage, "ydoc")?;
+                    }
+                    Ok::<_, RuntimeError>(result.snapshot.blob_sha256)
+                })
+                .expect("write");
+            let TxnOutcome::Committed(sha) = outcome else {
+                panic!("the write commits");
+            };
+            preimage = Some(Preimage::Present(sha));
+        }
+        std::fs::write(scratch.path().join("note.md"), "base").expect("disk");
+        let key = DocKey::new("workspace", "main", "object").expect("key");
+        let writes = store
+            .read_with(|conn| pending_ydoc_writes_in(conn, &key))
+            .expect("pending writes");
+        assert_eq!(writes, ["ydoc-mat_moment-z", "ydoc-mat_moment-a"]);
+        let created: Vec<i64> = writes
+            .iter()
+            .map(|id| {
+                store
+                    .load_materialization_job(id)
+                    .expect("load")
+                    .expect("job")
+                    .created_at_ms
+            })
+            .collect();
+        assert_eq!(created[0], created[1], "the writes tie in time");
+        (scratch, store, writes)
+    }
+
+    #[test]
+    fn a_close_replays_writes_that_tie_in_time_in_moment_order() {
+        let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+        let stopped = replay_materializations_in_order(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            &writes,
+        )
+        .expect("replay");
+        assert!(stopped.is_none());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+            "second edit"
+        );
+    }
+
+    /// Startup recovery replays every pending job. Its order breaks a tie
+    /// in time by the write's moment order, not by job id.
+    #[test]
+    fn recovery_replays_writes_that_tie_in_time_in_moment_order() {
+        let (scratch, mut store, _) = two_writes_that_tie_in_time();
+        let replay = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("replay");
+        assert_eq!((replay.parked, replay.failed), (0, 0));
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+            "second edit"
+        );
+    }
 }

@@ -528,24 +528,69 @@ describe("mcp tools operate on allowed paths", () => {
           asked.push(request.verb);
           expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
           if (request.verb === "liveKeptEdits") return { ok: true, keptEdits };
+          if (request.verb === "sharedFilesHeld") return { ok: true, heldFiles: null };
+          if (request.verb === "syncFailure") return { ok: true, syncFailure: null };
           if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
           return { ok: true, waiting };
         } });
         expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting, keptEdits });
-        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits"]);
+        expect(status).not.toHaveProperty("heldFiles");
+        expect(status).not.toHaveProperty("syncFailure");
+        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits", "sharedFilesHeld", "syncFailure"]);
       }
       const unanswered = await workspaceStatus({ ...ctx, request: async () => ({ ok: false, reason: "engine stopped" }) });
       expect(unanswered).toMatchObject({ synced: true });
       expect(unanswered).not.toHaveProperty("collectionsWaiting");
       expect(unanswered).not.toHaveProperty("keptEdits");
+      expect(unanswered).not.toHaveProperty("syncFailure");
       // A share profile holds no kept edits of its own, so it does not ask.
       const asked: string[] = [];
       const shared = await workspaceStatus({ ...ctx, shareAccess: "edit", request: async (request) => {
         asked.push(request.verb);
-        return { ok: true, waiting: false };
+        return request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: true, waiting: false };
       } });
       expect(shared).not.toHaveProperty("keptEdits");
-      expect(asked).toEqual(["collectionsWaiting"]);
+      expect(asked).toEqual(["collectionsWaiting", "sharedFilesHeld"]);
+    });
+  });
+
+  it("workspace_status names shared files held back and the step for each, as the desktop answers", async () => {
+    await withWorkspace(async (ctx) => {
+      const heldFiles = {
+        count: 1,
+        files: [{ path: "mine.md", reason: "local-collision" }],
+        message: "mine.md already has a file from this machine. Move or rename this file to receive the shared file.",
+      };
+      const status = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
+        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles } : { ok: false, reason: "not asked" } });
+      expect(status).toMatchObject({ heldFiles });
+      const none = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
+        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: false, reason: "not asked" } });
+      expect(none).not.toHaveProperty("heldFiles");
+    });
+  });
+
+  it("workspace_status says why sync stopped, as the desktop answers", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx);
+      const syncFailure = {
+        code: "conflict-wait-limit",
+        message: "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.",
+        detail: "DaemonRefusalError: conflict-wait-limit: … (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)",
+      };
+      const status = await workspaceStatus({ ...ctx, request: async (request) =>
+        request.verb === "syncFailure" ? { ok: true, syncFailure } : { ok: false, reason: "not asked" } });
+      expect(status).toMatchObject({ synced: true, syncFailure });
+      // A shared view's profile never asks, so it can't read the owner's paths.
+      for (const shareAccess of ["view", "comment", "edit"] as const) {
+        const asked: string[] = [];
+        const shared = await workspaceStatus({ ...ctx, shareAccess, request: async (request) => {
+          asked.push(request.verb);
+          return request.verb === "syncFailure" ? { ok: true, syncFailure } : { ok: false, reason: "not asked" };
+        } });
+        expect(shared, shareAccess).not.toHaveProperty("syncFailure");
+        expect(asked, shareAccess).not.toContain("syncFailure");
+      }
     });
   });
 

@@ -337,7 +337,7 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
         (
             "list-heading-two-lines",
             "- a\n  b\n  --\n",
-            "- \n  ## a\n  b",
+            "- \n  ## a\n  b\n",
         ),
         (
             "list-heading-bare-dash-two-lines",

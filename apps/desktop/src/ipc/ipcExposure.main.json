@@ -128,6 +128,7 @@
     "desktop:get-workspace-ui-state",
     "desktop:go-to-workspace-window",
     "desktop:history-names-changed",
+    "desktop:held-note-change",
     "desktop:hold-quit",
     "desktop:import-to-database",
     "desktop:import-workspace-files",
@@ -243,6 +244,7 @@
     "desktop:read-explorer-menu",
     "desktop:read-old-window-state",
     "desktop:read-external-open",
+    "desktop:read-held-change",
     "desktop:read-history-operation",
     "desktop:read-reports-notice",
     "desktop:read-schedule-host",
@@ -265,6 +267,7 @@
     "desktop:reset-user-settings",
     "desktop:reset-workspace-settings",
     "desktop:resolve-automation-controls",
+    "desktop:resolve-chat-decision",
     "desktop:resolve-work-link",
     "desktop:resolve-workspace-version-conflict",
     "desktop:restore-engine-moment-file",
@@ -367,6 +370,7 @@
     "desktop:write-workspace-text"
   ],
   "guards": {
+    "desktop:held-note-change": "active-workspace",
     "desktop:import-to-database": "trusted-sender",
     "desktop:undo-database-import": "trusted-sender",
     "desktop:list-workspace-versions": "active-workspace",
@@ -411,6 +415,7 @@
     "desktop:links-in": "active-workspace",
     "desktop:links-resolve": "active-workspace",
     "desktop:links-edges": "active-workspace",
+    "desktop:read-held-change": "active-workspace",
     "desktop:make-message-link": "active-workspace",
     "desktop:resolve-work-link": "active-workspace"
   }

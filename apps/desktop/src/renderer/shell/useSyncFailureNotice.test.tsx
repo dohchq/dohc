@@ -391,6 +391,33 @@ describe("useSyncFailureNotice", () => {
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
   });
 
+  it("names a file whose permissions dohc could not read, with Try again", async () => {
+    const detail = "Error: Could not update notes/trip.txt on disk: permissions-not-kept";
+    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+    await waitFor(() => expect(view.toasts()).toHaveLength(1));
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]).toMatchObject({
+      kind: "cloud-sync",
+      title: "dohc could not sync this workspace",
+      message: "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.",
+      details: [["Detail", detail]],
+    });
+    expect(view.rows()[0]!.retry).toBeTypeOf("function");
+  });
+
+  it("says changes wait on a conflict, and keeps the counts in Details", async () => {
+    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
+    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+    await waitFor(() => expect(view.toasts()).toHaveLength(1));
+    expect(view.rows()[0]).toMatchObject({
+      kind: "cloud-sync",
+      title: "dohc could not sync this workspace",
+      message: sentences,
+      details: [["Detail", detail]],
+    });
+  });
+
   it("keeps the generic words for a failed pass that names no file", () => {
     expect(
       syncFailureNotice({ cause: "unknown", detail: "DaemonRefusalError: workspace operation failed", sinceMs: 1, attempts: 1 }),

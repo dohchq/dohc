@@ -125,9 +125,11 @@ pub(super) fn settled_base(
             resolver,
         ) {
             Ok(text) => Some(text),
-            Err(CollabError::MarkdownReaderUnavailable | CollabError::MarkdownReaderRetryable) => {
-                None
-            }
+            Err(
+                CollabError::MarkdownReaderUnavailable
+                | CollabError::MarkdownReaderRetryable
+                | CollabError::MarkdownReaderCapacity,
+            ) => None,
             Err(error) => return Err(error.into()),
         }
     } else {

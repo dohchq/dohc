@@ -281,5 +281,7 @@
   "chat.archive.set",
   "agent.personal.read",
   "agent.personal.change",
+  "document.held.read",
+  "document.held.change",
   "dataset.operation.cancel"
 ]

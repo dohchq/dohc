@@ -5,6 +5,7 @@ import { createDatasetSources, type SourceCreationProgress } from "../workspaces
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { describe, expect, it, vi } from "vitest";
+import { isDatasetOwnerOnly } from "./errorWords";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler, type ServerCollections } from "./datasetIpc";
@@ -252,6 +253,10 @@ it("allows named Collection data actions without opening a local owner store or 
   expect(named.list).toHaveBeenCalled(); expect(f.host.list).not.toHaveBeenCalled();
   await expect(f.handler("window", f.createForm)).rejects.toThrow(/original workspace/);
   await expect(f.handler("window", { action: "prepare", workspaceId: "workspace", descriptorPath: "data/dataset.json" })).rejects.toThrow(/original workspace/);
+  // A change card's Apply from a shared view: only the owner can take it, which the card says without Try again.
+  const applied = f.handler("window", { action: "prepareMigration", workspaceId: "workspace", datasetPath: "data/dataset.json", migrationPath: "data/change.sql" });
+  await expect(applied).rejects.toThrow("Open the original workspace to manage this Collection.");
+  expect(isDatasetOwnerOnly(await applied.catch((error: unknown) => error))).toBe(true);
   expect(f.host.approvedArtifacts).not.toHaveBeenCalled();
 });
 it("routes owner reads and writes to shared authority without falling back locally", async () => {

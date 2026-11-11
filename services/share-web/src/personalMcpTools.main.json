@@ -247,5 +247,108 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
+  },
+  {
+    "name": "dohc_write_collection_files",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "submitId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x20-\\x7e]+$",
+          "description": "Names this write. Send the same id to retry after an unknown outcome; use a new id for any other write."
+        },
+        "files": {
+          "minItems": 1,
+          "maxItems": 502,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "The file's path exactly as dohc_list_files lists paths."
+                  },
+                  "basedOnBlobSha256": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "The file's complete new text."
+                  }
+                },
+                "required": [
+                  "path",
+                  "basedOnBlobSha256",
+                  "text"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "The file's path exactly as dohc_list_files lists paths."
+                  },
+                  "basedOnBlobSha256": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                  },
+                  "base64": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+                    "description": "The file's complete new UTF-8 content as base64, for text whose JSON would not fit in 9 MiB."
+                  }
+                },
+                "required": [
+                  "path",
+                  "basedOnBlobSha256",
+                  "base64"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "workspace",
+        "submitId",
+        "files"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
   }
 ]

@@ -16,12 +16,14 @@ import { CollectionAutomations, type KeptAutomationField } from "@dohc/automatio
 import { CHANNELS } from "./channels";
 import { SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreDetail, sharedLiveRestoreTitle } from "./errorWords";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
+import { liveStopWaitingError } from "./liveEditingStop";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
 import { AutomationStoreNotOpenedError, createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import {
   LiveDocumentMutationError,
+  LivePageOwnedError,
   RestoreHeadChangedError,
   RestoreLocalChangesError,
   type WorkspaceEngineMomentDetail,
@@ -70,6 +72,7 @@ function fixture(options: {
   changed?: boolean;
   otherWindow?: boolean;
   restoreError?: Error;
+  stopLiveEditing?: (path: string, objectId: string) => Promise<{keptEdits: "none" | "kept" | "recovered"}>;
   undoRunsOf?: CollectionAutomations["undoRunsOf"];
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean, retentionId: string) => Promise<Pass>;
   syncNow?: () => Promise<void>;
@@ -218,6 +221,7 @@ function fixture(options: {
     sharesChanged,
     requireEngineCapture: async () => ({ capture: options.engineCapture ?? capture }),
     localPerson: async () => account.person,
+    stopLiveEditing: async (_operation, path, objectId) => await options.stopLiveEditing?.(path, objectId) ?? { keptEdits: "none" },
     queuePull,
     deletePath: async () => undefined,
     notifyRenderer: () => undefined,
@@ -1388,6 +1392,22 @@ ${SHARED_LIVE_RESTORE_BODY}` }],
     await expect(down.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       review: [],
       unfinished: { step: "files", message: "The workspace engine is not running." },
+    });
+  });
+
+  it("stops live editing for a page they created, then removes it; a Stop that waits keeps it for review", async () => {
+    const LIVE = "dohc can't restore it while it has live editing on";
+    const ledger = { "grant-edit": [{ writes: [{ committedAtMs: 2, files: [{ path: SCHEMA, objectId: "o-schema", momentId: "m-schema", created: true }] }], nextAfterOriginSeq: null }] };
+    const options: NonNullable<Parameters<typeof fixture>[0]> = { ledger, restoreError: new LivePageOwnedError(LIVE),
+      stopLiveEditing: vi.fn(async () => { delete options.restoreError; return { keptEdits: "none" as const }; }) };
+    await expect(fixture(options).call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
+      .resolves.toMatchObject({ restored: [{ path: SCHEMA, removed: true }], review: [], unfinished: null });
+    expect(options.stopLiveEditing).toHaveBeenCalledWith(SCHEMA, "o-schema");
+    const waiting = fixture({ ledger, restoreError: new LivePageOwnedError(LIVE),
+      stopLiveEditing: async () => { throw liveStopWaitingError(new Error("timed out")); } });
+    await expect(waiting.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      restored: [], review: [{ path: SCHEMA, reason: "restore-refused", detail: expect.stringContaining("dohc is waiting for the server to stop live editing") }],
+      unfinished: null,
     });
   });
 

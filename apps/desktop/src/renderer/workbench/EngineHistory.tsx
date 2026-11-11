@@ -139,7 +139,7 @@ export function engineMomentSourceLabel(moment: SourcedMoment): string {
   return sourceName(moment) ?? engineOriginLabel(moment.origin);
 }
 
-type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
+type SourcedMoment = Pick<EngineMomentRecord, "origin" | "correlationId" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
 
 // Your personal agent's id when it made the moment, so its name and color come
 // from your roster. Only main can say an author is yours. Anyone who can write
@@ -150,8 +150,13 @@ function personalAuthorId(moment: Pick<EngineMomentRecord, "authors" | "authorPr
     ? author.agentId : undefined;
 }
 
+function isHeldChangeMoment(moment: SourcedMoment): boolean {
+  return moment.origin === "capture-recovery-cleared"
+    && (moment.correlationId?.startsWith("held-change:drop:") === true || moment.correlationId?.startsWith("held-change:undo:") === true);
+}
+
 function sourceName(moment: SourcedMoment): string | undefined {
-  if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
+  if ((moment.origin === "restore" || isHeldChangeMoment(moment)) && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.authorLabels) {
     const [first, second, third, ...rest] = moment.authorLabels;
     const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
@@ -190,11 +195,14 @@ function connectedAuthor(moment: Pick<EngineMomentRecord, "authorPresentations">
 
 // The one agent or person that made a moment, by their stable id. Two agents
 // can share a name, so a name never joins two ids. Every connected agent is
-// the unnamed agent, so the name each gave keeps them apart.
+// the unnamed agent, so the name each gave keeps them apart. Another account
+// can claim your personal agent's id, so only your own agent's edits are self.
 function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
   if (author === undefined || others.length > 0) return undefined;
-  if (author.kind === "agent") return `agent:${JSON.stringify([author.agentId, author.agentName ?? null])}`;
+  if (author.kind === "agent") {
+    return `agent:${JSON.stringify([author.agentId, author.agentName ?? null, moment.authorPresentations?.[0]?.self === true])}`;
+  }
   // A person the owner shared with, writing directly.
   if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
@@ -511,7 +519,7 @@ function momentAuthorLabel(moment: CreditedMoment): string {
 
 /** The name a History row gives whoever made a change, or undefined when the row says only where it came from. */
 export function engineMomentAuthorName(moment: SourcedMoment): string | undefined {
-  return (isCaptureRecoveryOrigin(moment.origin) ? undefined : moment.personAuthorName) ?? sourceName(moment);
+  return (isCaptureRecoveryOrigin(moment.origin) && !isHeldChangeMoment(moment) ? undefined : moment.personAuthorName) ?? sourceName(moment);
 }
 
 // One author in words: an agent and an automation say what they are, so

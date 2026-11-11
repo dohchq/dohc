@@ -1,7 +1,7 @@
 {
   "group-channel": [
     {
-      "name": "dohc_post_channel",
+      "name": "dohc_post_group",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -17,7 +17,7 @@
             "description": "Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."
           },
           "threadId": {
-            "description": "A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread.",
+            "description": "A threadId from dohc_read_group, to reply in that thread. Omit it to start a thread.",
             "type": "string",
             "minLength": 1,
             "maxLength": 256
@@ -31,7 +31,7 @@
       }
     },
     {
-      "name": "dohc_read_channel",
+      "name": "dohc_read_group",
       "inputSchema": {
         "type": "object",
         "properties": {

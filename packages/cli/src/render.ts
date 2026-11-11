@@ -29,7 +29,7 @@ function counted(count: number, one: string, many: string): string {
 function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
   return [...page.conflicts.flatMap(conflict => [
     `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
-    ...(conflict.waiting ? ["  A newer version from another machine is waiting. It comes in after you resolve this conflict."] : []),
+    ...(conflict.waiting ? ["  A newer version from another computer is waiting. It comes in after you resolve this conflict."] : []),
   ]),
     ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
@@ -366,6 +366,28 @@ function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
   ].join("\n");
 }
 
+// The words Live documents shows for each row's state.
+const LIVE_REASON_WORDS = {
+  "document-unavailable": "file moved or removed", "workspace-changed": "workspace changed", "session-host-refused": "stopped by the server",
+  "session-host-diverged": "server copy doesn't match", "live-document-without-lineage": "not started",
+  "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume",
+} as const;
+const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
+
+function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { ok: true }>): string {
+  if (page.documents.length === 0 && page.nextCursor === null) return "No document has live editing.";
+  return [
+    ...page.documents.map(row => [
+      lineSafe(row.path),
+      row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
+      ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
+      ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
+      ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
+    ].join(" · ")),
+    ...(page.nextCursor === null ? [] : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -411,8 +433,15 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!document.ok) throw new DohcCliError(document.reason);
       return document.markdown;
     }
+    case "documentHeld": {
+      const held = result as CliResultByVerb["documentHeld"];
+      if (!held.ok) throw new DohcCliError(held.reason);
+      return JSON.stringify(held.change, null, 2);
+    }
     case "collectionSetFields":
       return `Updated ${lineSafe((result as Extract<CliResultByVerb["collectionSetFields"], { ok: true }>).recordPath)}`;
+    case "heldNoteChange":
+      return JSON.stringify(result, null, 2);
     case "documentEdit":
     case "documentCreate": {
       const document = result as CliResultByVerb["documentEdit" | "documentCreate"];
@@ -442,6 +471,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "retryKeptEdits":
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
+    case "liveDocuments":
+      return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
@@ -540,6 +571,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "automationRun":
       return renderAutomationRun(result as AutomationRunResult);
     case "automationRetry":
+    case "chatRetry":
       return "queued";
     case "automationPress":
       return renderAutomationPress(result as Extract<CliResultByVerb["automationPress"], { ok: true }>);

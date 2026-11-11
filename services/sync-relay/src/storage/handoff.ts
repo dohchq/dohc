@@ -1,4 +1,5 @@
 import { isShareAccessValue } from "@dohc/security-contract/share-selector";
+import { accountIsFenced } from "./accountDeletion";
 import { type StorageContext } from "./context";
 import { insertShareGrant } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
@@ -162,6 +163,8 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
         authorized = false;
       }
       if (!authorized) return refuseAndConsume();
+      // A deleted account gets no new access, so no later Undo can restore it.
+      if (accountIsFenced(storage, input.principalUserId)) return refuseAndConsume();
 
       const current = readCurrentShareGrant(storage, {
         grantId: code.grantId,

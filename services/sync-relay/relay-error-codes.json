@@ -44,6 +44,8 @@
   { "code": "notice_rate_limited", "status": 429 },
   { "code": "notice_refused", "status": 403 },
   { "code": "payload_too_large", "status": 413 },
+  { "code": "personal_agent_edit_needed", "status": 403 },
+  { "code": "personal_agent_not_collection", "status": 403 },
   { "code": "personal_agent_out_of_reach", "status": 403 },
   { "code": "personal_agent_unavailable", "status": 503 },
   { "code": "personal_agent_view_only", "status": 403 },

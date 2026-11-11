@@ -50,7 +50,7 @@ async function prepare(host: LocalDatasetHost) {
   const adapter = sourceCaptureAdapter(sources);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
-  const dataset = { kind: "dataset", datasetId: definition.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
+  const dataset = { kind: "dataset", datasetPath: "data/dataset.json", revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
   sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
   return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, deferredWrites: [], compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
 }
@@ -115,8 +115,9 @@ test("local app works without an account, survives restart, and stops at shared 
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"ok":false');
     await expect(launcher.launch(publication.publicationId, lifetime.signal)).rejects.toThrow();
-    await page.reload();
-    expect(await page.locator("iframe").count()).toBe(0);
+    // The stopped session closes its loopback server, so the app can't load there again.
+    const stoppedOrigin = new URL(page.url()).origin;
+    await expect.poll(async () => { try { await fetch(stoppedOrigin + "/bootstrap"); return false; } catch { return true; } }).toBe(true);
     expect(errors).toEqual([]);
     await context.close();
   } finally {

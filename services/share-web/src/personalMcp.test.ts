@@ -69,7 +69,7 @@ function fixture(options: {answer?: (call: Call) => Response | Promise<Response>
     },
   };
   async function serve(request: Request): Promise<Response> {
-    const result = await servePersonalMcp(request, {client, signal: new AbortController().signal,
+    const result = await servePersonalMcp(request, {client, admitLargeBody: () => () => {}, signal: new AbortController().signal,
       deadlineAtMs: Date.now() + (options.deadlineMs ?? 35_000)});
     return result ? new Response(result.body, {status: result.status, headers: result.headers}) : new Response(null, {status: 401});
   }
@@ -94,7 +94,7 @@ const listRequest = () => new Request(`${origin}/mcp/agent/w/trip`, {method: "PO
   body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
 const probed = (answer: () => Promise<Response>) => servePersonalMcp(listRequest(), {
   client: {call: async (action) => action === "workspaces" ? answer() : Response.json({ok: true})},
-  signal: new AbortController().signal, deadlineAtMs: Date.now() + 35_000,
+  admitLargeBody: () => () => {}, signal: new AbortController().signal, deadlineAtMs: Date.now() + 35_000,
 });
 
 it("lists the workspaces from the reach check that starts each request", async () => {
@@ -102,7 +102,7 @@ it("lists the workspaces from the reach check that starts each request", async (
   const client = await f.connect();
   expect((await client.listTools()).tools.map(tool => tool.name).sort()).toEqual([
     "dohc_list_files", "dohc_list_groups", "dohc_list_workspaces", "dohc_post_channel", "dohc_post_discussion",
-    "dohc_read_channel", "dohc_read_discussion", "dohc_read_file", "dohc_wait_for_messages",
+    "dohc_read_channel", "dohc_read_discussion", "dohc_read_file", "dohc_wait_for_messages", "dohc_write_collection_files",
   ]);
   const listed = await client.callTool({name: "dohc_list_workspaces", arguments: {}});
   expect(listed.isError).toBeFalsy();
@@ -376,6 +376,80 @@ it("says a post may have landed when its answer is lost", async () => {
     expect(result.isError).toBe(true);
     expect(structured(result)).toEqual(unconfirmed);
   }
+});
+
+// A Collection write as the agent sends it.
+const WRITE = {workspace: "trip", submitId: "write-1", files: [{path: "trip/packing/Socks.md", basedOnBlobSha256: null, text: "Socks"}]};
+
+it("writes a Collection's files in the workspace it names, and answers as the link's write tool does", async () => {
+  const accepted = fixture({answer: () => Response.json({ok: true, submitId: "write-1", paths: ["trip/packing/Socks.md"], committedAtMs: 5, created: true})});
+  const written = await (await accepted.connect()).callTool({name: "dohc_write_collection_files", arguments: WRITE});
+  expect(structured(written)).toEqual({ok: true, outcome: "accepted", submitId: "write-1"});
+  expect(accepted.calls).toEqual([{action: "collection-writes", body: {workspaceId: "trip", submitId: "write-1", changes: [{
+    basedOnPath: null, basedOnBlobSha256: null, operation: "write", afterPath: "trip/packing/Socks.md",
+    afterContentKind: "text", afterContentBase64: Buffer.from("Socks").toString("base64"), recordedAtMs: expect.any(Number),
+  }]}}]);
+
+  const cases: Array<[() => Response, Record<string, unknown>]> = [
+    [() => Response.json({ok: false, code: "stale", error: "relay words", path: "trip/packing/collection.yaml", currentBlobSha256: TEXT_SHA}, {status: 409}),
+      {ok: false, outcome: "stale", path: "trip/packing/collection.yaml", currentBlobSha256: TEXT_SHA}],
+    // View and Comment name the agent and the level it needs.
+    [refusedBy("personal_agent_edit_needed", 403), {ok: false, outcome: "refused",
+      reason: "Trip helper needs Edit to change this workspace's Collections. Its owner can change that in Settings › Agents."}],
+    [refusedBy("personal_agent_not_collection", 403), {ok: false, outcome: "refused", reason:
+      "Trip helper can change only a Collection's own files: its collection.yaml, its automations.yaml, and new records. It can't write other files."}],
+    [refusedBy("personal_agent_out_of_reach", 403), {ok: false, outcome: "refused", reason: OUT_OF_REACH.error}],
+    [refusedBy("conflict", 409), {ok: false, outcome: "refused",
+      reason: "This submitId already names a different write. Send this write with a new submitId."}],
+    // A content refusal names the file and what to fix.
+    [() => Response.json({ok: false, code: "share_op_rejected", error: "trip/packing/Socks.md has frontmatter that does not parse"}, {status: 403}),
+      {ok: false, outcome: "refused", reason: "trip/packing/Socks.md has frontmatter that does not parse"}],
+    // A long one is cut to 1,024 bytes of UTF-8, never inside a character.
+    [() => Response.json({ok: false, code: "share_op_rejected", error: `${"a".repeat(1023)}😀`}, {status: 403}),
+      {ok: false, outcome: "refused", reason: "a".repeat(1023)}],
+    [() => Response.json({ok: false, code: "share_op_rejected", error: `${"é".repeat(511)}😀 and more`}, {status: 403}),
+      {ok: false, outcome: "refused", reason: "é".repeat(511)}],
+    [refusedBy("collection_write_rate_limited", 429), {ok: false, outcome: "rate-limited"}],
+    // Anything else may have committed.
+    [refusedBy("unexpected", 403), {ok: false, outcome: "unknown"}],
+    [refusedBy("personal_agent_edit_needed", 500), {ok: false, outcome: "unknown"}],
+    [() => {throw new Error("connection reset");}, {ok: false, outcome: "unknown"}],
+  ];
+  for (const [answer, outcome] of cases) {
+    const answered = await (await fixture({answer}).connect()).callTool({name: "dohc_write_collection_files", arguments: WRITE});
+    expect(answered.isError).toBe(true);
+    expect(structured(answered)).toEqual(outcome);
+    expect(textOf(answered)).not.toContain("relay words");
+  }
+});
+
+it("takes a write only in a request of its own, and a large one only with a body slot and a workspace at Edit", async () => {
+  const atEdit = {...REACH, workspaces: [{...REACH.workspaces[0]!, level: "edit"}, REACH.workspaces[1]!]};
+  const calls: PersonalAgentAction[] = [];
+  const serve = (body: unknown, reach: unknown, admitLargeBody: (agentId: string) => (() => void) | null) => servePersonalMcp(
+    new Request(`${origin}/mcp/agent/w/trip`, {method: "POST",
+      headers: {"content-type": "application/json", accept: "application/json, text/event-stream"}, body: JSON.stringify(body)}),
+    {client: {call: async (action) => {calls.push(action); return action === "workspaces" ? Response.json(reach) : Response.json({ok: true, submitId: "write-1"});}},
+      admitLargeBody, signal: new AbortController().signal, deadlineAtMs: Date.now() + 35_000});
+  const write = (text: string, id = 1) => ({jsonrpc: "2.0", id, method: "tools/call",
+    params: {name: "dohc_write_collection_files", arguments: {...WRITE, files: [{...WRITE.files[0]!, text}]}}});
+
+  const batched = await serve([write("Socks"), {jsonrpc: "2.0", id: 2, method: "tools/list"}], atEdit, () => () => {});
+  expect(await new Response(batched!.body).json()).toEqual({jsonrpc: "2.0", id: null,
+    error: {code: -32600, message: "Send dohc_write_collection_files in a request of its own, not in a batch."}});
+  expect(calls).toEqual(["workspaces"]);
+
+  // A body past an ordinary request's size waits for a free slot, which the agent holds whichever token it sends.
+  const asked: string[] = [];
+  let released = 0;
+  expect((await serve(write("x".repeat(64 * 1024)), atEdit, agentId => {asked.push(agentId); return null;}))?.status).toBe(429);
+  expect(asked).toEqual([REACH.agent.agentId]);
+  // With no workspace at Edit it asks for none.
+  await expect(serve(write("x".repeat(64 * 1024)), REACH, agentId => {asked.push(agentId); return () => {};})).rejects.toThrow(RangeError);
+  expect(asked).toEqual([REACH.agent.agentId]);
+  // A slot it takes is released once the request is answered.
+  await serve(write("x".repeat(64 * 1024)), atEdit, () => () => {released++;});
+  expect(released).toBe(1);
 });
 
 it("answers null for a token the relay doesn't accept, and words a reach check that fails", async () => {

@@ -55,7 +55,8 @@ async function probes() {
   const secretPath = "/continuity/publication-operator.secret", operatorPath = "/tmp/proof-operator/control.sock";
   const operator = await startPublicationOperator({disableAppPublication: input => {
     takedowns++; return {publicationId: input.publicationId, authorityRevision: 2,
-      operatorTakedown: {actor: "operator" as const, disabledAtMs: input.nowMs, reason: input.reason}};
+      operatorTakedown: {actor: "operator" as const, disabledAtMs: input.nowMs, reason: input.reason},
+      otherActiveCopies: {publicationIds: [], total: 0}};
   }}, operatorPath, secretPath);
   try {
     for (const action of ["async-fcntl", "async-ioctl", "setown-ex", "setsig", "siocspgrp"]) {

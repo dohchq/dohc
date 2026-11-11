@@ -13,6 +13,7 @@ import {
   ListChatMessagesResult,
   GetChatThreadRevisionResult,
   SendChatMessageResult,
+  ResolveChatDecisionResult,
   ListChatThreadDecisionsResult,
   ListChatThreadAttachmentsResult,
   ListChatChannelsResult,
@@ -481,6 +482,20 @@ export function registerChatsIpcHandlers<
       ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   });
+  // Try again after an answer whose reply saved but whose question stayed
+  // open. It holds the window's workspace operation, as a send does.
+  const resolveChatDecision: ChatHandler<"resolveChatDecision"> = (input, { event }) =>
+    withRendererWorkspaceOperation(event.sender, input.workspaceId, CHATS_STOPPED, async () => {
+      const scope = await requireChatScope(input.workspaceId);
+      const resolved = await chatWrites.answerWith(chatWritePlace(scope), {
+        writer: RENDERER,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        resolvedByMessageId: input.resolvedByMessageId,
+        ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
+      });
+      return ResolveChatDecisionResult.parse({ resolved: chatDecisionForIpc(resolved) });
+    });
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -1042,6 +1057,7 @@ export function registerChatsIpcHandlers<
     chatFileMentionsPage,
     listChatMessages,
     sendChatMessage,
+    resolveChatDecision,
     listPersonalChatFeed,
     listChannelThreads,
     startChannelThread,

@@ -24,6 +24,7 @@ import {
   createCollectionWriteRoutes,
   createLinkCollectionWriteAdmission,
   createLinkCollectionWriteRoute,
+  createPersonalCollectionWriteRoute,
   type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
@@ -135,9 +136,10 @@ export interface CreateSyncRelayHandlerOptions {
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
-  // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
+  // The browser sign-in behind a cookie, for state bound to it such as push subscriptions,
+  // and the Bearer sign-in of the account routes. Without it the server serves no account routes.
   resolveAccountSession?: ResolveAccountSession;
-  // The accounts' sign-ins in Better Auth's session table, which the account API lists and revokes.
+  // The accounts' sign-ins in Better Auth's session table, which the account routes list and revoke.
   accountSessions?: AccountSessions;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
   credentialFence?: CredentialFence;
@@ -203,8 +205,6 @@ export interface CreateSyncRelayHandlerOptions {
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
-  // The routes a signed-in account reads its workspaces through (DOHC_ACCOUNT_API). They need resolveAccountSession.
-  accountApi?: boolean;
   // This server's copies of workspaces, which the account routes read through; undefined until they start.
   serverCopies?: () => ServerCopies | undefined;
   // An account's reads through those copies, keyed by sign-in.
@@ -292,7 +292,6 @@ export function createSyncRelayHandler({
   automationServer,
   pressDataset,
   serverRuns = () => undefined,
-  accountApi = false,
   serverCopies = () => undefined,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
@@ -492,12 +491,12 @@ export function createSyncRelayHandler({
     storage, nowMs, automationHostRateLimiter, automationServer ?? null,
   );
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
-  const respondToAccountWorkspaces = accountApi && resolveAccountSession
+  const respondToAccountWorkspaces = resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
-  const respondToAccountSessions = accountApi && resolveAccountSession && accountSessions
+  const respondToAccountSessions = resolveAccountSession && accountSessions
     ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions, feedWaits: accountFeedWaits }) : undefined;
-  const respondToAccountOperation = accountApi && resolveAccountSession
+  const respondToAccountOperation = resolveAccountSession
     ? createAccountOperationRoute({
       storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter, feedWaits: accountFeedWaits,
     }) : undefined;
@@ -808,6 +807,15 @@ export function createSyncRelayHandler({
     admitBlobBytes: admitLinkBlobBytes,
     maxFiles: linkCurrentFileLimit,
     copies: serverCopies,
+    collectionWrites: createPersonalCollectionWriteRoute({
+      storage,
+      rateLimiter: collectionWriteRateLimiter,
+      admission: linkCollectionWriteAdmission,
+      nowMs,
+      newId,
+      discussionActivity,
+      lookupUserDisplayName,
+    }),
   });
 
   const respondToLinkChat = createLinkChatRoutes({
@@ -1266,14 +1274,15 @@ export function createSyncRelayHandler({
 
 /**
  * The routes whose handlers authenticate before they read the body, and bound
- * its size and receipt time: recovery imports, direct writes, and an
- * account's reads through this server's copies. Classified by
+ * its size and receipt time: recovery imports, direct writes, a personal
+ * agent's included, and an account's reads through this server's copies. Classified by
  * the same parse as dispatch, so every spelling of the path streams.
  */
 export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation";
+      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation" ||
+      (route.route === "personal-agent-tools" && route.action === "collection-writes");
   } catch { return false; }
 }

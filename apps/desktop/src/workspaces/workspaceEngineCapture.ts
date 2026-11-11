@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
@@ -650,7 +651,8 @@ export interface WorkspaceEngineCapture {
     // one. An update with a head may be empty.
     onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
-    onEditRefused?: (requestId: string, message: string) => void;
+    // `paused`: this file's queue for the server takes no more edits.
+    onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
@@ -741,6 +743,7 @@ export interface WorkspaceEngineCapture {
   // Old versions of files kept on a drive that cannot tell dohc whether a
   // program still has one open. dohc never deletes them itself; these list
   // and delete them for a person or agent who accepted that risk.
+  heldNoteChange(input: HeldNoteChangeInput): Promise<HeldNoteChangeResult>;
   listRetainedCopies(): Promise<RetainedCopiesListResult>;
   deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   resolveConflict(
@@ -1795,8 +1798,8 @@ type EngineReplaceFile = (path: string, temporary: string, data: string | Uint8A
 // production code always goes through WorkspaceEngineCaptureOptions.diskWriter
 // defaulting.
 // With `replaceFile`, the engine writes the temp after the checks here. On
-// macOS a temp Node creates takes the folder's inherited ACL entries; the
-// engine creates it without them and gives it the replaced file's ACL.
+// macOS and Windows a temp Node creates takes the folder's inherited ACL
+// entries; the engine gives it the replaced file's ACL instead.
 export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineReplaceFile): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
@@ -2016,10 +2019,10 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(
     rootPath,
-    process.platform === "darwin"
+    process.platform === "darwin" || process.platform === "win32"
       ? async (path, temporary, data) => {
           const { replaceFile } = await engineStore();
-          if (!replaceFile) throw new Error("This engine can't write a file whole on macOS.");
+          if (!replaceFile) throw new Error("This engine can't write a file whole.");
           await replaceFile({ path, temporary, data });
         }
       : undefined,
@@ -2555,7 +2558,7 @@ export function createWorkspaceEngineCapture(
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
-    onEditRefused?: (requestId: string, message: string) => void;
+    onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
     onSettled: (
       result: {
         sha256: string;
@@ -2748,6 +2751,9 @@ export function createWorkspaceEngineCapture(
       if (refusedEditorRecords.length === 0) return false;
       record.refusal.editorVisible = true;
       const reason = error instanceof Error ? error.message : "";
+      // This file's queue for the server takes no more: the server refused an
+      // earlier edit, or too many wait to reach it.
+      const paused = reason.includes("owner-outbox-frozen");
       const explanation = reason.includes("pending-edits-limit")
         ? "Too many edits are waiting to save."
         : reason.includes("update-too-large")
@@ -2756,8 +2762,7 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
-            // The server refused this file's earlier edits, so its queue takes no more.
-            : reason.includes("owner-outbox-frozen")
+            : paused
               ? "Live editing is paused for this file."
             : unanswered
               ? "No answer after three attempts."
@@ -2765,7 +2770,7 @@ export function createWorkspaceEngineCapture(
       const what = refusedEditorRecords.length > 1 ? "edits" : "an edit";
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
-      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message);
+      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message, paused);
       return true;
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
@@ -7233,6 +7238,11 @@ export function createWorkspaceEngineCapture(
 
     async saveKeptCopy(id) {
       return await (await engineStore()).saveKeptCopy(id);
+    },
+
+    async heldNoteChange(input) {
+      const result = await (await engineStore()).heldNoteChange(input);
+      return result;
     },
 
     async listRetainedCopies() {

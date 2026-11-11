@@ -129,11 +129,13 @@ import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./ch
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import { agentMentionId, listAgents, runnableAgents, withAgent, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
-import { archivedChatsFor } from "../../settings/archivedChats";
+import { archivedChatsFor, hiddenChatsFor } from "../../settings/archivedChats";
 import { Menu } from "../ui/Menu";
 import { isContextMenuKey } from "../ui/keys";
 import { chatRowMenuItems, type ChatRowMenuTarget } from "./chatRowMenu";
 import { removeAgentWithUndo } from "../settings/agentRemoval";
+import { HideAgentChatDialog, RemoveAgentDialog } from "../settings/agentDialogs";
+import { hideAgentChat } from "../settings/ArchivedAgents";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -2202,6 +2204,35 @@ export function ChatsView(props: {
     reload();
     props.onError(words, failure, reload);
   }, [props.onError]);
+  // A question marked answered. Its Group lists one fewer open question when
+  // this thread showed it open.
+  const showResolved = useCallback((threadId: string, resolved: ChatDecisionRecord) => {
+    const wasOpen = reconcileResolvedChatDecision(latestDecisions.current, resolved).wasOpen;
+    setDecisions((current) => reconcileResolvedChatDecision(current, resolved).decisions);
+    if (!wasOpen) return;
+    setChannelThreads((current) => current.map((thread) =>
+      thread.id === threadId
+        ? { ...thread, openDecisionCount: Math.max(0, (thread.openDecisionCount ?? 0) - 1) }
+        : thread));
+  }, []);
+  // An answer whose reply saved while its question stayed open. Try again
+  // marks the question answered with that reply while the window still shows
+  // that conversation, in this workspace, and never posts the reply again.
+  // A failed try offers Try again again.
+  const reportStillOpen = useCallback((words: string, failure: unknown, context: string, answer: {
+    threadId: string; messageId: string; resolvedByMessageId: string; chosenOption?: string;
+  }) => {
+    const shown = () => mounted.current && activeSendContext.current === context;
+    const report = (cause: unknown) => props.onError(words, cause, () => {
+      if (!shown()) return;
+      void bridge().resolveChatDecision({ workspaceId, ...answer }).then(({ resolved }) => {
+        if (!shown()) return;
+        showResolved(answer.threadId, resolved);
+        latestRefresh.current();
+      }, (error: unknown) => { if (shown()) report(error); });
+    });
+    report(failure);
+  }, [props.onError, showResolved, workspaceId]);
   // Resuming after a suspension owes one catch-up pass: the activity events
   // that fired meanwhile reached only the page instance, and waiting for the
   // next event would leave this surface stale for as long as the workspace
@@ -2397,40 +2428,20 @@ export function ChatsView(props: {
       if (!("failure" in result)) {
         if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         showSent(result);
-        const resolvedDecision = result.resolved;
-        if (resolvedDecision) {
-          const decisionWasOpen = reconcileResolvedChatDecision(
-            latestDecisions.current,
-            resolvedDecision,
-          ).wasOpen;
-          setDecisions(
-            (current) =>
-              reconcileResolvedChatDecision(current, resolvedDecision).decisions,
-          );
-          if (decisionWasOpen) {
-            setChannelThreads((current) =>
-              current.map((thread) =>
-                thread.id === nav.thread.id
-                  ? {
-                      ...thread,
-                      openDecisionCount: Math.max(
-                        0,
-                        (thread.openDecisionCount ?? 0) - 1,
-                      ),
-                    }
-                  : thread,
-              ),
-            );
-          }
-        }
+        if (result.resolved) showResolved(nav.thread.id, result.resolved);
       }
       // A message that saved leaves the composer, and a reply whose answer
       // failed leaves the mode, so retrying cannot silently post either twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
-      if (result.resolveFailure) {
+      if (resolvingMessageId !== null && result.resolveFailure) {
         if ("failure" in result) refreshForActivity();
-        props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+        reportStillOpen("Sent your reply. dohc could not mark the question answered.", result.resolveFailure, sendContextKey, {
+          threadId: nav.thread.id,
+          messageId: resolvingMessageId,
+          resolvedByMessageId: result.message.id,
+          ...(chosenOption ? { chosenOption } : {}),
+        });
       } else if ("failure" in result) {
         reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
       }
@@ -2455,12 +2466,14 @@ export function ChatsView(props: {
     props.onAgentWaitsForTrust,
     props.onError,
     refreshForActivity,
+    reportStillOpen,
     reportUnshown,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
     sendContextKey,
     sending,
+    showResolved,
     workspaceId,
   ]);
 
@@ -3601,6 +3614,12 @@ export function ChatsView(props: {
     () => new Set(archivedChatsFor(props.userSettings, workspaceId)),
     [props.userSettings, workspaceId],
   );
+  // Removed agents' chats this person took off Archived. A chat shows again
+  // when an agent with its id is added again.
+  const hiddenIds = useMemo(
+    () => new Set(hiddenChatsFor(props.userSettings, workspaceId)),
+    [props.userSettings, workspaceId],
+  );
   // An agent chat whose agent left Settings, or a personal agent's chat
   // whose agent left your roster, stays readable in Archived. It returns
   // when an agent with its id is added again.
@@ -3616,7 +3635,7 @@ export function ChatsView(props: {
   const setChatArchived = useCallback(
     async (channelId: string, label: string, archived: boolean): Promise<void> => {
       try {
-        await bridge().setChatArchived({ workspaceId, channelId, archived });
+        await bridge().setChatArchived({ workspaceId, channelId, state: archived ? "archived" : "active" });
         if (archived) {
           props.onNotice?.(`Archived ${label}`, () => void setChatArchived(channelId, label, false));
         }
@@ -3692,6 +3711,7 @@ export function ChatsView(props: {
         settings,
         agentProblems: file.agentProblems,
         agent: { id: agentId, name: entry.name },
+        chatId: agentChats.find((channel) => channel.agentId === agentId)?.id,
         save: async (next) => {
           try {
             return await bridge().setUserSettings({ settings: next, base: settings });
@@ -3714,7 +3734,7 @@ export function ChatsView(props: {
         onNotice: props.onNotice,
       });
     },
-    [props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
+    [agentChats, props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
   );
   // The members dialog, opened from a group's menu in the sidebar.
   const [membersFor, setMembersFor] = useState<{ workspaceId: string; channel: ChatChannelRecord; session: number } | null>(null);
@@ -3724,6 +3744,14 @@ export function ChatsView(props: {
   // never draw, or act, in the next.
   if (rowMenu && rowMenu.workspaceId !== workspaceId) setRowMenu(null);
   if (membersFor && membersFor.workspaceId !== workspaceId) setMembersFor(null);
+  // Remove agent and Remove from list ask first. A dialog opened in one
+  // workspace closes in the next, like the menu.
+  const [agentDialog, setAgentDialog] = useState<
+    | { workspaceId: string; kind: "remove"; agentId: string; name: string }
+    | { workspaceId: string; kind: "hide"; channelId: string; name: string }
+    | null
+  >(null);
+  if (agentDialog && agentDialog.workspaceId !== workspaceId) setAgentDialog(null);
   const rowMenuItems = rowMenu ? chatRowMenuItems(rowMenu.target, {
     markRead: () => void markChatRead(rowMenu.channelId, rowMenu.label, rowMenu.dmThreadId),
     setArchived: (archived) => void setChatArchived(rowMenu.channelId, rowMenu.label, archived),
@@ -3738,8 +3766,11 @@ export function ChatsView(props: {
       if (rowMenu.agentId) void setAgentEnabled(rowMenu.agentId, enabled);
     },
     removeAgent: () => {
-      if (rowMenu.agentId) void removeAgent(rowMenu.agentId);
+      const agentId = rowMenu.agentId;
+      const name = agentId ? props.userSettings?.agents[agentId]?.name : undefined;
+      if (agentId && name !== undefined) setAgentDialog({ workspaceId, kind: "remove", agentId, name });
     },
+    hideChat: () => setAgentDialog({ workspaceId, kind: "hide", channelId: rowMenu.channelId, name: rowMenu.label }),
   }) : [];
 
   // Which lane a "both" group shows.
@@ -5276,7 +5307,7 @@ export function ChatsView(props: {
       .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: groupRow(channel, true) })),
     ...dms.filter((dm) => archivedIds.has(dm.channelId))
       .map((dm) => ({ key: dm.channelId, unread: dm.unreadCount, row: dmRow(dm, true) })),
-    ...agentChats.filter((channel) => archivedIds.has(channel.id) || agentRemoved(channel))
+    ...agentChats.filter((channel) => agentRemoved(channel) ? !hiddenIds.has(channel.id) : archivedIds.has(channel.id))
       .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: <li key={channel.id}>{agentRow(channel, true)}</li> })),
   ];
   const archivedUnread = archivedRows.reduce((sum, entry) => sum + entry.unread, 0);
@@ -5717,6 +5748,27 @@ export function ChatsView(props: {
           open
           onOpenChange={(open) => {
             if (!open) setRowMenu(null);
+          }}
+        />
+      ) : null}
+      {agentDialog?.kind === "remove" && props.userSettings ? (
+        <RemoveAgentDialog
+          agent={{ id: agentDialog.agentId, name: agentDialog.name }}
+          settings={props.userSettings}
+          onCancel={() => setAgentDialog(null)}
+          onConfirm={() => {
+            setAgentDialog(null);
+            void removeAgent(agentDialog.agentId);
+          }}
+        />
+      ) : null}
+      {agentDialog?.kind === "hide" ? (
+        <HideAgentChatDialog
+          name={agentDialog.name}
+          onCancel={() => setAgentDialog(null)}
+          onConfirm={() => {
+            setAgentDialog(null);
+            void hideAgentChat({ workspaceId, channelId: agentDialog.channelId, name: agentDialog.name, onError: props.onError, onNotice: props.onNotice });
           }}
         />
       ) : null}

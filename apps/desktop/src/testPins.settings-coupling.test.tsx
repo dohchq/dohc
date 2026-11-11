@@ -26,6 +26,7 @@ vi.mock("./renderer/bridge", async () => {
     getUserSettingsFilePath: async () => "/fixture/settings.json",
     readWorkspaceTrust: async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false }),
     onWorkspaceTrustChanged: () => () => {},
+    listSites: async () => ({ sites: [] }),
     onUpdateState: () => () => {},
     getUpdateState: async () => ({ status: "idle", message: "fixture", currentVersion: "1.2.3", channel: "latest", canCheck: false, canInstall: false }),
   }) };

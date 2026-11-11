@@ -5,9 +5,10 @@ import * as Y from 'yjs'
 import {readMarkdownSourceWitness} from './artifact-markdown.js'
 import {sameFrontmatterValue, FRONTMATTER_SOURCE_META_KEY, MARKDOWN_CRLF_META_KEY} from './frontmatter.js'
 import {recordFrontmatterSourceItems, writeFrontmatterMap} from './frontmatter-map.js'
-import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, yDocToMarkdown} from './import-export.js'
+import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, MarkdownCapacityError, markdownToYDoc, yDocToMarkdown} from './import-export.js'
 import {createLiveMarkdownJournalValidator, isProseMirrorSchemaError, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
+import {LIVE_NOTE_CAPACITY, LIVE_NOTE_ELEMENT_WEIGHT, withinLiveNoteCapacity} from './liveValidationPolicy.js'
 
 const MAX_SOURCE_BYTES = LIVE_MARKDOWN_MAX_BYTES
 const MAX_UPDATE_BYTES = 20 * 1024 * 1024
@@ -71,6 +72,23 @@ function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
   requireReading(actualRoot.eq(importedRoot)
     && sameFrontmatterValue(getDohcYDocFrontmatter(actual), getDohcYDocFrontmatter(imported)), 'reading-mismatch')
 }
+/** Checked before the heaviest work, so the refusal comes before the reader's heap fills (#3575). */
+function checkCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): void {
+  requireReading(withinLiveNoteCapacity(doc, policy), 'capacity-refused')
+}
+/** Each element is also a struct, so a source past this many elements is over capacity before it is built. */
+const MAX_SOURCE_ELEMENTS = Math.floor(LIVE_NOTE_CAPACITY / (LIVE_NOTE_ELEMENT_WEIGHT + 1))
+function importSource(source: string, policy: OrderedLiveUpdateCutPolicy): Y.Doc {
+  let doc: Y.Doc
+  try {doc = markdownToYDoc(source, {maxElements: MAX_SOURCE_ELEMENTS})}
+  catch (error) {
+    if (error instanceof MarkdownCapacityError) throw new Refusal('capacity-refused')
+    throw error
+  }
+  try {checkCapacity(doc, policy)}
+  catch (error) {doc.destroy(); throw error}
+  return doc
+}
 function refused(error: unknown): Refused {
   if (!(error instanceof Refusal)) throw error
   return {kind: 'refused', reason: error.reason}
@@ -87,7 +105,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     requireReading(delta.length <= MAX_UPDATE_BYTES, 'capacity-refused')
     const result = journal({document: input.document, currentPath: input.currentPath,
       checkpoint: input.checkpoint, suffix: [], candidate: delta})
-    requireReading(result.kind === 'accepted', 'journal-refused')
+    if (result.kind === 'refused') throw new Refusal(result.reason === 'capacity-refused' ? 'capacity-refused' : 'journal-refused')
     const sourceSha256 = sha(input.source)
     const expected = expired ? utf8.encode(canonical) : input.source
     requireReading(result.evidence.projectedMarkdownSha256 === sha(expected)
@@ -103,11 +121,12 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         input = checked.input
         doc = new Y.Doc({gc: false})
         Y.applyUpdate(doc, input.checkpoint)
+        checkCapacity(doc, policy)
         requireReading(doc.getMap('meta').get('schemaVersion') === DOHC_SCHEMA_VERSION, 'invalid-schema')
         const before = Y.encodeStateVector(doc)
         const updates: Uint8Array[] = []
         doc.on('update', (update: Uint8Array) => updates.push(update))
-        imported = markdownToYDoc(source)
+        imported = importSource(source, policy)
         const target = root(imported)
         checkRoot(target)
         const beforeRoot = root(doc), fragment = doc.getXmlFragment('body')
@@ -148,6 +167,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
             setIfChanged(meta, 'dohcMarkdownSourceReader', 1)
           }
         })
+        // The changed blocks add to the note; refuse before the journal copies it again.
+        checkCapacity(doc, policy)
         compareReadings(doc, imported)
         // Full-state encoding repeats historical deletes even for a no-op; keep only this construction's updates.
         const delta = Y.diffUpdate(Y.mergeUpdates(updates), before)
@@ -161,17 +182,19 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const checked = checkInput(input), source = checked.source
         input = checked.input
         doc = new Y.Doc({gc: false}); Y.applyUpdate(doc, input.checkpoint)
+        checkCapacity(doc, policy)
         const witness = readMarkdownSourceWitness(Object.fromEntries(doc.getMap('meta').entries()))
         requireReading(witness !== 'absent' && witness !== 'invalid', 'witness-mismatch')
         const canonical = yDocToMarkdown(doc)
-        imported = markdownToYDoc(source)
+        imported = importSource(source, policy)
         if (doc.getMap('meta').get('dohcMarkdownSourceReader') === 1
           && (witness.source !== source || !root(doc).eq(root(imported))
             || !sameFrontmatterValue(getDohcYDocFrontmatter(doc), getDohcYDocFrontmatter(imported)))) {
           // Expiry needs a valid old reading and a strict proof of the current state.
           requireReading(utf8.encode(witness.source).length <= MAX_SOURCE_BYTES, 'capacity-refused')
-          earlier = witness.source === source ? undefined : markdownToYDoc(witness.source)
-          requireReading(textSha(yDocToMarkdown(earlier ?? imported)) === witness.projectionSha, 'witness-mismatch')
+          // Release the current reading before building the earlier one, so only one is held.
+          if (witness.source !== source) {imported.destroy(); imported = undefined; earlier = importSource(witness.source, policy)}
+          requireReading(textSha(yDocToMarkdown(earlier ?? imported!)) === witness.projectionSha, 'witness-mismatch')
           return {...validate(input, new Uint8Array([0, 0]), doc, canonical, true), kind: 'expired'}
         }
         requireReading(witness.source === source, 'witness-mismatch')

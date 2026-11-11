@@ -457,9 +457,24 @@ const schema = getSchema(extensions)
 
 type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
+/** A note with more block elements than `markdownToYDoc`'s `maxElements` allows. */
+export class MarkdownCapacityError extends Error {
+  constructor() { super('markdown-capacity') }
+}
+
+function withinElements(root: JSONContent, limit: number): boolean {
+  let count = 0
+  const stack = [root]
+  for (let node = stack.pop(); node !== undefined; node = stack.pop()) {
+    if (node.type !== 'text' && ++count > limit) return false
+    if (node.content) stack.push(...node.content)
+  }
+  return true
+}
+
 export function markdownToYDoc(
   markdown: string,
-  options: { clientID?: number; reading?: 'source' | 'projection' } = {},
+  options: { clientID?: number; reading?: 'source' | 'projection'; maxElements?: number } = {},
 ): Y.Doc {
   const usesCrlf = markdown.includes('\r\n')
   const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf)
@@ -482,6 +497,11 @@ export function markdownToYDoc(
   const tiptapJson = parseRichdocMarkdown(
     usesCrlf ? body.replaceAll('\r\n', '\n') : body, options.reading,
   )
+  // Checked before the Y.Doc is built, which costs far more memory than parsing.
+  if (options.maxElements !== undefined && !withinElements(tiptapJson, options.maxElements)) {
+    doc.destroy()
+    throw new MarkdownCapacityError()
+  }
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
   return doc
@@ -785,13 +805,17 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
   )
 
-  return `${frontmatterBlockFor(
+  const markdown = `${frontmatterBlockFor(
     frontmatter,
     internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
     body,
     usesCrlf ? '\r\n' : '\n',
     writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), internalMeta),
   )}${restoreLineEndings(body)}`
+  // A saved note that isn't empty ends with one line break.
+  return markdown === '' || markdown.endsWith('\n') || internalMeta.get('contentKind') === PLAIN_TEXT_CONTENT_KIND
+    ? markdown
+    : `${markdown}${usesCrlf ? '\r\n' : '\n'}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {

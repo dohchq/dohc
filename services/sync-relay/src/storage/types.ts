@@ -736,6 +736,7 @@ export interface SyncRelayStorage {
   listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
   showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
+  endAccountReasonsOfHiddenOrDisownedCopies(): void;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
   accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;
@@ -748,6 +749,8 @@ export interface SyncRelayStorage {
   automationWorkspaceInfo(workspaceId: string): { ownerUserId: string; everShared: boolean } | null;
   restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }): void;
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
+  checkPersonalCollectionWriter(input: import("./collectionWrites").PersonalWriterInput, nowMs: number): void;
+  commitPersonalCollectionWrite(input: import("./collectionWrites").CommitPersonalCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
@@ -772,7 +775,7 @@ export interface SyncRelayStorage {
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
   listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
-  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationState;
+  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationTakedownResult;
   liftAppPublishingHold(publicationId: string): boolean;
   reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
   authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
@@ -953,6 +956,8 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  /** Whether `fetchLogPage` with `limit: count` would report `hasMore`, without reading the rows. */
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean;
   fetchLogPageDescending(input: {
     workspaceId: string;
     beforeRelaySeq: number | null;

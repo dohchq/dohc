@@ -158,6 +158,24 @@ pub(crate) fn apply_replication_envelope_in_batch(
             },
         ));
     }
+    if envelope
+        .origin_id
+        .starts_with(crate::moment_apply::PERSONAL_COLLECTION_ORIGIN_PREFIX)
+        && envelope.op_kind != "moment.append"
+    {
+        // A personal agent's Collection writes are moments only; moment apply
+        // checks each one's author and path against the origin.
+        return plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::InvalidInput {
+                    reason: "relay personal-collection origin carries only moment.append",
+                })
+            },
+        ));
+    }
     if dohc_engine_domain::chats::replicated_source_origin(&envelope.origin_id)
         .starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ORIGIN_PREFIX)
         && !matches!(

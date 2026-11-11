@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import {
   engineMomentSourceLabel,
+  engineMomentAuthorName,
   engineMomentSummary,
   engineOriginLabel,
   momentDescription,
@@ -71,6 +72,13 @@ describe("engineOriginLabel", () => {
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("momentDescription", () => {
+  it.each(["drop", "undo"])("names the local person who performed held-change %s", action => {
+    const change = moment({id: `held-${action}`, origin: "capture-recovery-cleared", personAuthorName: "Ice",
+      correlationId: `held-change:${action}:token`, summary: action === "drop" ? "Dropped held change" : "Restored held change"});
+    expect(engineMomentAuthorName(change)).toBe("Ice");
+    expect(engineMomentSourceLabel(change)).toBe("Ice");
+    expect(momentDescription(change)).toContain(", Ice,");
+  });
   // A change several wrote lists each author; an agent or an automation
   // among them says what it is, so it never reads as another person.
   it("names each of several authors by their own kind", () => {
@@ -322,6 +330,16 @@ describe("groupTimeline", () => {
     // A name with no agent identity behind it never folds either.
     expect(groupEngineMoments([moment({ id: "m2", agentAuthorName: "Nova" }), moment({ id: "m1", agentAuthorName: "Nova" })])
       .map((group) => group.moments.length)).toEqual([1, 1]);
+  });
+
+  // Another account can write your personal agent's id and name on its own edit.
+  it("never folds your personal agent's edits with another account's that claim its id", () => {
+    const grok = `p-${"g".repeat(26)}`;
+    const edit = (id: string, self: boolean) => ({ kind: "file" as const, moment: byAgent(id, {
+      authorPresentations: [{ group: "agent", hue: null, self }] }, grok, "Grok Bot") });
+    expect(groupTimeline([edit("m4", true), edit("m3", true), edit("m2", false), edit("m1", false)])
+      .map((item) => item.kind === "files" ? item.group.moments.map((entry) => entry.id) : null))
+      .toEqual([["m4", "m3"], ["m2", "m1"]]);
   });
 
   // Every connected agent is the unnamed agent; the name it gave tells them apart.

@@ -1,4 +1,5 @@
 {
+  "desktop:held-note-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:import-to-database": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + assertWritableWorkspace" } },
   "desktop:undo-database-import": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + withExclusiveWorkspaceOperation" } },
   "desktop:dataset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "datasetHandler.withRendererWorkspaceOperation" } },
@@ -61,6 +62,7 @@
   "desktop:chat-links": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-messages": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:send-chat-message": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },
+  "desktop:resolve-chat-decision": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },
   "desktop:list-personal-chat-feed": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-channel-threads": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:start-channel-thread": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },
@@ -206,5 +208,6 @@
   "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-in": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

@@ -33,6 +33,9 @@
     "reply": [
       "chat.reply"
     ],
+    "chatRetry": [
+      "agent.run.retry"
+    ],
     "react": [
       "chat.react"
     ],
@@ -78,6 +81,9 @@
     "fileDelete": [
       "file.delete"
     ],
+    "documentHeld": [
+      "document.held.read"
+    ],
     "documentRead": [
       "document.read"
     ],
@@ -85,6 +91,12 @@
       "file.kept.list"
     ],
     "collectionsWaiting": [
+      "workspace.status"
+    ],
+    "sharedFilesHeld": [
+      "workspace.status"
+    ],
+    "syncFailure": [
       "workspace.status"
     ],
     "saveKeptCopy": [
@@ -107,6 +119,9 @@
     ],
     "stopAgain": [
       "share.live.document.stop"
+    ],
+    "liveDocuments": [
+      "share.live.documents.list"
     ],
     "documentEdit": [
       "document.edit"
@@ -259,6 +274,9 @@
     ],
     "notices": [
       "notice.list"
+    ],
+    "heldNoteChange": [
+      "document.held.change"
     ]
   },
   "public": {
@@ -266,6 +284,7 @@
     "access object": "access.object.read",
     "access sharing": "access.sharing.read",
     "document read": "document.read",
+    "document held": "document.held.read",
     "document edit": "document.edit",
     "document create": "document.create",
     "document chats": "file.chats.list",
@@ -275,6 +294,7 @@
     "document set-fields": "collection.record.edit",
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
+    "document live": "share.live.documents.list",
     "chat groups": "group.list",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",
@@ -283,6 +303,7 @@
     "chat show": "chat.show",
     "chat post": "chat.post",
     "chat reply": "chat.reply",
+    "chat retry": "agent.run.retry",
     "chat react": "chat.react",
     "chat grep": "chat.search",
     "chat export": "chat.export",
@@ -366,6 +387,7 @@
     "file duplicate": "file.duplicate",
     "chat links": "chat.read",
     "notices list": "notice.list",
+    "document held-change": "document.held.change",
     "dataset cancelInvoke": "dataset.operation.cancel"
   }
 }

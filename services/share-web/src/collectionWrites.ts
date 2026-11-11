@@ -41,19 +41,21 @@ export function collectionWriteContentBytes(files: readonly CollectionFileWrite[
 
 /** The request body: the relay's link envelope, with each file's text as base64. */
 export function collectionWriteBody(submitId: string, files: readonly CollectionFileWrite[], recordedAtMs: number): string {
+  return JSON.stringify({ submitId, changes: collectionWriteChanges(files, recordedAtMs) });
+}
+
+/** The envelope's changes, which a personal agent's write sends with its workspace. */
+export function collectionWriteChanges(files: readonly CollectionFileWrite[], recordedAtMs: number): Record<string, unknown>[] {
   const encoder = new TextEncoder();
-  return JSON.stringify({
-    submitId,
-    changes: files.map((file) => ({
-      basedOnPath: file.basedOnBlobSha256 === null ? null : file.path,
-      basedOnBlobSha256: file.basedOnBlobSha256,
-      operation: "write",
-      afterPath: file.path,
-      afterContentKind: "text",
-      afterContentBase64: "text" in file ? base64(encoder.encode(file.text)) : file.base64,
-      recordedAtMs,
-    })),
-  });
+  return files.map((file) => ({
+    basedOnPath: file.basedOnBlobSha256 === null ? null : file.path,
+    basedOnBlobSha256: file.basedOnBlobSha256,
+    operation: "write",
+    afterPath: file.path,
+    afterContentKind: "text",
+    afterContentBase64: "text" in file ? base64(encoder.encode(file.text)) : file.base64,
+    recordedAtMs,
+  }));
 }
 
 function base64(bytes: Uint8Array): string {

@@ -839,7 +839,7 @@ impl Fixture {
             bytes,
             authority,
             received_at_ms,
-            (agent_declaration, vec![]),
+            (agent_declaration, (vec![], vec![])),
         )
         .await
     }
@@ -849,9 +849,9 @@ impl Fixture {
         bytes: Vec<u8>,
         authority: ServerDerivedLiveUpdateAuthority,
         received_at_ms: i64,
-        authorship: (Option<AgentDeclaration>, Vec<LiveUpdateStructRange>),
+        authorship: (Option<AgentDeclaration>, FirstSeen),
     ) -> (LiveUpdateReceipt, ApplicationResult) {
-        let (agent_declaration, first_seen) = authorship;
+        let (agent_declaration, (first_seen, first_seen_deletes)) = authorship;
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -875,7 +875,7 @@ impl Fixture {
                         .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
                         .collect(),
                 ),
-                first_seen_deletes: Some(vec![]),
+                first_seen_deletes: Some(first_seen_deletes),
                 checkpoint_coverage: None,
             },
             update_bytes: bytes,
@@ -1000,6 +1000,19 @@ fn agent(agent_id: &str, on_behalf_of: &str) -> Option<AgentDeclaration> {
     })
 }
 
+/// The struct and delete ranges a delivery adds, as the relay names them.
+type FirstSeen = (Vec<LiveUpdateStructRange>, Vec<LiveUpdateStructRange>);
+
+/// Makes `change` against `doc` and names what the relay, holding `doc`'s
+/// state, finds new in it.
+fn relay_edit(doc: &Ydoc, change: impl FnOnce(&Ydoc) -> Vec<u8>) -> (Vec<u8>, FirstSeen) {
+    let accepted = Ydoc::wire();
+    accepted.apply(&doc.encode_full_state()).unwrap();
+    let bytes = change(doc);
+    let seen = first_seen_for_test(&accepted, &bytes);
+    (bytes, seen)
+}
+
 /// The authors the latest settlement moment names.
 fn latest_authors(f: &Fixture) -> serde_json::Value {
     f.read(|db| {
@@ -1018,7 +1031,9 @@ fn latest_authors(f: &Fixture) -> serde_json::Value {
 async fn named_delivery_settles_without_marker(author: serde_json::Value) {
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
-    let bytes = f.doc.richdoc_append_paragraph("Named contribution");
+    let (bytes, (first_seen, first_seen_deletes)) = relay_edit(&f.doc, |doc| {
+        doc.richdoc_append_paragraph("Named contribution")
+    });
     let receipt = LiveUpdateReceipt {
         delivery_id: "named-delivery".into(),
         update_digest: hex_sha256(&bytes),
@@ -1033,10 +1048,10 @@ async fn named_delivery_settles_without_marker(author: serde_json::Value) {
                 authority: owner_authority(),
                 received_at_ms: 2,
             },
-            first_seen: vec![],
+            first_seen,
             canonical_version: Some(2),
             author_snapshot: Some(vec![serde_json::from_value(author.clone()).unwrap()]),
-            first_seen_deletes: Some(vec![]),
+            first_seen_deletes: Some(first_seen_deletes),
             checkpoint_coverage: None,
         },
         update_bytes: bytes,
@@ -1094,35 +1109,19 @@ fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
 /// next interval names only its own.
 #[tokio::test]
 async fn live_settlement_names_declared_agents_of_its_exact_interval() {
-    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
-        use yrs::updates::decoder::Decode;
-        let before = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
-        let bytes = doc.richdoc_append_paragraph(text);
-        let after = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
-        let mut ranges: Vec<_> = after
-            .iter()
-            .filter_map(|(client, clock)| {
-                let start = before.get(client);
-                (*clock > start).then_some(LiveUpdateStructRange {
-                    client_id: client.get() as i64,
-                    start_clock: i64::from(start),
-                    end_clock: i64::from(*clock),
-                })
-            })
-            .collect();
-        ranges.sort_by_key(|range| range.client_id);
-        (bytes, ranges)
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, FirstSeen) {
+        relay_edit(doc, |doc| doc.richdoc_append_paragraph(text))
     }
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
-    let added = f.doc.richdoc_append_paragraph("Agent paragraph");
+    let (added, ranges) = paragraph(&f.doc, "Agent paragraph");
     let (_, result) = f
-        .apply_declared(
+        .apply_declared_with_content(
             3,
             added,
             owner_authority(),
             2,
-            agent("trip-agent âœˆ", "owner"),
+            (agent("trip-agent âœˆ", "owner"), ranges),
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
@@ -1158,14 +1157,18 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         ])
     );
     let vector = f.doc.encode_state_vector();
-    let removed = delete_last_block(&f.doc);
+    let (removed, ranges) = relay_edit(&f.doc, delete_last_block);
+    assert!(
+        ranges.0.is_empty() && !ranges.1.is_empty(),
+        "the edit only deletes"
+    );
     let (terminal, result) = f
-        .apply_declared(
+        .apply_declared_with_content(
             6,
             removed,
             owner_authority(),
             3,
-            agent("cleanup-agent", "owner"),
+            (agent("cleanup-agent", "owner"), ranges),
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
@@ -1181,31 +1184,36 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
 }
 
 /// A delivery whose bytes an earlier delivery in the same interval already
-/// carried deduplicates natively, yet the settlement moment of that
-/// content-bearing interval still names its declared agent beside the first.
+/// carried changes nothing, so the settlement moment names only the agent
+/// whose delivery added the content (#2251).
 #[tokio::test]
-async fn settlement_moment_names_a_byte_deduplicated_declared_delivery() {
+async fn settlement_moment_names_only_the_delivery_that_added_content() {
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let before = f.counts();
-    let added = f.doc.richdoc_append_paragraph("Agent paragraph");
+    let (added, ranges) = relay_edit(&f.doc, |doc| {
+        doc.richdoc_append_paragraph("Agent paragraph")
+    });
     let (_, first) = f
-        .apply_declared(
+        .apply_declared_with_content(
             3,
             added.clone(),
             owner_authority(),
             2,
-            agent("trip-agent", "owner"),
+            (agent("trip-agent", "owner"), ranges),
         )
         .await;
     assert!(matches!(first, ApplicationResult::Applied(..)));
+    // The relay already holds the paragraph, so the same bytes again add nothing.
+    let (added, ranges) = relay_edit(&f.doc, |_| added);
+    assert_eq!(ranges, (vec![], vec![]));
     let (terminal, repeated) = f
-        .apply_declared(
+        .apply_declared_with_content(
             4,
             added,
             owner_authority(),
             3,
-            agent("review-agent", "owner"),
+            (agent("review-agent", "owner"), ranges),
         )
         .await;
     let ApplicationResult::Applied(ack, _) = repeated else {
@@ -1248,7 +1256,6 @@ async fn settlement_moment_names_a_byte_deduplicated_declared_delivery() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
         serde_json::json!([
-            {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":1},
             {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":1},
         ])
     );
@@ -1271,21 +1278,29 @@ async fn declared_agent_past_the_author_bound_waits_for_settlement() {
     let mut terminal = None;
     let mut refused = None;
     for index in 0..80 {
-        let bytes = f.doc.richdoc_append_paragraph(&format!("p{index}"));
+        let (bytes, ranges) = relay_edit(&f.doc, |doc| {
+            doc.richdoc_append_paragraph(&format!("p{index}"))
+        });
         let cursor = index as i64 + 3;
         let (receipt, result) = f
-            .apply_declared(cursor, bytes.clone(), owner_authority(), 2, large(index))
+            .apply_declared_with_content(
+                cursor,
+                bytes.clone(),
+                owner_authority(),
+                2,
+                (large(index), ranges.clone()),
+            )
             .await;
         match result {
             ApplicationResult::Applied(..) => terminal = Some(receipt),
             ApplicationResult::Pending(ApplicationPending::SettlementRequired) => {
-                refused = Some((index, cursor, bytes));
+                refused = Some((index, cursor, bytes, ranges));
                 break;
             }
             other => panic!("unexpected {other:?}"),
         }
     }
-    let (index, cursor, bytes) = refused.expect("the author bound refuses a delivery");
+    let (index, cursor, bytes, ranges) = refused.expect("the author bound refuses a delivery");
     assert!(index > 1);
     f.read(|db| {
         let applied: i64 = db
@@ -1302,7 +1317,7 @@ async fn declared_agent_past_the_author_bound_waits_for_settlement() {
     assert_eq!(named.as_array().unwrap().len(), index);
     assert!(named.to_string().len() <= dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
     let (terminal, result) = f
-        .apply_declared(cursor, bytes, owner_authority(), 2, large(index))
+        .apply_declared_with_content(cursor, bytes, owner_authority(), 2, (large(index), ranges))
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
     f.settle(Some(terminal), 100, Arc::new(NoFaults))

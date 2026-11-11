@@ -106,12 +106,9 @@ const liveProfile = selfHostedLive ? selfHostLiveProfile() : undefined;
 const automationsSetting = process.env.DOHC_RELAY_AUTOMATIONS;
 if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)) fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
 const automationsOn = automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
-// The routes that let a signed-in account read its workspaces through this server's copies, off until they are complete.
-const accountApiSetting = process.env.DOHC_ACCOUNT_API;
-if (accountApiSetting !== undefined && !["0", "1"].includes(accountApiSetting)) fatal("FATAL: DOHC_ACCOUNT_API must be 0 or 1.");
-const accountApi = accountApiSetting === "1";
-// This server keeps copies of workspaces to run their automations and to answer their owners' accounts.
-const copiesOn = automationsOn || accountApi;
+// This server keeps copies of workspaces to run their automations and to answer their owners' phones.
+// A self-hosted server always keeps them; a development relay only while it runs automations.
+const copiesOn = automationsOn || selfHostedLive;
 if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
   fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
 }
@@ -347,7 +344,7 @@ const datasetHost = await storage.createDatasetHost({directory: datasetDirectory
 
 const resolveActor = resolveAccountActor;
 if (copiesOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
-  fatal("FATAL: Automations and the account API on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+  fatal("FATAL: Copies of workspaces on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
 }
 const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
 const automationReplicaKey = copiesOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;
@@ -447,7 +444,6 @@ const relayApplication = createSyncRelayHandler({
   serverRuns: () => automations?.runs,
   appCollectionPolicy,
   noticePostRateLimiter,
-  accountApi,
   serverCopies: () => copies,
   ...(automationServer ? {automationServer} : {}),
 });
@@ -743,12 +739,12 @@ if (namedLiveConfig) {
 }
 const publicationOperator = await startPublicationOperator(storage, operatorSocketPath(), operatorSecretPath());
 
-// A copy goes once nothing this server runs keeps it: none at all without
-// automations or the account API.
+// A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
 if (!copiesOn && automationRoot) await removeAutomationReplicas(storage, automationRoot);
 if (!automationsOn && copiesOn) storage.endCopyReasonEverywhere("automation");
-if (!accountApi && copiesOn) storage.endCopyReasonEverywhere("account");
+// No phone read is open at start, but one a crash cut short can leave the reason a pass gave back after "Show on phone" went off.
+if (copiesOn) storage.endAccountReasonsOfHiddenOrDisownedCopies();
 const copyReplicas = automationReplicaKey && automationRoot ? {root: automationRoot, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, ...automationReplicaKey} : undefined;
 automations = automationServer && copyReplicas ? await startAutomationServer({

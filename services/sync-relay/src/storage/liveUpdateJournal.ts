@@ -8,7 +8,7 @@ import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJo
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {canonicalVersionedAcceptedMetadata as canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest as nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
-import { deriveLiveAuthorSnapshot } from "./liveAuthorSnapshot";
+import { claimsPersonalAgent, deriveLiveAuthorSnapshot } from "./liveAuthorSnapshot";
 import { assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue, limitLiveDeclaredAgents } from "./liveAuthorWindow";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
@@ -961,6 +961,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, coverage), allFirstSeen)) {
           return refused({kind:"refused",reason:"provenance-refused"});
         }
+        if (!trustedAutomation && claimsPersonalAgent(metadata.authorContext)) return refused({kind: "refused", reason: "provenance-refused"});
         let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
         journalIntegrity(isDeepStrictEqual(seedSource,liveJournalSeedSource(storage,document)));
         const seedFirstSeen = allFirstSeen.filter(range => range.clientId === seedId);

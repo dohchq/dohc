@@ -26,7 +26,11 @@ Production operators must set five values:
 
 Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is the text after `#` in the share URL.
 The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
-The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
+The share page shows and copies the full address after a successful exchange of the original link.
+The viewer keeps the secret in memory for that page only, and removes it from the address bar.
+After a reload, or when the page is opened from its `/s/<session>` address, it shows the address format instead.
+Replace `<secret>` with the text after `#` in the original link in that case.
+The share page also advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
 An agent signs in with the standard MCP authorization (MCP 2025-06-18):
 
@@ -47,8 +51,8 @@ The consent page and its decision accept only this origin. The decision also nee
 These checks stop another site from allowing an agent through a person's browser. They do not protect the link. The MCP address gives the link's full access, so share it only as you share the link.
 
 The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
-On a Group share that is the Group's channel, read with `dohc_read_channel`.
-A read-write link also gets `dohc_post_channel`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
+On a Group share, read with `dohc_read_group`.
+A read-write link also gets `dohc_post_group`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
 On any other share it is the share discussion, which Comment and Edit links can also post to.
 The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
 If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.
@@ -88,7 +92,7 @@ The sign-in follows the steps above, with its own metadata at `/.well-known/oaut
 If the browser is signed out, `/oauth/authorize` first asks for the account's email and password, then returns to the same request.
 The consent page shows the signed-in account with **Not you?**, which signs the browser out.
 The person names a new agent, or chooses one of their agents to sign in again.
-They choose View, Comment, or None for each workspace the account owns. The address's workspace starts at Comment and the rest at None. Signing in again starts from the agent's current reach.
+They choose View, Comment, Edit, or None for each workspace the account owns. The address's workspace starts at Edit and the rest at None. Signing in again starts from the agent's current reach.
 **Allow** asks for no password. If the account's password changed after this browser signed in, the page asks the browser to sign in again first.
 The page runs no script, so choosing who the agent is posts the form and draws the page again.
 The relay keeps the agent, its reach, and its tokens, as it does for a link. Restarting share-web does not sign it out.
@@ -96,7 +100,12 @@ Settings › Agents shows when the agent last signed in, and the `client_name` a
 
 A share link agent's token never works at a personal address, nor the reverse. A personal token works only at the address it signed in at.
 Every tool but `dohc_list_workspaces` and `dohc_wait_for_messages` names a workspace, and the relay checks the agent's reach and level there on every call.
-View reads files, channels, and file discussions. Comment also posts in channels and on files.
+View reads files, channels, and file discussions. Comment also posts in channels and on files. Edit also changes Collections, and no other files.
+At Edit, `dohc_write_collection_files` takes the same files as an Edit link's write, plus the workspace it goes to.
+It edits a Collection's `collection.yaml`, creates or replaces its `automations.yaml`, adds new records, or creates a Collection.
+The relay refuses any other file, including a change to an existing record, and says the agent can't write other files. Personal agents have no live document tools yet.
+The relay names the agent, on behalf of its owner, as the author. It checks the agent's sign-in and level again when it commits, so a write that arrives after the owner narrows the reach or signs the agent out is refused.
+A large write body is admitted only while some workspace in reach is at Edit. share-web holds one per agent, whichever of its tokens sends it, within the four in all, and the write goes in an MCP request of its own.
 `dohc_read_discussion` reads every thread on a current file by its path, or one thread by its id. A thread on a file since deleted still reads and takes replies, with the path the file last had. A thread whose file's current or last path is secret is not found.
 `dohc_list_workspaces` also gives the agent's name, the handle people mention it by after an @, and its direct messages with the owner in each workspace.
 `dohc_list_groups` lists a workspace's Groups by channel. It reads them through the server's copy of the workspace, so a server that keeps no copies refuses it and says the DM still works.

@@ -10,6 +10,8 @@ import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type YdocOwnerDraft } from "../ydoc/ydocWireContract";
 import {validateUserWritePath} from "@dohc/workspace-core";
+import { storableChangeAuthor, type ChangeAuthor } from "@dohc/workspace-contracts/change-author";
+import { BegunLiveChange, LiveChangeList, type LiveChangeAction, type LiveDocumentChanges, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalEntry, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 import { keepEngineRunScope } from "./engineRunScope";
@@ -866,6 +868,35 @@ export class EngineClient implements EngineTransport {
   }
   async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {
     return this.ownerLiveStop(request, "list", {}, signal);
+  }
+  /**
+   * Records who asked to stop or resume live editing of a document, before the
+   * desktop acts. Null when `before` already shows the action's result, or
+   * while the document has a pending change that a Stop does not replace (a
+   * Stop replaces a pending Resume): the engine records nothing, and there is
+   * nothing to finish. Null never stops the action. A self-reported
+   * agent name the engine cannot store is left out, so it never fails the change.
+   */
+  async ownerLiveChangeBegin(request: OwnerYDocDeliveryRequest, input: {objectId: string; path: string; action: LiveChangeAction; author: ChangeAuthor; before: LiveDocumentStatus}, signal?: AbortSignal) {
+    const response = await this.sendRequest({...request, method: "ydoc.liveChange.begin", params: {...input, author: storableChangeAuthor(input.author)}}, signal);
+    if (response.result === null) return null;
+    const begun = BegunLiveChange.safeParse(response.result);
+    if (!begun.success) throw new TypeError("Invalid live change response.");
+    return begun.data;
+  }
+  /** Settles the pending change `changeId` names; false when the document has no such pending change. */
+  async ownerLiveChangeFinish(request: OwnerYDocDeliveryRequest, input: {objectId: string; changeId: string; outcome: "applied" | "unrecorded"}, signal?: AbortSignal): Promise<boolean> {
+    const response = await this.sendRequest({...request, method: "ydoc.liveChange.finish", params: input}, signal);
+    const value = response.result as {finished?: unknown} | null;
+    if (!value || Object.keys(value).join() !== "finished" || typeof value.finished !== "boolean") throw new TypeError("Invalid live change response.");
+    return value.finished;
+  }
+  /** The changes of at most 200 documents, and every document with a pending change. */
+  async ownerLiveChangeList(request: OwnerYDocDeliveryRequest, objectIds: readonly string[], signal?: AbortSignal): Promise<LiveDocumentChanges[]> {
+    const response = await this.sendRequest({...request, method: "ydoc.liveChange.list", params: {objectIds: [...objectIds]}}, signal);
+    const listed = LiveChangeList.safeParse(response.result);
+    if (!listed.success) throw new TypeError("Invalid live change list.");
+    return listed.data.changes;
   }
   private async ownerLiveStop(request: OwnerYDocDeliveryRequest, action: string, params: object, signal?: AbortSignal) {
     const response = await this.sendRequest({...request, method: `ydoc.ownerStop.${action}`, params}, signal);

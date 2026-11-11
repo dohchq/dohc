@@ -368,17 +368,17 @@ function sessionKey(discriminator: string, token: string): string {
   return `${discriminator}:${createHash("sha256").update(token).digest("base64url")}`;
 }
 
-/** Admits one large body per link, and a few in all: a release, or null when full. */
-function largeBodyAdmission(limit = LARGE_BODIES_IN_FLIGHT): (grantId: string) => (() => void) | null {
+/** Admits one large body per link or personal agent, and a few in all: a release, or null when full. */
+function largeBodyAdmission(limit = LARGE_BODIES_IN_FLIGHT): (key: string) => (() => void) | null {
   const holding = new Set<string>();
-  return (grantId) => {
-    if (holding.has(grantId) || holding.size >= limit) return null;
-    holding.add(grantId);
+  return (key) => {
+    if (holding.has(key) || holding.size >= limit) return null;
+    holding.add(key);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      holding.delete(grantId);
+      holding.delete(key);
     };
   };
 }
@@ -1442,6 +1442,12 @@ export function createShareWebApplication({
       try {
         if (personal) {
           const result = await servePersonalMcp(request, {signal, deadlineAtMs,
+            // A write's large body spends the agent's write budget and holds its one slot, whichever of its tokens sends it.
+            // The relay limits the agent too.
+            admitLargeBody: (agentId) => {
+              const key = `personal:${agentId}`;
+              return collectionWriteRateLimiter.allow(key, nowMs()) ? admitLargeBody(key) : null;
+            },
             client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay})});
           // The token expired or was revoked, or names another address: the client refreshes or signs in again.
           if (!result) {
