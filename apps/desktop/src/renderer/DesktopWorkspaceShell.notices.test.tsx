@@ -13,17 +13,17 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { DohcDesktopBridge, OwnerLiveDocumentsResult, ShareHandoffStatus, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, OwnerLiveDocumentsResult, ShareHandoffStatus, SyncDmsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { NoticeTarget } from "../notices/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useReopenKey } from "./documentVersionKey";
-import { deferred } from "../testing/deferred";
+import { deferred, type Deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, dmSyncResult } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
 // generic error. The notice explains what was found; the rebuild is explicit
@@ -2490,8 +2490,10 @@ describe("notices sent to you", () => {
       vi.stubGlobal("dohcDesktop", bridge);
       const ends: ("opened" | "dismissed")[] = [];
       const onSwitchWorkspace = vi.fn();
+      let setHostStatus!: (status: ShareHandoffStatus) => void;
       function Host() {
         const [status, setStatus] = useState<ShareHandoffStatus>(DONE);
+        setHostStatus = setStatus;
         const [current, setCurrent] = useState(workspace);
         return (
           <DesktopWorkspaceShell
@@ -2515,8 +2517,8 @@ describe("notices sent to you", () => {
           />
         );
       }
-      render(<Host />);
-      return { ends, onSwitchWorkspace };
+      const { unmount } = render(<Host />);
+      return { ends, onSwitchWorkspace, unmount, setStatus: (status: ShareHandoffStatus) => setHostStatus(status) };
     }
 
     it("opens Chats here at the invitation, with its Join focused, instead of saying where it waits", async () => {
@@ -2528,9 +2530,9 @@ describe("notices sent to you", () => {
       expect(screen.queryByTestId("handoff-opens-in-chats")).toBeNull();
     });
 
-    it("opens Chats once the saved layout applies, so the layout can't replace it", async () => {
+    it("opens Chats once the saved layout applies, so the layout can't replace it, and ends only once Chats lists it", async () => {
       let restore!: (state: WorkspaceUiState) => void;
-      const bridge = handoffBridge(new Promise((resolve) => { restore = resolve; }));
+      const { bridge, shares, syncs } = heldBridge(new Promise((resolve) => { restore = resolve; }));
       const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
       await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
       await act(async () => { await bridge.getRelayReceivedShare.mock.results[0]?.value; });
@@ -2539,18 +2541,29 @@ describe("notices sent to you", () => {
       expect(ends).toEqual([]);
       act(() => restore(STORED_STATE));
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      // Chats is open, and its reads still wait.
+      await opening();
+      expect(ends).toEqual([]);
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-      expect(ends).toEqual(["opened"]);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
     });
 
-    it("keeps Join from taking focus after a click during the lookup", async () => {
-      const bridge = handoffBridge();
+    it("keeps Join from taking focus after a click during the lookup, and ends only once Chats lists it", async () => {
+      const { bridge, shares, syncs } = heldBridge();
       let found!: (answer: { found: true; chats: true }) => void;
       bridge.getRelayReceivedShare.mockImplementation(() => new Promise((resolve) => { found = resolve; }));
       const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
       await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
       fireEvent.pointerDown(window);
       act(() => found({ found: true, chats: true }));
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await opening();
+      expect(ends).toEqual([]);
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
       const join = await screen.findByTestId("chats-join-shared");
       await waitFor(() => expect(ends).toEqual(["opened"]));
       expect(document.activeElement).not.toBe(join);
@@ -2570,6 +2583,196 @@ describe("notices sent to you", () => {
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
       expect(onSwitchWorkspace).toHaveBeenCalledOnce();
       expect(ends).toEqual(["opened"]);
+    });
+
+    // Every share read and message-request sync waits for the test. The
+    // mount's reads come first; the reveal's own come after them.
+    const NO_INVITATION: typeof INVITATION_LISTING = { ...INVITATION_LISTING, relay: { ...INVITATION_LISTING.relay, received: [] } };
+    function heldBridge(uiState?: Promise<WorkspaceUiState | null>) {
+      const shares: Deferred<typeof INVITATION_LISTING>[] = [];
+      const syncs: Deferred<SyncDmsResult>[] = [];
+      const bridge = Object.assign(handoffBridge(uiState), {
+        listChatChannelShares: vi.fn(() => {
+          const read = deferred<typeof INVITATION_LISTING>();
+          shares.push(read);
+          return read.promise;
+        }),
+        syncDms: vi.fn(() => {
+          const sync = deferred<SyncDmsResult>();
+          syncs.push(sync);
+          return sync.promise;
+        }),
+      });
+      return { bridge, shares, syncs };
+    }
+    const answerEvery = async (reads: Deferred<any>[], value: unknown) => {
+      await act(async () => { for (const read of reads) read.resolve(value); });
+    };
+    const opening = () => screen.findByText("Opening share…");
+    // Try again reads both lists again.
+    const tryAgain = async (shares: unknown[], syncs: unknown[]) => {
+      const [read, synced] = [shares.length, syncs.length];
+      fireEvent.click(within(screen.getByTestId("share-handoff-surface")).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect([shares.length > read, syncs.length > synced]).toEqual([true, true]));
+    };
+
+    it("ends only once Chats lists the invitation, and not while either read waits or after the shell goes", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends, unmount } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await opening();
+      expect(ends).toEqual([]);
+      // The window closes with the reads still out.
+      unmount();
+      await answerEvery(shares, INVITATION_LISTING);
+      await answerEvery(syncs, dmSyncResult());
+      expect(ends).toEqual([]);
+    });
+
+    it("ends once when the reveal's own read lists the invitation", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      expect(ends).toEqual([]);
+      await answerEvery(shares, INVITATION_LISTING);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("chats-join-shared")));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
+      expect(ends).toEqual(["opened"]);
+    });
+
+    it("ends once when an earlier read already listed the invitation", async () => {
+      const { bridge, shares } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      // Only the mount's read answers; the reveal's own still waits.
+      await act(async () => shares[0]!.resolve(INVITATION_LISTING));
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+      expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+    });
+
+    it("says the invitation isn't in the list when both reads answered without it, and Try again ends it once it is", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, NO_INVITATION);
+      const absent = await screen.findByTestId("handoff-chats-absent");
+      expect(absent.textContent).toContain("isn't in this account's list in Chats");
+      expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(ends).toEqual([]);
+      await tryAgain(shares, syncs);
+      await opening();
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+      expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+    });
+
+    it("says Chats could not be read when a read fails, and Try again ends it once a read lists it", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(syncs, dmSyncResult());
+      await act(async () => { for (const read of shares) read.reject(new Error("offline")); });
+      expect((await screen.findByTestId("handoff-chats-failed")).textContent).toContain("dohc could not read Chats");
+      expect(ends).toEqual([]);
+      await tryAgain(shares, syncs);
+      await opening();
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+    });
+
+    it("never says it isn't there from a listing read before the reveal", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(syncs, dmSyncResult());
+      // The mount's read answers without the invitation while the reveal's
+      // own read waits.
+      await act(async () => shares[0]!.resolve(NO_INVITATION));
+      await act(async () => undefined);
+      expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+      await opening();
+      await act(async () => shares[1]!.resolve(INVITATION_LISTING));
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+      expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+    });
+
+    it("doesn't end a newer link's handoff when the older reveal's read lists the older invitation", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const NEWER: ShareHandoffStatus = { status: "done", statusId: "status-2", shareId: "share-2" };
+      const { ends, setStatus } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      const older = shares.length;
+      act(() => setStatus(NEWER));
+      await waitFor(() => expect(shares.length).toBeGreaterThan(older));
+      // Every read, the older reveal's included, lists only share-1.
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
+      await screen.findByTestId("handoff-chats-absent");
+      expect(ends).toEqual([]);
+      const both: typeof INVITATION_LISTING = {
+        ...INVITATION_LISTING,
+        relay: { ...INVITATION_LISTING.relay, received: [...INVITATION_LISTING.relay.received, { ...INVITATION_LISTING.relay.received[0]!, shareId: "share-2", channelWireId: "wire-share-2" }] },
+      };
+      await tryAgain(shares, syncs);
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, both);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
+    });
+
+    it("ends once the person leaves the card while Chats reads, and Chats listing it later ends nothing more", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await opening();
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      expect(ends).toEqual(["dismissed"]);
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, INVITATION_LISTING);
+      await screen.findByTestId("chats-join-shared");
+      await act(async () => undefined);
+      expect(ends).toEqual(["dismissed"]);
+    });
+
+    it("ends at a message request once Chats lists it, and says when it isn't there", async () => {
+      const request = (pending: boolean): SyncDmsResult => ({
+        ...dmSyncResult(),
+        pending: pending ? [{ shareId: "share-1", granterEmail: "owner@example.com" }] : [],
+      });
+      const listed = heldBridge();
+      const first = renderHandoff(listed.bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(listed.syncs.length).toBe(1));
+      await answerEvery(listed.shares, NO_INVITATION);
+      await opening();
+      expect(first.ends).toEqual([]);
+      await answerEvery(listed.syncs, request(false));
+      await waitFor(() => expect(listed.syncs.length).toBe(2));
+      expect(first.ends).toEqual([]);
+      await answerEvery(listed.syncs, request(true));
+      await waitFor(() => expect(first.ends).toEqual(["opened"]));
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("chats-dm-request-accept")));
+      first.unmount();
+
+      const missing = heldBridge();
+      const second = renderHandoff(missing.bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(missing.syncs.length).toBe(1));
+      await answerEvery(missing.shares, NO_INVITATION);
+      await answerEvery(missing.syncs, request(false));
+      await waitFor(() => expect(missing.syncs.length).toBe(2));
+      await answerEvery(missing.shares, NO_INVITATION);
+      await answerEvery(missing.syncs, request(false));
+      expect(await screen.findByTestId("handoff-chats-absent")).toBeTruthy();
+      expect(second.ends).toEqual([]);
     });
 
     it("says to create a workspace first when they have none of their own", async () => {

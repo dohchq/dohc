@@ -232,7 +232,7 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
-import { countInput } from "./ui/inputCount";
+import { countInput, inputCount } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -273,6 +273,7 @@ import {
 import type {
   ChatErrorNotice,
   ChatsInvitation,
+  ChatsInvitationOutcome,
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
@@ -3288,10 +3289,14 @@ export function DesktopWorkspaceShell(props: {
   // Here it waits for the saved layout, as a work link does, so the layout
   // cannot replace Chats.
   const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
-  // The handoff ends once Chats shows the invitation, so a window that closes
-  // before then, or a workspace that fails to open, leaves it for the next.
-  // From a shared view it stays while the other workspace opens and shows it.
+  // The handoff ends only when Chats reports the invitation on screen, so a
+  // window that closes before then, or a workspace that fails to open, leaves
+  // it for the next. From a shared view it stays while the other workspace
+  // opens and shows it. `opened` is this handoff's own end, so a late report
+  // cannot end a newer link's.
   const handoffInChats = useRef<{ shareId: string; opened: (() => void) | undefined } | null>(null);
+  // What Chats found when it could not show the invitation, for the card.
+  const [handoffChatsOutcome, setHandoffChatsOutcome] = useState<{ shareId: string; outcome: "absent" | "failed" } | null>(null);
   const openHandoffInChats = (invitation: ChatsInvitation) => {
     if (ownWorkspaceForChats === null) return;
     if (ownWorkspaceForChats.workspaceId !== workspaceId) {
@@ -3299,7 +3304,33 @@ export function DesktopWorkspaceShell(props: {
       return;
     }
     handoffInChats.current = { shareId: invitation.shareId, opened: props.onShareHandoffOpened };
+    setHandoffChatsOutcome(null);
     setOpenedFromLink({ to: "chats-invitation", ...invitation });
+  };
+  const handleInvitationOutcome = useCallback((shareId: string, outcome: ChatsInvitationOutcome) => {
+    const handoff = handoffInChats.current;
+    if (handoff?.shareId !== shareId) return;
+    if (outcome !== "shown") {
+      setHandoffChatsOutcome({ shareId, outcome });
+      return;
+    }
+    handoffInChats.current = null;
+    setHandoffChatsOutcome(null);
+    handoff.opened?.();
+  }, []);
+  // Back, Escape and Cancel: the person ends it, and Chats' later reports
+  // end nothing more.
+  const leaveHandoff = () => {
+    handoffInChats.current = null;
+    setHandoffChatsOutcome(null);
+    props.onDismissShareHandoff?.();
+  };
+  // Try again reads Chats' lists once more, as a new reveal.
+  const retryHandoffInChats = () => {
+    const handoff = handoffInChats.current;
+    if (handoff === null) return;
+    setHandoffChatsOutcome(null);
+    openChatsInvitation({ shareId: handoff.shareId, inputs: inputCount() });
   };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link clicked in a chat or a document opens its message here, or
@@ -5647,15 +5678,9 @@ export function DesktopWorkspaceShell(props: {
           else openChatsNavInTab(place.nav);
           return null;
         }
-        case "chats-invitation": {
+        case "chats-invitation":
           openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
-          const handoff = handoffInChats.current;
-          if (handoff?.shareId === target.shareId) {
-            handoffInChats.current = null;
-            handoff.opened?.();
-          }
           return null;
-        }
         case "automation":
           return openAutomation(target.automation, target.run ?? null, null, false, signal);
         case "automation-controls":
@@ -6005,6 +6030,7 @@ export function DesktopWorkspaceShell(props: {
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
+    onInvitationOutcome: handleInvitationOutcome,
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,
@@ -7922,14 +7948,15 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
       {handoffStatus.status !== "idle" ? (
-        <Overlay onClose={() => props.onDismissShareHandoff?.()}>
+        <Overlay onClose={leaveHandoff}>
           <ShareHandoffSurface
             status={handoffStatus}
             onWorkspaceReady={props.onSwitchWorkspace}
-            onBack={() => props.onDismissShareHandoff?.()}
+            onBack={leaveHandoff}
             onOpened={() => props.onShareHandoffOpened?.()}
             ownWorkspace={ownWorkspaceForChats !== null}
             {...(ownWorkspaceForChats === null ? {} : { openInChats: openHandoffInChats })}
+            {...(handoffChatsOutcome === null ? {} : { chatsOutcome: handoffChatsOutcome, onRetryChats: retryHandoffInChats })}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}

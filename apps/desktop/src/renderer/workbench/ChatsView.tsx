@@ -217,6 +217,7 @@ type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 // An invitation a notice's Open asks Chats to show, with the input count from
 // when the person pressed Open.
 export type ChatsInvitation = { shareId: string; inputs: number };
+export type ChatsInvitationOutcome = "shown" | "absent" | "failed";
 
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
@@ -662,6 +663,12 @@ export function ChatsView(props: {
   // onInvitationRevealed then reports it handled.
   revealInvitation?: ChatsInvitation;
   onInvitationRevealed?: () => void;
+  // What each reveal found, from its own read of shares and message requests.
+  // `shown`: the invitation, or the Group or conversation it already became,
+  // is in this list. `absent`: both reads answered without it. `failed`: a
+  // read did not answer. A reveal reports `shown` at most once, and can still
+  // report it after `absent` or `failed` if a later listing brings the row.
+  onInvitationOutcome?: (shareId: string, outcome: ChatsInvitationOutcome) => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -1142,8 +1149,9 @@ export function ChatsView(props: {
     },
     [claimLanes, planJoinedWrite, workspaceId],
   );
+  // Resolves true when this call's share listing answered for the account.
   const refreshOverview = useCallback(
-    async (options?: { background?: boolean }): Promise<void> => {
+    async (options?: { background?: boolean }): Promise<boolean> => {
       const token = options?.background ? liveToken.current : ++liveToken.current;
       const ticket = takeCommitTicket();
       const session = sessionGeneration.current;
@@ -1163,7 +1171,7 @@ export function ChatsView(props: {
         // shared channels before it reads, so a channel a sync just pulled is
         // in the declaration rather than missing from it for a whole cycle.
         const result = await bridge().listChatChannels({ workspaceId });
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current) return false;
         // Sharing is OPTIONAL: solo / signed-out workspaces simply render
         // without the sharing affordances. Whether the lookup failed is kept
         // separate from what it returned — null is not an answer, it is the
@@ -1178,7 +1186,7 @@ export function ChatsView(props: {
           })
           .then((value) => ({ answered: true, value }) as const)
           .catch(() => ({ answered: false, value: null }) as const);
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current) return false;
         // commitShareListing decides what a failure is worth: for a refresh
         // nobody asked for, only a placeholder where nothing has answered yet.
         commitShareListing(ticket, session, shares.value, {
@@ -1195,20 +1203,22 @@ export function ChatsView(props: {
             fileThreads: result.fileThreads,
           });
         }
+        return session === sessionGeneration.current && shares.value?.relay.state === "answered";
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current) return false;
         // A refresh nobody asked for never reports a failure. There is nothing
         // to tell a user who asked for nothing, and a failure holds no answer
         // for the lane — so claiming it would only discard the answer of
         // whoever IS still in flight: a working list on screen, or the load
         // the surface is waiting on. Someone always owns settling it, because
         // every foreground refresh commits its own failure.
-        if (options?.background) return;
-        if (!claimLanes(["overview"], ticket)) return;
+        if (options?.background) return false;
+        if (!claimLanes(["overview"], ticket)) return false;
         setOverview({
           status: "unavailable",
           message: ipcErrorMessage(error, "Could not load Chats."),
         });
+        return false;
       }
     },
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
@@ -1408,18 +1418,30 @@ export function ChatsView(props: {
   // the pass (DM_SYNC_CAUSES). The queued pass checks the hold again, so a
   // sync that queued behind a slow failure waits it out unless a person
   // asked for it.
-  const dmSync = useRef<{ token: number; queued: DmSyncRequest | null } | null>(null);
+  //
+  // Each call resolves with whether the pass that covered it answered: the
+  // sync finished, and its whole listing reached this view.
+  const dmSync = useRef<{ token: number; queued: DmSyncRequest | null; waiting: ((answered: boolean) => void)[] } | null>(null);
   const dmSyncHold = useRef<DmSyncHold>({ issued: 0, settled: 0, until: 0 });
   const keepAcceptedNoticeRef = useRef(false);
-  const refreshDms = useCallback(async (cause: DmSyncCause) => {
+  const refreshDms = useCallback(async (cause: DmSyncCause): Promise<boolean> => {
     const active = dmSync.current;
     if (active !== null && active.token === liveToken.current) {
       active.queued = queueDmSync(active.queued, cause);
-      return;
+      return new Promise<boolean>((resolve) => active.waiting.push(resolve));
     }
-    const mine: { token: number; queued: DmSyncRequest | null } = {
+    let answered = false;
+    const mine: { token: number; queued: DmSyncRequest | null; waiting: ((answered: boolean) => void)[] } = {
       token: liveToken.current,
       queued: queueDmSync(null, cause),
+      waiting: [(value) => { answered = value; }],
+    };
+    // The calls the running pass covers. A pass that commits nothing leaves
+    // them unanswered.
+    let covering: ((answered: boolean) => void)[] = [];
+    const settle = (value: boolean) => {
+      for (const waiter of covering) waiter(value);
+      covering = [];
     };
     dmSync.current = mine;
     try {
@@ -1428,9 +1450,12 @@ export function ChatsView(props: {
         mine.token === liveToken.current &&
         dmSync.current === mine
       ) {
+        settle(false);
         const request = mine.queued;
         mine.queued = null;
-        if (dmSyncHeld(dmSyncHold.current, request)) return;
+        covering = mine.waiting;
+        mine.waiting = [];
+        if (dmSyncHeld(dmSyncHold.current, request)) break;
         const token = mine.token;
         const session = sessionGeneration.current;
         const sync = ++dmSyncHold.current.issued;
@@ -1440,8 +1465,9 @@ export function ChatsView(props: {
             ...(request.pull ? { poll: true } : {}),
           });
           settleDmSync(dmSyncHold.current, sync, result.failed);
-          if (token !== liveToken.current) return;
+          if (token !== liveToken.current) break;
           if (session !== sessionGeneration.current) continue;
+          settle(result.available && !result.failed);
           setDmAvailable(result.available);
           setDms(keepIfUnchanged(result.dms));
           setPendingDmRequests(keepIfUnchanged(result.pending));
@@ -1454,11 +1480,16 @@ export function ChatsView(props: {
           }
         } catch {
           // DMs are optional: Chats stays fully usable without them.
+          settle(false);
         }
       }
     } finally {
       if (dmSync.current === mine) dmSync.current = null;
+      settle(false);
+      for (const waiter of mine.waiting) waiter(false);
+      mine.waiting = [];
     }
+    return answered;
   }, [workspaceId]);
 
   // Workspace switch: drop everything stale and reload from the top.
@@ -3352,7 +3383,8 @@ export function ChatsView(props: {
     return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
   }, [aboutConversation, props.editorTabPath, workspaceId]);
 
-  const refreshShares = useCallback(async () => {
+  // Resolves true when this call's listing answered for the account.
+  const refreshShares = useCallback(async (): Promise<boolean> => {
     // This reader has no channel list of its own, and the joined lane answers
     // what a caller NAMES. While the overview is unresolved there is nothing
     // to name, and asking anyway would claim the lane with an answer covering
@@ -3364,10 +3396,7 @@ export function ChatsView(props: {
     // nobody asked for this refresh and it must not bump liveToken under an
     // in-flight navigation.
     const shown = latestShownWireIds.current;
-    if (shown === null) {
-      await refreshOverview({ background: true });
-      return;
-    }
+    if (shown === null) return refreshOverview({ background: true });
     const ticket = takeCommitTicket();
     const session = sessionGeneration.current;
     const shares = await bridge()
@@ -3379,15 +3408,53 @@ export function ChatsView(props: {
     // switch bumps sessionGeneration, and the commit point refuses the
     // stale response there.
     commitShareListing(ticket, session, shares);
+    return session === sessionGeneration.current && shares?.relay.state === "answered";
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
   // A notice's Open can name an invitation that arrived after Chats last
   // listed it. Each reveal reads the shares again and pulls message requests,
   // whose poll stops while a conversation tab is open.
+  //
+  // Chats owes each reveal an outcome until it reports `shown`. A newer
+  // reveal replaces the one owed, so an older reveal's reads report nothing.
+  const outcomeOwed = useRef<ChatsInvitation | null>(null);
+  const [revealRead, setRevealRead] = useState<{ reveal: ChatsInvitation; answered: boolean } | null>(null);
   useEffect(() => {
     if (revealInvitation === undefined) return;
-    void refreshShares();
-    void refreshDms("open");
+    const reveal = revealInvitation;
+    outcomeOwed.current = reveal;
+    void Promise.all([refreshShares(), refreshDms("open")]).then(([shares, messages]) => {
+      if (outcomeOwed.current === reveal) setRevealRead({ reveal, answered: shares && messages });
+    });
   }, [refreshDms, refreshShares, revealInvitation]);
+  const { onInvitationOutcome } = props;
+  const reportedRead = useRef<typeof revealRead>(null);
+  // After every commit, so a row counts as soon as it is on screen.
+  useEffect(() => {
+    const reveal = outcomeOwed.current;
+    if (reveal === null || onInvitationOutcome === undefined) return;
+    if (invitationListed(reveal.shareId)) {
+      outcomeOwed.current = null;
+      onInvitationOutcome(reveal.shareId, "shown");
+      return;
+    }
+    if (revealRead?.reveal !== reveal || reportedRead.current === revealRead) return;
+    reportedRead.current = revealRead;
+    // `absent` needs this reveal's own reads to have answered, and what is on
+    // screen to still be an answer: a later failed read leaves a list that
+    // cannot say the invitation isn't there.
+    const listAnswered = channelShares !== null && shareReadFailure === null && dmAvailable;
+    onInvitationOutcome(reveal.shareId, revealRead.answered && listAnswered ? "absent" : "failed");
+  });
+  // The invitation's row, or the Group or conversation it already became,
+  // archived ones included.
+  function invitationListed(shareId: string): boolean {
+    if (viewRef.current?.querySelector(`[data-invitation="${CSS.escape(shareId)}"]`)) return true;
+    if (dms.some((dm) => dm.shareId === shareId)) return true;
+    if (declinedDmRequests.some((request) => request.shareId === shareId)) return true;
+    const joined = channelShares?.joined.find((answer) => answer.joined?.shareId === shareId && answer.joined.ended !== true);
+    return joined !== undefined && overview.status === "ready" &&
+      overview.channels.some((channel) => channel.wireId === joined.channelWireId);
+  }
 
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic
