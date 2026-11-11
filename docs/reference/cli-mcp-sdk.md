@@ -385,7 +385,7 @@ Returns `{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`.
 
 ### `dohc_read_file`
 
-Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.
+Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes. A shared note's Markdown file can trail the note while its edits wait for the server; read notes with dohc_read_document.
 
 - `path`: `string`. Required.
 - `encoding`: `"utf8" | "base64"`

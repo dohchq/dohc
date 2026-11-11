@@ -422,7 +422,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register(
     "dohc_read_file",
     {
-      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
+      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes. A shared note's Markdown file can trail the note while its edits wait for the server; read notes with dohc_read_document.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         encoding: z.enum(["utf8", "base64"]).optional(),
