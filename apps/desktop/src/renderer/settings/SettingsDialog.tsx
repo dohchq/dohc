@@ -897,11 +897,16 @@ export function SettingsDialog(props: {
                     }
                   />
                 }
-              >
-                {null}
-              </SettingRow>
+              />
               <SettingRow
                 title="Folder name"
+                description={
+                  workspaceSettings.files.attachmentLocation === "same-folder" ? (
+                    <span id="attachment-folder-unused">
+                      Not used when images go beside the document.
+                    </span>
+                  ) : undefined
+                }
                 modified={isModified(
                   workspaceSettings.files.attachmentFolderName,
                   DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
@@ -921,8 +926,12 @@ export function SettingsDialog(props: {
                   value={workspaceSettings.files.attachmentFolderName}
                   placeholder="assets"
                   testId="attachment-folder-input"
-                  // Beside the document, an image goes in no folder.
                   disabled={workspaceSettings.files.attachmentLocation === "same-folder"}
+                  describedBy={
+                    workspaceSettings.files.attachmentLocation === "same-folder"
+                      ? "attachment-folder-unused"
+                      : undefined
+                  }
                   maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
                   onChange={(attachmentFolderName) =>
                     void saveWorkspaceSettings({

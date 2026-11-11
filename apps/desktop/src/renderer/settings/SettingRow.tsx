@@ -7,7 +7,8 @@ import { useRadioGroup } from "../ui/SegmentedControl";
 export function SettingRow(props: {
   title: string;
   description?: ReactNode;
-  children: ReactNode;
+  // Left out when the control sits in `aside`, under the title.
+  children?: ReactNode;
   modified?: boolean;
   onReset?: () => void;
   testId?: string;
@@ -81,9 +82,11 @@ export function SettingRow(props: {
       {props.onReset ? (
         <ResetButton onReset={props.modified ? props.onReset : undefined} className={props.top ? "mt-1" : ""} />
       ) : null}
-      <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
-        {props.children}
-      </div>
+      {props.children ? (
+        <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
+          {props.children}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -299,6 +302,7 @@ export function TextControl(props: {
   // — `maxLength` truncates typing and paste, and the caller clamps besides.
   maxLength?: number;
   disabled?: boolean;
+  describedBy?: string;
 }) {
   return (
     <input
@@ -309,6 +313,7 @@ export function TextControl(props: {
       placeholder={props.placeholder}
       maxLength={props.maxLength}
       disabled={props.disabled}
+      aria-describedby={props.describedBy}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
       className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"

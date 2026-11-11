@@ -1,6 +1,7 @@
 import { useId } from "react";
 import type { WorkspaceSettings } from "../../workspaces/workspaceSettings";
 import { computeAttachmentPaths } from "../editor/imagePaste";
+import { PathLine } from "../ui/PathLine";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
 type AttachmentLocation = WorkspaceSettings["files"]["attachmentLocation"];
@@ -13,7 +14,6 @@ const OPTIONS = [
 
 // The document each choice's example path is pasted into.
 const EXAMPLE_DOCUMENT = "Trips/Lisbon/itinerary.md";
-const EXAMPLE_FOLDER = "Trips/Lisbon/";
 
 /**
  * Where a pasted image is saved, as one radio per choice. Each shows the path
@@ -40,7 +40,6 @@ export function AttachmentLocationControl(props: {
           location: option.value,
           folderName: props.folderName,
         }).writePath;
-        const folder = path.startsWith(EXAMPLE_FOLDER) ? EXAMPLE_FOLDER : "";
         return (
           <button
             key={option.value}
@@ -49,7 +48,7 @@ export function AttachmentLocationControl(props: {
             // Named by its choice; the example path describes it.
             aria-label={option.label}
             aria-describedby={`${id}-${option.value}`}
-            className={`grid h-9 grid-cols-[14px_auto_minmax(0,1fr)] items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
+            className={`grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors duration-75 ${
               checked ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink"
             }`}
           >
@@ -62,13 +61,8 @@ export function AttachmentLocationControl(props: {
               {checked ? <span className="size-1.5 rounded-full bg-accent" /> : null}
             </span>
             {option.label}
-            <span
-              id={`${id}-${option.value}`}
-              title={path}
-              className="truncate text-right font-mono text-[11px] text-muted"
-            >
-              {folder}
-              <span className="text-ink">{path.slice(folder.length)}</span>
+            <span id={`${id}-${option.value}`} title={path} className="col-start-2 min-w-0 text-[12px] text-muted">
+              <PathLine path={path} />
             </span>
           </button>
         );

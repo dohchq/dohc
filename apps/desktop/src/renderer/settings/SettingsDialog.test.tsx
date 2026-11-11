@@ -2931,6 +2931,12 @@ describe("SettingsDialog", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
+  // The text of the path that describes one attachment location radio.
+  const examplePath = (location: string) =>
+    document.getElementById(
+      screen.getByTestId(`attachment-location-${location}`).getAttribute("aria-describedby")!,
+    )?.textContent;
+
   it("persists the attachment location and shows where each choice saves", async () => {
     const user = userEvent.setup();
     render(
@@ -2945,17 +2951,10 @@ describe("SettingsDialog", () => {
     const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
     const radio = (name: string) => within(group).getByRole("radio", { name });
     expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
-    // Each choice describes itself with the path a paste writes.
-    expect(radio("In a folder beside the document").getAttribute("aria-describedby")).toBeTruthy();
-    expect(screen.getByTestId("attachment-location-per-document").textContent).toContain(
-      "Trips/Lisbon/assets/photo.png",
-    );
-    expect(screen.getByTestId("attachment-location-global-folder").textContent).toContain(
-      "assets/photo.png",
-    );
-    expect(screen.getByTestId("attachment-location-same-folder").textContent).toContain(
-      "Trips/Lisbon/photo.png",
-    );
+    // Each choice is described by the path a paste writes.
+    expect(examplePath("per-document")).toBe("Trips/Lisbon/assets/photo.png");
+    expect(examplePath("global-folder")).toBe("assets/photo.png");
+    expect(examplePath("same-folder")).toBe("Trips/Lisbon/photo.png");
 
     await user.click(radio("In one folder for the whole workspace"));
     // The save carries the changed control only — main merges it onto the
@@ -2972,11 +2971,11 @@ describe("SettingsDialog", () => {
       workspaceId: "ws-1",
       patch: { files: { attachmentLocation: "same-folder" } },
     });
-    await waitFor(() =>
-      expect(
-        (screen.getByTestId("attachment-folder-input") as HTMLInputElement).disabled,
-      ).toBe(true),
-    );
+    const input = screen.getByTestId("attachment-folder-input") as HTMLInputElement;
+    await waitFor(() => expect(input.disabled).toBe(true));
+    expect(
+      document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
+    ).toBe("Not used when images go beside the document.");
   });
 
   it("names the typed folder in each example path", async () => {
@@ -2993,14 +2992,8 @@ describe("SettingsDialog", () => {
     const input = await screen.findByTestId("attachment-folder-input");
     await user.clear(input);
     await user.type(input, "media");
-    await waitFor(() =>
-      expect(screen.getByTestId("attachment-location-per-document").textContent).toContain(
-        "Trips/Lisbon/media/photo.png",
-      ),
-    );
-    expect(screen.getByTestId("attachment-location-global-folder").textContent).toContain(
-      "media/photo.png",
-    );
+    await waitFor(() => expect(examplePath("per-document")).toBe("Trips/Lisbon/media/photo.png"));
+    expect(examplePath("global-folder")).toBe("media/photo.png");
   });
 
   it("saves and resets the default site preview mode", async () => {
