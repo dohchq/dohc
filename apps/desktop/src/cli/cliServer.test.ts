@@ -1972,6 +1972,130 @@ describe("CLI socket server", () => {
     expect(calls).toHaveLength(2);
   });
 
+  // shared-with-me holds what others share with you, inside your own workspace.
+  describe("from inside a folder others share with you", () => {
+    const OWNER = "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+    const CHAT = "dohc: Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+    let inShare: string;
+    const send = (verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: inShare, actor: "agent", ...args } });
+
+    beforeEach(async () => {
+      inShare = join(workspaceRoot, "shared-with-me", "received", "notes");
+      await mkdir(inShare, { recursive: true });
+    });
+
+    it("refuses the commands for your workspace as its owner, before opening it", async () => {
+      // Every port these commands use, so a command that got through would reach one.
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const port = new Proxy({}, { get: () => reached });
+      Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: port, keptCopies: port, retainedCopies: port,
+        ownerAppResponses: reached, dataset: reached, appPublication: reached });
+      const ownerCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["stopSync", { actor: "human" }],
+        ["shareCopy", { shareId: "share", grantId: "grant" }],
+        ["shareAgents", { shareId: "share", grantId: "grant" }],
+        ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }],
+        ["keptCopies", {}],
+        ["saveKeptCopy", { id: 1 }],
+        ["retainedCopies", {}],
+        ["deleteRetainedCopies", { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
+        ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }],
+        ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }],
+        ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }],
+        ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of ownerCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+        }
+      }
+      expect(reached).not.toHaveBeenCalled();
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("refuses chat commands, and shows a Group with --peek", async () => {
+      const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["groupCreate", { name: "needs-ice" }],
+        ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+        ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+        ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+        ["chatRetry", { thread: "thread-1" }],
+        ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+        ["show", { target: "general", peek: false }],
+        ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+        ["watch", { timeoutMs: 0 }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of chatCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+      }
+      expect(calls.openWorkspace).toBe(0);
+      expect(await send("show", { target: "general", peek: true })).toMatchObject({ ok: true });
+    });
+
+    it("keeps each command's own answer where it already sent you to the original workspace", async () => {
+      const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+      const keptEdits = "Kept edits are kept only in the original workspace. Open it to continue.";
+      const live = "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.";
+      const versions = "Versions belong to the owning workspace. Open it to continue.";
+      const history = "History operations require the owning workspace. Open it to continue.";
+      const answers: Array<[CliVerb, Record<string, unknown>, string]> = [
+        ["liveKeptEdits", {}, keptEdits],
+        ["saveRecoveryCopy", { path: "a.md" }, keptEdits],
+        ["retryKeptEdits", { path: "a.md", incident: "incident" }, keptEdits],
+        ["stopAgain", { path: "a.md", incident: "incident" }, keptEdits],
+        ["restoreProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["discardProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["liveDocuments", {}, live],
+        ["liveStop", { path: "a.md" }, live],
+        ["liveResume", { path: "a.md" }, live],
+        ["documentHeld", { path: "a.md" }, "Held changes are kept only in the original workspace. Open it to continue."],
+        ["syncFailure", {}, "Sync status is kept only in the original workspace. Open it to continue."],
+        ["historyOperation", { operationId }, history],
+        ["versionList", {}, versions],
+        ["versionCompare", { version: "main" }, versions],
+        ["versionConflicts", {}, versions],
+        ["versionCreate", { name: "draft" }, versions],
+        ["versionSwitch", { version: "main" }, versions],
+        ["versionMerge", { version: "main" }, versions],
+        ["versionResolve", { conflictId: "conflict", resolution: { keep: "current" } }, versions],
+      ];
+      for (const [verb, args, reason] of answers) {
+        expect(await send(verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result: { ok: false, reason } });
+      }
+      // Only an Undo's refusal names its cause.
+      expect(await send("historyUndo", { operationId })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+        result: { ok: false, reason: history, refusal: { code: "unexplained" } } });
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("lets Collection and app publication commands name paths in the folder", async () => {
+      const dataset = vi.fn<NonNullable<CliWorkspaceContext["dataset"]>>(async () => { throw new Error("reached"); });
+      const appPublication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async () => { throw new Error("reached"); });
+      context.dataset = dataset;
+      context.appPublication = appPublication;
+      await send("dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } });
+      await send("appPublication", { request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "app" } });
+      expect(dataset).toHaveBeenCalledWith(expect.objectContaining({ datasetPath: "shared-with-me/received/notes/tasks/dataset.json" }), expect.anything());
+      expect(appPublication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "shared-with-me/received/notes/app" }), expect.anything());
+    });
+
+    it("answers reads", async () => {
+      expect(await send("groups", {})).toMatchObject({ ok: true });
+      expect(await send("threads", { group: "general" })).toMatchObject({ ok: true });
+      expect(await send("inbox", {})).toMatchObject({ ok: true });
+    });
+  });
+
+  it("refuses a chat wait in a read-only shared view", async () => {
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 }))
+      .rejects.toThrow("chats are not available in a read-only shared view");
+  });
+
   it("requires owner-local authority and refuses all automation publication actions", async () => {
     context.appPublication=vi.fn(async()=>({kind:"cancelled" as const}));
     const request={action:"createLink" as const,workspaceId:WORKSPACE_ID,appRoot:"app",access:"view" as const,operationId:"00000000-0000-4000-8000-000000000101",agentLabel:"Builder"};
