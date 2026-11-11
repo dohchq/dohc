@@ -349,6 +349,9 @@ struct Pending {
     names: std::rc::Rc<Names>,
     /// Folders kept open for this one and its ancestors.
     kept: usize,
+    /// Its parent, past the budget, when it is the only subfolder and so
+    /// opens next. A waiting sibling holds only `from`.
+    parent: Option<Folder>,
 }
 
 struct Names {
@@ -368,18 +371,20 @@ impl Drop for Names {
 
 impl Pending {
     /// `child` of the folder `dir`, which opened from `pending`, or is the
-    /// root when that is `None`. `dir` stays open for it unless a sibling
-    /// keeps it open and the walk already keeps its share.
+    /// root when that is `None`. Once the walk keeps its share, `dir` stays
+    /// open only until an only subfolder opens, and every descendant can
+    /// reopen from `from` by name.
     fn under(dir: &Folder, pending: Option<&Pending>, siblings: bool, child: Child) -> Self {
         let kept = pending.map_or(0, |pending| pending.kept);
         match pending {
-            Some(pending) if siblings && kept >= KEPT_FOLDERS => Self {
+            Some(pending) if kept >= KEPT_FOLDERS => Self {
                 from: pending.from.clone(),
                 names: std::rc::Rc::new(Names {
                     parent: Some(pending.names.clone()),
                     child,
                 }),
                 kept,
+                parent: (!siblings).then(|| dir.clone()),
             },
             _ => Self {
                 from: dir.clone(),
@@ -389,11 +394,15 @@ impl Pending {
                 }),
                 // An only subfolder opens next, and `dir` closes after it.
                 kept: kept + usize::from(siblings),
+                parent: None,
             },
         }
     }
 
     fn open(&self) -> std::io::Result<Folder> {
+        if let Some(parent) = &self.parent {
+            return parent.open(&self.names.child);
+        }
         let mut names = vec![&self.names.child];
         let mut parent = self.names.parent.as_deref();
         while let Some(next) = parent {
@@ -1623,9 +1632,15 @@ mod tests {
     fn a_deep_tree_with_a_waiting_subfolder_at_every_level_keeps_few_folders_open() {
         let f = Fixture::new();
         let mut deep = String::new();
-        for _ in 0..KEPT_FOLDERS + 40 {
-            // `d` opens before `side`, which waits while `d` is walked.
-            f.write(&format!("{deep}side/file.md"), "s");
+        let mut files = 1;
+        // Every level waits on a subfolder up to past the budget, then every
+        // other level has only one subfolder.
+        for level in 0..KEPT_FOLDERS + 120 {
+            if level < KEPT_FOLDERS + 40 || level % 2 == 0 {
+                // `d` opens before `side`, which waits while `d` is walked.
+                f.write(&format!("{deep}side/file.md"), "s");
+                files += 1;
+            }
             deep.push_str("d/");
         }
         f.write(&format!("{deep}deepest.md"), "x");
@@ -1634,7 +1649,7 @@ mod tests {
         let (_, most) = folder::OPEN.get();
         assert!(most <= KEPT_FOLDERS + 4, "{most} folders open at once");
         let listing = f.feed.state.lock().unwrap().listing.clone();
-        assert_eq!(listing.len(), KEPT_FOLDERS + 41);
+        assert_eq!(listing.len(), files);
         assert!(
             listing
                 .iter()
