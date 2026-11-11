@@ -1001,7 +1001,7 @@ fn reused_accepted_state_charges_a_fresh_read_and_drops_refused_bytes() {
     store
         .read_with(|conn| {
             let tx = conn.unchecked_transaction().map_err(SyncError::persist)?;
-            let mut reader = PublicationReader::new(&tx);
+            let mut reader = PublicationReader::new(&tx, None);
             let mut read = |digest: &str| {
                 let mut remaining = 1_000_000;
                 let proof = reader

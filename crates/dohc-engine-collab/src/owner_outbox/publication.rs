@@ -23,7 +23,12 @@ pub enum PublicationProof {
 pub struct PublicationReader<'a> {
     conn: &'a Connection,
     last: Option<AcceptedRead>,
+    now_ms: Option<i64>,
 }
+
+/// How long an update queued for the host as its own entry stays pending
+/// when the host's checkpoint already contains it.
+const QUEUED_ENTRY_HOLD_MS: i64 = 120_000;
 
 struct AcceptedRead {
     key: DocKey,
@@ -34,10 +39,13 @@ struct AcceptedRead {
 }
 
 impl<'a> PublicationReader<'a> {
-    pub fn new(tx: &'a rusqlite::Transaction<'_>) -> Self {
+    /// An ordinary push passes its clock as `now_ms`, so an update still
+    /// queued for the host stays pending for a while; see `queued_for_host`.
+    pub fn new(tx: &'a rusqlite::Transaction<'_>, now_ms: Option<i64>) -> Self {
         Self {
             conn: tx,
             last: None,
+            now_ms,
         }
     }
 
@@ -54,6 +62,7 @@ impl<'a> PublicationReader<'a> {
         prove(
             self.conn,
             &mut self.last,
+            self.now_ms,
             key,
             path,
             lineage,
@@ -75,13 +84,16 @@ pub fn contains_in(
     digest: &str,
     remaining: &mut usize,
 ) -> Result<PublicationProof, OwnerOutboxError> {
-    prove(conn, &mut None, key, path, lineage, kind, digest, remaining)
+    prove(
+        conn, &mut None, None, key, path, lineage, kind, digest, remaining,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prove(
     conn: &Connection,
     last: &mut Option<AcceptedRead>,
+    now_ms: Option<i64>,
     key: &DocKey,
     path: &str,
     lineage: Option<&str>,
@@ -135,6 +147,9 @@ fn prove(
         }
         match kind {
             PublicationContentKind::Ydoc => {
+                if queued_for_host(conn, binding, digest, now_ms)? {
+                    return Ok(false);
+                }
                 let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;
                 let before = bounded(accepted)?;
                 accepted.apply(&update).map_err(collab)?;
@@ -223,6 +238,47 @@ fn prove(
         *last = None;
     }
     Ok(proof)
+}
+
+/// Whether the update with `digest` waits for the host as its own entry in
+/// the queue `binding` names, queued at most [`QUEUED_ENTRY_HOLD_MS`] before
+/// the push at `now_ms`. Enrollment installs the host's checkpoint as
+/// accepted before the host has each entry, so containment alone would
+/// publish an update the host then holds. An entry dated after `now_ms`
+/// counts as expired, and a queue that was set aside never matches.
+fn queued_for_host(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    digest: &str,
+    now_ms: Option<i64>,
+) -> Result<bool, OwnerOutboxError> {
+    let Some(now_ms) = now_ms else {
+        return Ok(false);
+    };
+    // The queue's key, as find_parent_for_binding matches it.
+    let binding = binding
+        .clone()
+        .normalized()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    let selector_paths = serde_json::to_string(&binding.selector_paths)
+        .map_err(|_| OwnerOutboxError::Corrupt)?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=?1 AND e.pending=1 AND ?2-e.created_at_ms BETWEEN 0 AND ?3 AND o.workspace_id=?4 AND o.main_version_id=?5 AND o.object_id=?6 AND o.lineage_claim_id=?7 AND o.restore_fence_generation=?8 AND o.current_path=?9 AND o.selector_paths_json=?10 AND o.state!='quarantined')",
+        params![
+            digest,
+            now_ms,
+            QUEUED_ENTRY_HOLD_MS,
+            binding.workspace_id,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            binding.restore_fence_generation,
+            binding.current_path,
+            selector_paths
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
 }
 
 /// The owner draft's accepted checkpoint, or the native accepted history.

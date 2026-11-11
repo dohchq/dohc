@@ -241,7 +241,7 @@ pub fn owner_publication_prefix(
     store.read_with(|conn| {
         // One snapshot lets consecutive references to a document reuse its accepted read.
         let read_tx = conn.unchecked_transaction().map_err(SyncError::persist)?;
-        let mut reader = PublicationReader::new(&read_tx);
+        let mut reader = PublicationReader::new(&read_tx, ordinary.map(|ordinary| ordinary.now_ms));
         let mut remaining = max_read_bytes;
         for (allowed_ops, op) in ops.iter().enumerate() {
             if op.workspace_id != workspace {
