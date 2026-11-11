@@ -88,6 +88,7 @@ export function EngineMomentDiffPage({
   onReopenRestore,
   restoreRequested,
   onRestoreRequestTaken,
+  onOpenSharedRestore,
   steps,
   onOpenMoment,
 }: {
@@ -123,6 +124,9 @@ export function EngineMomentDiffPage({
   onReopenRestore: (momentId: string, path: string) => void;
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
+  // Opens the shell's Restore shared file for this change's file. The shell
+  // owns the dialog and its Notices rows, so they outlive this page.
+  onOpenSharedRestore?: (momentId: string, path: string) => void;
   // The older and newer change to this file in the loaded History, which
   // the page opens in its place with its arrows or [ and ].
   steps?: MomentSteps | undefined;
@@ -485,10 +489,11 @@ export function EngineMomentDiffPage({
   const recordedAt = formatChatTime(moment.recordedAtMs);
   // What the change did; the title already names the file.
   const summary = createdFile && !moment.summary ? "Created" : fileMomentSummary(moment);
-  // The rarer ways back, and the file itself, wait behind More. Restore
-  // shared file is not offered: a restore that stops a note's last Edit
-  // access can leave it and other shared notes stuck (#3090).
+  // The rarer ways back, and the file itself, wait behind More.
   const moreItems: MenuItem[] = [
+    ...(onOpenSharedRestore && !readOnly && !isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md")
+      ? [{ id: "shared-restore", label: "Restore shared file…", testId: "engine-diff-shared-restore", disabled: restoreBusy, onSelect: () => onOpenSharedRestore(moment.id, moment.path) }]
+      : []),
     ...(!readOnly && stopTarget
       ? [{ id: "stop-and-restore", label: "Stop and restore…", testId: "engine-diff-stop-and-restore", disabled: restoreBusy, onSelect: () => onStopAndRestore(stopTarget) }]
       : []),
