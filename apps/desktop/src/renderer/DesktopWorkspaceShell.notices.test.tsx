@@ -3833,9 +3833,10 @@ describe("owner live documents", () => {
     await user.click(
       await screen.findByRole("button", { name: "Open live documents" }),
     );
-    // Settings hands the surface over rather than stacking on top of it.
-    expect(screen.queryByTestId("settings-dialog")).toBeNull();
-    return await screen.findByTestId("live-documents-dialog");
+    // Settings stays open underneath, so closing the dialog returns there.
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+    return dialog;
   }
 
   it("opens live documents from settings and drives the real bridge", async () => {
@@ -3869,6 +3870,26 @@ describe("owner live documents", () => {
         objectId: LIVE_ROW.objectId,
       }),
     );
+  });
+
+  it("closes back to Settings by a click outside or by Escape", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(
+      async (): Promise<OwnerLiveDocumentsResult> => ({ documents: [], nextCursor: null }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(dialog.closest<HTMLElement>("[data-dohc-modal]")!);
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open live documents" }));
+    await screen.findByTestId("live-documents-dialog");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
   });
 
   // The dialog's failure outlives the dialog: the shell keeps the notice and
@@ -4427,7 +4448,19 @@ describe("Connect server", () => {
     await user.click(await screen.findByTestId("settings-nav-cloud"));
     await user.click(await screen.findByTestId("settings-cloud-connect"));
     expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
-    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    // Opened from Settings, the dialog closes back to Settings, by a click
+    // outside it or by Escape.
+    expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+    const backdrop = screen.getByTestId("cloud-sync-panel").closest<HTMLElement>("[data-dohc-modal]");
+    await user.click(backdrop!);
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
+
+    await user.click(screen.getByTestId("settings-cloud-connect"));
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
   });
 
   // The next step after signing in is the sync switch, so the dialog hands
@@ -5801,7 +5834,8 @@ it.each([
   expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
   await user.click(row.getByRole("button", { name: "Sign in again" }));
   await screen.findByTestId("cloud-user-code");
-  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  // Settings stays open underneath, so closing the dialog returns there.
+  expect(screen.getByTestId("settings-dialog")).toBeTruthy();
   expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
   expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
   expect(bridge.cloudStopSync).not.toHaveBeenCalled();
