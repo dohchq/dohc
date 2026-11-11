@@ -17,13 +17,13 @@ export interface LocalAppLaunchBackend {
   browserPublication(publicationId: string): { authorityRevision: number; files: Parameters<typeof createAppDocument>[0] };
   assertBrowserPublication(publicationId: string, authorityRevision: number): void;
   checkBrowserPublication?(publicationId: string, authorityRevision: number, signal: AbortSignal): Promise<void>;
-  /** activated: a person's click or key press in the app frame started this request, as the bootstrap saw it. */
+  /** activated: a person's click or key press in the app frame started this request, as dohc's tab saw it. Always false for a session `launch` opened. */
   request(publicationId: string, action: LocalAppAction, input: unknown, signal?: AbortSignal, activated?: boolean): Promise<unknown>;
   readBrowserFile(publicationId: string, input: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown>;
 }
 export interface LocalAppLaunchHost {
   launch(publicationId: string, signal: AbortSignal): Promise<string>;
-  /** keepAlive: dohc's own tab, which renews the session and gates the app frame's navigations in main. */
+  /** keepAlive: dohc's own tab, which renews the session, gates the app frame's navigations in main, and credits a click in the frame. Main keeps its URL. */
   launchSession(publicationId: string, signal: AbortSignal, options?: { keepAlive?: boolean }): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
 }
@@ -184,8 +184,9 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
               return reply(response, 200, { proof, html: resumed.html });
             }
             const body = await readJson(request, APP_BACKEND_UPLOAD_REQUEST_BYTES, activeSignal);
-            // Only the bootstrap sends this header; the app frame has neither the proof nor this origin.
-            const activated = request.headers["x-dohc-app-activated"] === "1";
+            // The app frame has neither the proof nor this origin. Only dohc's tab can claim a click, though: a session
+            // for a browser handed its URL, and so its proof, to whoever asked, an agent included, which can send this header.
+            const activated = launchOptions?.keepAlive === true && request.headers["x-dohc-app-activated"] === "1";
             if (!body || typeof body !== "object" || Array.isArray(body)) return reply(response, 400);
             const row = body as Record<string, unknown>;
             if (typeof row.id !== "string" || row.id.length > 64 || !/^[A-Za-z0-9_-]+$/.test(row.id)) return reply(response, 400);

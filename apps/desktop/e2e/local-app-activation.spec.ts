@@ -18,7 +18,8 @@ const app = `
 
 // Playwright's navigation leaves the page activated, and its evaluate and locator calls run as a user gesture. This
 // test reads and drives the page through the DevTools protocol, which grants none, so a real mouse press is the
-// only input the page receives after load.
+// only input the page receives after load. A trace also evaluates in the page as a gesture, so it stays off.
+test.use({ trace: "off" });
 test("@local-app-activation credits a click inside the sandboxed app frame, and nothing the app sends on its own", async ({ page }) => {
   const writes = new Map<unknown, boolean | undefined>(), bytes = Buffer.from(app);
   const backend: LocalAppLaunchBackend = {
@@ -38,7 +39,8 @@ test("@local-app-activation credits a click inside the sandboxed app frame, and 
     const activated = () => run("navigator.userActivation.isActive");
     const write = (key: string) => expect.poll(() => writes.has(key), { timeout: 15_000 }).toBe(true).then(() => writes.get(key));
 
-    await page.goto(await host.launch("a".repeat(64), lifetime.signal));
+    // dohc's tab: the only session that credits a click.
+    await page.goto((await host.launchSession("a".repeat(64), lifetime.signal, { keepAlive: true })).url);
     // The page opens activated, and the write the app makes as it loads is still its own.
     expect(await write("loaded")).toBe(false);
 

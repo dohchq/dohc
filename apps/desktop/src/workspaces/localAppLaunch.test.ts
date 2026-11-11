@@ -119,8 +119,17 @@ it("requires exact origin, host, handoff, and proof and strips caller authority"
   expect(f.backend.request).toHaveBeenCalledWith(publicationId, "invoke", { authorityRevision: 1, operation: "register", idempotencyKey: "attempt-1", input: { count: 1 } }, expect.any(AbortSignal), false);
 });
 
+// launch() hands its URL to whoever asked, such as an agent through the CLI, which can then send any header with the
+// session's proof. Only dohc's own tab, whose URL stays in main, can credit a write to a click.
+it("credits no click to a session launched for a browser, whatever its requests claim", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof, "x-dohc-app-activated": "1" };
+  expect((await f.post("/backend", invoke, headers)).status).toBe(200);
+  expect(f.backend.request.mock.calls.at(-1)?.[4]).toBe(false);
+  expect((await f.post("/backend", { id: "create", op: "collection.create", idempotencyKey: "response-1", fields: { destination: "Tokyo" } }, headers)).status).toBe(200);
+  expect(f.backend.request.mock.calls.at(-1)?.[4]).toBe(false);
+});
 it("takes a click from the bootstrap's header and never from the app's request", async () => {
-  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const f = await fixture(true), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
   const create = { id: "create", op: "collection.create", idempotencyKey: "response-1", fields: { destination: "Tokyo" } };
   for (const [value, activated] of [["1", true], ["0", false], ["true", false], ["", false]] as const) {
     expect((await f.post("/backend", invoke, { ...headers, "x-dohc-app-activated": value })).status).toBe(200);
