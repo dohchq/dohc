@@ -787,6 +787,7 @@ impl StoreCaptureSink {
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
             Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
+            Err(error) if waits_for_switch(&error) => Ok(DomainIngest::WaitsForSwitch),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
@@ -852,6 +853,7 @@ impl StoreCaptureSink {
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
             Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
+            Err(error) if waits_for_switch(&error) => Ok(DomainIngest::WaitsForSwitch),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
@@ -929,6 +931,7 @@ impl StoreCaptureSink {
                     Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                         Ok(IngestOutcome::Captured { size, sha256 })
                     }
+                    Err(error) if waits_for_switch(&error) => Ok(IngestOutcome::Deferred),
                     Err(_) => Err(SECRET_INGEST_FAILED),
                 }
             }
@@ -1176,6 +1179,9 @@ enum DomainIngest {
     HeldAsNewFile,
     /// A recorded file's outside bytes wait for its live session to release.
     WriteDeferred,
+    /// The disk still holds the bytes a pending version switch replaces. The
+    /// path defers, and capture sees it again once the switch's write lands.
+    WaitsForSwitch,
     Held,
 }
 
@@ -1202,6 +1208,11 @@ fn held_as_new_file(error: &RuntimeError) -> bool {
 fn write_waits_for_session(error: &RuntimeError) -> bool {
     matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
         if *reason == dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION)
+}
+
+fn waits_for_switch(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
+        if *reason == dohc_engine_runtime::actor::CAPTURE_WAITS_FOR_SWITCH)
 }
 
 struct PreparedTextCapture {
@@ -1506,6 +1517,7 @@ impl StoreCaptureSink {
                             self.remember_deferred_write(&path, &sha256);
                             Ok(IngestOutcome::WriteDeferred)
                         }
+                        Err(error) if waits_for_switch(&error) => Ok(IngestOutcome::Deferred),
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
                             Ok(IngestOutcome::Held { size, sha256 })
                         }
@@ -1738,6 +1750,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                     DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
+                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Deferred),
                     DomainIngest::Held => {
                         self.self_writes.clear_path(&self.workspace_id, path);
                         Ok(IngestOutcome::Held { size, sha256 })
@@ -1820,6 +1833,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                     DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
+                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Deferred),
                     DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }

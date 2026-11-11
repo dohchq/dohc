@@ -180,6 +180,25 @@ mod tests {
         retry.run(|| Ok(())).unwrap();
     }
 
+    // dohc#3621. Waiting for a switch's write is not contention. One attempt
+    // defers the path, and the store's answer stays the same until replay.
+    #[test]
+    fn a_capture_waiting_for_a_switch_is_attempted_once() {
+        let retry = CaptureBatchRetry::default();
+        let attempts = Cell::new(0);
+        let waits = || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: dohc_engine_runtime::actor::CAPTURE_WAITS_FOR_SWITCH,
+                },
+            ))
+        };
+        assert!(retry.run_single(waits).is_err());
+        assert!(retry.run(waits).is_err());
+        assert_eq!(attempts.get(), 2);
+    }
+
     #[test]
     fn later_batch_gets_a_fresh_budget_after_healthy_work() {
         let retry = CaptureBatchRetry::default();

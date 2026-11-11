@@ -3092,6 +3092,11 @@ fn ensure_no_pending_head_placement(
     Ok(())
 }
 
+/// The capture refusal while the active version's switch has yet to replace or
+/// delete a file that still holds the previous version's bytes (dohc#3621).
+/// Replay lands the switch's write, and capture sees the path again then.
+pub const CAPTURE_WAITS_FOR_SWITCH: &str = "capture-waits-for-switch";
+
 fn ensure_capture_target_not_leased(
     conn: &Connection,
     leases: &LeaseRegistry,
