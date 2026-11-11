@@ -16,6 +16,15 @@ allowBuilds:
   core-js: false
   msgpackr-extract: false
 
+# mermaid's published types import type-fest but declare it only as a
+# devDependency. Without this, the import resolves through pnpm's hidden hoist,
+# which links whichever type-fest the install happened to pick. Old versions
+# add lib="esnext", so the typecheck changed with the install (#3666).
+packageExtensions:
+  mermaid:
+    dependencies:
+      type-fest: "^4.41.0"
+
 minimumReleaseAgeExclude:
   - effect@4.0.0
 
