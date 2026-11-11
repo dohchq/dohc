@@ -60,8 +60,9 @@ mod ydoc;
 
 pub use capture::{
     CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CAPTURE_WAITS_FOR_SWITCH,
-    CAPTURE_WRITE_WAITS_FOR_SESSION, CapturePassSettlement, CapturePlacementPath,
-    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
+    CAPTURE_WRITE_WAITS_FOR_SESSION, CaptureBatchReads, CapturePassSettlement,
+    CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
+    WorkspaceRootGuard,
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
