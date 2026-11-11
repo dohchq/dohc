@@ -4793,5 +4793,6 @@ it.skipIf(engine.missing)("records an owner-bound live page that capture wrote a
   () => runDeleteRepros(["file-manager-capture"]), 300_000);
 it.skipIf(engine.missing)("refuses restoring an owner-bound live page deleted outside dohc (file-manager-restore)",
   () => runDeleteRepros(["file-manager-restore"]), 300_000);
-it.skipIf(engine.missing)("says Stop live editing stopped for an owner-bound live page deleted outside dohc (#3129)",
-  () => runDeleteRepros(["file-manager-stop", "file-manager-capture-stop-early", "file-manager-capture-stop"]), 300_000);
+// Each file-manager case runs alone: its console spies wrap whatever console it finds.
+it.skipIf(engine.missing).each(["file-manager-stop", "file-manager-capture-stop-early", "file-manager-capture-stop"] as const)(
+  "says Stop live editing stopped for an owner-bound live page deleted outside dohc (#3129, %s)", kind => runDeleteRepros([kind]), 300_000);
