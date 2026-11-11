@@ -4,7 +4,8 @@
 // Electron once, with no window, in a temporary home holding a copy of
 // fixtures/app-name-profile laid out under the old folder name. It never
 // resolves the real settings folder. Chromium may still use the system's
-// temporary folder.
+// temporary folder. A first run may download the pinned Electron into its
+// cache.
 //
 // Keep Electron's mock keychain switch: the probe passes use-mock-keychain on
 // the command line and appends it again as its first statement. A temporary
@@ -36,12 +37,16 @@ const PROBE = `
 import { app } from "electron";
 import { readdirSync } from "node:fs";
 import { nameApp } from "./appName.mjs";
+import { insideFolder } from "./inside-folder.mjs";
 // First, in case the command line lost it: see the header comment.
 app.commandLine.appendSwitch("use-mock-keychain");
 const home = process.env.HOME;
 const appData = app.getPath("appData");
-// Stop before resolving a settings folder outside the temporary home.
-if (!appData.startsWith(home)) {
+// Stop before resolving a settings folder outside the temporary home. Real
+// paths on both sides: Electron may answer /var where HOME says /private/var.
+let insideHome = false;
+try { insideHome = insideFolder(appData, home); } catch { /* A folder that isn't there is outside. */ }
+if (!insideHome) {
   console.log(JSON.stringify({ refused: appData }));
   app.exit(2);
 } else {
@@ -80,6 +85,7 @@ async function check() {
     mkdirSync(probe);
     writeFileSync(join(probe, "package.json"), JSON.stringify({ name: packageName, type: "module", main: "main.mjs" }));
     writeFileSync(join(probe, "main.mjs"), PROBE);
+    cpSync(join(desktopDir, "scripts/inside-folder.mjs"), join(probe, "inside-folder.mjs"));
     await build({ entryPoints: [join(desktopDir, "src/appName.ts")], outfile: join(probe, "appName.mjs"),
       bundle: true, format: "esm", platform: "node", external: ["electron"], logLevel: "silent" });
 
