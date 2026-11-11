@@ -965,6 +965,9 @@ export function DesktopWorkspaceShell(props: {
   } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
   const shellErrorsRef = useRef(shellErrors);
   shellErrorsRef.current = shellErrors;
+  // A document's "Stopping live editing" row, while it stands, already says its Stop waits and keeps its actions.
+  const stoppingRowStands = (id: string, objectId: string) => shellErrorsRef.current.some(error =>
+    error.identity === `owner-live-quarantine:${id}:${objectId}` && error.title?.startsWith("Stopping live editing"));
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -1205,8 +1208,9 @@ export function DesktopWorkspaceShell(props: {
           refusal = next;
           report();
         // Try again took the row, so a Stop that waits says so as Live documents does.
-        } else if (isLiveStopWaiting(error)) reportShellFailure({identity, title: `Stopping live editing for ${path}`, message: LIVE_STOP_WAITING, retry});
-        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+        } else if (isLiveStopWaiting(error)) {
+          if (!stoppingRowStands(id, objectId)) reportShellFailure({identity: `live-stop-waiting:${id}:${objectId}`, title: `Stopping live editing for ${path}`, message: LIVE_STOP_WAITING, retry});
+        } else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
       });
     };
     report();
@@ -1241,9 +1245,7 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
-        // The document's "Stopping live editing" row, while it stands, already says it waits and keeps its actions.
-        const row = `owner-live-quarantine:${failedFor}:${waiting.objectId}`;
-        if (shellErrorsRef.current.some(error => error.identity === row && error.title?.startsWith("Stopping live editing"))) return;
+        if (stoppingRowStands(failedFor, waiting.objectId)) return;
         // Copy details keeps what the error said. A plain relay error has words and no cause.
         const {cause, words} = readError(error);
         const said = cause ?? words;
