@@ -10,6 +10,7 @@ import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker"
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
+import { openCollectionChangeShell, resumeCollectionChanges } from "./collectionChangeShells";
 import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
@@ -22,6 +23,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -3335,6 +3337,19 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  // A Collection's changes send only while this shell is open, and report
+  // here once their page has closed. A layout effect, so that on a switch
+  // the shell closes before its pages do, and nothing is sent as they close.
+  const collectionReportsRef = useRef(collectionReports);
+  collectionReportsRef.current = collectionReports;
+  useLayoutEffect(() => openCollectionChangeShell(workspaceId, {
+    onError: (...report) => collectionReportsRef.current.onError(...report),
+    onSettled: identity => collectionReportsRef.current.onSettled(identity),
+    onNotice: message => collectionReportsRef.current.onNotice(message),
+  }), [workspaceId]);
+  // Each table whose changes need the person files its row, once this
+  // shell's Notices have started empty for the workspace.
+  useEffect(() => resumeCollectionChanges(workspaceId), [workspaceId]);
   const documentReports = useMemo(() => {
     const owner = workspaceId;
     const current = () => workspaceIdRef.current === owner;

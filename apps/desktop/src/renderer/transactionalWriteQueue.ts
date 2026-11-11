@@ -3,6 +3,7 @@ import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { TableCellStatus, TableCellStatuses } from "@dohc/collection-views/table";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts";
 import { isCollectionRulesReplaced } from "../ipc/errorWords";
+import { closeCollectionChangeShellsForTests, collectionChangeShell, onCollectionChangesResumed, type CollectionChangeReports } from "./collectionChangeShells";
 import { cannotTake, emptyValue, fieldShape, isEmptyValue, object, parsePage, type TransactionalField, type TransactionalRow } from "./transactionalCollectionModel";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
 
@@ -30,12 +31,8 @@ export interface QueuedWrite {
   request?: TransactionalInvoke;
 }
 
-/**
- * What the queue needs from a page that shows it, read again at each step.
- * The rules and the shell's handlers are the queue's own once given: it
- * sends with the latest ones after every page has closed.
- */
-export interface WriteQueueHost {
+/** The Collection's rules as a page has them, which the queue checks and sends changes under. */
+export interface WriteQueueRules {
   workspaceId: string;
   datasetId: string;
   revision: number;
@@ -48,9 +45,14 @@ export interface WriteQueueHost {
   operations: readonly DatasetOperation[];
   offline: boolean;
   invoke(request: TransactionalInvoke, signal: AbortSignal): Promise<{ result: AppBackendJson }>;
-  onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string): void;
-  onSettled?(identity: string): void;
-  onNotice?(message: string): void;
+}
+
+/**
+ * What one page gives the queue, read again at each step: the rules as the
+ * page has them, where it reports a failure while it is open, and how it
+ * shows what became of a change.
+ */
+export interface WriteQueueHost extends WriteQueueRules, Pick<CollectionChangeReports, "onError" | "onSettled"> {
   confirmed(write: QueuedWrite, receipt: AppBackendJson): void;
   /**
    * A change that will not be sent again. True when the page's form shows
@@ -78,7 +80,11 @@ export interface WriteQueuePage {
   readonly statuses: TableCellStatuses;
   /** The highest change to this cell that its record's value already shows. */
   acknowledged(record: CollectionRecord, field: string): number;
-  /** Gives the page's rules and handlers. The page gives them before it opens, and again at each commit. */
+  /**
+   * Gives the page's rules and handlers. The page gives them before it opens,
+   * and again at each commit. The queue takes its own rules from the newest
+   * revision a page has given, so a page on an older one never replaces them.
+   */
   sync(host: WriteQueueHost): void;
   /** The page opened. Returns what closes it. */
   open(): () => void;
@@ -108,6 +114,8 @@ type Flight = { abort: AbortController; revisionSha256: string; write?: QueuedWr
 /** A record whose version no receipt reported. `lookup`: a page's read left it out, so the queue reads it by its key. `stuck`: that read can't run, or failed. */
 type Unknown = { seq: number; lookup: boolean; stuck: boolean };
 type Page = {
+  /** The page's view, by which a change knows the page that made it. */
+  view: WriteQueuePage | null;
   host: WriteQueueHost | null;
   /** Confirmed values this page's records do not show yet. */
   settled: CellMap<Settled>;
@@ -148,14 +156,22 @@ function receiptVersion(write: QueuedWrite, raw: AppBackendJson): number | null 
  * change after a confirmed one uses the version that receipt reports, or the
  * version a read returns when the receipt reports none.
  *
- * With no page open, an outcome goes to the shell's toast and Notices.
+ * With no page open, an outcome goes to the toast and Notices of the
+ * workspace's open shell. While the window shows another workspace the
+ * queue sends nothing, and goes on when its workspace's shell opens again.
  * Changes still unsent or unconfirmed when dohc quits are lost.
  */
 export class WriteQueue {
   private readonly writes: QueuedWrite[] = [];
   private flight: Flight | null = null;
-  /** The rules and the shell's handlers a page gave last. */
-  private rules: WriteQueueHost | null = null;
+  /** The rules changes are checked against and sent under: those of the newest revision a page has given. They stay once every page has closed. */
+  private rules: WriteQueueRules | null = null;
+  /** The page that gave them, which may always give them again. */
+  private rulesFrom: Page | null = null;
+  /** The page that made each change, which hears first what became of it. */
+  private readonly madeBy = new WeakMap<QueuedWrite, WriteQueuePage>();
+  /** Whether Notices holds this queue's row for the changes that need the person. */
+  private reminded = false;
   private readonly pages = new Set<Page>();
   private nextId = 1;
   /** Rises with each outcome. A read that starts at or after an outcome's number shows it. */
@@ -196,8 +212,8 @@ export class WriteQueue {
 
   /** A page's view of the queue. It shows nothing of its own until the page opens it. */
   page(): WriteQueuePage {
-    const page: Page = { host: null, settled: new Map(), seen: 0, unread: null, readAsked: false };
-    return {
+    const page: Page = { view: null, host: null, settled: new Map(), seen: 0, unread: null, readAsked: false };
+    return page.view = {
       statuses: {
         subscribe: this.subscribe,
         get: (recordId, field) => this.shown.get(recordId)?.get(field)?.status ?? page.settled.get(recordId)?.get(field)?.status,
@@ -212,7 +228,11 @@ export class WriteQueue {
       sync: host => {
         const was = this.rules;
         page.host = host;
+        // Another page's rules replace the queue's only when they are newer, or as new once the page that gave the queue's has closed.
+        const givenByOpenPage = this.rulesFrom !== null && this.pages.has(this.rulesFrom);
+        if (was && this.rulesFrom !== page && (host.revision < was.revision || (host.revision === was.revision && givenByOpenPage))) return;
         this.rules = host;
+        this.rulesFrom = page;
         if (was && was.offline !== host.offline) { this.changed(); this.pump(); }
       },
       open: () => {
@@ -231,7 +251,7 @@ export class WriteQueue {
           this.pump();
         };
       },
-      readStarted: () => this.rules?.offline ? -1 : this.seq,
+      readStarted: () => page.host?.offline ? -1 : this.seq,
       readShown: (token, rows) => {
         page.readAsked = false;
         page.seen = Math.max(page.seen, token);
@@ -255,11 +275,12 @@ export class WriteQueue {
     };
   }
 
-  /** Adds a change after every change made before it. */
-  enqueue(change: { kind: QueuedWrite["kind"]; record: Pick<TransactionalRow, "id" | "version"> | null; operationId: string; values?: Record<string, Typed>; label: string; undo?: boolean }): number {
+  /** Adds a change after every change made before it. `from`: the page that made it. */
+  enqueue(change: { kind: QueuedWrite["kind"]; record: Pick<TransactionalRow, "id" | "version"> | null; operationId: string; values?: Record<string, Typed>; label: string; undo?: boolean }, from?: WriteQueuePage): number {
     const record = change.record ? { id: change.record.id, key: JSON.stringify(change.record.id) } : null;
     const write: QueuedWrite = { id: this.nextId++, kind: change.kind, record, operationId: change.operationId, values: change.values ?? {}, baseVersion: change.record?.version ?? 0,
       key: crypto.randomUUID(), label: change.label, undo: change.undo ?? false, state: "queued" };
+    if (from) this.madeBy.set(write, from);
     // A new change to a cell replaces the value dohc did not save there.
     if (record) for (const fieldId of Object.keys(write.values)) take(this.held, record.key, fieldId);
     this.writes.push(write);
@@ -325,6 +346,35 @@ export class WriteQueue {
   }
 
   /**
+   * The shell of the queue's workspace opened, so the window shows that
+   * workspace again. One row in Notices says what here needs the person,
+   * since no page may be open to show it, and the changes not sent yet go on.
+   */
+  resume(workspaceId: string): void {
+    const rules = this.rules, shell = collectionChangeShell(workspaceId);
+    if (!rules || rules.workspaceId !== workspaceId || !shell) return;
+    const waiting = this.attention();
+    if (waiting.length > 0) {
+      const unconfirmed = waiting.filter(item => item.kind === "unconfirmed").length, unsaved = waiting.length - unconfirmed;
+      const count = (changes: number) => changes === 1 ? "a change" : `${changes} changes`;
+      const words = `${unconfirmed === 0 ? `dohc did not save ${count(unsaved)} to ${rules.tableName}`
+        : unsaved === 0 ? `dohc could not confirm ${count(unconfirmed)} to ${rules.tableName}`
+        : `dohc could not confirm ${count(unconfirmed)} to ${rules.tableName}, and did not save ${unsaved} more`}. Open it to check its records.`;
+      // Try again sends what dohc could not confirm, and reads again the records it could not read.
+      const again = !rules.offline && waiting.some(item => item.kind === "unconfirmed" || (item.kind === "waiting" && item.reason === WAITING_READ));
+      this.reminded = true;
+      shell.onError(words, new Error(words), again ? () => {
+        for (const pending of this.unknown.values()) pending.stuck = false;
+        for (const write of [...this.writes]) this.retry(write.id);
+        this.changed();
+        this.pump();
+      } : null, this.reminder());
+    }
+    this.pump();
+  }
+  private reminder(): string { return `collection-changes:${this.scope}`; }
+
+  /**
    * The Collection's rules changed. A request sent under the old rules can't
    * be confirmed or sent again, so its change goes, and its value stays on
    * its cell. A change not sent yet is checked against the new rules when it
@@ -342,15 +392,22 @@ export class WriteQueue {
         if (write.record) this.forget(write.record.key);
         this.drop(write, RULES_CHANGED);
       }
-      rules.onError("The Collection's rules changed. Check the records before making another change.", new Error("The Collection's rules changed before this change was confirmed. Check the records before making another change."), null);
+      this.reports()?.onError("The Collection's rules changed. Check the records before making another change.", new Error("The Collection's rules changed before this change was confirmed. Check the records before making another change."), null);
     }
     this.changed();
     this.pump();
   }
 
+  /** Where an outcome is reported: an open page, or with none open the shell of the queue's workspace while that is open. */
+  private reports(): Pick<CollectionChangeReports, "onError" | "onSettled"> | undefined {
+    for (const page of this.pages) if (page.host) return page.host;
+    return this.rules ? collectionChangeShell(this.rules.workspaceId) : undefined;
+  }
+
   private pump(): void {
     const rules = this.rules;
-    if (!rules || this.flight || rules.offline) return;
+    // While the window shows another workspace, main refuses this one's changes, so they wait unsent.
+    if (!rules || this.flight || rules.offline || !collectionChangeShell(rules.workspaceId)) return;
     let waitsForRead = false, stuck = false;
     const blocked = new Set<string>();
     for (const write of [...this.writes]) {
@@ -375,7 +432,7 @@ export class WriteQueue {
   }
 
   /** Why the rules now refuse a change made under earlier ones, or null. */
-  private problem(write: QueuedWrite, rules: WriteQueueHost): string | null {
+  private problem(write: QueuedWrite, rules: WriteQueueRules): string | null {
     const operation = rules.operations.find(candidate => candidate.operationId === write.operationId && !candidate.readOnly);
     if (!operation) return RULES_DISALLOW;
     for (const [fieldId, typed] of Object.entries(write.values)) {
@@ -388,7 +445,7 @@ export class WriteQueue {
   }
 
   /** Sends the change. False when the rules no longer allow it, so it went. */
-  private send(write: QueuedWrite, rules: WriteQueueHost): boolean {
+  private send(write: QueuedWrite, rules: WriteQueueRules): boolean {
     if (!write.request) {
       const problem = this.problem(write, rules);
       if (problem !== null) { this.dropUnsent(write, problem, rules); this.changed(); return false; }
@@ -416,7 +473,7 @@ export class WriteQueue {
    * version its next change needs. False when the table's read can't find a
    * record by its key.
    */
-  private lookup(record: NonNullable<QueuedWrite["record"]>, pending: Unknown, rules: WriteQueueHost): boolean {
+  private lookup(record: NonNullable<QueuedWrite["record"]>, pending: Unknown, rules: WriteQueueRules): boolean {
     const key = rules.primaryKeyFieldId;
     const read = rules.operations.find(operation => operation.kind === "read" && operation.readOnly);
     if (key === undefined || !read?.fieldIds.includes(key)) return false;
@@ -427,7 +484,7 @@ export class WriteQueue {
     const failed = (cause: unknown) => {
       pending.stuck = true;
       // Try again reads the record once more, while its changes still wait for it.
-      rules.onError(`dohc could not read record ${String(record.id)} in ${rules.tableName}, so its changes are waiting.`, cause, () => {
+      this.reports()?.onError(`dohc could not read record ${String(record.id)} in ${rules.tableName}, so its changes are waiting.`, cause, () => {
         if (this.unknown.get(record.key) !== pending) return;
         pending.stuck = false; this.changed(); this.pump();
       }, `collection-record:${this.scope}:${record.key}`);
@@ -435,7 +492,8 @@ export class WriteQueue {
     const ended = (run: () => void) => {
       if (this.flight !== flight) return;
       this.flight = null;
-      run();
+      // A page's read, or a later change, has answered or replaced what this read was for, so its answer says nothing now.
+      if (this.unknown.get(record.key) === pending) run();
       this.changed();
       this.pump();
     };
@@ -445,7 +503,7 @@ export class WriteQueue {
       let rows: TransactionalRow[];
       try { rows = parsePage(response.result, read.fieldIds).rows; } catch (cause) { failed(cause); return; }
       const row = rows.find(candidate => JSON.stringify(candidate.id) === record.key);
-      if (this.unknown.get(record.key) === pending) this.unknown.delete(record.key);
+      this.unknown.delete(record.key);
       if (row) { this.versions.set(record.key, { version: row.version, seq: this.seq }); return; }
       // The record is gone, so nothing queued for it can save.
       for (const write of this.writes.filter(candidate => candidate.record?.key === record.key)) this.dropUnsent(write, RECORD_GONE, rules);
@@ -488,11 +546,11 @@ export class WriteQueue {
         put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, status: { state: "pending", value: typed.value as CollectionValue } });
       }
     }
-    // An open page shows its table's change. With none open, a notice says the change saved, and in which Collection.
-    if (this.pages.size === 0) rules.onNotice?.(`${write.label} in ${rules.tableName}`);
+    // An open page shows its table's change. With none open, a notice in the workspace's open shell says the change saved, and in which Collection.
+    if (this.pages.size === 0) collectionChangeShell(rules.workspaceId)?.onNotice?.(`${write.label} in ${rules.tableName}`);
     else for (const page of this.pages) page.host?.confirmed(write, receipt);
     // The row an earlier failure of this change left in Notices goes.
-    rules.onSettled?.(this.identity(write));
+    this.reports()?.onSettled?.(this.identity(write));
     this.changed();
     this.pump();
   }
@@ -500,34 +558,35 @@ export class WriteQueue {
   private fail(flight: Flight, write: QueuedWrite, cause: unknown): void {
     if (this.flight !== flight) return;
     this.flight = null;
-    const rules = this.rules!, open = this.pages.size > 0;
+    // With no page open, a failure still reaches the toast and Notices of the workspace's open shell, and names the Collection.
+    // With no shell open either, the change stays as it ended, and Notices says so when the shell opens.
+    const rules = this.rules!, open = this.pages.size > 0, reports = this.reports();
     const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
     if (refused) {
       this.outcome();
       this.drop(write, cause instanceof Error && cause.message ? `${REFUSED} ${cause.message}` : REFUSED, true);
-      // With no page open, a failure still reaches a toast and Notices, and names the Collection.
-      rules.onError(open ? REFUSED : `${rules.tableName} refused the change. Open it to check its records.`, cause, null);
+      reports?.onError(open ? REFUSED : `${rules.tableName} refused the change. Open it to check its records.`, cause, null);
     } else if (isCollectionRulesReplaced(cause)) {
       // The host ran nothing: the request names rules it has replaced, so the same request can never save.
       this.outcome();
       if (write.record) this.forget(write.record.key);
       this.drop(write, RULES_CHANGED);
-      rules.onError(open ? "The Collection's rules changed. Check the records before making another change." : `The rules of ${rules.tableName} changed, so dohc did not save the change. Open it to check its records.`, cause, null);
+      reports?.onError(open ? "The Collection's rules changed. Check the records before making another change." : `The rules of ${rules.tableName} changed, so dohc did not save the change. Open it to check its records.`, cause, null);
       for (const page of this.pages) page.host?.describe();
     } else {
       write.state = "unconfirmed";
       for (const page of this.pages) page.host?.unconfirmed(write);
       // Try again sends the change only while it still waits, so a row left in Notices can't send it twice.
-      rules.onError(open ? NOT_CONFIRMED : `dohc could not confirm the change to ${rules.tableName}. Open it to check its records.`, cause, () => this.retry(write.id), this.identity(write));
+      reports?.onError(open ? NOT_CONFIRMED : `dohc could not confirm the change to ${rules.tableName}. Open it to check its records.`, cause, () => this.retry(write.id), this.identity(write));
     }
     this.changed();
     this.pump();
   }
 
   /** Drops a change that was never sent, and says so when no page is open to show why. */
-  private dropUnsent(write: QueuedWrite, reason: string, rules: WriteQueueHost): void {
+  private dropUnsent(write: QueuedWrite, reason: string, rules: WriteQueueRules): void {
     this.drop(write, reason);
-    if (this.pages.size === 0) rules.onError(`dohc did not save a change to ${rules.tableName}. Open it to check its records.`, new Error(reason), null);
+    if (this.pages.size === 0) this.reports()?.onError(`dohc did not save a change to ${rules.tableName}. Open it to check its records.`, new Error(reason), null);
   }
 
   /**
@@ -540,8 +599,10 @@ export class WriteQueue {
     if (at >= 0) this.writes.splice(at, 1);
     this.retire(write.id);
     // Its Try again in Notices has nothing left to send.
-    this.rules?.onSettled?.(this.identity(write));
-    for (const page of this.pages) if (page.host?.dropped(write, reason, refused)) return;
+    this.reports()?.onSettled?.(this.identity(write));
+    // The page that made the change shows how it ended. Another page takes it, as by opening a new record's form again, only once that page has closed.
+    const from = this.madeBy.get(write), maker = from && [...this.pages].find(page => page.view === from);
+    if (maker ? maker.host?.dropped(write, reason, refused) : [...this.pages].some(page => page.host?.dropped(write, reason, refused))) return;
     const fields = Object.entries(write.values);
     if (fields.length === 0) return;
     if (!write.record) { this.records.push({ id: write.id, values: write.values, reason }); return; }
@@ -589,6 +650,8 @@ export class WriteQueue {
     this.shown = next;
     this.waits = waits;
     this.changes++;
+    // The row Notices holds for the changes that needed the person goes once none does.
+    if (this.reminded && this.attention().length === 0) { this.reminded = false; this.reports()?.onSettled?.(this.reminder()); }
     for (const listener of [...this.listeners]) listener();
     // A queue with no page open and nothing left to keep goes.
     if (this.pages.size === 0 && this.flight === null && this.writes.length === 0 && this.held.size === 0 && this.records.length === 0 && queues.get(this.scope) === this) queues.delete(this.scope);
@@ -616,7 +679,10 @@ export function writeQueueFor(scope: string): WriteQueue {
 export function hasWriteQueueForTests(scope: string): boolean {
   return queues.has(scope);
 }
-/** Tests start without changes an earlier test's page kept. */
+// A workspace's shell can list notices: its tables' queues say what needs the person, and send what waited.
+onCollectionChangesResumed(workspaceId => { for (const queue of [...queues.values()]) queue.resume(workspaceId); });
+/** Tests start without changes an earlier test's page kept, and with no shell open. */
 export function resetWriteQueuesForTests(): void {
   queues.clear();
+  closeCollectionChangeShellsForTests();
 }

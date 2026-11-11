@@ -63,8 +63,6 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string): void;
   /** The records loaded, so the row their last failed load left in Notices goes. */
   onSettled?(identity: string): void;
-  /** A change that answered after the page closed, which the page can no longer show. */
-  onNotice?(message: string): void;
   /** Shell-owned confirmation states the real recovery path before deletion. */
   confirmDelete?(row: TransactionalRow): Promise<boolean>;
   onCustomAction?(operationId: string): void;
@@ -232,7 +230,7 @@ interface Live {
   onError: TransactionalCollectionPageProps["onError"];
 }
 function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
-  const { workspaceId, dataset, tableId, invoke, onError, onNotice, confirmDelete, onCustomAction } = props;
+  const { workspaceId, dataset, tableId, invoke, onError, confirmDelete, onCustomAction } = props;
   const offline = props.copy?.offline ?? false;
   const table = dataset.tables.find(table => table.tableId === tableId);
   const operations = dataset.operations.filter(operation => operation.tableId === tableId && (!offline || operation.readOnly));
@@ -378,9 +376,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }, [failure]);
   // The queue reads the page's rules and handlers when it sends and when an answer comes, so each commit gives
   // it the current ones. It is given them before the page opens it, and before the rules change under it below.
+  // The queue keeps the rules of the newest revision a page of the table has given, and checks this page's changes against those.
   useLayoutEffect(() => {
     view.sync({ workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableName: table?.name ?? "this Collection",
-      fields: table?.fields ?? [], primaryKeyFieldId: table?.primaryKeyFieldId, operations, offline, invoke, onError, onSettled: props.onSettled, onNotice,
+      fields: table?.fields ?? [], primaryKeyFieldId: table?.primaryKeyFieldId, operations, offline, invoke, onError, onSettled: props.onSettled,
       confirmed, dropped, unconfirmed, read: readForQueue, describe: () => props.onRefresh?.() });
   });
   // A page that closes leaves the queue to go on without it: it sends what is unsent, and what it could not
@@ -646,7 +645,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     awaitingRef.current = queue.nextWrite; setAwaiting(queue.nextWrite);
     // An edit keeps the record's version from when its field opened, so a change made to the record meanwhile is refused, not overwritten.
     queue.enqueue(editor.kind === "edit" ? { kind: "edit", record: editor.row, operationId: formOperation.operationId, values, label: "Saved the edit" }
-      : { kind: "create", record: null, operationId: formOperation.operationId, values, label: "Created a record" });
+      : { kind: "create", record: null, operationId: formOperation.operationId, values, label: "Created a record" }, view);
   }
   // One confirmation at a time: a second press while the shell asks does nothing.
   const asking = useRef(false);
@@ -658,7 +657,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || !confirmed) return;
       setDetails(null);
       // The deletion follows the record's changes still queued, at the version they leave it.
-      queue.enqueue({ kind: "delete", record: row, operationId: remove.operationId, label: "Deleted the record" });
+      queue.enqueue({ kind: "delete", record: row, operationId: remove.operationId, label: "Deleted the record" }, view);
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { asking.current = false; }
   }
@@ -666,7 +665,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (!undo || !table) return;
     const values: Record<string, Typed> = {};
     for (const [fieldId, value] of Object.entries(undo.values)) { const field = table.fields.find(entry => entry.fieldId === fieldId); if (field) values[fieldId] = { value, under: field }; }
-    queue.enqueue({ kind: "edit", undo: true, record: { id: undo.id, version: undo.version }, operationId: undo.operation.operationId, values, label: "Reversed the last edit" });
+    queue.enqueue({ kind: "edit", undo: true, record: { id: undo.id, version: undo.version }, operationId: undo.operation.operationId, values, label: "Reversed the last edit" }, view);
   }
   // An edit started in record details opens in its field there.
   const editEntry = editor?.kind === "edit" ? form[0] : undefined;
@@ -741,7 +740,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (value === undefined) return queue.hold(row, field, null, `Enter a value ${field.name} can take.`);
     const problem = inputProblem(field, value);
     if (problem !== null) return queue.hold(row, field, value, problem);
-    return queue.enqueue({ kind: "edit", record: row, operationId: operation.operationId, values: { [fieldId]: { value, under: field } }, label: "Saved the edit" });
+    return queue.enqueue({ kind: "edit", record: row, operationId: operation.operationId, values: { [fieldId]: { value, under: field } }, label: "Saved the edit" }, view);
   }, [queue, view]);
   const changeCell = useCallback((change: CollectionCellChange) => commitCell(change.recordId, change.field, jsonValue(change.value)), [commitCell]);
   // Each field's definition as the page last had it, so text typed under a field that is gone keeps its name.
@@ -916,7 +915,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
       canMove={fieldId=>editOperation(fieldId)!==undefined}
       onMove={(row,fieldId,value)=>{const operation=editOperation(fieldId),field=fields.find(field=>field.fieldId===fieldId);if(!operation||!field||disabled)return;
-        queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"});}} /></Suspense> : null}
+        queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"},view);}} /></Suspense> : null}
     {failure && !busy && !visualBusy && (visual || !page) ? <CollectionUnavailable waiting={failure.wait !== null} words={failure.wait?.ended ? WAIT_ENDED : failure.words} onRetry={failure.retry} /> : null}
     {/* The table always shows its columns, so an empty Collection already says what a record holds. An offline copy pauses an open editor with what it holds. */}
     {!visual && page ? <div className="min-h-0 flex-1"><DataTable schema={schema} records={records} sort={sort} onSortChange={sortTable} canSortField={names.canSortField} fieldLabel={names.fieldLabel} recordName={nameRecord}

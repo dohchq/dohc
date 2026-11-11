@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import { deferred, type Deferred } from "../testing/deferred";
 import type { TransactionalField } from "./transactionalCollectionModel";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
+import { openCollectionChangeShell, resumeCollectionChanges } from "./collectionChangeShells";
 import { hasWriteQueueForTests, resetWriteQueuesForTests, writeQueueFor, type WriteQueueHost } from "./transactionalWriteQueue";
 
 const scope = "workspace/collection/table";
@@ -17,15 +18,28 @@ const row = (id: number, version: number) => ({ id, version, values: {} });
 const refusal = (words: string) => Object.assign(new Error(words), { code: "operation_refused" });
 type Answer = Deferred<{ result: AppBackendJson }>;
 
+/** The rules a test's page has other than the usual ones. */
+type Rules = Partial<Pick<WriteQueueHost, "primaryKeyFieldId" | "revision" | "revisionSha256" | "fields" | "operations">>;
 /** A page's rules and handlers. Each request waits in `calls` for the test to answer it. */
-function host(overrides: Pick<WriteQueueHost, "primaryKeyFieldId"> = { primaryKeyFieldId: "member" }) {
+function host(overrides: Rules = {}) {
   const calls: Array<{ request: TransactionalInvoke; answer: Answer }> = [];
   const invoke = vi.fn((request: TransactionalInvoke) => { const answer: Answer = deferred(); calls.push({ request, answer }); return answer.promise; });
-  const given = { workspaceId: "workspace", datasetId: "collection", revision: 1, revisionSha256: "a".repeat(64), tableName: "People", fields: [name, amount, member],
-    operations, offline: false, invoke, onError: vi.fn(), onSettled: vi.fn(), onNotice: vi.fn(), confirmed: vi.fn(), dropped: vi.fn(() => false), unconfirmed: vi.fn(), read: vi.fn(), describe: vi.fn(), ...overrides };
+  const given = { workspaceId: "workspace", datasetId: "collection", revision: 1, revisionSha256: "a".repeat(64), tableName: "People", fields: [name, amount, member], primaryKeyFieldId: "member" as string | undefined,
+    operations, offline: false, invoke, onError: vi.fn(), onSettled: vi.fn(), confirmed: vi.fn(), dropped: vi.fn(() => false), unconfirmed: vi.fn(), read: vi.fn(), describe: vi.fn(), ...overrides };
   const inputs = (operationId: string) => calls.filter(call => call.request.operationId === operationId).map(call => call.request.input);
   return { ...given, calls, inputs };
 }
+/** The toast and Notices of a workspace's open shell. */
+const shellReports = () => ({ onError: vi.fn(), onSettled: vi.fn(), onNotice: vi.fn() });
+/** Opens the workspace's shell, as the window does when it shows the workspace. Returns its reports and what closes it. */
+function openShell(workspaceId = "workspace") {
+  const reports = shellReports(), close = openCollectionChangeShell(workspaceId, reports);
+  resumeCollectionChanges(workspaceId);
+  return { ...reports, close };
+}
+// The window shows the pages' workspace unless a test closes its shell.
+let shell: ReturnType<typeof openShell>;
+beforeEach(() => { shell = openShell(); });
 /** Opens a page of the table with these rules. */
 function open(given: WriteQueueHost) {
   const queue = writeQueueFor(scope), page = queue.page();
@@ -120,11 +134,11 @@ describe("the version a record's next change goes with", () => {
     // No page is open to read, so the queue reads the record itself.
     await vi.waitFor(() => expect(rules.inputs("read")).toHaveLength(1));
     rules.calls[1]!.answer.reject(new Error("Offline"));
-    await vi.waitFor(() => expect(rules.onError).toHaveBeenCalledOnce());
-    expect(rules.onError.mock.calls[0]).toEqual(["dohc could not read record 1 in People, so its changes are waiting.", expect.objectContaining({ message: "Offline" }), expect.any(Function), expect.any(String)]);
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledOnce());
+    expect(shell.onError.mock.calls[0]).toEqual(["dohc could not read record 1 in People, so its changes are waiting.", expect.objectContaining({ message: "Offline" }), expect.any(Function), expect.any(String)]);
     expect(page.statuses.get("1", "amount")).toMatchObject({ state: "waiting", reason: "Waiting for dohc to read this record again" });
     expect(queue.attention()).toEqual([expect.objectContaining({ kind: "waiting", reason: "Waiting for dohc to read this record again" })]);
-    (rules.onError.mock.calls[0]![2] as () => void)();
+    (shell.onError.mock.calls[0]![2] as () => void)();
     rules.calls[2]!.answer.resolve({ result: { rows: [row(1, 8)], nextCursor: null } });
     await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
     expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 8, values: { amount: 9 } });
@@ -234,44 +248,78 @@ describe("one queue for a table", () => {
     expect(b.queue).toBe(a.queue);
     a.queue.enqueue(edit(row(1, 2), name, "Alicia"));
     expect([state(a.page, 1, name), state(b.page, 1, name)]).toEqual(["pending", "pending"]);
-    // The request goes through the rules given last.
-    expect([left.calls, right.calls].map(calls => calls.length)).toEqual([0, 1]);
-    right.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    // Both pages are on one revision, so the request goes through the rules of the page that gave them first.
+    expect([left.calls, right.calls].map(calls => calls.length)).toEqual([1, 0]);
+    left.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
     await vi.waitFor(() => expect(left.read).toHaveBeenCalledOnce());
     expect(right.read).toHaveBeenCalledOnce();
     expect(left.confirmed).toHaveBeenCalledOnce(); expect(right.confirmed).toHaveBeenCalledOnce();
-    expect(right.onNotice).not.toHaveBeenCalled();
+    expect(shell.onNotice).not.toHaveBeenCalled();
     // Each page shows the confirmed value until its own read shows it. This read finds the record changed again since.
     a.page.readShown(a.page.readStarted(), [row(1, 5)]);
     expect([state(a.page, 1, name), state(b.page, 1, name)]).toEqual([undefined, "pending"]);
     // A change from the page that has not read yet goes with the newest version any page has read, not its own old one.
     b.queue.enqueue(edit(row(1, 2), amount, 9));
-    expect(right.calls[1]!.request.input).toEqual({ id: 1, expectedVersion: 5, values: { amount: 9 } });
+    expect(left.calls[1]!.request.input).toEqual({ id: 1, expectedVersion: 5, values: { amount: 9 } });
   });
 
-  it("goes on sending with no page open, reports to the shell, and sends nothing while offline", async () => {
-    const rules = host(), { queue, page, close } = open(rules);
+  it("goes on sending with no page open, and reports to the open shell of its workspace", async () => {
+    const rules = host(), { queue, close } = open(rules);
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
     queue.enqueue(edit(row(1, 2), amount, 9));
     close();
     rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
     await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
-    expect(rules.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People");
+    expect(shell.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People");
     expect(rules.confirmed).not.toHaveBeenCalled(); expect(rules.read).not.toHaveBeenCalled();
     rules.calls[1]!.answer.reject(new Error("Lost reply"));
-    await vi.waitFor(() => expect(rules.onError).toHaveBeenCalledOnce());
-    expect(rules.onError.mock.calls[0]).toEqual(["dohc could not confirm the change to People. Open it to check its records.", expect.objectContaining({ message: "Lost reply" }), expect.any(Function), expect.any(String)]);
-    // The row's Try again sends nothing while the Collection is offline.
-    page.sync({ ...rules, offline: true });
-    (rules.onError.mock.calls[0]![2] as () => void)();
-    expect(rules.calls).toHaveLength(2);
-    page.sync({ ...rules, offline: false });
-    (rules.onError.mock.calls[0]![2] as () => void)();
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledOnce());
+    expect(shell.onError.mock.calls[0]).toEqual(["dohc could not confirm the change to People. Open it to check its records.", expect.objectContaining({ message: "Lost reply" }), expect.any(Function), expect.any(String)]);
+    // Nothing went to the closed page's own handlers.
+    expect([rules.onError, rules.onSettled].map(report => report.mock.calls.length)).toEqual([0, 0]);
+    // The row's Try again sends the exact request, and once it saves, the row goes.
+    (shell.onError.mock.calls[0]![2] as () => void)();
     expect(rules.calls[2]!.request).toEqual(rules.calls[1]!.request);
-    // Once it saves, the row its failure left in Notices goes.
     rules.calls[2]!.answer.resolve({ result: { id: 1, version: 4 } });
-    await vi.waitFor(() => expect(rules.onSettled).toHaveBeenLastCalledWith(rules.onError.mock.calls[0]![3]));
-    expect(rules.onNotice).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(shell.onSettled).toHaveBeenLastCalledWith(shell.onError.mock.calls[0]![3]));
+    expect(shell.onNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends nothing from a Notices row while the Collection is offline and no page is open, and sends once a page has it online again", async () => {
+    const rules = host(), first = open(rules);
+    const lost = first.queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    first.close();
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledOnce());
+    const retry = shell.onError.mock.calls[0]![2] as () => void;
+    // A page opens, learns the Collection is offline, and closes.
+    const offline = open({ ...rules, offline: true });
+    offline.close();
+    retry();
+    expect(rules.calls).toHaveLength(1);
+    expect(first.queue.find(lost)?.state).toBe("unconfirmed");
+    // A page opens with the Collection online, and closes. The row's Try again now sends the exact request.
+    open(rules).close();
+    retry();
+    expect(rules.calls[1]!.request).toEqual(rules.calls[0]!.request);
+  });
+
+  it("drops a change its host refuses with no page open because the rules changed elsewhere, and says so in Notices", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    close();
+    const replaced = () => new Error("Error invoking remote method 'desktop:dataset': DatasetHostError [conflict]: The Collection's rules changed. Its owner must approve this access again.");
+    // No page is open to learn the new rules, so the next change goes under the old ones too, and is refused the same way.
+    rules.calls[0]!.answer.reject(replaced());
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    rules.calls[1]!.answer.reject(replaced());
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledTimes(2));
+    for (const call of shell.onError.mock.calls) expect(call).toEqual(["The rules of People changed, so dohc did not save the change. Open it to check its records.", expect.any(Error), null]);
+    expect(queue.size).toBe(0);
+    // What was typed stays for the person, on its cells when a page opens.
+    const again = open(rules);
+    expect([state(again.page, 1, name), state(again.page, 2, name)]).toEqual(["refused", "refused"]);
   });
 
   it("drops a change its host refuses for replaced rules, and asks each open page to describe the Collection again", async () => {
@@ -325,6 +373,208 @@ describe("one queue for a table", () => {
     rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
     await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
     expect(rules.confirmed).not.toHaveBeenCalled();
+    expect(rules.calls).toHaveLength(1);
+  });
+});
+
+describe("the rules of a table open at two revisions", () => {
+  const tags: TransactionalField = { fieldId: "tags", name: "Tags", type: "text", required: false, unique: false };
+  /** The next revision: it adds Tags, which the edit operation takes, and removes Amount. */
+  const revised = (): Rules => ({ revision: 2, revisionSha256: "b".repeat(64), fields: [name, member, tags],
+    operations: [operation("read", "read", ["name", "member", "tags"]), operation("edit", "edit", ["name", "tags"]), operation("create", "create", ["name"]), operation("delete", "delete", [])] });
+
+  it("keeps the newer revision's rules when the page on the older one draws again, so an edit to a field only the newer one has still sends", async () => {
+    const old = host(), next = host(revised());
+    const a = open(old), b = open(next);
+    // The older page draws again, and gives its rules again.
+    a.page.sync(old);
+    b.queue.enqueue(edit(row(1, 2), tags, "vip"), b.page);
+    expect(next.calls).toHaveLength(1);
+    expect(next.calls[0]!.request).toMatchObject({ revision: 2, revisionSha256: "b".repeat(64), input: { id: 1, expectedVersion: 2, values: { tags: "vip" } } });
+    expect(state(b.page, 1, tags)).toBe("pending");
+    // The older page's edit to a field the newer rules removed is checked against them, and its cell says why it did not save.
+    a.queue.enqueue(edit(row(2, 4), amount, 9), a.page);
+    next.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(state(a.page, 2, amount)).toBe("refused"));
+    expect(a.page.statuses.get("2", "amount")).toMatchObject({ value: 9, reason: "This field was removed, so dohc did not save this value." });
+    expect([old.calls, next.calls].map(calls => calls.length)).toEqual([0, 1]);
+  });
+
+  it("keeps the newer rules once only the page on the older revision is open, until that page has the newer revision too", async () => {
+    const old = host(), next = host(revised());
+    const a = open(old), b = open(next);
+    b.close();
+    a.page.sync(old);
+    a.queue.enqueue(edit(row(1, 2), name, "Alicia"), a.page);
+    // The change goes under the newest rules any page has given, as the page that gave them sent.
+    expect(next.calls[0]!.request).toMatchObject({ revision: 2, input: { id: 1, expectedVersion: 2, values: { name: "Alicia" } } });
+    expect(old.calls).toHaveLength(0);
+    // The open page reads the newer revision, and the queue's rules are that page's from then on.
+    const caught = host(revised());
+    a.page.sync(caught);
+    a.queue.enqueue(edit(row(2, 4), tags, "vip"), a.page);
+    next.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(caught.calls).toHaveLength(1));
+    expect(caught.calls[0]!.request).toMatchObject({ revision: 2, input: { id: 2, expectedVersion: 4, values: { tags: "vip" } } });
+    expect(old.calls).toHaveLength(0);
+  });
+
+  it("lets the page that gave the rules change them, and no page on an older revision", () => {
+    const old = host(), next = host(revised());
+    const a = open(old), b = open(next);
+    b.page.sync({ ...next, offline: true });
+    b.queue.enqueue(edit(row(1, 2), name, "Alicia"), b.page);
+    expect(b.page.statuses.get("1", "name")).toMatchObject({ state: "waiting", reason: "Waiting for the Collection to come back online" });
+    // The older page can't say the Collection is back online.
+    a.page.sync(old);
+    expect([old.calls, next.calls].map(calls => calls.length)).toEqual([0, 0]);
+    b.page.sync(next);
+    expect([old.calls, next.calls].map(calls => calls.length)).toEqual([0, 1]);
+  });
+});
+
+describe("a read of one record that a newer read has answered", () => {
+  it.each([
+    ["an older version of the record", { rows: [row(1, 3)], nextCursor: null }],
+    ["no record", { rows: [], nextCursor: null }],
+  ])("changes nothing when it returns %s", async (_returned, answer) => {
+    const rules = host(), { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    // The receipt reports no version, and the page's read leaves the record out, so the queue reads it by its key.
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    page.readShown(page.readStarted(), []);
+    expect(rules.inputs("read")).toHaveLength(1);
+    // A newer read by the page returns the record at version 8 before the queue's own read answers.
+    page.readShown(page.readStarted(), [row(1, 8)]);
+    expect(rules.inputs("edit")).toHaveLength(1);
+    rules.calls[1]!.answer.resolve({ result: answer });
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 8, values: { amount: 9 } });
+    expect(state(page, 1, amount)).toBe("pending");
+    expect(queue.attention()).toEqual([]);
+  });
+});
+
+describe("a new record the Collection refuses while two pages are open", () => {
+  const create = (queue: ReturnType<typeof open>["queue"], from: ReturnType<typeof open>["page"]) =>
+    queue.enqueue({ kind: "create", record: null, operationId: "create", values: { name: { value: "Bob", under: name } }, label: "Created a record" }, from);
+  const REFUSED = "The Collection refused this change. Name is taken.";
+
+  it.each([["first", 0], ["second", 1]] as const)("tells the %s page, which made it, and not the other", async (_which, maker) => {
+    const hosts = [host(), host()];
+    // Each page would take the record: the one that made it into its open form, the other into a form it opens again.
+    for (const given of hosts) given.dropped.mockReturnValue(true);
+    const views = hosts.map(given => open(given));
+    const id = create(views[0]!.queue, views[maker]!.page);
+    hosts[0]!.calls[0]!.answer.reject(refusal("Name is taken."));
+    await vi.waitFor(() => expect(hosts[maker]!.dropped).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id }), REFUSED, true));
+    expect(hosts[1 - maker]!.dropped).not.toHaveBeenCalled();
+    expect(views[0]!.queue.attention()).toEqual([]);
+  });
+
+  it("keeps the record in the list when the page that made it can't show it, and offers it to no other page", async () => {
+    const left = host(), right = host();
+    right.dropped.mockReturnValue(true);
+    const a = open(left);
+    open(right);
+    const id = create(a.queue, a.page);
+    left.calls[0]!.answer.reject(refusal("Name is taken."));
+    await vi.waitFor(() => expect(a.queue.attention()).toEqual([{ kind: "record", id, values: { name: { value: "Bob", under: name } }, reason: REFUSED }]));
+    expect(left.dropped).toHaveBeenCalledOnce();
+    expect(right.dropped).not.toHaveBeenCalled();
+  });
+
+  it("offers it to the other page once the page that made it has closed", async () => {
+    const left = host(), right = host();
+    right.dropped.mockReturnValue(true);
+    const a = open(left);
+    open(right);
+    const id = create(a.queue, a.page);
+    a.close();
+    left.calls[0]!.answer.reject(refusal("Name is taken."));
+    await vi.waitFor(() => expect(right.dropped).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id }), REFUSED, true));
+    expect(left.dropped).not.toHaveBeenCalled();
+  });
+});
+
+describe("while the window shows another workspace", () => {
+  it("sends nothing and reports no failure, and goes on when its workspace's shell opens again with no page open", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    const waiting = queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    // The window switches workspace: this workspace's shell closes, then its pages, and the other's shell opens.
+    shell.close();
+    close();
+    const other = openShell("other");
+    // The change in flight is confirmed. The next one waits unsent, and is no failure.
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(queue.size).toBe(1));
+    expect(rules.calls).toHaveLength(1);
+    expect(queue.find(waiting)?.state).toBe("queued");
+    for (const reports of [shell, other]) expect([reports.onError, reports.onNotice].map(report => report.mock.calls.length)).toEqual([0, 0]);
+    expect(rules.onError).not.toHaveBeenCalled();
+    // The window shows the workspace again. No page of the table opens, and the change goes.
+    other.close();
+    const back = openShell();
+    expect(rules.calls[1]!.request.input).toEqual({ id: 2, expectedVersion: 4, values: { name: "Beatrice" } });
+    expect(back.onError).not.toHaveBeenCalled();
+    rules.calls[1]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(back.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
+    expect(other.onNotice).not.toHaveBeenCalled();
+  });
+
+  it("files one row in Notices, with Try again, for a table whose change could not be confirmed meanwhile", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const lost = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    shell.close();
+    close();
+    // Main refuses the change in flight as the window leaves the workspace.
+    rules.calls[0]!.answer.reject(new Error("Collection changes stopped because this window changed workspaces."));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    expect(shell.onError).not.toHaveBeenCalled();
+    // The workspace's shell opens again: one row for the table, for the change dohc could not confirm and the one that waits behind it.
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    const [, , retry, identity] = back.onError.mock.calls[0]!;
+    // Try again sends the exact request, and the row goes once nothing needs the person.
+    (retry as () => void)();
+    expect(rules.calls[1]!.request).toEqual(rules.calls[0]!.request);
+    expect(back.onSettled).toHaveBeenCalledWith(identity);
+    rules.calls[1]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(3));
+    expect(rules.calls[2]!.request.input).toEqual({ id: 1, expectedVersion: 3, values: { amount: 9 } });
+  });
+
+  it("files a row with no Try again for a table that holds only values dohc did not save, in its own workspace's Notices", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    shell.close();
+    close();
+    const other = openShell("other");
+    // The Collection's refusal answers after the window left: no shell of this workspace is open to hear it.
+    rules.calls[0]!.answer.reject(refusal("No."));
+    await vi.waitFor(() => expect(queue.attention()).toHaveLength(1));
+    expect([shell, other].map(reports => [reports.onError, reports.onNotice, reports.onSettled].map(report => report.mock.calls.length))).toEqual([[0, 0, 0], [0, 0, 0]]);
+    other.close();
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    expect(other.onError).not.toHaveBeenCalled();
+    // The row goes once the person has cleared the value.
+    queue.dismiss("1", "name");
+    expect(back.onSettled).toHaveBeenCalledExactlyOnceWith(back.onError.mock.calls[0]![3]);
+  });
+
+  it("files no row for a table whose changes only wait to be sent", () => {
+    const rules = host(), { queue, close } = open(rules);
+    shell.close();
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    close();
+    expect(rules.calls).toHaveLength(0);
+    const back = openShell();
+    expect(back.onError).not.toHaveBeenCalled();
     expect(rules.calls).toHaveLength(1);
   });
 });

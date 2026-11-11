@@ -7,6 +7,7 @@ import { describeApprovedDataset, parseDatasetDescription } from "@dohc/security
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetDefinitionFromDrafts } from "./collections/datasetDefinitionFromDrafts";
 import { transactionalDescription } from "./transactionalCollectionModel";
+import { openCollectionChangeShell } from "./collectionChangeShells";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -33,6 +34,8 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
   const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page() : request.operationId === edit ? receipt() : { id: 1, version: 1 } }));
   const onError = vi.fn(), onNotice = vi.fn();
   const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError, onNotice, ...overrides };
+  // The window shows the page's workspace, so its changes send, and report to its shell once the page has closed.
+  openCollectionChangeShell(props.workspaceId, { onError: props.onError, onSettled: props.onSettled, onNotice: props.onNotice });
   return { invoke, onError, onNotice, props, ...render(<TransactionalCollectionPage {...props} />) };
 }
 type Invoke = { mock: { calls: Array<[TransactionalInvoke, ...unknown[]]> } };
@@ -550,10 +553,11 @@ describe("a Data Collection's table", () => {
     await screen.findByText("workspace-A");
     type("Name", "changed");
     const nextNotice = vi.fn();
-    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" onNotice={nextNotice} />); await screen.findByText("workspace-B");
+    openCollectionChangeShell("workspace-B", { onError: vi.fn(), onNotice: nextNotice });
+    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" />); await screen.findByText("workspace-B");
     expect(mark("Name")).toBeNull();
     await act(async () => { pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "workspace-A" } } }); });
-    // The notice goes to its own workspace's handler, which the shell drops once the window has left that workspace.
+    // The notice goes to its own workspace's shell, and never to the next one's.
     expect(onNotice).toHaveBeenCalledWith("Saved the edit in People"); expect(nextNotice).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
     expect(cell("Name").textContent).toBe("workspace-B");
@@ -1848,6 +1852,7 @@ describe("one queue for a table's changes", () => {
     const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() })
       : answers[sent(invoke, edit).length - 1]!.promise);
     const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError: vi.fn(), onNotice: vi.fn() };
+    openCollectionChangeShell(props.workspaceId, props);
     const left = <div key="left" data-testid="left"><TransactionalCollectionPage {...props} /></div>;
     const right = <div key="right" data-testid="right"><TransactionalCollectionPage {...props} /></div>;
     const view = render(<>{left}{right}</>);
@@ -1866,6 +1871,43 @@ describe("one queue for a table's changes", () => {
     await act(async () => answers[1]!.resolve({ result: receipt(4) }));
     await waitFor(() => expect([b.mark("Name"), b.mark("Amount")]).toEqual([null, null]));
     expect(props.onNotice).not.toHaveBeenCalled();
+  });
+
+  it("keeps the newer revision's rules when a page still on the older revision draws again, and sends an edit to a field only the newer one has", async () => {
+    const tags = id(8), next = dataset();
+    next.revision = 2; next.revisionSha256 = "b".repeat(64);
+    next.tables[0]!.fields.push({ fieldId: tags, name: "Tags", type: "text", required: false, unique: false });
+    for (const operationId of [read, edit]) next.operations.find(operation => operation.operationId === operationId)!.fieldIds.push(tags);
+    const older = setup();
+    await screen.findByText("Alice");
+    const newer = render(<TransactionalCollectionPage {...older.props} dataset={next} />);
+    await waitFor(() => expect(screen.getAllByText("Alice")).toHaveLength(2));
+    older.rerender(<TransactionalCollectionPage {...older.props} />);
+    tableIn(newer.container).type("Tags", "vip");
+    await waitFor(() => expect(sent(older.invoke, edit)).toHaveLength(1));
+    expect(sent(older.invoke, edit)[0]).toMatchObject({ revision: 2, revisionSha256: "b".repeat(64), input: { id: 1, expectedVersion: 2, values: { [tags]: "vip" } } });
+    expect(newer.container.querySelector('[data-cell-status="refused"]')).toBeNull();
+  });
+
+  it.each([["first", 0], ["second", 1]] as const)("shows a new record the Collection refuses in the form of the %s of two pages, which sent it, and opens no form in the other", async (_which, maker) => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      throw refusal("Name is taken.");
+    });
+    const first = setup({ invoke });
+    await screen.findByText("Alice");
+    const second = render(<TransactionalCollectionPage {...first.props} />);
+    await waitFor(() => expect(screen.getAllByText("Alice")).toHaveLength(2));
+    const pages = [within(first.container), within(second.container)];
+    const sender = pages[maker]!, other = pages[1 - maker]!;
+    fireEvent.click(within(sender.getByRole("grid")).getByRole("button", { name: "New record" }));
+    fireEvent.change(sender.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.click(sender.getByRole("button", { name: "Create record" }));
+    const form = () => within(sender.getByRole("form", { name: "New record" }));
+    await waitFor(() => expect(form().getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken."));
+    expect(form().getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(other.queryByRole("form", { name: "New record" })).toBeNull();
+    expect(sent(invoke, create)).toHaveLength(1);
   });
 
   it("drops a request sent under the old rules when its page opens again under new ones, and keeps what was typed", async () => {
@@ -1999,6 +2041,32 @@ describe("what a change that did not save leaves for the person", () => {
     fireEvent.keyDown(editorInput(), { key: "Enter" });
     await waitFor(() => expect(sent(view.invoke, edit)).toHaveLength(1));
     expect(sent(view.invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Bob" } });
+  });
+
+  it("keeps text typed in a cell and not saved on its record and field when the records are sorted another way", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const { rows } = twoRecords() as { rows: AppBackendJson[] };
+      const descending = (request.input as { sort?: { direction: string } }).sort?.direction === "desc";
+      return { result: { rows: descending ? rows.reverse() : rows, nextCursor: null } };
+    });
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    fireEvent.change(editorInput(), { target: { value: "Alicia" } });
+    view.unmount();
+    // The page opens again in a saved view that sorts the other way, so Alice's record is in the second row.
+    render(<TransactionalCollectionPage {...view.props} activeView={{ viewId: id(30), name: "Last first", kind: "table", search: "", filters: [], sort: { fieldId: name, direction: "desc" } }} />);
+    await screen.findByText("Alicia");
+    expect([cell("Name").textContent, mark("Name")]).toEqual(["Bea", null]);
+    expect(cell("Name", 1).textContent).toContain("Alicia");
+    expect([mark("Name", 1), why("Name", 1)]).toEqual(["refused", NOT_FINISHED]);
+    // The header's next press clears the sort, and the text goes back to the first row with its record.
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    await waitFor(() => expect(cell("Name").textContent).toContain("Alicia"));
+    expect([mark("Name"), mark("Name", 1)]).toEqual(["refused", null]);
+    expect(cell("Name", 1).textContent).toBe("Bea");
+    expect(sent(invoke, edit)).toHaveLength(0);
   });
 
   it("keeps nothing of an open cell editor in which nothing was typed", async () => {
