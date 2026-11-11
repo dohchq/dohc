@@ -111,6 +111,9 @@ pub(crate) struct OpenWorkspace {
     /// before their first relay step until they are between pages, finish,
     /// or fail.
     pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
+    /// Closes whose session ended but whose file write did not land, by
+    /// session id. A retried close reports them until the write lands.
+    pub(super) unfinished_closes: super::ydoc::UnfinishedCloses,
     /// What this binding's last open that writes prepared in `.dohc/local`.
     /// On Windows it holds the folder until the binding closes.
     local_state: Mutex<Option<root_binding::LocalState>>,
@@ -1392,6 +1395,7 @@ impl EngineService {
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
+                unfinished_closes: Default::default(),
                 local_state: Mutex::new(local_state),
             }),
         );

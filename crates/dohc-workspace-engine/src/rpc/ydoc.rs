@@ -479,6 +479,18 @@ struct YdocCloseResult {
     closed: bool,
 }
 
+pub(super) type UnfinishedCloses =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, UnfinishedClose>>>;
+
+/// A close that ended its session but could not write the note's file.
+#[derive(Clone)]
+pub(super) struct UnfinishedClose {
+    key: DocKey,
+    /// The moment whose write the file was owed when the close failed.
+    head: Option<String>,
+    failure: WireError,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocEvictParams {
@@ -2214,6 +2226,15 @@ impl EngineService {
         params: YdocCloseParams,
         serial: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Value, WireError> {
+        let open = self.open(handle)?;
+        let unfinished = lock(&open.unfinished_closes)
+            .get(&params.session_id)
+            .cloned();
+        if let Some(unfinished) = unfinished {
+            return self
+                .ydoc_close_unfinished(open, params.session_id, unfinished, serial)
+                .await;
+        }
         // Missing `settle` means settle — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
@@ -2286,6 +2307,7 @@ impl EngineService {
         let taken = lock(&self.sessions).remove(&params.session_id);
         let close_events = self.events.clone();
         let close_workspace_id = open.workspace_id.clone();
+        let unfinished_closes = Arc::clone(&open.unfinished_closes);
         let close_task = tokio::spawn(async move {
             let _serial = serial;
             let committed = actor
@@ -2312,17 +2334,18 @@ impl EngineService {
                     {
                         lock(&sessions).insert(session_id, entry);
                     }
-                    return Err(error);
+                    return Err(map_runtime(error));
                 }
             };
             if !drains {
                 return Ok(());
             }
             // The close committed, so the session stays closed whatever its
-            // drain answers; a retried close finds no session to close.
-            let record_facts = actor
+            // drain answers. A failed drain is recorded instead, so a retried
+            // close reports it rather than finding no session (#2813).
+            let drained = actor
                 .ydoc_close_drain(
-                    session_key,
+                    session_key.clone(),
                     Some(YdocCloseMaterialization {
                         root_dir: close_root,
                         self_writes: close_self_writes,
@@ -2331,7 +2354,26 @@ impl EngineService {
                     Arc::new(NoFaults),
                     CancellationToken::new(),
                 )
-                .await?;
+                .await;
+            let record_facts = match drained {
+                Ok(record_facts) => record_facts,
+                Err(error) => {
+                    let failure = map_runtime(error);
+                    let head = actor
+                        .ydoc_head_moment(session_key.clone())
+                        .await
+                        .map_err(map_runtime)?;
+                    lock(&unfinished_closes).insert(
+                        session_id,
+                        UnfinishedClose {
+                            key: session_key,
+                            head,
+                            failure: failure.clone(),
+                        },
+                    );
+                    return Err(failure);
+                }
+            };
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
             // committed these history rows.
@@ -2343,9 +2385,68 @@ impl EngineService {
         let close_result = close_task
             .await
             .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc close task failed"))?;
-        if let Err(error) = close_result {
-            return Err(map_runtime(error));
-        }
+        close_result?;
+        serde_json::to_value(YdocCloseResult { closed: true })
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
+    }
+
+    /// Retry a close that ended its session but could not write the note's
+    /// file: drain and replay what the note still owes, and report the first
+    /// close's failure until the write it owed has landed. Spawned for the
+    /// reason the close is: the drain's record events must outlive a dropped
+    /// request.
+    async fn ydoc_close_unfinished(
+        &self,
+        open: Arc<OpenWorkspace>,
+        session_id: String,
+        unfinished: UnfinishedClose,
+        serial: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Value, WireError> {
+        let now = now_ms()?;
+        let self_writes = Arc::new(self.self_writes.scoped(&open.root));
+        let events = self.events.clone();
+        let retry = tokio::spawn(async move {
+            let _serial = serial;
+            let materialization = || YdocCloseMaterialization {
+                root_dir: open.root.clone(),
+                self_writes: self_writes.clone(),
+            };
+            let record_facts = open
+                .actor
+                .ydoc_close_drain(
+                    unfinished.key.clone(),
+                    Some(materialization()),
+                    now,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .map_err(map_runtime)?;
+            for facts in &record_facts {
+                emit_record_events(&events, &open.workspace_id, facts);
+            }
+            if let Some(head) = unfinished.head {
+                let landed = open
+                    .actor
+                    .ydoc_write_landed(
+                        unfinished.key,
+                        head,
+                        materialization(),
+                        now,
+                        Arc::new(NoFaults),
+                    )
+                    .await
+                    .map_err(map_runtime)?;
+                if !landed {
+                    return Err(unfinished.failure);
+                }
+            }
+            lock(&open.unfinished_closes).remove(&session_id);
+            Ok(())
+        });
+        retry
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc close task failed"))??;
         serde_json::to_value(YdocCloseResult { closed: true })
             .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }

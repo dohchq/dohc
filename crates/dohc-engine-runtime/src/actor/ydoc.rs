@@ -1336,6 +1336,36 @@ impl ActorHandle {
         .await
     }
 
+    /// The moment whose write the file of `key` should hold: its head's.
+    pub async fn ydoc_head_moment(&self, key: DocKey) -> Result<Option<String>, RuntimeError> {
+        self.run(move |store, _cache| Ok(store.read_with(|conn| head_moment_in(conn, &key))?))
+            .await
+    }
+
+    /// Replay the writes `key` still owes its file, oldest first, and answer
+    /// whether the write of `moment_id` has landed. A moment with no write
+    /// of its own owes the file nothing.
+    pub async fn ydoc_write_landed(
+        &self,
+        key: DocKey,
+        moment_id: String,
+        materialization: YdocCloseMaterialization,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            ydoc_write_landed_on_store(
+                store,
+                &key,
+                &moment_id,
+                &materialization,
+                now_ms,
+                faults.as_ref(),
+            )
+        })
+        .await
+    }
+
     /// Run `stage` on the actor until no drain in it waits for released-tail
     /// validation. A drain that waits leaves what it committed queued and
     /// ends its transaction; the actor is free while the store's worker
@@ -4641,6 +4671,60 @@ fn pending_ydoc_writes_in(
         )
         .and_then(|rows| rows.collect())
         .map_err(StorageError::corrupt_public)
+}
+
+fn head_moment_in(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<Option<String>, StorageError> {
+    conn.query_row(
+        "SELECT latest_moment_id FROM snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(StorageError::corrupt_public)
+}
+
+fn ydoc_write_landed_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    moment_id: &str,
+    materialization: &YdocCloseMaterialization,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RuntimeError> {
+    let writes = store.read_with(|conn| pending_ydoc_writes_in(conn, key))?;
+    replay_materializations_in_order(
+        store,
+        &materialization.root_dir,
+        MaterializationReplayScope {
+            holds: None,
+            workspace_id: &key.workspace_id,
+            self_writes: Some(materialization.self_writes.as_ref()),
+            progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
+            planned_against_active_heads: false,
+        },
+        now_ms,
+        faults,
+        &writes,
+    )?;
+    for job_id in [
+        format!("ydoc-mat_{moment_id}"),
+        format!("sync-mat_{moment_id}"),
+    ] {
+        if let Some(job) = store.load_materialization_job(&job_id)? {
+            return Ok(matches!(
+                job.status,
+                JobStatus::Complete | JobStatus::Cancelled
+            ));
+        }
+    }
+    Ok(true)
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
