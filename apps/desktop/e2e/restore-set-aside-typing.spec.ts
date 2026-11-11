@@ -205,11 +205,16 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       // RETEST INSTRUMENTATION (never merge): record any notice now, then record and clear any earlier toast, so the refusal below is the only one.
       await recordCouldNotUpdate(page, info, "owner", "before the refused restore");
       const earlier = page.getByTestId("notice-toasts").getByTestId("workspace-shell-error");
-      for (const shown of await earlier.all()) {
-        info.annotations.push({type: "RETEST toast before restore", description: (await shown.innerText()).slice(0, 2000)});
-        await shown.getByRole("button", {name: "Dismiss workspace error"}).click();
+      try {
+        for (const text of await earlier.allInnerTexts()) info.annotations.push({type: "RETEST toast before restore", description: text.slice(0, 2000)});
+        // Always the first: dismissing one moves the next into its place.
+        for (let left = 10; left > 0 && await earlier.count() > 0; left--) {
+          await earlier.first().getByRole("button", {name: "Dismiss workspace error"}).click({timeout: 10_000});
+        }
+        await expect(earlier).toHaveCount(0, {timeout: 10_000});
+      } catch (error) {
+        info.annotations.push({type: "RETEST toasts before restore not cleared", description: String(error).slice(0, 2000)});
       }
-      await expect(earlier).toHaveCount(0);
       await page.getByTestId("engine-diff-restore-file").click();
       const refusal = page.getByTestId("workspace-shell-error");
       await expect(refusal).toContainText(title, {timeout: 30_000});

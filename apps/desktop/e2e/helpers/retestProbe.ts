@@ -9,6 +9,8 @@ const COULD_NOT_UPDATE = /could not update/;
 const PROBE_MS = 10_000;
 // How long the closing probes wait before reading History again, to see whether a credited row arrives late.
 const LATE_READ_MS = 120_000;
+// What the closing probes add to the test's timeout: the late read, two rounds of probes, and room for teardown.
+const CLOSING_BUDGET_MS = 300_000;
 const fail = (error: unknown) => String(error).slice(0, 2000);
 
 function withDeadline<T>(promise: Promise<T>, what: string, ms = PROBE_MS): Promise<T> {
@@ -170,6 +172,8 @@ export function closingProbes(info: TestInfo): {
       const probe = pending;
       pending = undefined;
       if (!probe) return;
+      // Its own time on top of the test's: the late read alone takes two minutes, and a failure can come late.
+      info.setTimeout(info.timeout + CLOSING_BUDGET_MS);
       await probe.stopWatching();
       await recordHistory(probe.owner, info, probe.workspaceId, probe.path, when);
       await recordCouldNotUpdate(probe.owner, info, "owner", when);
