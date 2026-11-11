@@ -593,6 +593,18 @@ export function createWorkspaceEngineIpc<
           notifyRenderer({ workspaceId: started.workspaceId });
         }
       },
+      retrySecretKey: async (input, { event }) => {
+        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          assertWritableWorkspace(operation.workspace);
+          const status = await withEngineAdapter(operation.workspace, async adapter => {
+            await adapter.reconcileCapture();
+            return await adapter.watcherStatus();
+          });
+          if (!status) throw new Error("The workspace engine is not running.");
+          notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+          if (status.secretKeyUnavailable) throw new Error("dohc still cannot use the workspace secret key.");
+        });
+      },
     });
     registerOperations<typeof fileObservationOperations, Event, Operation>({
       handle: registerHandler, assertTrustedSender,
@@ -624,22 +636,6 @@ export function createWorkspaceEngineIpc<
         });
         if (!recovered) throw new Error("The workspace engine is not running.");
         notifyRenderer({ workspaceId: operation.workspace.workspaceId });
-      });
-    });
-    // Rescans, so a protected file waiting on the secret key is captured
-    // again, and fails while the key is still unavailable.
-    registerHandler(CHANNELS.retrySecretKey, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceIdPayload.parse(payload);
-      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-        assertWritableWorkspace(operation.workspace);
-        const status = await withEngineAdapter(operation.workspace, async adapter => {
-          await adapter.reconcileCapture();
-          return await adapter.watcherStatus();
-        });
-        if (!status) throw new Error("The workspace engine is not running.");
-        notifyRenderer({ workspaceId: operation.workspace.workspaceId });
-        if (status.secretKeyUnavailable) throw new Error("dohc still cannot use the workspace secret key.");
       });
     });
     registerHandler(CHANNELS.retryOwnerLiveDelivery, async (event, payload) => {

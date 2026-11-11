@@ -1639,6 +1639,16 @@ export const captureRecoveryOperations = {
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The restart starts only in the sending window's active, writable workspace, and is awaited outside its workspace operation." },
   },
+  // Rescans, so a protected file waiting on the secret key is captured again.
+  // Rejects while the key is still unavailable.
+  retrySecretKey: {
+    capabilityId: "capture.secret.retry",
+    channel: "desktop:retry-secret-key",
+    payload: WorkspaceIdPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The rescan runs only in the sending window's active, writable workspace." },
+  },
 } satisfies OperationTable;
 
 export const fileObservationOperations = {
@@ -8129,7 +8139,6 @@ export interface DohcDesktopBridge
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
-  retrySecretKey(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
