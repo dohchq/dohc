@@ -442,7 +442,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
         const context = currentScope.kind === "link" ? {...currentScope, sessionId: "link-session-" + person,
           capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)} : {...scope, grantId, userId: "reader-" + person};
         expect(state.storage.resolveLiveObjectHostBinding(context, "object-" + document)).toMatchObject({kind: "current",
-          binding: {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`}});
+          binding: {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`, selectorPaths: [`docs/${document}.md`]}});
         const response = await post(`/sync/live/${routeKind}-tickets`, {discriminator: session, objectId: "object-" + document}, cookie, headers);
         expect(response.status).toBe(200);
         return await response.json() as {token: string};
@@ -1026,17 +1026,21 @@ it("refuses a native capture for a different owner document", async () => {
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
 });
 
-it("projects file-only link sync metadata before it reaches the browser provider", async () => {
+// The link's own share decides what it sees, not the lineage's recorded binding.
+it.each([
+  ["file-only", [binding.currentPath], "a.md", ["a.md"]],
+  ["folder", ["docs"], "docs/a.md", ["docs"]],
+] as const)("projects %s link sync metadata from the link's share before it reaches the browser provider", async (kind, paths, currentPath, selectorPaths) => {
   const f = await fixture(limits, true);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}));
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths, versionId: null}));
   const minted = await f.tickets.mint({objectId: binding.objectId}, f.currentScope);
   expect(minted).not.toBeNull();
   const browser = f.connect(minted!.token); expect(await browser.status).toBe(101);
   const {provider, until} = await startProvider(browser);
   await until(() => provider.state().status === "live");
-  expect(provider.state().binding).toMatchObject({workspaceId: `link:${scope.grantId}`, currentPath: "a.md", selectorPaths: ["a.md"], objectId: binding.objectId});
+  expect(provider.state().binding).toMatchObject({workspaceId: `link:${scope.grantId}`, currentPath, selectorPaths, objectId: binding.objectId});
   expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
-  expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
+  if (kind === "file-only") expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
 });
 

@@ -144,7 +144,7 @@ it("owns returned selectors and rejects hostile report fields without invocation
     const minted = await service.mint({ objectId: binding.objectId }, scope);
     const redeemed = await service.redeem(minted!.token, scope);
     (redeemed!.binding.selectorPaths as string[]).push("outside");
-    expect(state.raw.prepare("SELECT selector_paths_json FROM sync_relay_live_session_tickets").get()).toEqual({ selector_paths_json: '["docs"]' });
+    expect(state.raw.prepare("SELECT selector_paths_json FROM sync_relay_live_session_tickets").get()).toEqual({ selector_paths_json: '["docs/a.md"]' });
   } finally { await state.close(); }
 });
 

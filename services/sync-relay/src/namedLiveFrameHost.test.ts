@@ -195,17 +195,19 @@ it("keeps three readers alive when a relay write wakes them during a native uplo
     remove(); removeAuthority();
   }
 });
-it("keeps two named selectors distinct while borrowing one native registration", async () => {
+it("shows each named recipient its own share's selector on one binding and one native registration", async () => {
   const f = await setup();
   const secondScope = { ...scope, shareId: "share-2", grantId: "edit-2", userId: "reader-2" };
-  const secondBinding = { ...binding, selectorPaths: [binding.currentPath] };
   f.raw.prepare("INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
-    .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: secondBinding.selectorPaths, versionId: null }));
+    .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: ["docs/a.md"], versionId: null }));
   f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES (?,?,'user',?,NULL,'edit',4,'active',0,NULL,NULL)`).run(secondScope.grantId, secondScope.shareId, secondScope.userId);
-  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => ({ connection: host, binding: secondBinding }) } });
+  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
   const ticket = (await tickets.redeem(minted!.token, secondScope))!;
+  // Both recipients' accepted events carry the lineage's one recorded binding.
+  expect(ticket.binding).toEqual(f.capture.ticket.binding);
+  expect(ticket.binding).toEqual(binding);
   const second = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(secondScope), storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
   cleanup.push(async () => { second.close(); });
   const signal = new AbortController().signal;
@@ -268,15 +270,23 @@ it("freezes the captured ticket and its binding before exposing them", async () 
   expect(Object.isFrozen(f.capture.ticket)).toBe(true);
   f.capture.assertCurrent();
 });
-it.each(["grant", "selector", "restore", "host"])("invalidates the capture when %s standing changes", async mode => {
+it.each(["grant", "coverage", "restore", "host"])("invalidates the capture when %s standing changes", async mode => {
   const f = await setup();
   if (mode === "grant") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run(scope.grantId);
-  if (mode === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths: ["other"], versionId: null }), scope.shareId);
+  if (mode === "coverage") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths: ["other"], versionId: null }), scope.shareId);
   if (mode === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
   if (mode === "host") f.invalidated.abort(); else f.changes.notify();
   await Promise.resolve();
   expect(f.capture.invalidated.aborted).toBe(true);
   expect(f.peer.closed).toBe(false); expect(f.changes.listenerCount()).toBe(0);
+});
+
+it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("keeps a recipient capture when its share is %s and still covers the document", async (_case, paths) => {
+  const f = await setup();
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths, versionId: null }), scope.shareId);
+  f.changes.notify(); await Promise.resolve();
+  expect(f.capture.invalidated.aborted).toBe(false);
+  f.capture.assertCurrent();
 });
 
 // Only the relay attributes work to a personal agent. The host refuses before it reads who records.

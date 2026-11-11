@@ -28,7 +28,7 @@ async function fixture() {
       (journal_cursor,delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,
        selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
        accepting_host_epoch,received_at_ms,update_bytes,relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes)
-      VALUES (?, ?, ?, ?, 'main', ?, ?, ?, '["docs"]', 7, 'named', 'reader-1', 'edit-1', 4, 1, ?, x'0000', ?, ?, ?, 1)`)
+      VALUES (?, ?, ?, ?, 'main', ?, ?, ?, '["docs/a.md"]', 7, 'named', 'reader-1', 'edit-1', 4, 1, ?, x'0000', ?, ?, ?, 1)`)
       .run(cursor, `delivery-${cursor}`, "c".repeat(64), scope.workspaceId, objectId, binding.lineageClaimId,
         binding.currentPath, receivedAtMs, namespace, cursor, "d".repeat(64));
   };

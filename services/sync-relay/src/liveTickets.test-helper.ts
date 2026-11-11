@@ -16,7 +16,7 @@ export const scope = { kind: "named" as const, workspaceId: "workspace-1", share
 export const host = { mode: "device", hostId: "host-1", hostEpoch: parseHostEpoch(1), instanceId: "instance-1", connectionId: "connection-1" } as const;
 const bytes = new Uint8Array([0, 0]);
 export const binding = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
-  lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 };
+  lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs/a.md"], restoreFenceGeneration: 7 };
 export const report = { connection: host, binding };
 /** Stored metadata of a retained service activation of `binding`. Native activation is covered by the engine integration suite. */
 export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, namespace: string, completed = false): string {

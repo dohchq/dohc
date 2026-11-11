@@ -926,7 +926,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
     (delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
     restore_fence_generation,principal_kind,principal_id,accepting_host_epoch,received_at_ms,update_bytes,
     relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,canonical_version,first_seen_deletes_json)
-    VALUES ('pending-edit',?,?,'main',?,?,?,'["docs"]',7,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
+    VALUES ('pending-edit',?,?,'main',?,?,?,'["docs/a.md"]',7,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
     .get("c".repeat(64), scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.currentPath, namespace, "d".repeat(64))!.journal_cursor);
   f.host.pending.delete(binding.objectId);
   const stopped = await stop();

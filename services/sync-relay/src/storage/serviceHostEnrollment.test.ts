@@ -884,7 +884,7 @@ function activatedSibling(f: Awaited<ReturnType<typeof activated>>) {
   copy("sync_relay_live_documents", "object_id", binding.objectId,
     {object_id: "sibling", lineage_claim_id: lineageClaimId, baseline_digest: lineageClaimId, current_path: path});
   copy("sync_relay_service_activations", "activation_id", `ordinary-activation-${"a".repeat(64)}`, {activation_id: activationId, object_id: "sibling",
-    lineage_claim_id: lineageClaimId, binding_json: JSON.stringify({...binding, objectId: "sibling", lineageClaimId, currentPath: path})});
+    lineage_claim_id: lineageClaimId, binding_json: JSON.stringify({...binding, objectId: "sibling", lineageClaimId, currentPath: path, selectorPaths: [path]})});
   f.enroll({path});
   return {relayDatabaseNamespace: key.namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "sibling", lineageClaimId, path,
     restoreFenceGeneration: 7, acceptedThrough: 0};
