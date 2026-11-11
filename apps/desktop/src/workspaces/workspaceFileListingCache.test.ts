@@ -408,3 +408,45 @@ describe("WorkspaceFileListingCache", () => {
   }
   expect(load).toHaveBeenCalledTimes(1);
 });
+
+it("answers whether the listing in hand has a file, once its walk finishes, and nothing without one", async () => {
+  const cache = new WorkspaceFileListingCache("win32");
+  const named = (path: string) => path === "dataset.json" || path.endsWith("/dataset.json");
+  const has = (attachmentId = ATTACHMENT_A) => cache.hasFile("ws-a", attachmentId, named);
+  expect(await has()).toBeUndefined();
+  const walk = deferred<WorkspacePathListing>();
+  const read = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => walk.promise });
+  const answer = has();
+  walk.resolve({ files: [{ path: "notes.md", kind: "file" }, { path: "tasks/dataset.json", kind: "file" }], folders: ["tasks"] });
+  await read;
+  expect(await answer).toBe(true);
+  expect(await has(ATTACHMENT_B)).toBeUndefined();
+  cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
+  expect(await has()).toBeUndefined();
+  await cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => listing("notes.md") });
+  expect(await has()).toBe(false);
+  cache.invalidate({ workspaceId: "ws-a" , paths: ["notes.md"] });
+  await cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => { throw new Error("walk failed"); } }).catch(() => undefined);
+  expect(await has()).toBeUndefined();
+});
+
+it("answers nothing from a walk that a newer walk or a change replaced while it ran", async () => {
+  const cache = new WorkspaceFileListingCache("win32");
+  const has = () => cache.hasFile("ws-a", ATTACHMENT_A, path => path.endsWith("dataset.json"));
+  const replaced = deferred<WorkspacePathListing>();
+  const first = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => replaced.promise });
+  const answer = has();
+  const newer = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: false, load: async () => listing("tasks/dataset.json") });
+  replaced.resolve(listing("notes.md"));
+  await Promise.all([first, newer]);
+  expect(await answer).toBeUndefined();
+  expect(await has()).toBe(true);
+  cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
+  const dropped = deferred<WorkspacePathListing>();
+  const second = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => dropped.promise });
+  const late = has();
+  cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
+  dropped.resolve(listing("notes.md"));
+  await second;
+  expect(await late).toBeUndefined();
+});

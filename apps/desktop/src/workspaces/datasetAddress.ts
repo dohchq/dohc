@@ -13,7 +13,7 @@ type Address = { sha256: string; datasetId: string | null };
 const identities = new Map<string, string | null>();
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const maxBytes = 256 * 1024;
-const isDescriptor = (path: string) => path === "dataset.json" || path.endsWith("/dataset.json");
+export const isDatasetDescriptor = (path: string) => path === "dataset.json" || path.endsWith("/dataset.json");
 
 const catalogs = new Map<string, { workspaceId: string; value: Promise<Map<string, Address>> }>();
 export function invalidateDatasetAddresses(scope?: { workspaceId?: string }) {
@@ -36,7 +36,7 @@ function addresses(adapter: Adapter, workspaceId: string, versionId: string, sig
 
 async function readAddresses(adapter: Adapter, workspaceId: string, versionId: string, signal: AbortSignal) {
   signal.throwIfAborted();
-  const files = (await adapter.listTextFileMetadata({ workspaceId, versionId })).filter(file => isDescriptor(file.path));
+  const files = (await adapter.listTextFileMetadata({ workspaceId, versionId })).filter(file => isDatasetDescriptor(file.path));
   signal.throwIfAborted();
   const result = new Map<string, Address>();
   const changed = files.filter(file => {
@@ -80,6 +80,27 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
     .sort();
   if (conflictingPaths.length !== 1) throw Error(`Collection address ambiguous: ${path}. These dataset.json files name this Collection: ${conflictingPaths.join(", ")}. Choose one file to keep. Remove the other files.`);
   return id;
+}
+
+/**
+ * The folders whose dataset.json names a Collection that `kept` leaves out,
+ * as one deleted permanently leaves behind. `kept` lists the ids the store
+ * keeps, and is asked only when some dataset.json names one.
+ *
+ * `listed` says whether the file listing main hands Home has a dataset.json,
+ * or undefined without one in hand. Home applies this answer only to the
+ * dataset.json files in that listing, so with none there it can change
+ * nothing, and the engine's files go unread. It saves time and decides no access.
+ */
+export async function unclaimedDatasetFolders(adapter: Adapter, workspaceId: string, signal: AbortSignal,
+  sources: { listed(): Promise<boolean | undefined>; kept(): Promise<readonly string[]> }): Promise<string[]> {
+  if (await sources.listed() === false) return [];
+  signal.throwIfAborted();
+  const named = [...await addresses(adapter, workspaceId, "main", signal)].filter(([, value]) => value.datasetId !== null);
+  signal.throwIfAborted();
+  if (!named.length) return [];
+  const ids = new Set(await sources.kept());
+  return named.filter(([, value]) => !ids.has(value.datasetId!)).map(([path]) => path.slice(0, Math.max(0, path.lastIndexOf("/"))));
 }
 
 /** `datasetPaths`: the dataset.json files to fix before the Collection can open. */

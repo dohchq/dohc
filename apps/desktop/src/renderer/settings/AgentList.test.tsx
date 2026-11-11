@@ -1653,8 +1653,8 @@ it("says in the list that the account's agents couldn't be listed, with the caus
   });
   const { onError } = renderList();
   expect((await screen.findByTestId("personal-agents-retry")).textContent).toContain("dohc could not list your agents on relay.test.");
-  expect(onError).toHaveBeenCalledWith("dohc could not reach relay.test. Check your connection.", undefined, expect.any(Function), undefined,
-    `personal-agents:${ACCOUNT_KEY}`);
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not reach relay.test. Check your connection.", undefined, expect.any(Function), undefined,
+    `personal-agents:${ACCOUNT_KEY}`));
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account()] });
   await userEvent.click(within(screen.getByTestId("personal-agents-retry")).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(personalIds()).toEqual([GROK_ID, NOVA_ID]));

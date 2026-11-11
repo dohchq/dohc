@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses } from "./datasetAddress";
+import { addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, unclaimedDatasetFolders } from "./datasetAddress";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Equipment", schemaPath: "data/schema.sql", operationsPath: "data/actions.js",
@@ -147,4 +147,42 @@ it("leaves out a Collection whose dataset.json is gone, keeps one whose file can
   sources.delete("data/dataset.json");
   invalidateDatasetAddresses({ workspaceId: "w" });
   expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "missing" }]);
+});
+
+it("names the folders whose dataset.json names a Collection the store no longer keeps, and opens no store when no file names one", async () => {
+  const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["gone/dataset.json", JSON.stringify({ datasetId: id(9) })],
+    ["dataset.json", JSON.stringify({ datasetId: id(8) })], ["draft/dataset.json", "{ \"datasetId\": "], ["gone/notes.md", "# Notes"]]);
+  const adapter = sourceCaptureAdapter(sources);
+  const kept = vi.fn(async () => [id(1)]);
+  const listed = async () => true;
+  invalidateDatasetAddresses({ workspaceId: "w" });
+  expect((await unclaimedDatasetFolders(adapter, "w", signal, { listed, kept })).sort()).toEqual(["", "gone"]);
+  sources.delete("gone/dataset.json"); sources.delete("dataset.json"); sources.delete("data/dataset.json");
+  invalidateDatasetAddresses({ workspaceId: "w" });
+  kept.mockClear();
+  // A dataset.json that can't be read names nothing, so its folder keeps today's rule.
+  expect(await unclaimedDatasetFolders(adapter, "w", signal, { listed, kept })).toEqual([]);
+  expect(kept).not.toHaveBeenCalled();
+});
+
+it("reads no engine listing when the file listing in hand has no dataset.json, and reads one when that listing is missing or wrong", async () => {
+  const sources = new Map([["gone/dataset.json", JSON.stringify({ datasetId: id(9) })], ["notes.md", "# Notes"]]);
+  const requests: string[] = [];
+  const adapter = sourceCaptureAdapter(sources, { onRequest: method => requests.push(method) });
+  const kept = vi.fn(async () => [id(1)]);
+  const read = (listed: boolean | undefined) => {
+    invalidateDatasetAddresses({ workspaceId: "w" });
+    requests.length = 0;
+    return unclaimedDatasetFolders(adapter, "w", signal, { listed: async () => listed, kept });
+  };
+  expect(await read(false)).toEqual([]);
+  expect(requests).toEqual([]);
+  expect(kept).not.toHaveBeenCalled();
+  // No listing in hand, or one that names a dataset.json: the engine's files decide.
+  for (const listed of [undefined, true]) {
+    expect(await read(listed)).toEqual(["gone"]);
+    expect(requests).toContain("versionedText.list");
+  }
+  sources.delete("gone/dataset.json");
+  expect(await read(true)).toEqual([]);
 });

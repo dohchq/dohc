@@ -501,6 +501,97 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
     );
 }
 
+/// #2813. A close ends its session before its drain writes the file. When
+/// that write fails, the service keeps the head the file was owed, and a
+/// retried close drains again and asks where that head's write stands. One a
+/// passing failure stopped stays owed while the failure lasts, so the retry
+/// reports it, and lands on a retry once the failure has passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_close_lands_the_write_a_passing_failure_stopped() {
+    use dohc_engine_runtime::{YdocWriteState, actor::YdocCloseMaterialization};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let materialization = || YdocCloseMaterialization {
+        root_dir: scratch.path().to_path_buf(),
+        self_writes: Arc::new(()),
+    };
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterTempWrite);
+    let (_, drains) = handle
+        .ydoc_close_commit(
+            key.clone(),
+            Some(scratch.path().to_path_buf()),
+            200,
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the close commits");
+    assert!(drains, "the close drains the parked update");
+    handle
+        .ydoc_close_drain(
+            key.clone(),
+            Some(materialization()),
+            200,
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the drain cannot write the file");
+    assert!(faults.fired(), "the drain reaches the injected fault");
+    let head = handle
+        .ydoc_head_moment(key.clone())
+        .await
+        .expect("read head")
+        .expect("the note has a head");
+    assert_eq!(unfinished_writes(&db), 1, "the head's write is owed");
+
+    // A retry while the failure lasts finds the write still owed.
+    let again = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterTempWrite);
+    let state = handle
+        .ydoc_write_state(
+            key.clone(),
+            head.clone(),
+            materialization(),
+            250,
+            again.clone(),
+        )
+        .await
+        .expect("ask where the write stands");
+    assert!(again.fired(), "the retry reaches the injected fault");
+    assert_eq!(state, YdocWriteState::Owed, "the retry reports it");
+    assert_eq!(unfinished_writes(&db), 1, "the head's write is still owed");
+
+    handle
+        .ydoc_close_drain(
+            key.clone(),
+            Some(materialization()),
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the retried drain");
+    let state = handle
+        .ydoc_write_state(key, head, materialization(), 300, Arc::new(NoFaults))
+        .await
+        .expect("ask where the write stands");
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        state,
+        YdocWriteState::Landed,
+        "the head's write lands on the retry"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("file"),
+        "before parked",
+        "the file holds the note"
+    );
+}
+
 fn lineage_claim(db: &std::path::Path, key: &DocKey) -> Option<String> {
     let store = EngineStore::open_read_only(db).expect("open probe store");
     dohc_engine_collab::read_marker(&store, key)

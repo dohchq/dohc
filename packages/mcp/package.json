@@ -12,6 +12,7 @@
   },
   "scripts": {
     "dev": "tsx src/server.ts",
+    "eval": "tsx evals/run.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

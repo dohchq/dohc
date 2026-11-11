@@ -70,8 +70,10 @@ vi.mock("./CollectionPage", () => ({
   CollectionPage: (props: { collectionPath: string }) => <div data-testid="collection-page" data-path={props.collectionPath} />,
 }));
 vi.mock("./ConnectedTransactionalCollection", () => ({
-  ConnectedTransactionalCollection: (props: { datasetPath: string; tableId: string }) => (
-    <div data-testid="transactional-collection-page" data-path={props.datasetPath} data-table={props.tableId} />
+  ConnectedTransactionalCollection: (props: { datasetPath: string; tableId: string; onLifecycleChanged?(): void }) => (
+    <div data-testid="transactional-collection-page" data-path={props.datasetPath} data-table={props.tableId}>
+      <button onClick={() => props.onLifecycleChanged?.()}>Delete the Collection</button>
+    </div>
   ),
 }));
 
@@ -167,6 +169,34 @@ describe("shell tab surfaces", () => {
       requested.seedInvalidApp = false;
       error.mockRestore();
     }
+  });
+
+  it("reads Home's Collection folders again after a Collection is deleted or restored", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    requested.path = transactionalCollectionTabPath("data/dataset.json", tableId);
+    fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+    const deleteButton = await screen.findByRole("button", { name: "Delete the Collection" });
+    await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
+    const reads = bridge.listCollections.mock.calls.length;
+    fireEvent.click(deleteButton);
+    await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  // Home sorts the fresh walk's dataset.json files by the Collection folders, read here from the cached listing.
+  it("reads Home's Collection folders again once a fresh walk replaces the cached listing", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const fresh = Promise.withResolvers<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    bridge.listWorkspaceFiles
+      .mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], folders: [], cached: true })
+      .mockImplementationOnce(() => fresh.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
+    const reads = bridge.listCollections.mock.calls.length;
+    await act(async () => fresh.resolve({ visibility: { status: "ready", rules: [] }, files: [{ path: "data/dataset.json", kind: "file" }], folders: [] }));
+    await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
   });
 
   it("keeps an app mounted while another tab is shown", async () => {

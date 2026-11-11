@@ -518,11 +518,16 @@ export function saveOnlyLiveDocuments(quarantines: readonly OwnerLiveQuarantine[
     ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
 }
 // What a Stop did with edits the server refused: wrote them into the file,
-// or kept them on this computer because it could not.
+// or kept them on this computer because it could not. `already` when the
+// server says live editing was already stopped, so this Stop changed nothing.
 export const StopOwnerLiveDocumentResult = z.object({
   keptEdits: z.enum(["none", "recovered", "kept"]),
+  already: z.literal(true).optional(),
 }).strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
+// `already` when the server says the document was already live, so this Resume changed nothing.
+export const ResumeOwnerLiveDocumentResult = z.object({already: z.literal(true).optional()}).strict();
+export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();
@@ -788,9 +793,10 @@ const CollectionQueryFilterSchema: z.ZodType<CollectionQueryFilter> = z.object({
 export const ListCollectionsPayload = WorkspaceIdPayload;
 export type ListCollectionsPayload = z.infer<typeof ListCollectionsPayload>;
 
-export const ListCollectionsResult: z.ZodType<CollectionListResultContract> =
-  z.object({ collections: z.array(CollectionSummarySchema).max(10_000) });
-export type ListCollectionsResult = CollectionListResultContract;
+// `unclaimedDatasetFolders`: folders whose dataset.json names no Collection on this computer, as a deleted one leaves.
+export type ListCollectionsResult = CollectionListResultContract & { unclaimedDatasetFolders: string[] };
+export const ListCollectionsResult: z.ZodType<ListCollectionsResult> =
+  z.object({ collections: z.array(CollectionSummarySchema).max(10_000), unclaimedDatasetFolders: z.array(z.string().max(4096)).max(10_000) });
 
 export const GetCollectionPayload = z.object({
   workspaceId: WORKSPACE_ID,

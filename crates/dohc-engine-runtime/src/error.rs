@@ -223,7 +223,7 @@ impl RuntimeError {
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),
             RuntimeError::Materialize(error) => error.code(),
-            RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
+            RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "file-write-incomplete",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
             RuntimeError::YdocOpenConflict { .. } => "ydoc-conflict-open",

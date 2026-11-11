@@ -735,7 +735,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, openPayload);
     const change = vi.fn(async () => "stopped");
     await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
-      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+      .rejects.toThrow("notes/a.md is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.");
     expect(change).not.toHaveBeenCalled();
     await h.ipc.close(sender, { sessionId: openPayload.sessionId });
     await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
