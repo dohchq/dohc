@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
-import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
+import { DATASET_SERVER_NOT_FOUND, DATASET_OWNER_ONLY, ipcWireError } from "../../ipc/errorWords";
 import type { CollectionChangeRow } from "../../workspaces/collectionChange";
 import { COLLECTION_CHANGE_FILE, loadCollectionChange, undoCollectionChange } from "../collections/collectionChangeFlow";
 import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
@@ -74,6 +74,7 @@ it("keeps its frame when the Collection can't be read, and offers Try again ther
   const failed = await screen.findByTestId("lane-change-load-failed");
   expect(screen.getByTestId("lane-change-loading").textContent).toContain("Change to Volunteers");
   expect(failed.textContent).toContain("dohc couldn't open Volunteers.");
+  expect(within(failed).queryByTestId("lane-change-owner-only")).toBeNull();
   fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
   await screen.findByTestId("lane-change-card");
 });
@@ -284,6 +285,25 @@ it("names the server when it refuses the change, with no Try again", async () =>
   expect(screen.queryByTestId("lane-change-apply")).toBeNull();
   expect(screen.getByTestId("lane-change-not-now-button")).toBeTruthy();
   expect(screen.getByTestId("lane-change-review")).toBeTruthy();
+  expect(onReply).not.toHaveBeenCalled();
+});
+
+it("tells a teammate in a shared view to ask the owner, with the lock and no Try again", async () => {
+  ask(place);
+  // A shared view refuses History, which the card reads first, as main does.
+  const refused = Object.assign(new Error("Open the original workspace to manage this Collection."), { code: DATASET_OWNER_ONLY });
+  const dataset = vi.mocked(place.api.dataset).getMockImplementation()!;
+  vi.mocked(place.api.dataset).mockImplementation(async request => {
+    if (request.action === "historyRevision") throw new Error(`Error invoking remote method 'desktop:dataset': ${String(ipcWireError(refused))}`);
+    return dataset(request);
+  });
+  card();
+  const failed = await screen.findByTestId("lane-change-load-failed");
+  expect(screen.getByTestId("lane-change-loading").textContent).toContain("Change to Volunteers");
+  expect(failed.textContent).toBe("You can't apply changes to Volunteers. Ask its owner to apply it.");
+  expect(within(failed).getByTestId("lane-change-owner-only")).toBeTruthy();
+  expect(within(failed).getByRole("button", { name: "Copy" })).toBeTruthy();
+  expect(within(failed).queryByRole("button", { name: "Try again" })).toBeNull();
   expect(onReply).not.toHaveBeenCalled();
 });
 

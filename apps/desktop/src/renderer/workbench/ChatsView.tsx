@@ -129,11 +129,13 @@ import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./ch
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import { agentMentionId, listAgents, runnableAgents, withAgent, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
-import { archivedChatsFor } from "../../settings/archivedChats";
+import { archivedChatsFor, hiddenChatsFor } from "../../settings/archivedChats";
 import { Menu } from "../ui/Menu";
 import { isContextMenuKey } from "../ui/keys";
 import { chatRowMenuItems, type ChatRowMenuTarget } from "./chatRowMenu";
 import { removeAgentWithUndo } from "../settings/agentRemoval";
+import { HideAgentChatDialog, RemoveAgentDialog } from "../settings/agentDialogs";
+import { hideAgentChat } from "../settings/ArchivedAgents";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -3612,6 +3614,12 @@ export function ChatsView(props: {
     () => new Set(archivedChatsFor(props.userSettings, workspaceId)),
     [props.userSettings, workspaceId],
   );
+  // Removed agents' chats this person took off Archived. A chat shows again
+  // when an agent with its id is added again.
+  const hiddenIds = useMemo(
+    () => new Set(hiddenChatsFor(props.userSettings, workspaceId)),
+    [props.userSettings, workspaceId],
+  );
   // An agent chat whose agent left Settings, or a personal agent's chat
   // whose agent left your roster, stays readable in Archived. It returns
   // when an agent with its id is added again.
@@ -3627,7 +3635,7 @@ export function ChatsView(props: {
   const setChatArchived = useCallback(
     async (channelId: string, label: string, archived: boolean): Promise<void> => {
       try {
-        await bridge().setChatArchived({ workspaceId, channelId, archived });
+        await bridge().setChatArchived({ workspaceId, channelId, state: archived ? "archived" : "active" });
         if (archived) {
           props.onNotice?.(`Archived ${label}`, () => void setChatArchived(channelId, label, false));
         }
@@ -3703,6 +3711,7 @@ export function ChatsView(props: {
         settings,
         agentProblems: file.agentProblems,
         agent: { id: agentId, name: entry.name },
+        chatId: agentChats.find((channel) => channel.agentId === agentId)?.id,
         save: async (next) => {
           try {
             return await bridge().setUserSettings({ settings: next, base: settings });
@@ -3725,7 +3734,7 @@ export function ChatsView(props: {
         onNotice: props.onNotice,
       });
     },
-    [props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
+    [agentChats, props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
   );
   // The members dialog, opened from a group's menu in the sidebar.
   const [membersFor, setMembersFor] = useState<{ workspaceId: string; channel: ChatChannelRecord; session: number } | null>(null);
@@ -3735,6 +3744,14 @@ export function ChatsView(props: {
   // never draw, or act, in the next.
   if (rowMenu && rowMenu.workspaceId !== workspaceId) setRowMenu(null);
   if (membersFor && membersFor.workspaceId !== workspaceId) setMembersFor(null);
+  // Remove agent and Remove from list ask first. A dialog opened in one
+  // workspace closes in the next, like the menu.
+  const [agentDialog, setAgentDialog] = useState<
+    | { workspaceId: string; kind: "remove"; agentId: string; name: string }
+    | { workspaceId: string; kind: "hide"; channelId: string; name: string }
+    | null
+  >(null);
+  if (agentDialog && agentDialog.workspaceId !== workspaceId) setAgentDialog(null);
   const rowMenuItems = rowMenu ? chatRowMenuItems(rowMenu.target, {
     markRead: () => void markChatRead(rowMenu.channelId, rowMenu.label, rowMenu.dmThreadId),
     setArchived: (archived) => void setChatArchived(rowMenu.channelId, rowMenu.label, archived),
@@ -3749,8 +3766,11 @@ export function ChatsView(props: {
       if (rowMenu.agentId) void setAgentEnabled(rowMenu.agentId, enabled);
     },
     removeAgent: () => {
-      if (rowMenu.agentId) void removeAgent(rowMenu.agentId);
+      const agentId = rowMenu.agentId;
+      const name = agentId ? props.userSettings?.agents[agentId]?.name : undefined;
+      if (agentId && name !== undefined) setAgentDialog({ workspaceId, kind: "remove", agentId, name });
     },
+    hideChat: () => setAgentDialog({ workspaceId, kind: "hide", channelId: rowMenu.channelId, name: rowMenu.label }),
   }) : [];
 
   // Which lane a "both" group shows.
@@ -5287,7 +5307,7 @@ export function ChatsView(props: {
       .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: groupRow(channel, true) })),
     ...dms.filter((dm) => archivedIds.has(dm.channelId))
       .map((dm) => ({ key: dm.channelId, unread: dm.unreadCount, row: dmRow(dm, true) })),
-    ...agentChats.filter((channel) => archivedIds.has(channel.id) || agentRemoved(channel))
+    ...agentChats.filter((channel) => agentRemoved(channel) ? !hiddenIds.has(channel.id) : archivedIds.has(channel.id))
       .map((channel) => ({ key: channel.id, unread: channel.unreadCount, row: <li key={channel.id}>{agentRow(channel, true)}</li> })),
   ];
   const archivedUnread = archivedRows.reduce((sum, entry) => sum + entry.unread, 0);
@@ -5728,6 +5748,27 @@ export function ChatsView(props: {
           open
           onOpenChange={(open) => {
             if (!open) setRowMenu(null);
+          }}
+        />
+      ) : null}
+      {agentDialog?.kind === "remove" && props.userSettings ? (
+        <RemoveAgentDialog
+          agent={{ id: agentDialog.agentId, name: agentDialog.name }}
+          settings={props.userSettings}
+          onCancel={() => setAgentDialog(null)}
+          onConfirm={() => {
+            setAgentDialog(null);
+            void removeAgent(agentDialog.agentId);
+          }}
+        />
+      ) : null}
+      {agentDialog?.kind === "hide" ? (
+        <HideAgentChatDialog
+          name={agentDialog.name}
+          onCancel={() => setAgentDialog(null)}
+          onConfirm={() => {
+            setAgentDialog(null);
+            void hideAgentChat({ workspaceId, channelId: agentDialog.channelId, name: agentDialog.name, onError: props.onError, onNotice: props.onNotice });
           }}
         />
       ) : null}

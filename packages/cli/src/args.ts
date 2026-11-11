@@ -179,6 +179,38 @@ function lookup<T>(table: Readonly<Record<string, T>>, name: string): T | undefi
   return Object.hasOwn(table, name) ? table[name] : undefined;
 }
 
+/** Edits between two names: an insert, a delete, a changed letter, or two neighbors swapped. */
+function editDistance(a: string, b: string): number {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j += 1) rows[0]![j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const changed = a[i - 1] === b[j - 1] ? 0 : 1;
+      rows[i]![j] = Math.min(rows[i - 1]![j]! + 1, rows[i]![j - 1]! + 1, rows[i - 1]![j - 1]! + changed);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        rows[i]![j] = Math.min(rows[i]![j]!, rows[i - 2]![j - 2]! + 1);
+      }
+    }
+  }
+  return rows[a.length]![b.length]!;
+}
+
+/**
+ * The one name a mistyped name most likely meant. It differs only in case and dashes, or by one
+ * edit, or by two when the name has eight letters or more. A tie suggests nothing.
+ */
+function nearest(name: string, candidates: readonly string[]): string | undefined {
+  const fold = (value: string) => value.toLowerCase().replace(/[-_]/g, "");
+  const folded = candidates.filter((candidate) => candidate !== name && fold(candidate) === fold(name));
+  if (folded.length === 1) return folded[0];
+  const limit = fold(name).length >= 8 ? 2 : 1;
+  const [first, second] = candidates
+    .map((candidate) => ({ candidate, distance: editDistance(name, candidate) }))
+    .filter(({ distance }) => distance > 0 && distance <= limit)
+    .sort((left, right) => left.distance - right.distance);
+  return first && first.distance !== second?.distance ? first.candidate : undefined;
+}
+
 function takeValue(tokens: readonly string[], index: number, flag: string): string {
   const value = tokens[index + 1];
   if (value === undefined || value === "--") fail(`${flag} requires a value`);
@@ -229,7 +261,10 @@ function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(verb.strayRefusal ?? `unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
+      if (verb.strayRefusal) fail(verb.strayRefusal);
+      const meant = nearest(token, [...flags, ...GLOBAL_FLAGS].map((candidate) => candidate.name));
+      const dashRule = verb.freeText ? `${meant ? " Otherwise put" : "; put"} ${DASH_RULE}` : "";
+      fail(`unknown ${name} option '${token}'${meant ? `; did you mean '${meant}'?` : ""}${dashRule}`);
     } else {
       operands.push(token);
     }
@@ -1592,6 +1627,12 @@ function stripGlobalFlags(argv: readonly string[]): {
   return { actorFlag, ...(agentId === undefined ? {} : { agentId }), json, tokens };
 }
 
+/** Leads into the help command for an unknown name, with the name it likely meant when there is one. */
+function seeHelp(name: string, candidates: readonly string[]): string {
+  const meant = nearest(name, candidates);
+  return meant ? `did you mean '${meant}'? Run` : "run";
+}
+
 export function parseCliArguments(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -1603,10 +1644,10 @@ export function parseCliArguments(
   const [commandName, verbName, ...tokens] = help ? names : global.tokens;
   if (!commandName) return { help: [] };
   const command = lookup(CLI_COMMANDS, commandName);
-  if (!command) fail(`unknown command '${commandName}'; run dohc --help`);
+  if (!command) fail(`unknown command '${commandName}'; ${seeHelp(commandName, Object.keys(CLI_COMMANDS))} dohc --help`);
   if (!verbName) return { help: [commandName] };
   const verb = lookup(command.verbs, verbName);
-  if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
+  if (!verb) fail(`unknown ${commandName} verb '${verbName}'; ${seeHelp(verbName, Object.keys(command.verbs))} dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
   const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || global.agentId !== undefined || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));

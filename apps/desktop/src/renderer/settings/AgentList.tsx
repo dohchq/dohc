@@ -45,6 +45,10 @@ import {
   type PersonalEntry,
 } from "./PersonalAgentPage";
 import { agentListRows, checkIdentity, placeBack, removeAgentWithUndo, rowId, type AgentListRow } from "./agentRemoval";
+import { RemoveAgentDialog } from "./agentDialogs";
+import { ArchivedAgents, archivedAgentChats, useAgentChats } from "./ArchivedAgents";
+import { archivedChatsFor } from "../../settings/archivedChats";
+import { isPersonalAgentId } from "../workbench/chosenColors";
 
 /** A problem sentence, with each key in backticks set in monospace. */
 export function ProblemText(props: { text: string }) {
@@ -520,6 +524,18 @@ export function AgentList(props: {
   }, [detectTools]);
 
   const rows = agentListRows(settings, props.agentProblems);
+  // Agents whose chat is archived here list under Archived, as in Chats,
+  // with removed agents' chats that are still there. The chats are read again
+  // when an agent leaves or a chat is archived, which can add to Archived.
+  const agentChats = useAgentChats(workspaceId, JSON.stringify([Object.keys(settings.agents).sort(), archivedChatsFor(settings, workspaceId)]), onError);
+  const archivedChats = archivedAgentChats(workspaceId, settings, agentChats, (agentId) =>
+    isPersonalAgentId(agentId)
+      ? personalKnown ? entries.some((entry) => entry.agent.agentId === agentId) : null
+      : (props.agentProblems ?? []).some((problem) => problem.id === agentId));
+  const listed = rows.filter((row) => row.kind === "broken" || !archivedChats.archived.has(row.agent.id));
+  // The agent Remove asks about. A dialog opened in one workspace closes in the next.
+  const [removing, setRemoving] = useState<{ workspaceId: string; agent: Agent } | null>(null);
+  if (removing && removing.workspaceId !== workspaceId) setRemoving(null);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
   // The chip shows only when there is more than one agent to choose from.
   const automation = automationAgent(settings);
@@ -543,7 +559,10 @@ export function AgentList(props: {
       (target === "page" ? back.current : heading.current)?.focus();
       return;
     }
-    const element = card.current?.querySelector<HTMLElement>(`[data-testid="agent-row"][data-agent-id="${CSS.escape(target.row)}"]`);
+    const id = CSS.escape(target.row);
+    const element = card.current?.querySelector<HTMLElement>(
+      `[data-testid="agent-row"][data-agent-id="${id}"], [data-testid="agent-row-archived"][data-agent-id="${id}"] > button`,
+    );
     // A row for an agent just added waits for the settings that list it.
     if (!element && !Object.hasOwn(settings.agents, target.row)) return;
     focusAfter.current = null;
@@ -718,16 +737,21 @@ export function AgentList(props: {
 
   const remove = async (agent: Agent) => {
     const removed = await removeAgentWithUndo({
-      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave, order: onOrder, onError, onClearError, onNotice,
+      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave,
+      chatId: agentChats?.find((chat) => chat.agentId === agent.id)?.id, order: onOrder, onError, onClearError, onNotice,
     });
     if (!removed) return;
     setRenaming((current) => (current === agent.id ? null : current));
-    // Its page goes with it, and focus goes to the Agents heading.
+    // Its page or Archived row goes with it, and focus goes to the Agents heading.
     setOpened((current) => {
       if (current !== agent.id) return current;
       focusAfter.current = "heading";
       return null;
     });
+    // From an Archived row the list may already show without it, with focus
+    // returned to nothing or to the panel around the list.
+    const active = document.activeElement;
+    if (active === null || active.contains(card.current)) heading.current?.focus();
   };
 
   const changePersonal = async (entry: PersonalEntry, next: PersonalAgentChange, failure: string): Promise<boolean> => {
@@ -760,6 +784,18 @@ export function AgentList(props: {
         props.trust?.onTrust();
       }} />
     </div>
+  ) : null;
+
+  const removeDialog = removing ? (
+    <RemoveAgentDialog
+      agent={removing.agent}
+      settings={settings}
+      onCancel={() => setRemoving(null)}
+      onConfirm={() => {
+        setRemoving(null);
+        void remove(removing.agent);
+      }}
+    />
   ) : null;
 
   if (page) {
@@ -798,13 +834,14 @@ export function AgentList(props: {
               ? { onUseForAutomations: () => void wakeForAutomations(agent) }
               : {})}
             onRename={() => setRenaming(agent.id)}
-            onRemove={() => void remove(agent)}
+            onRemove={() => setRemoving({ workspaceId, agent })}
             onCheck={() => void check(agent)}
             onChange={(change) => void onSave(withAgent(settings, agent.id, change))}
             onBack={closePage}
             backRef={back}
           />
         </div>
+        {removeDialog}
       </section>
     );
   }
@@ -878,9 +915,9 @@ export function AgentList(props: {
           <p data-testid="agents-empty" className="m-0 rounded-lg border border-dashed border-line px-4 py-6 text-center text-[13px] text-muted">
             No agents yet.
           </p>
-        ) : null) : (
+        ) : null) : listed.length === 0 && entries.length === 0 ? null : (
           <div data-testid="agents" className="rounded-lg border border-line bg-panel">
-            {rows.map((row) => row.kind === "broken" ? (
+            {listed.map((row) => row.kind === "broken" ? (
               <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
             ) : (
               <AgentRow
@@ -901,6 +938,18 @@ export function AgentList(props: {
             ))}
           </div>
         )}
+        <ArchivedAgents
+          workspaceId={workspaceId}
+          agents={rows.flatMap((row) => {
+            const chat = row.kind === "agent" ? archivedChats.archived.get(row.agent.id) : undefined;
+            return row.kind === "agent" && chat ? [{ agent: row.agent, chat }] : [];
+          })}
+          removed={archivedChats.removed}
+          onOpen={openPage}
+          onRemove={(agent) => setRemoving({ workspaceId, agent })}
+          onError={(message, cause, retry) => onError?.(message, cause, retry)}
+          onNotice={onNotice}
+        />
         <PersonalReadFailure state={personal.state} reported={reportedRead} onReload={personal.reload} onError={onError} />
         {personal.state.status === "ready" ? personal.state.accounts.map((account) => (
           <AccountReadFailure key={account.accountKey} account={account} reported={reportedAccounts} onReload={personal.reload} onError={onError} onClearError={onClearError} />
@@ -938,6 +987,7 @@ export function AgentList(props: {
           }}
         />
       ) : null}
+      {removeDialog}
     </section>
   );
 }
