@@ -155,7 +155,7 @@ export async function startDocumentNativeHost(options, deployment) {
         storage = deployment.storage;
       const current = storage.resolveCurrentLiveDocumentBinding({
         document: entry.document,
-        actor: { kind: 'owner', userId: 'owner', shareId: 'share' },
+        actor: { kind: 'owner', userId: 'owner' },
       });
       assert.equal(current.kind, 'current');
       const { beginStopRestore, advanceStopRestoreFence } = await load(

@@ -13,7 +13,7 @@ function fixture() {
       definition_hash,record_id,state,accepted_by,accepted_generation,created_at_ms,updated_at_ms)
     VALUES ('press','workspace','share','grant',4,'recipient-press','reader',?,'docs',?,'record','accepted','server',1,1,1)`)
     .run(declaration.automationId, "a".repeat(16)));
-  const input = {...f.capture(f.update(), "automation", {kind: "owner", userId: "owner", shareId: "owner-share"}),
+  const input = {...f.capture(f.update(), "automation", {kind: "owner", userId: "owner"}),
     trustedAutomation: declaration, trustedAutomationPress: {hostPressId: "press", automationId: declaration.automationId}};
   return {...f, input};
 }

@@ -355,7 +355,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   storage.createShare({share: {shareId: "native-share", workspaceId: WORKSPACE, granterUserId: "owner", selectorJson: JSON.stringify({paths: ["Tasks"], versionId: null}), createdAtMs: 0},
     grant: {grantId: "native-grant", shareId: "native-share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null}});
   await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
-  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner"}});
   if (current.kind !== "current") throw new Error(JSON.stringify(current));
   const {binding} = current;
   const nativeSession = session.nativeOwner!.sessionId;
@@ -390,7 +390,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([WORKSPACE]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["automation"] })!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
@@ -398,11 +398,10 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   await copy.sync(); await recipient.sync();
   const replica = {...copy, workspaceId: WORKSPACE, signal: copy.lifetime};
   let refused = false, loseAck = false, staleRecipient = false;
-  let ownerDeliveryShare = "native-share";
   const capture = async () => {
     await consumer.drain(document);
     const registration = consumer.captureRegistration(binding);
-    const captured = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: ownerDeliveryShare, storage,
+    const captured = captureOwnerLiveFrameHost({authenticatedUserId: "owner", storage,
       trustedAccount: {accountId: "owner", name: "Owner"}, bounds: profile.namedLive.host, validate,
       native: {client: native, workspace: owner.workspace, registrationId: registration.id, coordinate: host, binding,
         invalidated: registration.invalidated, changes: createNamedFrameChanges(16), deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId, drain: (doc, signal) => consumer.drain(doc, signal)}});
@@ -685,7 +684,6 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   expect(await readFile(join(owner.root, "Tasks/automations.yaml"), "utf8")).toBe(markText);
   expect(await readFile(join(copy.root, "Tasks/automations.yaml"), "utf8")).toBe(markText);
   const freshGrant = await grantButton();
-  ownerDeliveryShare = freshGrant.shareId;
   await vi.waitFor(async () => expect(await inspect(freshGrant.shareId, freshGrant.grantId)).toMatchObject({kind: "ready"}), {timeout: DEADLINE_MS});
   // A fresh server replica cannot infer the prior host's Allow from identical
   // definition bytes, even though the prior replica was ready.
@@ -907,7 +905,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const registrationResult = storage.registerLiveDocumentBaseline({host, baselineBytes, evidence: validated.evidence, registeredAtMs: 3});
   expect(registrationResult, JSON.stringify(registrationResult)).toMatchObject({kind: "registered"});
   await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
-  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner"}});
   if (current.kind !== "current") throw new Error(JSON.stringify(current));
   const {binding} = current;
   const nativeSession = session.nativeOwner!.sessionId;
@@ -942,7 +940,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([WORKSPACE]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const nativeRegistration = consumer.captureRegistration(binding);
   const common = {storage, bounds: profile.namedLive.host, validate,
@@ -971,7 +969,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const minted = await tickets.mint({objectId: document.objectId}, viewer);
   const ticket = await tickets.redeem(minted!.token, viewer);
   if (authors === "owner-and-recipient") {
-    const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner", shareId: "native-share",
+    const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner",
       trustedAccount: {accountId: "owner", name: "Owner"}});
     await edit(ownerHost, "OwnerNote", {kind: "account", accountId: "owner"}, false);
   }

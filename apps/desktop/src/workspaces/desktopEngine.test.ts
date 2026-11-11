@@ -207,7 +207,7 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[],
     connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
       retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
       documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
-        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}})),
+        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}})),
         ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})})})};
   const workspace = () => f.authorities.withAuthority("owner", lease =>
     ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
@@ -1037,7 +1037,7 @@ describe("server owner peer lifecycle", () => {
     const row = {binding, document: {mainVersionId: "main", objectId: "broken", currentPath: "broken.md"},
       retirementOwed: true, relayDatabaseNamespace: "namespace", state: "requested" as const};
     const document = {binding: {...binding, objectId: "working", currentPath: "working.md", selectorPaths: ["working.md"]},
-      relayDatabaseNamespace: "namespace", shareId: "share"};
+      relayDatabaseNamespace: "namespace"};
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
@@ -1109,7 +1109,7 @@ describe("server owner peer lifecycle", () => {
     const rootPath = await createTestScratch("dohc-server-owner-status-");
     f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
     const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace"};
     let status = "preparing";
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
@@ -1151,7 +1151,7 @@ describe("server owner peer lifecycle", () => {
     const bindingOf = (path: string, objectId: string) => ({workspaceId: "owner", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
       currentPath: path, selectorPaths: [path], restoreFenceGeneration: 1});
     const ready = (path: string, objectId: string) =>
-      ({path, objectId, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}});
+      ({path, objectId, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}});
     const observed = () => ownerDeliveryMock.pass.mock.calls.filter(([options]) => options.observedOnly === true)
       .map(([options]) => options.document.binding.objectId as string);
     async function owner(rows: () => unknown[]) {
@@ -1227,7 +1227,7 @@ describe("server owner peer lifecycle", () => {
     f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
     const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
       currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
-    const document = {binding, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const document = {binding, relayDatabaseNamespace: "namespace"};
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
@@ -2163,7 +2163,7 @@ describe("server owner peer lifecycle", () => {
     const rootPath = await createTestScratch("dohc-server-owner-refused-");
     f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
     const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace"};
     const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
     const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
     const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
@@ -2214,6 +2214,11 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       rows = [ready, ...others]; diverged = false; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      // One document's damaged server record marks only its row diverged; it still outranks a refusal.
+      rows = [ready, refused, divergedRow]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
       // A document edited while live editing was off outranks a frozen one and
       // the server's other reasons, but not a refusal a Resume can still help.
       rows = [ready, ...others, edited]; f.engine.retryOwnerDelivery("owner");
@@ -2247,7 +2252,7 @@ describe("server owner peer lifecycle", () => {
     const rootPath = await createTestScratch("dohc-server-owner-peer-");
     f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
     const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace"};
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},

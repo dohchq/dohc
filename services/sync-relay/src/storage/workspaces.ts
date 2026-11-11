@@ -380,6 +380,11 @@ export function workspaceIsOwnedBy(storage: StorageContext, workspaceId: string,
     return row !== undefined;
   }
 
+export function workspaceOwner(storage: StorageContext, workspaceId: string): string | null {
+    const row = storage.db.prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?").get(workspaceId);
+    return row ? String(row.owner_user_id) : null;
+  }
+
 export function workspaceUsageBytes(storage: StorageContext, workspaceId: string): number {
     const row = storage.db
       .prepare(

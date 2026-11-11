@@ -223,9 +223,10 @@ it("refuses a restore while live editing is still stopping with a conflict that 
   try {
     const plan = await f.plan(), document = f.input.evidence.document;
     f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor)
-        VALUES ('restore-history',?,?,'main',?,?,'{}','{}',?,x'0000','owner','share','{}',1,10,1,0)`)
-      .run(`ordinary-activation-${"d".repeat(64)}`, document.workspaceId, document.objectId, document.lineageClaimId, document.lineageClaimId));
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor)
+        VALUES ('restore-history',?,?,'main',?,?,'{}',?,?,x'0000','owner','{}',1,10,1,0)`)
+      .run(`ordinary-activation-${"d".repeat(64)}`, document.workspaceId, document.objectId, document.lineageClaimId,
+        JSON.stringify({...document, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 1}), document.lineageClaimId));
     for (const [suffix, body] of [["/plan", f.planInput], ["", {intent: plan.intent}]] as const) {
       const response = await f.request(suffix, body);
       expect(response.status).toBe(409);

@@ -52,7 +52,7 @@ export interface LiveHostConnectionCoordinate {
 export interface CurrentLiveBindingRequest {
   readonly document: LiveDocumentKey;
   readonly actor:
-    | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
+    | { readonly kind: "owner"; readonly userId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
     | { readonly kind: "link"; readonly sessionId: string;
         readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
@@ -85,6 +85,8 @@ export type CurrentLiveBindingResult =
   | {
       readonly kind: "current";
       readonly binding: LiveObjectBinding;
+      /** What this editor is shown of `binding`: the binding itself for an owner, the recipient's share's view for a named or link recipient. */
+      readonly view: LiveObjectBinding;
       readonly authority: ServerDerivedLiveUpdateAuthority;
       readonly host: LiveHostConnectionCoordinate;
     }
@@ -679,7 +681,7 @@ export interface SyncRelayStorage {
   /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
   serviceHostEnrollmentCovered(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">): boolean;
   /** With `restoring`, the owner's unfinished restore that kept the live session also counts. Live admission never passes it. */
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean): boolean;
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string}, restoring?: boolean): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** Whether the document has a restore that has neither resumed nor been declined. */
@@ -804,7 +806,7 @@ export interface SyncRelayStorage {
   automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
     authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
-  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
+  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding} | null;
   /**
    * The accepted state of the live document now at `path` in main: its
    * journal cut, "restoring" while a restore keeps the relay from cutting it,
@@ -878,6 +880,8 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  /** The user who owns the workspace, or null when the relay has no such workspace. */
+  workspaceOwner(workspaceId: string): string | null;
   discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;

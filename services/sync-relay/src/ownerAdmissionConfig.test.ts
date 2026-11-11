@@ -8,18 +8,20 @@ import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConf
 const fixtureRoots: string[] = [];
 afterEach(() => {for (const root of fixtureRoots.splice(0)) rmSync(root,{recursive: true,force: true});});
 
-it("requires a bounded explicit owner share map and every validation budget",() => {
+it("admits every delivered workspace's owner and requires every validation budget",() => {
   const root = mkdtempSync(join(tmpdir(),"dohc-owner-admission-")), path = join(root,"config.json");
   fixtureRoots.push(root);
   const validation = {maxStructVisits: 100,maxValueNodeVisits: 100,maxDecodedPayloadByteVisits: 1000,maxStructClientGroupVisits: 100,
     maxDeleteClientGroupVisits: 100,maxDeleteIntervalVisits: 100,maxIndexOperations: 100};
-  const value = {version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation,maxEntriesPerDrain: 10,
+  const value = {version: 1,validation,maxEntriesPerDrain: 10,
     maxBytesPerDrain: 10_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 1000};
-  const read = (input: unknown) => {writeFileSync(path,JSON.stringify(input)); return readOwnerAdmissionConfig(path,["workspace"], accountId => ({accountId, name: "Owner name"}));};
-  expect(read(value).admission.shares).toEqual(new Map([["workspace","share"]]));
-  expect(() => readOwnerAdmissionConfig(path,["workspace","other"], accountId => ({accountId, name: "Owner name"}))).toThrow("workspace is not configured");
-  for (const bad of [{...value,shares: []},{...value,shares: [...value.shares,...value.shares]},
-    {...value,shares: [{workspaceId: "unknown",shareId: "share"}]},{...value,validation: {...validation,maxIndexOperations: undefined}},
+  const read = (input: unknown, workspaceIds = ["workspace"]) => {
+    writeFileSync(path,JSON.stringify(input)); return readOwnerAdmissionConfig(path,workspaceIds, accountId => ({accountId, name: "Owner name"}));
+  };
+  expect(read(value).admission.workspaceIds).toEqual(new Set(["workspace"]));
+  expect(read(value,["workspace","other"]).admission.workspaceIds).toEqual(new Set(["workspace","other"]));
+  expect(() => read(value,[])).toThrow("workspace is not configured");
+  for (const bad of [{...value,version: 2},{...value,shares: [{workspaceId: "workspace",shareId: "share"}]},{...value,validation: {...validation,maxIndexOperations: undefined}},
     {...value,validation: {...validation,defaultBudget: 10}},{...value,maxEntriesPerDrain: undefined},
     ...[0,-1,1.5,2_147_483_648].map(pollIntervalMs => ({...value,pollIntervalMs})),{...value,extra: true}]) expect(() => read(bad)).toThrow();
   expect(() => readOwnerAdmissionConfig("relative.json",["workspace"], accountId => ({accountId, name: "Owner name"}))).toThrow("absolute");
@@ -36,7 +38,7 @@ it("resumes a bounded workspace scan and aborts the active pass on close",async 
     return objectId ? {workspaceId,mainVersionId: "main",objectId,lineageClaimId: "a".repeat(64)} : undefined;
   }})};
   let held: AbortSignal | undefined;
-  const config = {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share-a"],["b","share-b"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
+  const config = {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set(["a","b"]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
     maxDocumentsPerPass: 2,pollIntervalMs: 100,passDeadlineMs: 30_000};
   const runner = startOwnerAdmission({config,storage: storage as never,history: {} as never,onError: vi.fn(),control: {settle: async (doc,signal) => {
     calls.push(doc.objectId);
@@ -60,7 +62,7 @@ it("reports a recurring failure again after a successful pass",async () => {
     return {workspaceId: "a",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64)};
   }})};
   const runner = startOwnerAdmission({storage: storage as never,history: {} as never,onError,
-    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},maxDocumentsPerPass: 1,pollIntervalMs: 100,passDeadlineMs: 30_000},
+    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set(["a"]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},maxDocumentsPerPass: 1,pollIntervalMs: 100,passDeadlineMs: 30_000},
     control: {settle: async () => {if (fails) throw new Error("offline"); return {} as never;}},
   });
   try {
@@ -81,7 +83,7 @@ function admissionFixture(settle: Settle,onError = vi.fn()) {
   const runner = startOwnerAdmission({
     storage: {unavailable: unavailable.signal,createLiveCommittedDeliveryStore: () => ({nextOwnerDocument})} as never,
     history: {} as never,onError,control: {settle},
-    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
+    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set(["a"]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
       maxDocumentsPerPass: 2,pollIntervalMs: 100,passDeadlineMs: 30_000},
   });
   return {runner,unavailable,nextOwnerDocument};

@@ -17,7 +17,7 @@ const capabilities = new WeakMap<ServiceActivationAccess, {
  */
 export function readServiceActivation(storage: StorageContext, document: LiveDocumentKey) {
   return storage.db.prepare(`SELECT relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-    predecessor_activation_id,source_json,binding_json,state_digest,owner_user_id,share_id,completion_json,accounted_bytes,
+    predecessor_activation_id,source_json,binding_json,state_digest,owner_user_id,completion_json,accounted_bytes,
     retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms FROM ${SERVICE_ACTIVATIONS} a
     WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND NOT EXISTS (SELECT 1 FROM ${SERVICE_ACTIVATIONS} s
       WHERE s.relay_database_namespace=a.relay_database_namespace AND s.predecessor_activation_id=a.activation_id)
@@ -62,7 +62,7 @@ export function allowsServiceActivation(storage: StorageContext, request: Curren
   const held = access && capabilities.get(access);
   return !!held && held.storage === storage && access!.activationId === row!.activation_id &&
     isDeepStrictEqual(held.host, host) && isDeepStrictEqual(held.binding, binding) &&
-    request.actor.kind === "owner" && request.actor.userId === row!.owner_user_id && request.actor.shareId === row!.share_id;
+    request.actor.kind === "owner" && request.actor.userId === row!.owner_user_id;
 }
 
 /**

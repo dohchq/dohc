@@ -31,10 +31,10 @@ const positive=(value:unknown)=>{
   return value;
 };
 export function parseServiceActivationTarget(value:unknown){
-  const item=configRecord(value,["workspaceId","path","shareId"]);
+  const item=configRecord(value,["workspaceId","path"]);
   const checked=typeof item.path==="string"?validateUserWritePath(item.path):undefined;
   if(typeof item.path!=="string" || !checked?.ok || checked.normalized!==item.path || liveDocumentKindForPath(item.path)!=="richdoc")throw new Error("Invalid service activation path.");
-  return Object.freeze({workspaceId:parseLiveUpdateIdentifier(item.workspaceId),path:item.path,shareId:parseLiveUpdateIdentifier(item.shareId)});
+  return Object.freeze({workspaceId:parseLiveUpdateIdentifier(item.workspaceId),path:item.path});
 }
 export type ServiceActivationTarget=ReturnType<typeof parseServiceActivationTarget>;
 const targetKey=(target:ServiceActivationTarget)=>JSON.stringify([target.workspaceId,target.path]);
@@ -63,7 +63,7 @@ export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceAc
  */
 export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
-  binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
+  binding:LiveObjectBinding;target:string;ownerUserId:string};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
 /** How a departed document's settlement ended. The engine refuses an `unready` document's registration, as once it parked. */
 export type DepartedSettlement={kind:"settled";settlement:CommittedSettlement}|{kind:"pending";reason:string}|{kind:"unready"};
@@ -290,7 +290,7 @@ export class ServiceActivationDriver {
       const object=moved?undefined:this.#objects.get(targetKey(row));
       if(row.workspaceId!==document.workspaceId || (object!==undefined && object!==document.objectId))continue;
       const read=this.#store.read(row.workspaceId,row.path,o.config.maxCaptureBytes,document.objectId);
-      if(read?.completed && read.shareId===row.shareId && read.source.objectId===document.objectId && read.source.lineageClaimId===document.lineageClaimId){
+      if(read?.completed && read.source.objectId===document.objectId && read.source.lineageClaimId===document.lineageClaimId){
         target=row;saved=read;break;
       }
     }
@@ -305,7 +305,7 @@ export class ServiceActivationDriver {
     // Only a step that registers reloads the retained activation into a new native session.
     const operation=o.storage.readStopRestore(lookup),origin=operation?.basis.ownerOrigin;
     if(!operation || operation.intent.deliveryKind!=="owner" || !isDeepStrictEqual(operation.intent.document,parseLiveDocumentKey(document)) ||
-      operation.intent.shareId!==saved.shareId || operation.intent.ownerUserId!==saved.ownerUserId || !origin ||
+      operation.intent.ownerUserId!==saved.ownerUserId || !origin ||
       JSON.parse(origin)?.adoptionId!==saved.activationId)throw new Error("Service restore owner adoption is unavailable.");
     const slot=moved?movedKey(target,document.objectId):targetKey(target);
     const owner:Owner=this.#owner(target,async signal=>{
@@ -326,7 +326,7 @@ export class ServiceActivationDriver {
       if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
       this.#owners.set(key,owner);
       return capture;
-    },{binding:operation.basis.ownerBinding,activationPending:false,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}},undefined,slot);
+    },{binding:operation.basis.ownerBinding,activationPending:false,ownerUserId:saved.ownerUserId},undefined,slot);
     return owner.consumer;
   }
   workspaceReady(workspaceId:string){
@@ -346,7 +346,6 @@ export class ServiceActivationDriver {
   departing(target:ServiceActivationTarget,signal:AbortSignal,objectId?:string){
     const o=this.options,saved=this.#read(target,objectId);
     if(!saved)return undefined;
-    if(saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     const document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
       objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -395,7 +394,7 @@ export class ServiceActivationDriver {
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     const document=parseLiveDocumentKey(value),saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes,document.objectId);
-    if(!saved || saved.shareId!==target.shareId || saved.source.objectId!==document.objectId || saved.source.lineageClaimId!==document.lineageClaimId) {
+    if(!saved || saved.source.objectId!==document.objectId || saved.source.lineageClaimId!==document.lineageClaimId) {
       throw new Error("Retained service activation changed.");
     }
     check();
@@ -583,7 +582,6 @@ export class ServiceActivationDriver {
     }
     let saved=this.#read(target,objectId);
     if(!saved)this.#completedTargets.delete(key);
-    if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     if(saved)this.#objects.set(key,saved.source.objectId);
     // An activation whose retirement is open leaves only through `retire`, even once Resume hosts its document again.
     if(saved && o.storage.serviceActivationRetirement({workspaceId:target.workspaceId,objectId:saved.source.objectId}))return retiring;
@@ -624,7 +622,7 @@ export class ServiceActivationDriver {
       }
       if(!saved){
         try{
-          await this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,signal,
+          await this.#store.prepare({capture,host:o.host,registeredAtMs:Date.now(),guard:check,signal,
             validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
@@ -644,7 +642,7 @@ export class ServiceActivationDriver {
       const resumed=this.#store.resume({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
       o.registered();check();
       owner=this.#owner(target,async()=>capture,{binding:resumed.binding,activationPending:!resumed.completed,
-        actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}},resumed.access);
+        ownerUserId:saved.ownerUserId},resumed.access);
       if(retired())return retiring;
       this.#owners.set(JSON.stringify(document),owner);
     }
@@ -679,7 +677,7 @@ export class ServiceActivationDriver {
     });
   }
   // Owner delivery through the native session's verified transport.
-  #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"actor"|"activationPending">,
+  #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"ownerUserId"|"activationPending">,
     access?:ServiceActivationAccess,slot=targetKey(target)):Owner{
     const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId)!;
     const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
@@ -687,13 +685,13 @@ export class ServiceActivationDriver {
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publish:signal=>workspace.replica.publish(signal),seedDelivery:transport.seedDelivery,
-      ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
+      ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,workspaceIds:new Set([target.workspaceId]),
         maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,keptOnServer:workspace.identity,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:slot,...state};
   }
   // Clears readiness when the owner may no longer use its exact binding.
   #invalidated(owner:Owner,document:LiveDocumentKey){
-    const current=this.#currentBinding(document,owner.actor);
+    const current=this.#currentBinding(document,owner.ownerUserId);
     if(isDeepStrictEqual(current,owner.binding))return false;
     owner.completed=false;this.#completedTargets.delete(owner.target);
     const key=JSON.stringify(document);
@@ -701,8 +699,8 @@ export class ServiceActivationDriver {
     return true;
   }
   // The exact binding the owner may use now, or null while it is fenced or unavailable.
-  #currentBinding(document:LiveDocumentKey,saved:{ownerUserId:string;shareId:string}){
-    const current=this.options.storage.resolveCurrentLiveDocumentBinding({document,actor:{kind:"owner",userId:saved.ownerUserId,shareId:saved.shareId}});
+  #currentBinding(document:LiveDocumentKey,ownerUserId:string){
+    const current=this.options.storage.resolveCurrentLiveDocumentBinding({document,actor:{kind:"owner",userId:ownerUserId}});
     return current.kind==="current"?current.binding:null;
   }
 }

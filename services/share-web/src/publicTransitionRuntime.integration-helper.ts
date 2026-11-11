@@ -37,7 +37,7 @@ type Step = Omit<LoadedPublicTransitions["cases"]["view"]["updates"][number], "b
 
 export async function assertPublicApplication(h: PublicTransitionHarness, fixture: PublicTransitionFixture, step: Step) {
   const current = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-    actor: {kind: "owner", userId: h.ownerUserId, shareId: fixture.link.shareId}});
+    actor: {kind: "owner", userId: h.ownerUserId}});
   if (current.kind !== "current") throw new Error("Transition native binding missing.");
   const native = await h.host().captureNative(current.binding);
   const ack = await native.client.readLiveApplicationAck({id: native.nextRequestId(), workspace: native.workspace,
@@ -177,7 +177,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
             bounds: h.interruptedBounds, validate: h.validate});
           expect(admission.projectedMarkdownSha256).toBe(hash(continuation.expected.markdown));
           const binding = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-            actor: {kind: "owner", userId: h.ownerUserId, shareId: fixture.link.shareId}});
+            actor: {kind: "owner", userId: h.ownerUserId}});
           if (binding.kind !== "current") throw new Error("Restored continuation binding missing.");
           const admissionReceipt = save("admission.json", Buffer.from(JSON.stringify({admission, binding: binding.binding,
             bounds: h.interruptedBounds, checkpointSha256: hash(actual.cut.checkpoint.bytes),

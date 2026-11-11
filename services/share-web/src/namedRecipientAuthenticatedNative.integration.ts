@@ -216,7 +216,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     await browserExpect(wrongGrant.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
     expect(requests).toContainEqual({accountId: users[1]!.id, path: "/api/live/named-documents", status: 404});
     results.authentication = {accountIds: users.map(user => user.id), requests, wrongGrantRefused: true};
-    const actor = {kind: "owner", userId: ownerUser.id, shareId: "share-0"} as const;
+    const actor = {kind: "owner", userId: ownerUser.id} as const;
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor});
     if (current.kind !== "current") throw Error("Current binding unavailable.");
     const capture = await active.captureNative(current.binding);

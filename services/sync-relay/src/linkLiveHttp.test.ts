@@ -131,3 +131,24 @@ it("explains a document the session host blocked as unavailable until the block 
   blocked = false;
   expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
 });
+
+// A link sees each share root by its own name, so a nested folder named
+// shared-with-me shows as the reserved top-level folder, which no binding can
+// hold. The share is valid and covers the file, so only the link's view refuses.
+const unviewable = JSON.stringify({paths: ["docs", "notes/shared-with-me"], versionId: null});
+it("refuses a link's host binding when its share's projected view can't form a binding", async () => {
+  const f = await fixture();
+  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toMatchObject({kind: "current", binding: {objectId: binding.objectId}});
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
+  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toEqual({kind: "refused", reason: "stale-selector"});
+});
+it("refuses to mint a link ticket for such a share before it writes a ticket row", async () => {
+  const f = await fixture();
+  const ticketRows = () => Number(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()!.count);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
+  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).toBeNull();
+  expect(ticketRows()).toBe(0);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
+  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).not.toBeNull();
+  expect(ticketRows()).toBe(1);
+});

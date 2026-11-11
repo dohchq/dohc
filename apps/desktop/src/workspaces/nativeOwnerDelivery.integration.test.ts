@@ -21,7 +21,7 @@ const frames = {receive: {maxFrameBytes: 4096, maxStateVectorBytes: 1024, maxUpd
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const configValue = {version: 1, nativeConfigPath: resolve("test", "native.json"), nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
   relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 1000,
-  documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};
+  documents: [{binding, relayDatabaseNamespace: "namespace"}]};
 const config = parseDesktopOwnerDeliveryConfig(configValue);
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const update = Uint8Array.of(1,2,3), baseUpdate = Uint8Array.of(0,0);
