@@ -1667,8 +1667,10 @@ export function NoticeCenter(props: {
     }
 
     const projection = props.syncStatus?.shareProjection;
-    // Only held files remain. Each waits on a person's step, which a refresh
-    // cannot take, so the row names the file and the step.
+    // Only held files remain, each waiting on a person's step, so the row
+    // names the file and the step. A background refresh skips an unchanged
+    // share, so once the person moves their own file, Refresh brings the
+    // shared one in. Only the sharer can rename one of two spellings.
     if (
       projection?.state === "pending" &&
       projection.pendingPathCount === 0 &&
@@ -1682,7 +1684,12 @@ export function NoticeCenter(props: {
         title: projection.heldPathCount === 1
           ? "dohc held back a shared file"
           : `dohc held back ${projection.heldPathCount} shared files`,
-        body: unjournalablePathMessages(projection.heldPaths).join(" "),
+        ...(projection.heldPaths.some(entry => entry.reason === "local-collision")
+          ? {
+              body: `${unjournalablePathMessages(projection.heldPaths).join(" ")} Then choose Refresh.`,
+              actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
+            }
+          : { body: unjournalablePathMessages(projection.heldPaths).join(" ") }),
         Icon: AlertTriangle,
       });
     } else if (projection?.state === "pending") {

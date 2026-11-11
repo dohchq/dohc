@@ -354,7 +354,7 @@ describe("notice center", () => {
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
   });
 
-  it("names a held shared file and the person's step, with no Refresh", async () => {
+  it("names a held shared file and the person's step, with Refresh only once the person can act", async () => {
     const held = (heldPaths: Array<{ path: string; reason: "local-collision" | "spelling-collision"; owner?: string }>): SyncStatusResult => ({
       state: "synced",
       pendingChangeCount: 0,
@@ -373,15 +373,21 @@ describe("notice center", () => {
         pullInFlight: false,
       },
     });
-    const view = renderNotices({ syncStatus: held([{ path: "mine.md", reason: "local-collision" }]) });
+    // A background refresh skips an unchanged share, so the file arrives
+    // when the person moves theirs and chooses Refresh.
+    const onRefreshShareView = vi.fn();
+    const view = renderNotices({ syncStatus: held([{ path: "mine.md", reason: "local-collision" }]), onRefreshShareView });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     let notice = screen.getByTestId("notice-share-projection-held");
     expect(notice.textContent).toContain("dohc held back a shared file");
-    expect(notice.textContent).toContain("mine.md already has a file from this machine. Move or rename this file to receive the shared file.");
-    expect(within(notice).queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(notice.textContent).toContain("mine.md already has a file from this machine. Move or rename this file to receive the shared file. Then choose Refresh.");
     expect(screen.queryByTestId("notice-share-projection-pending")).toBeNull();
+    await userEvent.click(within(notice).getByRole("button", { name: "Refresh" }));
+    expect(onRefreshShareView).toHaveBeenCalledOnce();
 
+    // Only the sharer can rename one of two spellings, so a refresh can't help.
     view.rerender(noticeElement({ syncStatus: held([{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }]) }));
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
     notice = screen.getByTestId("notice-share-projection-held");
     expect(notice.textContent).toContain("This machine treats Plan.md and plan.md as the same name. Ask the person who shared the files to rename one of them.");
     expect(within(notice).queryByRole("button", { name: "Refresh" })).toBeNull();
