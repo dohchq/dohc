@@ -298,6 +298,7 @@ export function TextControl(props: {
   // that throws on an over-long value, so a bounded setting must bound its input
   // — `maxLength` truncates typing and paste, and the caller clamps besides.
   maxLength?: number;
+  disabled?: boolean;
 }) {
   return (
     <input
@@ -307,9 +308,10 @@ export function TextControl(props: {
       value={props.value}
       placeholder={props.placeholder}
       maxLength={props.maxLength}
+      disabled={props.disabled}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
     />
   );
 }

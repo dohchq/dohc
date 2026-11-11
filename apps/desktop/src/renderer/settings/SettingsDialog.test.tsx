@@ -2931,7 +2931,7 @@ describe("SettingsDialog", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  it("persists the attachment location and hides the folder name for same-folder", async () => {
+  it("persists the attachment location and shows where each choice saves", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
@@ -2942,13 +2942,22 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    // Folder name is visible for the default (per-document) location.
-    expect(await screen.findByTestId("attachment-folder-input")).toBeTruthy();
-
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "global-folder",
+    const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
+    const radio = (name: string) => within(group).getByRole("radio", { name });
+    expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
+    // Each choice describes itself with the path a paste writes.
+    expect(radio("In a folder beside the document").getAttribute("aria-describedby")).toBeTruthy();
+    expect(screen.getByTestId("attachment-location-per-document").textContent).toContain(
+      "Trips/Lisbon/assets/photo.png",
     );
+    expect(screen.getByTestId("attachment-location-global-folder").textContent).toContain(
+      "assets/photo.png",
+    );
+    expect(screen.getByTestId("attachment-location-same-folder").textContent).toContain(
+      "Trips/Lisbon/photo.png",
+    );
+
+    await user.click(radio("In one folder for the whole workspace"));
     // The save carries the changed control only — main merges it onto the
     // file, so the dialog's copy of the other fields never rides along.
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
@@ -2956,13 +2965,41 @@ describe("SettingsDialog", () => {
       patch: { files: { attachmentLocation: "global-folder" } },
     });
 
-    // Switching to same-folder removes the (now meaningless) folder-name row.
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "same-folder",
-    );
+    // The arrow keys move the choice. Beside the document uses no folder, so
+    // the folder name stays in place but cannot be edited.
+    await user.keyboard("{ArrowDown}");
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { files: { attachmentLocation: "same-folder" } },
+    });
     await waitFor(() =>
-      expect(screen.queryByTestId("attachment-folder-input")).toBeNull(),
+      expect(
+        (screen.getByTestId("attachment-folder-input") as HTMLInputElement).disabled,
+      ).toBe(true),
+    );
+  });
+
+  it("names the typed folder in each example path", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
+    );
+
+    const input = await screen.findByTestId("attachment-folder-input");
+    await user.clear(input);
+    await user.type(input, "media");
+    await waitFor(() =>
+      expect(screen.getByTestId("attachment-location-per-document").textContent).toContain(
+        "Trips/Lisbon/media/photo.png",
+      ),
+    );
+    expect(screen.getByTestId("attachment-location-global-folder").textContent).toContain(
+      "media/photo.png",
     );
   });
 
@@ -3024,10 +3061,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
 
     await waitFor(() =>
       expect(
@@ -3044,8 +3078,8 @@ describe("SettingsDialog", () => {
     // edit that never landed.
     await waitFor(() =>
       expect(
-        (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-      ).toBe("per-document"),
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
     );
   });
 
@@ -3063,10 +3097,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     const input = await screen.findByTestId("attachment-folder-input");
     await user.clear(input);
     await user.type(input, "media");
@@ -3075,8 +3106,8 @@ describe("SettingsDialog", () => {
       expect((input as HTMLInputElement).value).toBe("media"),
     );
     expect(
-      (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-    ).toBe("global-folder");
+      screen.getByTestId("attachment-location-global-folder").getAttribute("aria-checked"),
+    ).toBe("true");
   });
 
   it("shows one scoped reset action for each settings scope", async () => {
@@ -3225,15 +3256,18 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const select = await screen.findByTestId("attachment-location-select");
-    await user.selectOptions(select, "global-folder");
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
     expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
       `Settings error: ${words}`,
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
-    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("per-document"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
 
     await act(async () => {
       await onError.mock.calls[0]![2]();
