@@ -4,12 +4,45 @@ import {initializeOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 export const SERVICE_ACTIVATIONS = "sync_relay_service_activations";
 export const LIVE_DELIVERY_OWNER_HISTORY = "sync_relay_live_delivery_owner_history";
 const V1_MIGRATION = "service-activation-v1";
-const MIGRATION = "service-activation-v2";
+const V2_MIGRATION = "service-activation-v2";
+const MIGRATION = "service-activation-v3";
 const SAFE = 9_007_199_254_740_991;
 const optionalInteger = (name: string) => `${name} INTEGER CHECK (${name} IS NULL OR ${name} BETWEEN 0 AND ${SAFE})`;
 // A retirement obligation (`retire_*`) is recorded by Stop and stays as it was
 // until the activation retires. Only a retired activation drops its state.
+// `binding_json` is the lineage's owner binding. Its first activation recorded
+// it, and each successor keeps it at the restore generation it activated at.
 const sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
+  relay_database_namespace TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL CHECK (main_version_id='main'),
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  predecessor_activation_id TEXT,
+  source_json TEXT NOT NULL CHECK (json_valid(source_json)),
+  binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+  state_digest TEXT NOT NULL CHECK (length(state_digest)=64 AND state_digest NOT GLOB '*[^0-9a-f]*'),
+  state_bytes BLOB CHECK (state_bytes IS NULL OR length(state_bytes) BETWEEN 2 AND 20971520),
+  owner_user_id TEXT NOT NULL,
+  completion_json TEXT CHECK (completion_json IS NULL OR json_valid(completion_json)),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${SAFE}),
+  ${optionalInteger("retire_requested_at_ms")},
+  ${optionalInteger("retire_restore_generation")},
+  ${optionalInteger("retire_accepted_cursor")},
+  ${optionalInteger("retired_at_ms")},
+  retired_boundary_json TEXT CHECK (retired_boundary_json IS NULL OR json_valid(retired_boundary_json)),
+  CHECK ((retire_requested_at_ms IS NULL)=(retire_restore_generation IS NULL) AND (retire_requested_at_ms IS NULL)=(retire_accepted_cursor IS NULL)),
+  CHECK ((retired_at_ms IS NULL)=(retired_boundary_json IS NULL) AND (retired_at_ms IS NULL)=(state_bytes IS NOT NULL)),
+  CHECK (retired_at_ms IS NULL OR (retire_requested_at_ms IS NOT NULL AND retired_at_ms>=retire_requested_at_ms)),
+  CHECK (predecessor_activation_id IS NULL OR predecessor_activation_id<>activation_id),
+  PRIMARY KEY (relay_database_namespace,activation_id),
+  FOREIGN KEY (relay_database_namespace,predecessor_activation_id) REFERENCES ${SERVICE_ACTIVATIONS}(relay_database_namespace,activation_id),
+  FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
+    REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
+) STRICT`;
+// The v2 layout, which also named the share the owner's authority came from.
+const v2Sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
   relay_database_namespace TEXT NOT NULL,
   activation_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
@@ -24,11 +57,11 @@ const sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
   owner_user_id TEXT NOT NULL,
   share_id TEXT NOT NULL,
   completion_json TEXT CHECK (completion_json IS NULL OR json_valid(completion_json)),
-  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${SAFE}),
-  ${optionalInteger("retire_requested_at_ms")},
-  ${optionalInteger("retire_restore_generation")},
-  ${optionalInteger("retire_accepted_cursor")},
-  ${optionalInteger("retired_at_ms")},
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  retire_requested_at_ms INTEGER CHECK (retire_requested_at_ms IS NULL OR retire_requested_at_ms BETWEEN 0 AND 9007199254740991),
+  retire_restore_generation INTEGER CHECK (retire_restore_generation IS NULL OR retire_restore_generation BETWEEN 0 AND 9007199254740991),
+  retire_accepted_cursor INTEGER CHECK (retire_accepted_cursor IS NULL OR retire_accepted_cursor BETWEEN 0 AND 9007199254740991),
+  retired_at_ms INTEGER CHECK (retired_at_ms IS NULL OR retired_at_ms BETWEEN 0 AND 9007199254740991),
   retired_boundary_json TEXT CHECK (retired_boundary_json IS NULL OR json_valid(retired_boundary_json)),
   CHECK ((retire_requested_at_ms IS NULL)=(retire_restore_generation IS NULL) AND (retire_requested_at_ms IS NULL)=(retire_accepted_cursor IS NULL)),
   CHECK ((retired_at_ms IS NULL)=(retired_boundary_json IS NULL) AND (retired_at_ms IS NULL)=(state_bytes IS NOT NULL)),
@@ -102,25 +135,58 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
     for (const index of Object.values(indexes)) db.exec(index);
     db.exec(historySql);
   };
-  const v2 = marked(MIGRATION);
-  if (!v2 && marked(V1_MIGRATION)) {
+  const current = marked(MIGRATION);
+  if (!current && marked(V2_MIGRATION)) {
+    if (!exact(db, SERVICE_ACTIVATIONS, "table", v2Sql) || !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)) {
+      throw new Error("Service activation storage is damaged.");
+    }
+    assertConstraints(db);
+    rebuildWithoutShare(db);
+  } else if (!current && marked(V1_MIGRATION)) {
     if (!exact(db, SERVICE_ACTIVATIONS, "table", v1Sql) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Service activation storage is damaged.");
     assertV1Constraints(db);
     // Every v1 activation is current: Stop recorded no obligation before v2.
     db.exec(`ALTER TABLE ${SERVICE_ACTIVATIONS} RENAME TO ${SERVICE_ACTIVATIONS}_v1`);
     create();
     db.exec(`INSERT INTO ${SERVICE_ACTIVATIONS}(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes)
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes)
       SELECT relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes FROM ${SERVICE_ACTIVATIONS}_v1;
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes FROM ${SERVICE_ACTIVATIONS}_v1;
       DROP TABLE ${SERVICE_ACTIVATIONS}_v1;`);
-  } else if (!v2) {
+  } else if (!current) {
     if (present(SERVICE_ACTIVATIONS) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Unmarked service activation storage exists.");
     create();
   }
   if (!exact(db, SERVICE_ACTIVATIONS, "table", sql) || !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)) {
     throw new Error("Service activation storage is damaged.");
   }
+  assertConstraints(db);
+  for (const migration of [V2_MIGRATION, MIGRATION]) {
+    if (!marked(migration)) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(migration, Date.now());
+  }
+}
+
+// Runs inside the relay's schema transaction, where foreign keys stay on.
+// Dropping the activations would cascade into their archived history, so both
+// tables move through temporary copies, history dropped first. Each keeps every
+// column but `share_id`. Deferred checks verify the predecessor chain and each
+// history row's activation when the transaction commits.
+function rebuildWithoutShare(db: SqliteDb): void {
+  const tables = [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY] as const;
+  const columns = tables.map(table => db.prepare(`SELECT name FROM pragma_table_info('${table}') WHERE name<>'share_id' ORDER BY cid`).all()
+    .map(row => String(row.name)).join(","));
+  db.exec("PRAGMA defer_foreign_keys=ON");
+  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
+  for (const table of [...tables].reverse()) db.exec(`DROP TABLE main.${table}`);
+  db.exec(sql);
+  db.exec(historySql);
+  for (const [index, table] of tables.entries()) db.exec(`INSERT INTO main.${table}(${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`);
+  for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
+  for (const index of Object.values(indexes)) db.exec(index);
+}
+
+/** The v2 and current layouts share these indexes and constraints. */
+function assertConstraints(db: SqliteDb): void {
   const activationIndexes = db.prepare(`PRAGMA index_list(${SERVICE_ACTIVATIONS})`).all();
   const historyIndexes = db.prepare(`PRAGMA index_list(${LIVE_DELIVERY_OWNER_HISTORY})`).all();
   if (activationIndexes.length !== 4 || activationIndexes.some(row => row.origin === "pk"
@@ -132,7 +198,6 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
       db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name IN (?,?)").get(SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY)) {
     throw new Error("Service activation constraints are damaged.");
   }
-  if (!v2) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(MIGRATION, Date.now());
 }
 
 function assertV1Constraints(db: SqliteDb): void {

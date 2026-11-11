@@ -215,9 +215,9 @@ export function createServiceHostEnrollmentRoutes(options: {
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
+    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId}});
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
-    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
+    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace}};
   }
   // The exact prepared activation, pending or completed, of a document the host
   // holds for an unadmitted live edit. Its Resume retires that activation inside
@@ -312,7 +312,7 @@ export function createServiceHostEnrollmentRoutes(options: {
         (input.retry === true && (input.path !== undefined || input.shareId === undefined)) || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
       const retained = input.path === undefined ? undefined : storage.readServiceHostEnrollment(workspaceId, input.path as string);
       if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
-      const shareId = parseShareId(input.shareId ?? retained!.shareId);
+      const shareId = parseShareId(input.shareId ?? retained!.shareId ?? undefined);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {})})));
