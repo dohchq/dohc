@@ -29,6 +29,13 @@
       "credits": []
     },
     {
+      "case": "an automation's delivery that changes nothing credits nobody",
+      "authorSnapshot": [{"kind": "automation", "automationId": "collection:Tasks#mark", "attribution": {"actorKind": "automation", "onBehalfOf": "presser", "depth": 1, "run": {"claimId": "claim", "automationName": "Mark done"}}}],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    },
+    {
       "case": "a delivery with no snapshot and no content credits nobody",
       "authorSnapshot": [],
       "firstSeen": [],

@@ -2022,8 +2022,10 @@ pub fn apply_committed_with_settlement_limit(
                 }
             }
             // Canonical person and agent snapshots retain names and explicit depths.
+            // An automation named from the snapshot is credited like the
+            // snapshot, only for a delivery that changes content.
             let native_actor = admitted_actor.as_ref().filter(|(_, attribution)| {
-                own.is_some() || attribution.as_ref().is_some_and(|attribution| {
+                own.is_some() || adds_content && attribution.as_ref().is_some_and(|attribution| {
                     attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
                 })
             });
