@@ -5796,6 +5796,9 @@ mod pending_write_order_tests {
         store: &mut EngineStore,
         head: &str,
     ) -> YdocWriteState {
+        // A conflicted write gives the note's author coverage back, which
+        // needs the note's document row.
+        with_document_row(store);
         std::fs::write(scratch.path().join("note.md"), "outside edit").expect("outside edit");
         let key = DocKey::new("workspace", "main", "object").expect("key");
         let state = ydoc_write_state_on_store(
@@ -5815,6 +5818,20 @@ mod pending_write_order_tests {
             "outside edit"
         );
         state
+    }
+
+    fn with_document_row(store: &mut EngineStore) {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, \
+                     updated_at_ms, path) \
+                     VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("the note's document row");
     }
 
     fn job_status(store: &EngineStore, job_id: &str) -> JobStatus {
