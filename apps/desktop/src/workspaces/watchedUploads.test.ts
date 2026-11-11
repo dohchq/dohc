@@ -73,20 +73,24 @@ it.each([[false, 1], [true, 1], [false, 0], [true, 0]] as const)("keeps a durabl
   await f.sync.stop();
 });
 
-it("merges watched sharing declines with pull notices and replaces the same object once", async () => {
+it("replaces sharing declines with the set a watched push reports, before the next pull", async () => {
   vi.useFakeTimers(); const f = fixture();
   const decline = {objectId: "old", versionId: "main", path: "a.md", lineagePruned: false, headBlobSha256: null, constraint: "limit", limitBytes: 1, observedBytes: 2};
   f.pull.mockResolvedValueOnce({...await f.pull(), sharingDeclined: [decline]});
   f.pull.mockClear(); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
   f.answer(true); await vi.advanceTimersByTimeAsync(0);
   const next = {...decline, objectId: "new", path: "b.md"};
-  f.push.mockResolvedValueOnce({pushed: 1, hasMore: false, originsPushed: [], sharingDeclined: [next], ownerAdmissionPending: []});
+  f.push.mockResolvedValueOnce({pushed: 1, hasMore: false, originsPushed: [], sharingDeclined: [decline, next], ownerAdmissionPending: []});
   f.edit(); await vi.advanceTimersByTimeAsync(0);
   expect(f.sync.snapshot().sharingDeclined).toEqual([decline, next]);
+  // The engine cleared a.md's decline, and b.md was renamed.
   const renamed = {...next, path: "c.md"};
   f.push.mockResolvedValueOnce({pushed: 1, hasMore: false, originsPushed: [], sharingDeclined: [renamed], ownerAdmissionPending: []});
+  const changes = f.onChange.mock.calls.length;
   f.edit(); await vi.advanceTimersByTimeAsync(250);
-  expect(f.sync.snapshot().sharingDeclined).toEqual([decline, renamed]);
+  expect(f.sync.snapshot().sharingDeclined).toEqual([renamed]);
+  expect(f.onChange.mock.calls.length).toBeGreaterThan(changes);
+  expect(f.pull).toHaveBeenCalledTimes(1);
   await f.sync.stop();
 });
 

@@ -2511,6 +2511,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(reference_error)?
                     .is_empty();
         }
+        // Report every decline that stands, not only the ones this push
+        // found, so a decline cleared since the last pull leaves at once.
+        if !hosted {
+            let current = store
+                .read_with(|conn| {
+                    let tx = conn.unchecked_transaction().map_err(SyncError::corrupt)?;
+                    crate::ydoc_origination::current_sharing_declines_in_tx(&tx, workspace_id)
+                })
+                .map_err(local)?;
+            for declined in current {
+                push_sharing_declined_once(&mut sharing_declined, declined);
+            }
+        }
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending,
             pushed,

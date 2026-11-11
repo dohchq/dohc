@@ -343,7 +343,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         countOwnAppends(pushed.pushed);
         watchedDirty ||= pushed.pushed > 0 && pushed.hasMore;
         watchedPushPaused = pushed.pushed === 0 && !watchedDirty;
-        sharingDeclined = mergeSharingDeclined([...sharingDeclined, ...pushed.sharingDeclined]);
+        // A push reports every decline that stands, so one it leaves out has cleared.
+        sharingDeclined = mergeSharingDeclined(pushed.sharingDeclined);
         ownerAdmissionPending = pushed.ownerAdmissionPending;
         if (ownerAdmissionPending.length > 0 && !pushed.hasMore) scheduleBackoff();
       } catch (error) {
