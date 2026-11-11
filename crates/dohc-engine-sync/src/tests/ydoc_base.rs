@@ -5172,15 +5172,13 @@ fn an_untouched_seed_of_the_winners_bytes_keeps_a_file_changed_after_seeding() {
     );
 }
 
-/// The relay's first-open base, built from the text this desktop seeded its
-/// note from, lands ahead of the desktop's own base. The desktop's lineage by
-/// then holds an edit its file already shows. The edit continues on the
-/// winner, published as an update there, and no conflict holds it back.
-///
-/// Mutation check: drop the carry from `preserve_base_sides_in_tx` and the
-/// edit stays the current side of a conflict, published on no lineage.
+/// The relay's first-open base, built from the text this desktop seeded a
+/// plaintext note from, lands ahead of the desktop's own base, whose lineage
+/// by then holds an edit its file shows. A plaintext note has no frontmatter
+/// entries to continue on the winner, so the edit stays in a conflict and
+/// nothing is published on the winner.
 #[test]
-fn a_winner_of_the_seeded_text_continues_an_edit_the_file_shows() {
+fn a_plaintext_edit_over_a_first_open_winner_of_its_seed_stays_a_conflict() {
     use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
@@ -5267,7 +5265,7 @@ fn a_winner_of_the_seeded_text_continues_an_edit_the_file_shows() {
 
     let claim = engine.put_binary_blob(&winner).unwrap();
     let mut base_op = envelope(
-        "first-open",
+        FIRST_OPEN_TEST_ORIGIN,
         0,
         "ydoc.update",
         json!({
@@ -5288,55 +5286,359 @@ fn a_winner_of_the_seeded_text_continues_an_edit_the_file_shows() {
     let ApplyDisposition::Applied(result) = outcome.primary else {
         panic!("base did not apply")
     };
-    assert_eq!(result.conflicts_opened, 0);
+    assert!(result.conflicts_opened > 0, "the edit stays in a conflict");
+    let open_conflicts = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(open_conflicts, 1);
+    assert!(
+        published_on_winner(&engine, &claim).is_empty(),
+        "nothing is published on the winner"
+    );
+}
+
+/// The origin under which the relay's service host publishes a first-open base.
+const FIRST_OPEN_TEST_ORIGIN: &str =
+    "service-host:first-open:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A Collection note whose relation cleanup removes `related`.
+const FIRST_OPEN_TEST_NOTE: &str = concat!(
+    "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "related: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\ntitle: Keep\n---\n\n",
+    "# Body stays intact\n\nA second paragraph.\n",
+);
+
+/// The ordinary updates this desktop published on the lineage `claim`, each
+/// with its bytes and payload.
+fn published_on_winner(engine: &EngineStore, claim: &str) -> Vec<(Vec<u8>, serde_json::Value)> {
+    let payloads: Vec<String> = engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT payload_json FROM replication_log
+                 WHERE origin_id='local' AND imported=0 AND op_kind='ydoc.update'
+                   AND json_extract(payload_json,'$.lineageClaimId')=?1
+                   AND json_extract(payload_json,'$.isBaseState')=0
+                 ORDER BY origin_seq",
+            )?;
+            let rows = statement
+                .query_map([claim], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>();
+            rows
+        })
+        .unwrap();
+    payloads
+        .into_iter()
+        .map(|payload| {
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            let bytes = engine
+                .get_binary_blob(payload["updateBlobSha256"].as_str().unwrap())
+                .unwrap()
+                .expect("the published update's bytes");
+            (bytes, payload)
+        })
+        .collect()
+}
+
+/// One desktop's side of a first-open race over a rich note.
+struct FirstOpenRace {
+    _scratch: ScratchDir,
+    engine: EngineStore,
+    key: dohc_engine_collab::DocKey,
+    claim: String,
+    winner: Vec<u8>,
+    edited: String,
+    conflicts_opened: i64,
+}
+
+const FIRST_OPEN_RACE_PATH: &str = "notes/cleanup.md";
+
+/// A desktop seeded its note's lineage from the text `source` projects to
+/// and published that base. `change` then edited the lineage as the agent
+/// `trip-agent`, and the note's file shows the edit. The relay's base, built
+/// from the same text with other item IDs, arrives from `winner_origin` and
+/// replaces the lineage.
+fn first_open_race(
+    source: &str,
+    winner_origin: &str,
+    change: impl FnOnce(&dohc_engine_collab::Ydoc) -> Vec<u8>,
+) -> FirstOpenRace {
+    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let (scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    adopt_join_identity(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    // Both sides build from the canonical text, so neither keeps a source.
+    let canonical = Ydoc::wire();
+    canonical
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+        .unwrap();
+    let seeded = canonical.project(ContentKind::Richdoc).unwrap().content;
+    let winner = build_base(ContentKind::Richdoc, &seeded);
+    let built = Ydoc::wire();
+    built.apply(&winner).unwrap();
+    assert_eq!(
+        built.project(ContentKind::Richdoc).unwrap().content,
+        seeded,
+        "the winner shows the seeded text"
+    );
+    let seeded_sha = seed_text_head(&mut engine, "cleanup", FIRST_OPEN_RACE_PATH, &seeded);
+    let key = DocKey::new("ws", "main", "cleanup").unwrap();
+    let local = Ydoc::wire();
+    local
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &seeded)
+        .unwrap();
+    assert_ne!(local.encode_full_state(), winner, "the two constructions differ");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Richdoc,
+        &local.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    let edit = change(&local);
+    let agent = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: None,
+        depth: 0,
+        run: None,
+        agent_run_id: None,
+    };
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &edit,
+        LocalAppend {
+            actor_origin_id: Some("trip-agent"),
+            attribution: Some(&agent),
+            ..Default::default()
+        },
+        &NoFaults,
+        1_200,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    let edited = local.project(ContentKind::Richdoc).unwrap().content;
+    assert_ne!(edited, seeded, "the change shows in the text");
+    // The lineage was seeded from the file's earlier text, and its settle
+    // wrote the edit to the file.
+    let edited_sha = dohc_engine_storage::hex_sha256(edited.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256=?1,last_settled_sha=?2 WHERE object_id=?3",
+                params![seeded_sha, edited_sha, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![edited_sha, edited.len() as i64, edited],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET blob_sha256=?1 WHERE object_id=?2",
+                params![edited_sha, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let claim = engine.put_binary_blob(&winner).unwrap();
+    let mut base_op = envelope(
+        winner_origin,
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": FIRST_OPEN_RACE_PATH,
+            "contentKind": "richdoc", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let ApplyDisposition::Applied(result) = outcome.primary else {
+        panic!("base did not apply")
+    };
     assert_eq!(
         result
             .lineage_replacement
             .map(|replacement| replacement.winner_lineage_claim_id),
         Some(claim.clone())
     );
-    let (open_conflicts, files, published) = engine
+    FirstOpenRace {
+        _scratch: scratch,
+        engine,
+        key,
+        claim,
+        winner,
+        edited,
+        conflicts_opened: result.conflicts_opened,
+    }
+}
+
+fn remove_related(doc: &dohc_engine_collab::Ydoc) -> Vec<u8> {
+    doc.frontmatter_drop_relation_target("related", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", false)
+        .expect("the relation cleanup applies")
+}
+
+/// The winner with each desktop's published updates applied, in order.
+fn winner_with(winner: &[u8], updates: &[&[u8]]) -> String {
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(winner).unwrap();
+    for update in updates {
+        doc.apply(update).unwrap();
+    }
+    doc.project(dohc_engine_collab::ContentKind::Richdoc).unwrap().content
+}
+
+/// A Collection relation cleanup removed a key from a note no editor had
+/// opened, and the relay's first-open base of the note's earlier text then
+/// won. The removal continues on the winner as one update credited to the
+/// agent that made it, and no conflict opens.
+///
+/// Mutation check: continue the edit with a whole-text rewrite and the
+/// published update loses its agent.
+#[test]
+fn a_frontmatter_change_continues_on_a_first_open_winner_with_its_agent() {
+    let mut race = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, remove_related);
+    assert_eq!(race.conflicts_opened, 0);
+    let open_conflicts = race
+        .engine
         .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                conn.query_row("SELECT COUNT(*) FROM snapshots", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_log
-                     WHERE origin_id='local' AND imported=0 AND op_kind='ydoc.update'
-                       AND json_extract(payload_json,'$.lineageClaimId')=?1
-                       AND json_extract(payload_json,'$.isBaseState')=0",
-                    [&claim],
-                    |row| row.get::<_, i64>(0),
-                )?,
-            ))
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
         })
         .unwrap();
+    assert_eq!(open_conflicts, 0);
+    let published = published_on_winner(&race.engine, &race.claim);
+    assert_eq!(published.len(), 1, "one update on the winner");
+    let (update, payload) = &published[0];
+    assert_eq!(payload["actorOriginId"], "trip-agent");
+    assert_eq!(payload["attribution"]["actorKind"], "agent");
+    assert_eq!(winner_with(&race.winner, &[update]), race.edited);
     assert_eq!(
-        (open_conflicts, files, published),
-        (0, 1, 1),
-        "no conflict, no recovered copy, one update on the winner"
-    );
-    assert_eq!(
-        VersionedTextStore::new(&mut engine)
-            .read_text("ws", "main", path)
+        VersionedTextStore::new(&mut race.engine)
+            .read_text("ws", "main", FIRST_OPEN_RACE_PATH)
             .unwrap()
             .unwrap()
             .text,
-        edited
+        race.edited
     );
     assert_eq!(
-        engine
-            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+        race.engine
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &race.key))
             .unwrap()
-            .plaintext_string(),
-        edited
+            .project(dohc_engine_collab::ContentKind::Richdoc)
+            .unwrap()
+            .content,
+        race.edited
     );
+}
+
+/// Two desktops each continue their own frontmatter change on the same
+/// first-open winner. Both changes land together, and the body shows once,
+/// because neither update rewrites the winner's body.
+///
+/// Mutation check: continue each edit by rewriting the whole text and the
+/// body shows twice.
+#[test]
+fn two_desktops_changing_different_keys_on_a_first_open_winner_both_land() {
+    let first = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, remove_related);
+    let second = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, |doc| {
+        doc.frontmatter_set("status", "packed").unwrap()
+    });
+    assert_eq!((first.conflicts_opened, second.conflicts_opened), (0, 0));
+    assert_eq!(first.winner, second.winner, "one first-open base");
+    let first_update = published_on_winner(&first.engine, &first.claim);
+    let second_update = published_on_winner(&second.engine, &second.claim);
+    assert_eq!((first_update.len(), second_update.len()), (1, 1));
+    let merged = winner_with(&first.winner, &[&first_update[0].0, &second_update[0].0]);
+    let (frontmatter, body) =
+        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&merged).unwrap();
+    assert_eq!(
+        frontmatter,
+        json!({"id": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "status": "packed", "title": "Keep"})
+    );
+    let (_, edited_body) =
+        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&first.edited)
+            .unwrap();
+    assert_eq!(body, edited_body, "the body shows once, unchanged");
+    assert_eq!(merged.matches("Body stays intact").count(), 1);
+}
+
+/// Two desktops make the same relation cleanup on the same first-open
+/// winner. The key goes once and the body shows once.
+#[test]
+fn two_desktops_removing_the_same_key_from_a_first_open_winner_remove_it_once() {
+    let first = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, remove_related);
+    let second = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, remove_related);
+    let first_update = published_on_winner(&first.engine, &first.claim);
+    let second_update = published_on_winner(&second.engine, &second.claim);
+    assert_eq!((first_update.len(), second_update.len()), (1, 1));
+    assert_eq!(
+        winner_with(&first.winner, &[&first_update[0].0, &second_update[0].0]),
+        first.edited
+    );
+}
+
+/// A body edit over a first-open winner of its seed text stays a conflict:
+/// only frontmatter entries continue on the winner.
+#[test]
+fn a_body_change_over_a_first_open_winner_stays_a_conflict() {
+    let race = first_open_race(FIRST_OPEN_TEST_NOTE, FIRST_OPEN_TEST_ORIGIN, |doc| {
+        doc.richdoc_append_paragraph("A paragraph only this desktop wrote.")
+    });
+    assert!(race.conflicts_opened > 0, "the body edit stays in a conflict");
+    assert!(published_on_winner(&race.engine, &race.claim).is_empty());
+}
+
+/// A base from any origin other than the relay's first open keeps the
+/// conflict, even when it holds the text the desktop seeded from.
+#[test]
+fn a_frontmatter_change_over_another_peers_base_of_its_seed_stays_a_conflict() {
+    let race = first_open_race(FIRST_OPEN_TEST_NOTE, "peer-desktop", remove_related);
+    assert!(race.conflicts_opened > 0);
+    assert!(published_on_winner(&race.engine, &race.claim).is_empty());
 }
 
 /// One row of the first-open fixtures: the table note and its first base.
