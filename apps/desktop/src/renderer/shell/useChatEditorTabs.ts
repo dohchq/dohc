@@ -164,6 +164,8 @@ export function useChatEditorTabs(input: {
   // A hidden conversation's tab counts its unread messages, as Chats does.
   // One local read per workspace change, and none without a hidden one.
   const [unreadRead, setUnread] = useState({ workspaceId: input.workspaceId, counts: NO_UNREAD });
+  // One read in flight across tab switches too; the latest tabs take the next.
+  const unreadReads = useRef({ reading: false, again: false, read: null as (() => Promise<void>) | null });
   useEffect(() => {
     const byChannel = new Map<string, string>();
     for (const path of JSON.parse(pathsKey) as string[]) {
@@ -177,34 +179,40 @@ export function useChatEditorTabs(input: {
       return;
     }
     const workspaceId = input.workspaceId;
-    let live = true;
-    let reading = false;
-    let again = false;
+    const reads = unreadReads.current;
     const read = async () => {
-      if (reading) { again = true; return; }
-      reading = true;
-      do {
-        again = false;
-        const result = await bridge().listChatUnread({ workspaceId }).catch(() => null);
-        if (!live) return;
-        if (result) {
-          const counts = new Map(result.chats.flatMap(({ channelId, unreadCount }) => {
-            const path = byChannel.get(channelId);
-            return path && unreadCount > 0 ? [[path, unreadCount] as const] : [];
-          }));
-          // Most workspace changes are not messages: keep the shell's render.
-          setUnread((current) => current.workspaceId === workspaceId && sameCounts(current.counts, counts)
-            ? current
-            : { workspaceId, counts: counts.size === 0 ? NO_UNREAD : counts });
-        }
-      } while (again);
-      reading = false;
+      const result = await bridge().listChatUnread({ workspaceId }).catch(() => null);
+      if (reads.read !== read || !result) return;
+      const counts = new Map(result.chats.flatMap(({ channelId, unreadCount }) => {
+        const path = byChannel.get(channelId);
+        return path && unreadCount > 0 ? [[path, unreadCount] as const] : [];
+      }));
+      // Most workspace changes are not messages: keep the shell's render.
+      setUnread((current) => current.workspaceId === workspaceId && sameCounts(current.counts, counts)
+        ? current
+        : { workspaceId, counts: counts.size === 0 ? NO_UNREAD : counts });
     };
-    void read();
+    const request = async () => {
+      if (reads.reading) { reads.again = true; return; }
+      reads.reading = true;
+      try {
+        do {
+          reads.again = false;
+          await reads.read?.();
+        } while (reads.again);
+      } finally {
+        reads.reading = false;
+      }
+    };
+    reads.read = read;
+    void request();
     const unsubscribe = bridge().onWorkspaceActivity((event) => {
-      if (event.workspaceId === workspaceId) void read();
+      if (event.workspaceId === workspaceId) void request();
     });
-    return () => { live = false; unsubscribe(); };
+    return () => {
+      if (reads.read === read) reads.read = null;
+      unsubscribe();
+    };
   }, [input.enabled, input.workspaceId, input.readRevision, pathsKey]);
   const unread = unreadRead.workspaceId === input.workspaceId ? unreadRead.counts : NO_UNREAD;
   const titles = useMemo(() => new Map(

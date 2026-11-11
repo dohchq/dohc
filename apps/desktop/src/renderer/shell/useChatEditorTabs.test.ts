@@ -332,13 +332,43 @@ describe("chat editor tabs", () => {
     await act(async () => answers[1]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 2 }] }));
     expect(result.current.unread.get(path)).toBe(2);
 
+    // A workspace switch waits for the read in flight, then drops its answer.
     act(() => activity({ workspaceId: "first" }));
     rerender({ workspaceId: "second" });
-    expect(answers).toHaveLength(4);
+    expect(answers).toHaveLength(3);
     expect(result.current.unread.size).toBe(0);
     await act(async () => answers[2]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 7 }] }));
     expect(result.current.unread.size).toBe(0);
+    expect(answers).toHaveLength(4);
     await act(async () => answers[3]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 5 }] }));
     expect(result.current.unread.get(path)).toBe(5);
+  });
+
+  it("keeps one unread read in flight while tabs and reads change, and answers for the latest tabs", async () => {
+    const answers: Array<ReturnType<typeof deferred<{ chats: { channelId: string; unreadCount: number }[] }>>> = [];
+    const listChatUnread = vi.fn(() => {
+      const answer = deferred<{ chats: { channelId: string; unreadCount: number }[] }>();
+      answers.push(answer);
+      return answer.promise;
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {},
+      syncDms: vi.fn(() => new Promise(() => {})), listChatChannels: vi.fn(() => new Promise(() => {})), listChatUnread,
+    });
+    const group = chatEditorPath(general), person = chatEditorPath(dm);
+    const { result, rerender } = renderHook(({ activePaths, readRevision }) => useChatEditorTabs({
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [group, person], activePaths, enabled: true, readRevision,
+    }), { initialProps: { activePaths: [person], readRevision: 0 } });
+    rerender({ activePaths: [person], readRevision: 1 });
+    rerender({ activePaths: [person], readRevision: 2 });
+    rerender({ activePaths: [group], readRevision: 2 });
+    expect(listChatUnread).toHaveBeenCalledTimes(1);
+    const both = { chats: [{ channelId: general.channel.id, unreadCount: 1 }, { channelId: dm.dm.channelId, unreadCount: 4 }] };
+    await act(async () => answers[0]!.resolve(both));
+    // The answer for tabs no longer shown is dropped; one more read serves the rest.
+    expect(result.current.unread.size).toBe(0);
+    expect(listChatUnread).toHaveBeenCalledTimes(2);
+    await act(async () => answers[1]!.resolve(both));
+    expect(result.current.unread).toEqual(new Map([[person, 4]]));
   });
 });
