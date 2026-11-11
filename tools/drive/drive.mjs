@@ -174,10 +174,14 @@ async function mounts(host) {
   throw new Error("Could not list mounted filesystems with findmnt. Check that util-linux is installed, then try again.");
 }
 
+// While a container uses a deployment folder, Docker mounts that folder again under its own volumes directory.
+// findmnt lists it with the folder after the device, as in /dev/sda[/dohc/sync-relay]. It is not another mount of the volume.
+const isFolderMount = entry => /\[\/.+\]$/.test(entry.source ?? "");
+
 /** Returns true when the volume is mounted at `mount`. Throws when anything else holds the mount point or the volume. */
 async function mountState(mount, uuid, host) {
   const list = await mounts(host), current = list.filter(entry => entry.target === mount).at(-1);
-  const elsewhere = list.filter(entry => entry.uuid?.toLowerCase() === uuid && entry.target !== mount).map(entry => entry.target);
+  const elsewhere = list.filter(entry => entry.uuid?.toLowerCase() === uuid && entry.target !== mount && !isFolderMount(entry)).map(entry => entry.target);
   if (elsewhere.length) throw new Error(`Volume ${uuid} is mounted at ${elsewhere.join(", ")}, not ${mount}. Keep one mount, at ${mount}.`);
   if (current && current.uuid?.toLowerCase() !== uuid) {
     throw new Error(`Another filesystem is mounted at ${mount}. Check that --volume-uuid names this deployment's volume.`);

@@ -358,6 +358,14 @@ test("disk-watch pings the disk check while the volume is under the limit, witho
   assert.ok(!output().includes(diskUrl));
 });
 
+test("disk-watch pings while the deployment runs and Docker has mounted its folders", async () => {
+  const folders = ["sync-relay", "continuity", "host-data", "snapshots"].map(folder => (
+    { target: `/var/lib/docker/volumes/dohc_${folder}/_data`, source: `/dev/sda[/dohc/${folder}]`, uuid, fstype: "ext4" }));
+  const { host, pings } = driveHost({ otherMounts: folders });
+  await runDrive(watch(), host);
+  assert.deepEqual(pings.map(ping => ping.url), [diskUrl]);
+});
+
 test("disk-watch reports a failure when the volume reaches the limit, or is not the mounted volume", async () => {
   const full = driveHost({ disk: { blocks: 1000, bfree: 300, bavail: 300 } });
   await assert.rejects(runDrive(watch(), full.host), /is 70% full\. The limit is 70%\. Make room on the volume or grow it\. Reported this to the disk check\./);

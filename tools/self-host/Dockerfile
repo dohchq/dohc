@@ -41,6 +41,7 @@ WORKDIR /app
 COPY --from=build /opt/dohc-reader/ /opt/dohc-reader/
 COPY --from=build --chown=node:node /release/ /app/
 COPY --from=native --chown=node:node /source/target/release/dohc-workspace-engine /app/bin/dohc-workspace-engine
-RUN mkdir /data /continuity /host-data /snapshots /replicas && chown node:node /data /continuity /host-data /snapshots /replicas && chmod 700 /replicas
+# Docker gives an empty volume the mode of the image folder it covers. The Drive checks require 0700 on a data disk.
+RUN mkdir /data /continuity /host-data /snapshots /replicas && chown node:node /data /continuity /host-data /snapshots /replicas && chmod 700 /data /continuity /host-data /snapshots /replicas
 USER node
 ENTRYPOINT ["node", "/app/tools/self-host/entrypoint.mjs"]
