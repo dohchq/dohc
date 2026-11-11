@@ -772,3 +772,82 @@ async fn a_settle_after_two_resyncs_writes_both_edits() {
     assert_eq!(unfinished_writes(&db), 0);
     supervisor.close(&db).expect("close actor");
 }
+
+/// When an older write fails for a passing reason, the settle stops before
+/// the head's write, which expects the file to hold the older one. Both stay
+/// owed, and a retried settle lands them in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let first = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("first resync");
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&first.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    let second = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("second resync");
+    assert_eq!(unfinished_writes(&db), 2);
+    let settle = |faults: Arc<dyn dohc_engine_storage::FaultInjector>, now| {
+        actor.ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim.clone(),
+            second.head_blob_sha256.clone(),
+            "older-write-fails".into(),
+            Arc::new(()),
+            now,
+            faults,
+            CancellationToken::new(),
+            None,
+            None,
+        )
+    };
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    settle(faults.clone(), 301)
+        .await
+        .expect_err("the older write fails, so the settle stops");
+    assert!(faults.fired(), "the older write reaches the injected fault");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before",
+        "nothing is written"
+    );
+    assert_eq!(unfinished_writes(&db), 2, "both writes stay owed");
+    assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+
+    settle(Arc::new(NoFaults), 302)
+        .await
+        .expect("the retried settle writes the file");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}

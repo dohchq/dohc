@@ -3311,15 +3311,17 @@ fn ydoc_settle_attempt_on_store(
             validate_workspace_root(root_dir, root_guard)?;
             // A resync applies edits without writing, so writes older than the
             // head's can still be owed, and the head's expects the file to
-            // hold them (#2813). One that does not land leaves the head's to
-            // conflict below.
+            // hold them (#2813). One still pending after its replay failed
+            // stops the settle, so the head's waits for the retry instead of
+            // conflicting. One that conflicted leaves the head's to conflict
+            // below, as it would anyway.
             let earlier: Vec<String> = store
                 .read_with(|conn| pending_ydoc_writes_in(conn, key))?
                 .into_iter()
                 .filter(|job_id| *job_id != job.job_id)
                 .collect();
             if !earlier.is_empty() {
-                replay_materializations_in_order(
+                let incomplete = replay_materializations_in_order(
                     store,
                     root_dir,
                     MaterializationReplayScope {
@@ -3335,6 +3337,15 @@ fn ydoc_settle_attempt_on_store(
                     faults,
                     &earlier,
                 )?;
+                if incomplete > 0
+                    && store
+                        .load_materialization_job(&earlier[earlier.len() - incomplete])?
+                        .is_some_and(|stopped| stopped.status == JobStatus::Pending)
+                {
+                    return Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                        failed_jobs: incomplete + 1,
+                    });
+                }
             }
             // Suppression before the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
