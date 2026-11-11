@@ -33,6 +33,9 @@
     "reply": [
       "chat.reply"
     ],
+    "chatRetry": [
+      "agent.run.retry"
+    ],
     "react": [
       "chat.react"
     ],
@@ -286,6 +289,7 @@
     "chat show": "chat.show",
     "chat post": "chat.post",
     "chat reply": "chat.reply",
+    "chat retry": "agent.run.retry",
     "chat react": "chat.react",
     "chat grep": "chat.search",
     "chat export": "chat.export",

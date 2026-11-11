@@ -127,6 +127,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_start_group_chat: ["chat.post"],
   dohc_start_file_chat: ["file.chat.start"],
   dohc_reply_to_chat: ["chat.reply"],
+  dohc_retry_chat_run: ["agent.run.retry"],
   dohc_query_collection: ["collection.query"],
   dohc_read_record: ["collection.record.read"],
   dohc_set_record_fields: ["collection.record.edit"],
@@ -2461,6 +2462,12 @@ export async function retryAutomationRun(
     run: args.run,
     startOver: args.startOver ?? false,
   });
+}
+
+// The desktop runs it only for someone who may post in the conversation.
+export async function retryChatRun(ctx: ToolContext, args: { threadId: string }) {
+  const result = await requestCli(ctx, "chatRetry", { thread: args.threadId });
+  return result.ok ? { ...result, threadId: engineThreadId(result.threadId) } : result;
 }
 
 // The desktop checks current access and hosts shared Collection Buttons.

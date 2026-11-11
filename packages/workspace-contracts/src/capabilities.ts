@@ -171,7 +171,7 @@ export const CAPABILITIES = {
   "chat.dispatch.pause.read": capability("Read whether agent replies are paused on this computer.", {ipc: ["readChatDispatchPaused"]}),
   "chat.dispatch.pause.switch": capability("Pause or resume agent replies on this computer.", {ipc: ["setChatDispatchPaused"]}),
   "agent.run.state.read": capability("Read whether this computer's agent is working in this workspace.", {ipc: ["readAgentRunState"]}),
-  "agent.run.retry": capability("Try a failed agent run again.", {ipc: ["retryStoppedRun"]}),
+  "agent.run.retry": capability("Run an agent's stopped request in a conversation again, as Try again does.", {ipc: ["retryStoppedRun"], mcp: {owner: ["dohc_retry_chat_run"]}, mcpReason: "Only the computer that ran a request can run it again. Shared profiles omit it."}),
   "agent.listening.read": capability("Read which agents you run are waiting for messages on this computer.", {ipc: ["readAgentsListening"]}),
   "agent.personal.read": capability("Read the personal agents of your server account.", {ipc: ["readPersonalAgents"]}),
   "agent.personal.change": capability("Rename, recolor, change the reach of, sign out, or remove a personal agent.", {ipc: ["changePersonalAgent"]}),

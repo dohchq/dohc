@@ -176,6 +176,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
     ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
     ["chat", "reply", "th_1", "--as-agent", "--work", "done", "--link", "https://example.com/pull/7", "Opened", "a", "pull", "request"],
   ],
+  retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
   export: [
@@ -254,6 +255,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
+  dohc_retry_chat_run: { cli: "chatRetry" },
   dohc_press_button: { cli: "automationPress" },
   dohc_inspect_buttons: { cli: "automationButtons" },
 };
@@ -488,6 +490,7 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   links: "chatLinks",
   "file-mentions": "chatFileMentions",
   "create-group": "groupCreate",
+  retry: "chatRetry",
 };
 
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's

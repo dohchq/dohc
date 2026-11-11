@@ -103,6 +103,7 @@ const streamPageArgs = {
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
+const chatRetryArgsSchema = z.object({ ...argsBase, thread: z.string().min(1) }).strict();
 // One part of what an agent reports about itself: printable text with no
 // surrounding space.
 export const MAX_REPORTED_AGENT_CHARS = 64;
@@ -594,6 +595,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("reply"), args: replyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("chatRetry"), args: chatRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("export"), args: exportArgsSchema }).strict(),
@@ -708,6 +710,7 @@ export const CLI_CAPABILITIES = {
   show: ["chat.show"],
   post: ["chat.post"],
   reply: ["chat.reply"],
+  chatRetry: ["agent.run.retry"],
   react: ["chat.react"],
   grep: ["chat.search"],
   export: ["chat.export"],
@@ -1003,6 +1006,11 @@ const replyResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
+// Try again for a conversation's stopped agent request: queued, or why not.
+const chatRetryResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
+]);
 const reactResultSchema = z
   .object({
     threadId: z.string().min(1),
@@ -1908,6 +1916,7 @@ export const cliResultSchemas = {
   show: showResultSchema,
   post: postResultSchema,
   reply: replyResultSchema,
+  chatRetry: chatRetryResultSchema,
   react: reactResultSchema,
   grep: grepResultSchema,
   export: exportResultSchema,
