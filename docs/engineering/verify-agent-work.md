@@ -103,7 +103,8 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks distribute the complete selected JavaScript inventory across workers.
+PR checks distribute the complete selected JavaScript inventory across 14 workers.
+Worker 0 runs inside the JavaScript aggregate; workers 1–13 run as matrix jobs.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
 Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
 Both install Rust to check the prepared engine fingerprint. Relay checks only that engine and builds its runtime bundles.
@@ -111,7 +112,7 @@ Compiler also checks the prepared desktop artifacts and installs nextest for its
 Workers and aggregates do not wait for confinement. Only the final verdict waits for it.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
-The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
+The Rust gate builds one test archive, runs its complete inventory across 12 shards, and checks policy separately.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.
@@ -141,7 +142,7 @@ JavaScript group polls run every 3 s; Rust group polls run every 10 s. These add
 Job-list responses change with step status, so every group poll is budgeted as a counted request.
 Each wait logs its last rate-limit headers, non-304 request count, and 304 count, including on failure.
 With about 2 minutes of JavaScript preparation wait, a ready Rust archive, a 40 s JavaScript group wait, and a 3-minute Rust group wait,
-a combined run should use roughly 120 custom REST requests, including native downloads.
+a combined run should use roughly 130 custom REST requests, including native downloads.
 A recent run observed a 5,000-request hourly token limit and roughly 100 requests used with the prior polling intervals.
 This estimate assumes unchanged artifact polls return 304. Confirm it from the next run's headers and counters.
 Standard action upload, download, and cache requests are additional.

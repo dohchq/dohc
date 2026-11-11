@@ -164,6 +164,11 @@ function passingCloudJobs() {
   jobs.push({ ...prepared, name: "compiler confinement", created_at: "2026-11-11T13:06:40Z", started_at: "2026-11-11T13:06:40Z" });
   jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
   prepared.completed_at = "2026-11-11T13:06:40Z";
+  // Extend the historical topology with copies of an existing worker's timing.
+  const workers = jobs.filter(job => /^JS worker \d+$/u.test(job.name));
+  for (let part = workers.length + 1; part < JS_SHARDS; part++) {
+    jobs.push({ ...workers[0], name: `JS worker ${part}` });
+  }
   return jobs;
 }
 
@@ -279,7 +284,12 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
       ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === name).conclusion = conclusion; }),
       rows => { rows.find(job => job.name === name).head_sha = "other"; },
     ]),
-    rows => rows.splice(rows.findIndex(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1")), 1),
+    ...[scope === "js" ? `JS worker ${JS_SHARDS - 2}` : "Rust tests 1", scope === "js" ? `JS worker ${JS_SHARDS - 1}` : "Rust tests 11"].flatMap(name => [
+      rows => rows.splice(rows.findIndex(job => job.name === name), 1),
+      rows => rows.push(rows.find(job => job.name === name)),
+      rows => { rows.find(job => job.name === name).conclusion = "cancelled"; },
+      rows => { rows.find(job => job.name === name).head_sha = "other"; },
+    ]),
     rows => rows.push(rows.find(job => job.name === "shared preparation")),
     ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler confinement").conclusion = conclusion; }),
     rows => { rows[0].head_sha = "other-head"; },
