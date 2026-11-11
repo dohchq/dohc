@@ -117,6 +117,9 @@
     "stopAgain": [
       "share.live.document.stop"
     ],
+    "liveDocuments": [
+      "share.live.documents.list"
+    ],
     "documentEdit": [
       "document.edit"
     ],
@@ -287,6 +290,7 @@
     "document set-fields": "collection.record.edit",
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
+    "document live": "share.live.documents.list",
     "chat groups": "group.list",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",

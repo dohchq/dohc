@@ -143,6 +143,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
+  live: "liveDocuments",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -221,6 +222,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },
+  dohc_list_live_documents: { cli: "liveDocuments" },
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
@@ -425,6 +427,7 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_live_documents: "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",

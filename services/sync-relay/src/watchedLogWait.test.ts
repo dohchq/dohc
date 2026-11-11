@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub, ownerLogWaitGroup } from "./discussionActivity";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { ReplicaWatches } from "./replicaWatches";
-import { appendLog, claimWorkspace, closeTestStorages, request, resolveTestActor, testHandler, testStorage } from "./testing";
+import { appendLog, claimWorkspace, closeTestStorages, jsonBody, request, resolveTestActor, testHandler, testStorage } from "./testing";
 
 const registries: ReplicaWatches[] = [];
 afterEach(async () => {
@@ -177,6 +177,55 @@ describe("owner watched held read", () => {
     expect(f.watches.watched).not.toHaveBeenCalled();
     expect(f.state.size).toBe(0);
     expect(f.activity.stats().waiters).toBe(0);
+  });
+
+  it("counts the rows the caller says it appended, and wakes for any row past them", async () => {
+    const f = await fixture();
+    await appendLog(f.h, "owner", "a", [0, 1].map(originSeq => ({ originSeq, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 })));
+    const settled = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=2"));
+    expect(await settled.text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"known":2}');
+    vi.useFakeTimers();
+    let response: Response | undefined;
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&known=2")).then(r => { response = r; return r; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(response).toBeUndefined();
+    expect(f.activity.stats().waiters).toBe(1);
+    await appendLog(f.h, "owner", "a", [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }], { originId: "origin-b" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":true,"known":2}');
+  });
+
+  it("answers a counted read the way a pull of that many rows reports more", async () => {
+    const f = await fixture();
+    await appendLog(f.h, "owner", "a", [0, 1, 2].map(originSeq => ({ originSeq, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 })));
+    for (const since of [0, 1, 3]) {
+      for (const known of [1, 2, 3, 4]) {
+        const held = await (await f.h(request("owner", `/sync/a/log?since=${since}&hold=0&known=${known}`))).json();
+        const page = await (await f.h(request("owner", `/sync/a/log?since=${since}&limit=${known}`))).json();
+        expect(held, `since ${since}, known ${known}`).toMatchObject({ hasMore: page.hasMore, known });
+      }
+    }
+  });
+
+  it("wakes as before for a claim above its limit, or rows an epoch hides", async () => {
+    const f = await fixture();
+    await appendLog(f.h, "owner", "a", [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }]);
+    const above = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1025"));
+    expect(await above.text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":true}');
+    const at = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1024"));
+    expect(await at.json()).toMatchObject({ hasMore: false, known: 1024 });
+    const rotated = await f.h(request("owner", "/sync/a/epoch", jsonBody({ replicationEpoch: "epoch-2", streamIdentity: "stream-2" })));
+    expect(rotated.status, await rotated.clone().text()).toBe(200);
+    await appendLog(f.h, "owner", "a", [{ originSeq: 1, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }],
+      { replicationEpoch: "epoch-2", streamIdentity: "stream-2" });
+    const floored = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1&replicationEpoch=epoch-2&streamIdentity=stream-2"));
+    expect(await floored.json()).toMatchObject({ hasMore: true, known: 0 });
+  });
+
+  it.each(["-1", "1.5", "", "01", "x"])("refuses a held read whose known count is %j", async known => {
+    const f = await fixture();
+    const response = await f.h(request("owner", `/sync/a/log?since=0&hold=0&known=${known}`));
+    expect(response.status).toBe(400);
   });
 
   it("a watch wake rechecks the session before disclosing its state", async () => {

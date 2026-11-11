@@ -314,6 +314,10 @@ export interface CliKeptEditsPort {
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
+// The owner's Live documents list, read as the dialog reads it. Paths are
+// workspace-relative; the cursor is the list's own nextCursor.
+export type CliLiveDocumentsPort = (cursor?: string) => Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
 // Notices row offers the same step after the same warning.
@@ -442,6 +446,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   heldNoteChange?: (input: HeldNoteChangeInput) => Promise<HeldNoteChangeResult>;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
+  liveDocuments?: CliLiveDocumentsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -832,6 +837,10 @@ function retainedCopiesUnavailable() {
     ok: false as const,
     reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
   };
+}
+
+function liveDocumentsUnavailable() {
+  return { ok: false as const, reason: "Live documents are listed only in the original workspace. Open it to continue." };
 }
 
 function keptEditsUnavailable() {
@@ -2080,7 +2089,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2094,6 +2103,7 @@ async function dispatch(
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
+  if (paths.shared && request.verb === "liveDocuments") return liveDocumentsUnavailable();
   if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
@@ -2951,6 +2961,15 @@ async function dispatchWorkspace(
         if (input.action !== "review") await notifyWrite(options, context);
         return {ok: true as const, ...result};
       } catch (error) { return mcpFailure(error, "dohc could not change the held note."); }
+    }
+    case "liveDocuments": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        return { ok: true as const, ...await live(request.args.cursor) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list live documents");
+      }
     }
 
     case "documentEdit": {

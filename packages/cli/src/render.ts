@@ -366,6 +366,28 @@ function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
   ].join("\n");
 }
 
+// The words Live documents shows for each row's state.
+const LIVE_REASON_WORDS = {
+  "document-unavailable": "file moved or removed", "workspace-changed": "workspace changed", "session-host-refused": "stopped by the server",
+  "session-host-diverged": "server copy doesn't match", "live-document-without-lineage": "not started",
+  "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume",
+} as const;
+const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
+
+function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { ok: true }>): string {
+  if (page.documents.length === 0 && page.nextCursor === null) return "No document has live editing.";
+  return [
+    ...page.documents.map(row => [
+      lineSafe(row.path),
+      row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
+      ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
+      ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
+      ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
+    ].join(" · ")),
+    ...(page.nextCursor === null ? [] : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -449,6 +471,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "retryKeptEdits":
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
+    case "liveDocuments":
+      return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`

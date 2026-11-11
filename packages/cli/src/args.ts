@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -42,6 +42,7 @@ type CliCommandBody =
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
+  | { verb: "liveDocuments"; cursor?: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
@@ -517,6 +518,23 @@ const DOCUMENT_VERBS = {
       if (!path || !incident) fail("stop-again requires a path and an incident");
       noExtraArgs(extra, "document stop-again");
       return { verb: "stopAgain", path, incident };
+    },
+  },
+  live: {
+    capabilityId: "share.live.documents.list",
+    summary: "List this workspace's live documents, with each one's state and why.",
+    operands: "",
+    notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
+      "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
+      ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
+      "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
+      "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
+      "Pass nextCursor as --cursor until it is null."],
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+    parse: input => {
+      noExtraArgs(input.operands, "document live");
+      const cursor = lastValue(input, "--cursor");
+      return { verb: "liveDocuments", ...(cursor ? { cursor } : {}) };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -1463,7 +1481,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

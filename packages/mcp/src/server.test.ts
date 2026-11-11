@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -696,6 +696,26 @@ describe("share copy profile admission", () => {
   it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
     const request = vi.fn(async () => details);
     expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("live documents profile admission", () => {
+  const page = { ok: true, documents: [{ path: "plan.md", objectId: "object-plan", status: "retired", canResume: true }], nextCursor: null };
+  it("advertises and calls dohc_list_live_documents only for the owner profile, with only the cursor", async () => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain("dohc_list_live_documents");
+    expect((await client.callTool({ name: "dohc_list_live_documents", arguments: { cursor: "notes/old.md" } })).structuredContent).toEqual(page);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "liveDocuments", door: "mcp", args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("does not offer the list to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    expect(names).not.toContain("dohc_list_live_documents");
+    expect(await client.callTool({ name: "dohc_list_live_documents", arguments: {} })).toMatchObject({ isError: true });
+    expect(await listLiveDocuments({ root: "/workspace", home: "/state", shareAccess, request }, {}))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
     expect(request).not.toHaveBeenCalled();
   });
 });
