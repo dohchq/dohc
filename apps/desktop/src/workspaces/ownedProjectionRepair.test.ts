@@ -97,6 +97,8 @@ describe("createOwnedProjectionRepairer", () => {
           pendingPaths: ["a.md"],
           collisionPathCount: 0,
           collisionPaths: [],
+          heldPathCount: 0,
+          heldPaths: [],
           pullInFlight: false,
         },
         {
@@ -105,6 +107,8 @@ describe("createOwnedProjectionRepairer", () => {
           pendingPaths: ["a.md"],
           collisionPathCount: 0,
           collisionPaths: [],
+          heldPathCount: 0,
+          heldPaths: [],
           pullInFlight: false,
         },
       ],
@@ -208,6 +212,8 @@ describe("createOwnedProjectionRepairer", () => {
     pendingPaths: ["a.md"],
     collisionPathCount: 0,
     collisionPaths: [],
+    heldPathCount: 0,
+    heldPaths: [],
     pullInFlight: false,
   };
   const heldStatus: ShareViewProjectionStatus = {
@@ -216,6 +222,8 @@ describe("createOwnedProjectionRepairer", () => {
     pendingPaths: [],
     collisionPathCount: 2,
     collisionPaths: ["Notes.md", "mine.md"],
+    heldPathCount: 0,
+    heldPaths: [],
     pullInFlight: false,
   };
   const holds: ShareViewReconcileOutcome = {

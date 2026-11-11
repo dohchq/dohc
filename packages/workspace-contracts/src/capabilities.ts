@@ -85,7 +85,7 @@ export const CAPABILITIES = {
   "group.shares.list": capability("List Group grants and invitations for this workspace.", {ipc: ["listChatChannelShares"]}),
   "group.join": capability("Join a shared Group in this workspace.", {ipc: ["joinSharedChannel"]}),
   "group.leave": capability("Leave a shared Group in this workspace.", {ipc: ["leaveSharedChannel"]}),
-  "share.live.documents.list": capability("List the owner's live documents.", {ipc: ["listOwnerLiveDocuments"]}),
+  "share.live.documents.list": capability("List the owner's live documents.", {ipc: ["listOwnerLiveDocuments"], mcp: {owner: ["dohc_list_live_documents"]}, mcpReason: "Only the original workspace offers its live documents. Shared profiles omit this read; main admits the workspace and the relay checks the owner's account."}),
   "share.live.refusals.list": capability("List live document refusals.", {ipc: ["listOwnerLiveRefusals"]}),
   "share.live.retry": capability("Retry live editing for a share.", {ipc: ["retryOwnerLiveShare"]}),
   "share.create": capability("Create a share for a named recipient.", {ipc: ["createRelayShare"]}),

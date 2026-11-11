@@ -8,14 +8,17 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
+};
 use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
 };
 
-use crate::private_dir::{Local, unsupported};
+use crate::private_dir::{Local, current_user, keeps_dacl, open, unsupported};
 
 /// A file's DACL: its entries, and whether its folder's entries reach it.
 pub struct Dacl(Local<core::ffi::c_void>);
@@ -66,6 +69,35 @@ impl Dacl {
         } else {
             Err(err)
         }
+    }
+
+    /// The DACL for a new private file in `folder`: protected from the
+    /// folders above, with full control for this user, SYSTEM and
+    /// Administrators, as a user's profile folder gives its files. A volume
+    /// that keeps no DACL, or a network share, gives `None`, as
+    /// [`crate::ensure_private_dir`] leaves its folders there.
+    pub fn private_file_in(folder: &Path) -> io::Result<Option<Self>> {
+        if !keeps_dacl(&open(folder, FILE_READ_ATTRIBUTES, 0)?)? {
+            return Ok(None);
+        }
+        let sddl = format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{})", current_user()?);
+        let sddl: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: The string ends with one null and outlives this synchronous
+        // call. The descriptor it returns is freed once, by `Local`.
+        #[allow(unsafe_code)]
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(Self(Local(descriptor))))
     }
 }
 

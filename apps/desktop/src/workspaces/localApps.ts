@@ -28,10 +28,10 @@ export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof
     async checkBrowserPublication(publicationId, authorityRevision, signal) {
       if (kind(publicationId, authorityRevision) === "collection") await collection.checkBrowserPublication(publicationId, authorityRevision, signal);
     },
-    request: async (publicationId, action, input, signal) => {
+    request: async (publicationId, action, input, signal, activated) => {
       const reached = kind(publicationId);
       if (reached === "unconnected") throw new Error("This app is not approved for workspace data.");
-      return reached === "dataset" ? dataset.request(publicationId, action, input, signal) : collection.request(publicationId, action, input, signal);
+      return reached === "dataset" ? dataset.request(publicationId, action, input, signal, activated) : collection.request(publicationId, action, input, signal, activated);
     },
     readBrowserFile: async (publicationId, input, signal) => {
       if (kind(publicationId) !== "dataset") throw new Error("This app cannot read Collection files.");

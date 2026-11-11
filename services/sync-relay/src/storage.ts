@@ -1611,6 +1611,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchLogPage(this, input);
   }
 
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean {
+    return logStorage.logHasMoreThan(this, input);
+  }
+
   hasRefusedSettlement(input: Parameters<SyncRelayStorage["hasRefusedSettlement"]>[0]): boolean {
     return logStorage.hasRefusedSettlement(this, input);
   }

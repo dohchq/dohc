@@ -48,6 +48,9 @@ function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapsho
 }
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
+const logCountStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
+// The rows a pull past a cursor serves. A held read counts the same rows.
+const LOG_PAGE_ROWS = "FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ?";
 
 /** Every copy of retained work's creation moment ID starts with this. */
 export const RELEASED_COPY_MOMENT_PREFIX = "released-copy-moment-";
@@ -365,8 +368,7 @@ export function fetchLogPage(storage: StorageContext, input: {
     if (!statement) {
       statement = storage.db.prepare(
         `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND relay_seq > ?
+         ${LOG_PAGE_ROWS}
          ORDER BY relay_seq
          LIMIT ?`,
       );
@@ -380,6 +382,20 @@ export function fetchLogPage(storage: StorageContext, input: {
       nextCursor: last?.relaySeq ?? input.sinceRelaySeq,
       hasMore: rows.length > input.limit,
     };
+  }
+
+/** Whether a pull of `count` rows past the cursor would report more. */
+export function logHasMoreThan(storage: StorageContext, input: {
+    workspaceId: string;
+    sinceRelaySeq: number;
+    count: number;
+  }): boolean {
+    let statement = logCountStatements.get(storage.db);
+    if (!statement) {
+      statement = storage.db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 ${LOG_PAGE_ROWS} ORDER BY relay_seq LIMIT ?)`);
+      logCountStatements.set(storage.db, statement);
+    }
+    return Number(statement.get(input.workspaceId, input.sinceRelaySeq, input.count + 1)?.n) > input.count;
   }
 
 export function fetchLogPageDescending(storage: StorageContext, input: {

@@ -85,6 +85,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
+  dohc_list_live_documents: ["share.live.documents.list"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -1096,13 +1097,14 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting, kept] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept, held] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
     requestCli(ctx, "collectionsWaiting", {}),
     ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
+    requestCli(ctx, "sharedFilesHeld", {}),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1125,6 +1127,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
     ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
+    ...(held.ok && held.heldFiles ? { heldFiles: held.heldFiles } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -2391,6 +2394,13 @@ export async function stopAgain(ctx: ToolContext, args: { path: string; incident
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "stopAgain", { path: resolved.normalized, incident: args.incident });
+}
+
+// The Live documents list. The desktop names the workspace and refuses a
+// shared view.
+export async function listLiveDocuments(ctx: ToolContext, args: { cursor?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
+  return requestCli(ctx, "liveDocuments", args.cursor === undefined ? {} : { cursor: args.cursor });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

@@ -1,7 +1,7 @@
 import { LIVE_STOP_WAITING, liveStopError } from "../ipc/liveEditingStop";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
-import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import { OwnerLiveDocument, type OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { createShareLinkAgentActions } from "../ipc/shareLinkAgentActions";
@@ -11,7 +11,7 @@ import { closeTestStorages, testStorage, testHandler, request as relayRequest, i
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
-import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
+import { LIVE_DOCUMENT_REASON_STEPS, parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
 import { createTestScratch } from "../workspaces/testTemp";
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -151,6 +151,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    shareProjection: vi.fn(async () => undefined),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     localPerson: async () => ({ kind: "human", humanId: "local:test" }),
@@ -714,6 +715,21 @@ describe("desktop CLI workspace context", () => {
     collectionsWaiting.mockResolvedValueOnce(false);
     expect(await context.daemonReads.collectionsWaiting()).toBe(false);
     expect(seen).toEqual([f.workspace, f.workspace]);
+  });
+
+  it("reads the shared files held back from the shared view's projection", async () => {
+    const f = fixture();
+    const unshared = await f.create().openCliWorkspace(f.workspace);
+    expect(await unshared.sharedFilesHeld?.()).toBeNull();
+    const files = [{ path: "mine.md", reason: "local-collision" as const }];
+    f.dependencies.shareProjection = vi.fn(async () => ({
+      state: "pending" as const, pendingPathCount: 0, pendingPaths: [], collisionPathCount: 1,
+      collisionPaths: ["mine.md"], heldPathCount: 1, heldPaths: files, pullInFlight: false,
+    }));
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(await context.sharedFilesHeld?.()).toEqual({ count: 1, files });
+    f.dependencies.shareProjection = vi.fn(async () => ({ state: "current" as const }));
+    expect(await (await f.create().openCliWorkspace(f.workspace)).sharedFilesHeld?.()).toEqual({ count: 0, files: [] });
   });
 
   it("refuses both collection reads when the engine adapter is unavailable", async () => {
@@ -2072,6 +2088,78 @@ it("refuses kept edits on a retired desktop attachment before reaching the engin
   expect(f.save).not.toHaveBeenCalled();
   expect(f.retry).not.toHaveBeenCalled();
   expect(f.stopAgain).not.toHaveBeenCalled();
+});
+
+// Both agent doors read the Live documents list through the desktop CLI
+// server, wired as main wires it: the dialog's own list, with a stand-in
+// server that hosts notes/plan.md.
+async function liveDocumentsFixture(options: { caller?: string } = {}) {
+  const f = await keptEditsFixture(options);
+  const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", {
+    ownerLiveQuarantines: () => f.kept.workspace ?? [],
+  });
+  const documents: Record<string, unknown>[] = [
+    { path: "notes/plan.md", objectId: "object-plan", status: "ready" },
+    { path: "notes/held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld" },
+  ];
+  const retired: Record<string, unknown>[] = [{ path: "notes/old.md", objectId: "object-old", status: "retired" }];
+  h.relay.mockImplementation(async (_credentials, path, init) => {
+    expect(path.startsWith("/sync/workspace/live-host")).toBe(true);
+    expect(init?.method).toBeUndefined();
+    return path.includes("retired=1") ? { ok: true, documents: retired, nextCursor: null } : { ok: true, documents };
+  });
+  f.dependencies.ownerLiveDocuments = (operation, input) =>
+    h.actions.list(input, operation as unknown as { workspace: { workspaceId: string }; assertCurrent(): void });
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const cwd = join(f.root, options.caller ?? "");
+  const cli = async (...argv: string[]) => {
+    const result = await executeCli({ argv: ["document", ...argv, "--json"], cwd, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...answer } = JSON.parse(result.stdout);
+    return answer;
+  };
+  const ctx = { root: cwd, home: join(f.root, "state"), request: transport };
+  const doors = { cli: () => cli("live"), mcp: () => listLiveDocuments(ctx, {}) };
+  return { ...f, h, doors };
+}
+
+// Agents read reason codes, so each one the window's list can carry has its documented next step.
+it("documents every reason a Live documents row can carry", () => {
+  expect(Object.keys(LIVE_DOCUMENT_REASON_STEPS).sort()).toEqual([...OwnerLiveDocument.shape.reason.unwrap().options].sort());
+});
+
+describe.each(["cli", "mcp"] as const)("live documents through %s", door => {
+  it("lists each live document with its state and reason, as Live documents does", async () => {
+    const f = await liveDocumentsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    expect(await f.doors[door]()).toEqual({ ok: true, nextCursor: null, documents: [
+      { path: "notes/old.md", objectId: "object-old", status: "retired", canResume: true },
+      { path: "notes/plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "outbox:delivery:0" },
+      { path: "notes/held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
+    ] });
+  });
+  it("refuses a received share, a received workspace, and a received marker before reaching the server", async () => {
+    const shared = await liveDocumentsFixture({ caller: "shared-with-me/received" });
+    const received = await liveDocumentsFixture(); vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({});
+    const marked = await liveDocumentsFixture(); marked.workspace.shareView = {} as RegistryEntry["shareView"];
+    for (const f of [shared, received, marked]) {
+      expect(await f.doors[door]()).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+      expect(f.h.relay).not.toHaveBeenCalled();
+    }
+  });
+});
+
+it("refuses the Live documents list on a retired desktop attachment before reaching the server", async () => {
+  const f = await liveDocumentsFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+  await f.authorities.invalidate("workspace");
+  await expect(context.liveDocuments!()).rejects.toThrow("This workspace changed while this ran. Try again.");
+  expect(f.h.relay).not.toHaveBeenCalled();
 });
 
 it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {

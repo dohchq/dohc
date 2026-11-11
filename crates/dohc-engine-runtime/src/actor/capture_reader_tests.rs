@@ -833,6 +833,67 @@ async fn outside_reader_fold_round1_preparation_error_is_per_item() {
 }
 
 #[tokio::test]
+async fn outside_reader_fold_busy_retry_reuses_the_first_reads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct BusyOnce(AtomicBool);
+    impl WorkspaceRootGuard for BusyOnce {
+        fn validate(&self, _: &std::path::Path) -> Result<(), RuntimeError> {
+            if self.0.swap(false, Ordering::SeqCst) {
+                Err(RuntimeError::Storage(StorageError::FileLocked))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let (scratch, store, _) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let reader = Arc::new(Reader::new(None));
+    actor
+        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )))
+        .await
+        .unwrap();
+    let captured = input("**Strong**");
+    std::fs::write(scratch.path().join("note.md"), &captured.text).unwrap();
+    let root = scratch.path().to_owned();
+    let policy = Arc::new(crate::search::read_engine_search_policy(&root));
+    let guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BusyOnce(AtomicBool::new(true)));
+    let retry = actor.clone();
+    let (busy, retried) = std::thread::spawn(move || {
+        let mut reads = CaptureBatchReads::default();
+        let mut attempt = || {
+            retry.capture_ingest_batch_reusing_reads_blocking(
+                vec![captured.clone()],
+                policy.clone(),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                root.clone(),
+                guard.clone(),
+                &mut reads,
+            )
+        };
+        (attempt(), attempt())
+    })
+    .join()
+    .unwrap();
+    assert!(
+        matches!(busy, Err(RuntimeError::Storage(StorageError::FileLocked))),
+        "the first attempt did not meet a busy store"
+    );
+    assert_eq!(retried.expect("the busy retry failed").len(), 1);
+    assert_eq!(
+        reader.dispatch_count(),
+        1,
+        "the busy retry asked the reader again"
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_round1_later_batch_failure_keeps_committed_receipts() {
     use std::sync::atomic::{AtomicUsize, Ordering};
