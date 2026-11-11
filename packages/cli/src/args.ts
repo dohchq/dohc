@@ -532,6 +532,8 @@ const DOCUMENT_VERBS = {
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
       "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
+      "lastChange names who stopped or resumed it into the state it shows: a person, with self true for you, or an agent.",
+      "Only this computer records it: on your other computers the row names no one. A change dohc could not record, for example one interrupted before the server's answer arrived, names no one either.",
       "Pass nextCursor as --cursor until it is null."],
     flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
     parse: input => {
@@ -544,7 +546,8 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.document.stop",
     summary: "Stop live editing for a document, as Stop does in Live documents.",
     operands: "<path>",
-    notes: ["Run resume to start live editing again. dohc records the Stop as this agent's.",
+    notes: ["Run resume to start live editing again. dohc records the Stop as this agent's when the server says this request stopped it.",
+      "already is true when live editing was already stopped. Then dohc records no one.",
       "Pass --object-id from live to stop the server's document when its file moved or is gone. dohc then stops that document, whatever path it has now.",
       "keptEdits is recovered when dohc wrote edits the server refused into the file, kept while dohc still keeps them, and none when there were none.",
       "For kept, run kept-edits, then save-recovery-copy or stop-again.",
@@ -562,7 +565,8 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.document.resume",
     summary: "Resume live editing for a document, as Resume does in Live documents.",
     operands: "<path>",
-    notes: ["Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's.",
+    notes: ["Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it.",
+      "already is true when the document was already live. Then dohc records no one.",
       "Run live again to follow it: preparing until the server starts the document, then ready."],
     parse: input => {
       const [path, ...extra] = input.operands;

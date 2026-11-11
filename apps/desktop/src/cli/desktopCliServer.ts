@@ -40,7 +40,7 @@ import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthori
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
-import type { OwnerLiveDocumentsResult, OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, OwnerLiveQuarantine, ResumeOwnerLiveDocumentResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import type {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
@@ -135,7 +135,7 @@ interface DesktopCliServerDependencies<State> {
   ownerLiveDocuments?: {
     list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
     stop(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; objectId?: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<StopOwnerLiveDocumentResult>;
-    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<void>;
+    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<ResumeOwnerLiveDocumentResult>;
   };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];

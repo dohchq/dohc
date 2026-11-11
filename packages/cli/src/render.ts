@@ -383,6 +383,8 @@ function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { o
       ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
       ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
       ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
+      ...(row.lastChange ? [`by ${row.lastChange.author.kind === "agent" ? `agent ${lineSafe(row.lastChange.author.agentName ?? row.lastChange.author.agentId)}`
+        : row.lastChange.author.self ? "you" : "another person"}`] : []),
     ].join(" · ")),
     ...(page.nextCursor === null ? [] : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
   ].join("\n");
@@ -474,11 +476,14 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
     case "liveDocuments":
       return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
-    case "liveResume":
-      return `Resuming live editing for ${lineSafe((result as Extract<CliResultByVerb["liveResume"], { ok: true }>).path)}`;
+    case "liveResume": {
+      const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
+      return resumed.already ? `${lineSafe(resumed.path)} was already live.` : `Resuming live editing for ${lineSafe(resumed.path)}`;
+    }
     case "liveStop": {
       const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
       const path = lineSafe(stopped.path);
+      if (stopped.already) return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
         : stopped.keptEdits === "kept" ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
         : `Stopped live editing for ${path}`;

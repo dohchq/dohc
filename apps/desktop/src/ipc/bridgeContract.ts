@@ -507,6 +507,9 @@ export const OwnerLiveDocument = z.object({
   incident: OwnerLiveQuarantine.shape.incident.optional(),
   // The server's document at this path, whose kept edits the row shows and which its Stop and Try again name.
   objectId: OwnerLiveQuarantine.shape.objectId,
+  // Who last stopped or resumed live editing for it on this computer, when this computer recorded it.
+  lastChange: z.object({action: z.enum(["stopped", "resumed"]), atMs: z.number().int().nonnegative(),
+    author: WorkspaceSyncPauseStatus.shape.author}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // Edits a restore set aside get a row each, apart from the server's document.
@@ -518,11 +521,16 @@ export function saveOnlyLiveDocuments(quarantines: readonly OwnerLiveQuarantine[
     ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
 }
 // What a Stop did with edits the server refused: wrote them into the file,
-// or kept them on this computer because it could not.
+// or kept them on this computer because it could not. `already` when the
+// server says live editing was already stopped, so this Stop changed nothing.
 export const StopOwnerLiveDocumentResult = z.object({
   keptEdits: z.enum(["none", "recovered", "kept"]),
+  already: z.literal(true).optional(),
 }).strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
+// `already` when the server says the document was already live, so this Resume changed nothing.
+export const ResumeOwnerLiveDocumentResult = z.object({already: z.literal(true).optional()}).strict();
+export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();

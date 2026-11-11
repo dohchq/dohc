@@ -1678,6 +1678,16 @@ const stopAgainResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
   rawFailureSchema,
 ]);
+// `already` when the server says the change was already made: live editing was
+// already stopped, or the document already live. Then nothing records who asked.
+const liveStopResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]), already: z.literal(true).optional() }).strict(),
+  rawFailureSchema,
+]);
+const liveResumeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() }).strict(),
+  rawFailureSchema,
+]);
 
 // The Live documents dialog's rows. status is the server's; reason says why a
 // document is not live; canResume says whether Resume can start it again.
@@ -1699,6 +1709,9 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
       sessionEnded: z.literal(true).optional(),
       storedOn: keptEditsStoredOnSchema.optional(),
       incident: keptEditsIncidentSchema.optional(),
+      // Who stopped or resumed it into the state the row shows, as this computer recorded it. Absent means unknown.
+      lastChange: z.object({ action: z.enum(["stopped", "resumed"]), atMs: z.number().int().nonnegative(),
+        author: WorkspaceSyncPauseStatus.shape.author }).strict().optional(),
     }).strict()),
     nextCursor: z.string().min(1).nullable(),
   }).strict(),
@@ -2051,8 +2064,8 @@ export const cliResultSchemas = {
   stopAgain: stopAgainResultSchema,
   heldNoteChange: heldNoteChangeResultSchema,
   liveDocuments: liveDocumentsResultSchema,
-  liveStop: stopAgainResultSchema,
-  liveResume: retryKeptEditsResultSchema,
+  liveStop: liveStopResultSchema,
+  liveResume: liveResumeResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

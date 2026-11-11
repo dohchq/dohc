@@ -323,8 +323,8 @@ export interface CliKeptEditsPort {
 // the cursor is the list's own nextCursor. A Stop or Resume names its author.
 export interface CliLiveDocumentsPort {
   list(cursor?: string): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
-  stop(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits">>;
-  resume(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<void>;
+  stop(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
+  resume(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
@@ -3018,7 +3018,7 @@ async function dispatchWorkspace(
       try {
         const stopped = await live.stop(request.args.path, liveChangeAuthor(context, options), request.args.objectId);
         await notifyWrite(options, context);
-        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits };
+        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits, ...(stopped.already ? { already: true as const } : {}) };
       } catch (error) {
         return mcpFailure(error, `failed to stop live editing for ${request.args.path}`);
       }
@@ -3028,9 +3028,9 @@ async function dispatchWorkspace(
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
       try {
-        await live.resume(request.args.path, liveChangeAuthor(context, options));
+        const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
         await notifyWrite(options, context);
-        return { ok: true as const, path: request.args.path };
+        return { ok: true as const, path: request.args.path, ...(resumed.already ? { already: true as const } : {}) };
       } catch (error) {
         return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
       }

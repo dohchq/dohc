@@ -54,6 +54,23 @@ it("lists live documents with each state and reason, and pages with the list's c
     .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.\n" });
 });
 
+it("says when live editing was already stopped or live, and who changed a row", async () => {
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
+    verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "none", already: true }
+      : verb === "liveResume" ? { ok: true, path: "plan.md", already: true }
+        : { ok: true, nextCursor: null, documents: [
+          { path: "plan.md", objectId: "object-plan", status: "retired", canResume: true,
+            lastChange: { action: "stopped", atMs: 1, author: { kind: "agent", agentId: "agent-1", agentName: "Claude", onBehalfOf: "me", depth: 0 } } },
+          { path: "old.md", objectId: "object-old", status: "retired", canResume: true,
+            lastChange: { action: "stopped", atMs: 1, author: { kind: "person", personId: "me", self: true } } },
+        ] });
+  expect((await executeCli({ argv: ["document", "stop", "plan.md"], cwd: "/workspace", env: {}, request })).stdout)
+    .toBe("Live editing for plan.md was already stopped.\n");
+  expect((await executeCli({ argv: ["document", "resume", "plan.md"], cwd: "/workspace", env: {}, request })).stdout).toBe("plan.md was already live.\n");
+  expect((await executeCli({ argv: ["document", "live"], cwd: "/workspace", env: {}, request })).stdout)
+    .toBe("plan.md · stopped · can resume · by agent Claude\nold.md · stopped · can resume · by you\n");
+});
+
 it("stops and resumes live editing with only the caller's path", async () => {
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "kept" } : { ok: true, path: "plan.md" });

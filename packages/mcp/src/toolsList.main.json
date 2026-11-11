@@ -2698,7 +2698,7 @@
     },
     {
       "name": "dohc_list_live_documents",
-      "description": "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
+      "description": "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. `lastChange` `{ action, atMs, author }` names who stopped or resumed it into the state it shows: a person, with `self` true for the owner here, or an agent. Only this computer records it: on your other computers the row names no one. A change dohc could not record, for example one interrupted before the server's answer arrived, names no one either. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2708,8 +2708,8 @@
             "maxLength": 4096
           }
         },
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -3870,7 +3870,7 @@
     },
     {
       "name": "dohc_resume_live_editing",
-      "description": "Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.",
+      "description": "Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3883,8 +3883,8 @@
         "required": [
           "path"
         ],
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -4272,7 +4272,7 @@
     },
     {
       "name": "dohc_stop_live_editing",
-      "description": "Stop live editing for a document, as Stop does in Live documents. dohc_resume_live_editing starts it again. dohc records the Stop as this agent's. Pass the row's `objectId` from dohc_list_live_documents to stop the server's document when its file moved or is gone; dohc then stops that document, whatever path it has now. `keptEdits` is `recovered` when dohc wrote edits the server refused into the file, `kept` while dohc still keeps them (see `keptEdits` in dohc_workspace_status), and `none` when there were none. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing; ask the person using dohc to close it. Owner workspace only.",
+      "description": "Stop live editing for a document, as Stop does in Live documents. dohc_resume_live_editing starts it again. dohc records the Stop as this agent's when the server says this request stopped it; `already: true` means live editing was already stopped, and dohc records no one. Pass the row's `objectId` from dohc_list_live_documents to stop the server's document when its file moved or is gone; dohc then stops that document, whatever path it has now. `keptEdits` is `recovered` when dohc wrote edits the server refused into the file, `kept` while dohc still keeps them (see `keptEdits` in dohc_workspace_status), and `none` when there were none. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing; ask the person using dohc to close it. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4290,8 +4290,8 @@
         "required": [
           "path"
         ],
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
         "taskSupport": "forbidden"

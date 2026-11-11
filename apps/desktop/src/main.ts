@@ -6877,6 +6877,7 @@ function registerIpcHandlers(): void {
 
   // The window's Stop and Resume, and an agent's Stop again, use these alike.
   const ownerLiveDocumentDependencies: OwnerLiveDocumentActionDependencies<DesktopWorkspaceOperation["workspace"]> = {
+    person: () => ({kind: "person", personId: localInstallationId()}),
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
@@ -6935,12 +6936,11 @@ function registerIpcHandlers(): void {
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
   };
-  // TODO(#2971): record input.author once the engine keeps who stopped or resumed a document.
   ownerLiveDocumentsForCli = {
     list: (operation, input) => agentOwnerLiveDocuments.list(input, operation),
-    stop: (operation, {author: _author, ...input}) => stopNamedOwnerLiveDocument(agentOwnerLiveDocuments, {...ownerLiveDocumentDependencies, sendRendererActivity},
+    stop: (operation, input) => stopNamedOwnerLiveDocument(agentOwnerLiveDocuments, {...ownerLiveDocumentDependencies, sendRendererActivity},
       {workspaceId: operation.workspace.workspaceId, ...input}, operation),
-    resume: (operation, {author: _author, ...input}) => agentOwnerLiveDocuments.resume({workspaceId: operation.workspace.workspaceId, ...input}, operation),
+    resume: (operation, input) => agentOwnerLiveDocuments.resume({workspaceId: operation.workspace.workspaceId, ...input}, operation),
   };
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
