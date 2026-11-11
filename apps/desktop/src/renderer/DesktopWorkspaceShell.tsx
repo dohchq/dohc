@@ -7041,7 +7041,11 @@ export function DesktopWorkspaceShell(props: {
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!shareView}
-                  onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
+                  onLifecycleChanged={() => {
+                    void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error));
+                    // A deleted Collection's folder holds its files still, now as plain files on Home.
+                    void refreshCollections();
+                  }}
                   onError={collectionReports.onError}
                   onKeepCollections={keepCollectionsWithList}
                   onSettled={collectionReports.onSettled}

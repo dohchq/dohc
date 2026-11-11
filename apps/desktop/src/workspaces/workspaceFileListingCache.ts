@@ -125,13 +125,15 @@ export class WorkspaceFileListingCache {
 
   /**
    * Whether the listing in hand has a file `matches` accepts, once its walk
-   * finishes. Undefined with no listing in hand, or when its walk fails.
+   * finishes. Undefined with no listing in hand, when its walk fails, or when
+   * a newer walk or a change replaced it meanwhile, since it may lack a newer file.
    */
   async hasFile(workspaceId: string, attachmentId: symbol, matches: (path: string) => boolean): Promise<boolean | undefined> {
     const entry = this.#listings.get(workspaceId);
     if (entry?.attachmentId !== attachmentId) return undefined;
     try {
-      return (await entry.listing).files.some(file => matches(file.path));
+      const listing = await entry.listing;
+      return this.#listings.get(workspaceId) === entry ? listing.files.some(file => matches(file.path)) : undefined;
     } catch {
       return undefined;
     }
