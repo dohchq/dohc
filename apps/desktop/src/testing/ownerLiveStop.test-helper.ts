@@ -4,7 +4,7 @@ import { createOwnerLiveDocumentActions, type OwnerLiveDocumentActionDependencie
 import type { OwnerLiveStop } from "../workspaces/ownerLiveStop";
 
 export function pendingStopHarness(workspaceId: string, path: string, objectId: string,
-  options: Partial<Pick<OwnerLiveDocumentActionDependencies<{workspaceId: string}>, "withoutEditors" | "ownerLiveQuarantines">> = {}) {
+  options: Partial<Pick<OwnerLiveDocumentActionDependencies<{workspaceId: string}>, "withoutEditors" | "ownerLiveQuarantines" | "liveChanges" | "person">> = {}) {
   const document = { mainVersionId: "main", objectId, currentPath: path };
   let recorded: OwnerLiveStop | undefined;
   const ownerLiveStop = vi.fn<OwnerLiveDocumentActionDependencies<{workspaceId: string}>["ownerLiveStop"]>(async (_workspace, action) => {

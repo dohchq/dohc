@@ -143,7 +143,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
-  live: "liveDocuments",
+  live: "liveDocuments", stop: "liveStop", resume: "liveResume",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -225,6 +225,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },
   dohc_list_live_documents: { cli: "liveDocuments" },
+  dohc_stop_live_editing: { cli: "liveStop" },
+  dohc_resume_live_editing: { cli: "liveResume" },
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },

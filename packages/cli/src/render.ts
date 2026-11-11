@@ -474,6 +474,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
     case "liveDocuments":
       return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
+    case "liveResume": {
+      const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
+      return resumed.already ? `${lineSafe(resumed.path)} was already live.` : `Resuming live editing for ${lineSafe(resumed.path)}`;
+    }
+    case "liveStop": {
+      const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
+      const path = lineSafe(stopped.path);
+      if (stopped.already) return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
+      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept" ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
+        : `Stopped live editing for ${path}`;
+    }
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`

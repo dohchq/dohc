@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, resumeLiveEditing, stopLiveEditing, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -711,6 +711,17 @@ describe("live documents profile admission", () => {
     expect(names).toContain("dohc_list_live_documents");
     expect((await client.callTool({ name: "dohc_list_live_documents", arguments: { cursor: "notes/old.md" } })).structuredContent).toEqual(page);
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "liveDocuments", door: "mcp", args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("offers neither Stop nor Resume to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => ({ ok: true, path: "plan.md" }));
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    for (const [name, call] of [["dohc_stop_live_editing", stopLiveEditing], ["dohc_resume_live_editing", resumeLiveEditing]] as const) {
+      expect(names).not.toContain(name);
+      expect(await client.callTool({ name, arguments: { path: "plan.md" } })).toMatchObject({ isError: true });
+      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, { path: "plan.md" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    }
+    expect(request).not.toHaveBeenCalled();
   });
   it.each(["view", "comment", "edit"] as const)("does not offer the list to a %s profile", async shareAccess => {
     const request = vi.fn(async () => page);

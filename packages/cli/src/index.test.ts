@@ -50,8 +50,34 @@ it("lists live documents with each state and reason, and pages with the list's c
   ]);
   expect((await executeCli({ argv: ["document", "live", "extra"], env: {}, request })).exitCode).toBe(1);
   expect(await executeCli({ argv: ["document", "live", "--json"], env: {},
-    request: async () => ({ ok: false, reason: "Live documents are listed only in the original workspace. Open it to continue." }) }))
-    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Live documents are listed only in the original workspace. Open it to continue.\n" });
+    request: async () => ({ ok: false, reason: "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue." }) }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.\n" });
+});
+
+it("says when live editing was already stopped or live", async () => {
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
+    verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "none", already: true } : { ok: true, path: "plan.md", already: true });
+  expect((await executeCli({ argv: ["document", "stop", "plan.md"], cwd: "/workspace", env: {}, request })).stdout)
+    .toBe("Live editing for plan.md was already stopped.\n");
+  expect((await executeCli({ argv: ["document", "resume", "plan.md"], cwd: "/workspace", env: {}, request })).stdout).toBe("plan.md was already live.\n");
+});
+
+it("stops and resumes live editing with only the caller's path", async () => {
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
+    verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "kept" } : { ok: true, path: "plan.md" });
+  expect(await executeCli({ argv: ["document", "stop", "plan.md"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Stopped live editing for plan.md. dohc still keeps edits the server refused. Run kept-edits to check them.\n", stderr: "" });
+  expect((await executeCli({ argv: ["document", "stop", "plan.md", "--object-id", "object-plan"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
+  expect(await executeCli({ argv: ["document", "resume", "plan.md"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Resuming live editing for plan.md\n", stderr: "" });
+  expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
+    ["liveStop", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
+    ["liveStop", { cwd: WORKSPACE, actor: "agent", path: "plan.md", objectId: "object-plan" }],
+    ["liveResume", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
+  ]);
+  expect(await executeCli({ argv: ["document", "stop"], env: {}, request }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: document stop requires a path\n" });
+  expect((await executeCli({ argv: ["document", "resume", "plan.md", "extra"], env: {}, request })).exitCode).toBe(1);
 });
 
 it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
