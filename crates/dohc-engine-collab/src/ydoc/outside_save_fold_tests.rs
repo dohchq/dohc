@@ -385,28 +385,167 @@ fn the_direct_comparison_decides_as_the_json_one_did() {
     assert!(different > same, "different {different}, same {same}");
 }
 
-#[test]
-fn the_direct_comparison_treats_what_json_cannot_tell_apart_as_changed() {
-    // A heading's level, a number either way, stored as the other kind.
-    let fresh = folded("## Kept.\n");
-    let old = folded("## Kept.\n");
-    let XmlOut::Element(heading) = blocks_of(&old).remove(0) else {
-        panic!("not a heading")
+/// Folds `markdown` twice, changes the first block of one copy with `old` and
+/// of the other with `new`, and compares the two: (JSON, direct).
+fn judged(markdown: &str, old: impl Fn(&Ydoc), new: impl Fn(&Ydoc)) -> (bool, bool) {
+    let (old_doc, new_doc) = (folded(markdown), folded(markdown));
+    old(&old_doc);
+    new(&new_doc);
+    let (old_block, new_block) = (blocks_of(&old_doc).remove(0), blocks_of(&new_doc).remove(0));
+    let (old_txn, new_txn) = (old_doc.doc.transact(), new_doc.doc.transact());
+    (
+        json_same(&old_txn, &old_block, &new_txn, &new_block),
+        same_xml(&old_txn, &old_block, &new_txn, &new_block),
+    )
+}
+
+fn set_attribute(doc: &Ydoc, key: &str, value: Any) {
+    let XmlOut::Element(element) = blocks_of(doc).remove(0) else {
+        panic!("not an element")
     };
-    {
-        let mut txn = old.doc.transact_mut();
-        let other = match heading.get_attribute(&txn, "level") {
-            Some(Out::Any(Any::Number(level))) => Any::BigInt(level as i64),
-            Some(Out::Any(Any::BigInt(level))) => Any::Number(level as f64),
-            level => panic!("{level:?}"),
-        };
-        heading.insert_attribute(&mut txn, "level", other);
+    element.insert_attribute(&mut doc.doc.transact_mut(), key, value);
+}
+
+/// Empties the first block's text and writes it again with `write`.
+fn rewrite_text(
+    doc: &Ydoc,
+    write: impl Fn(&yrs::XmlTextRef, &mut yrs::TransactionMut, Option<Box<yrs::types::Attrs>>),
+) {
+    let text = doc.richdoc_block_text(0).unwrap();
+    let mut txn = doc.doc.transact_mut();
+    let format = text.diff(&txn, YChange::identity)[0].attributes.clone();
+    let len = text.len(&txn);
+    text.remove_range(&mut txn, 0, len);
+    write(&text, &mut txn, format);
+}
+
+#[test]
+fn where_the_comparisons_could_disagree_the_direct_one_keeps_nothing_json_would_not() {
+    let unchanged = |_: &Ydoc| {};
+    let attribute =
+        |key: &'static str, value: Any| move |doc: &Ydoc| set_attribute(doc, key, value.clone());
+    // 1 against 1.0: JSON spells both 1, the direct comparison calls it changed.
+    assert_eq!(
+        judged(
+            "# Kept.\n",
+            attribute("level", Any::BigInt(1)),
+            attribute("level", Any::Number(1.0))
+        ),
+        (true, false)
+    );
+    // An attribute set to nothing against one that's absent: both call it changed.
+    assert_eq!(
+        judged("# Kept.\n", attribute("extra", Any::Null), unchanged),
+        (false, false)
+    );
+    // The two kinds of nothing: JSON spells both null, the direct comparison calls it changed.
+    assert_eq!(
+        judged(
+            "# Kept.\n",
+            attribute("extra", Any::Null),
+            attribute("extra", Any::Undefined)
+        ),
+        (true, false)
+    );
+    // Attributes are a map, so the order they were set in is not part of the
+    // block, and both keep it.
+    let first_a = |doc: &Ydoc| {
+        set_attribute(doc, "a", Any::Number(1.0));
+        set_attribute(doc, "b", Any::Number(2.0));
+    };
+    let first_b = |doc: &Ydoc| {
+        set_attribute(doc, "b", Any::Number(2.0));
+        set_attribute(doc, "a", Any::Number(1.0));
+    };
+    assert_eq!(judged("# Kept.\n", first_a, first_b), (true, true));
+    // Text written in two pieces reads as one run, so both keep it.
+    let split = |doc: &Ydoc| {
+        rewrite_text(doc, |text, txn, _| {
+            text.insert(txn, 0, "Ke");
+            text.insert(txn, 2, "pt.");
+        })
+    };
+    assert_eq!(judged("Kept.\n", split, unchanged), (true, true));
+    // A bold run written in two pieces: whatever the runs come out as, the
+    // two comparisons decide alike.
+    let split_bold = |doc: &Ydoc| {
+        rewrite_text(doc, |text, txn, format| {
+            let format = *format.expect("bold");
+            text.insert_with_attributes(txn, 0, "Ke", format.clone());
+            text.insert_with_attributes(txn, 2, "pt.", format);
+        })
+    };
+    let (json, direct) = judged("**Kept.**\n", split_bold, unchanged);
+    assert_eq!(direct, json);
+    // A plain value embedded in the text against the same digits as text.
+    let embed = |doc: &Ydoc| {
+        rewrite_text(doc, |text, txn, _| {
+            text.insert_embed(txn, 0, Any::Number(7.0));
+        })
+    };
+    let digits = |doc: &Ydoc| rewrite_text(doc, |text, txn, _| text.insert(txn, 0, "7"));
+    assert_eq!(judged("Kept.\n", embed, digits), (false, false));
+}
+
+fn fold_work(doc: &Ydoc, markdown: &str) -> FoldWork {
+    FOLD_WORK.with(|work| work.set(FoldWork::default()));
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    FOLD_WORK.with(|work| work.get())
+}
+
+/// Every block and text node in a note's body.
+fn nodes(doc: &Ydoc) -> usize {
+    fn count<T: ReadTxn>(txn: &T, node: &XmlOut) -> usize {
+        match node {
+            XmlOut::Element(element) => {
+                1 + element
+                    .children(txn)
+                    .map(|child| count(txn, &child))
+                    .sum::<usize>()
+            }
+            _ => 1,
+        }
     }
-    let (old_block, new_block) = (blocks_of(&old).remove(0), blocks_of(&fresh).remove(0));
-    let (old_txn, new_txn) = (old.doc.transact(), fresh.doc.transact());
-    // JSON spells both the same; the direct comparison keeps nothing.
-    assert!(json_same(&old_txn, &old_block, &new_txn, &new_block));
-    assert!(!same_xml(&old_txn, &old_block, &new_txn, &new_block));
+    let blocks = blocks_of(doc);
+    let txn = doc.doc.transact();
+    blocks.iter().map(|block| count(&txn, block)).sum()
+}
+
+/// Limits on the work an outside save's fold does to find what it keeps.
+/// They are counts, so load can't fail them; lower one when the fold does
+/// less, and never raise one.
+#[test]
+fn finding_what_an_outside_save_keeps_reads_each_block_once_and_serializes_nothing() {
+    let mut every_block_changed = Vec::new();
+    for blocks in [100, 2000] {
+        // One line changed in the middle: each block is built and compared
+        // once, from one end or the other, and the changed heading (two
+        // nodes) from both.
+        let doc = folded(&note(blocks, ""));
+        let body = nodes(&doc);
+        let work = fold_work(&doc, &note(blocks, " Edited."));
+        assert!(work.built <= blocks + 1, "{blocks} blocks: {work:?}");
+        assert!(
+            work.compared <= body + 2,
+            "{blocks} blocks, {body} nodes: {work:?}"
+        );
+        assert_eq!(work.serialized, 0, "{blocks} blocks: {work:?}");
+        // Every block changed: the fold stops at the first block from each
+        // end, however long the note is.
+        let doc = folded(&note(blocks, ""));
+        let changed = note(blocks, "")
+            .replace("Paragraph", "Line")
+            .replace("Section", "Part")
+            .replace("item", "entry");
+        let work = fold_work(&doc, &changed);
+        assert!(
+            work.built <= 2 && work.compared <= 4 && work.serialized == 0,
+            "{blocks} blocks: {work:?}"
+        );
+        every_block_changed.push(work);
+    }
+    assert_eq!(every_block_changed[0], every_block_changed[1]);
 }
 
 #[test]
@@ -420,7 +559,7 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
     };
     {
         let mut txn = child.doc.transact_mut();
-        let branch = yrs::branch::BranchPtr::from(paragraph.as_ref());
+        let branch = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(&paragraph));
         yrs::ArrayRef::from(branch).push_back(&mut txn, 7);
     }
     // A heading whose level is a shared array.

@@ -5054,6 +5054,37 @@ fn out_json<T: ReadTxn>(txn: &T, out: Out) -> Value {
     }
 }
 
+/// What an outside save's fold did to find the blocks it keeps, counted on
+/// this thread so tests can hold its cost to counts rather than times.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FoldWork {
+    /// Blocks built in the scratch body to compare against.
+    pub(crate) built: usize,
+    /// Nodes `same_xml` compared.
+    pub(crate) compared: usize,
+    /// Nodes `xml_json` serialized.
+    pub(crate) serialized: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FOLD_WORK: std::cell::Cell<FoldWork> = const {
+        std::cell::Cell::new(FoldWork { built: 0, compared: 0, serialized: 0 })
+    };
+}
+
+macro_rules! count_fold_work {
+    ($field:ident) => {
+        #[cfg(test)]
+        FOLD_WORK.with(|work| {
+            let mut now = work.get();
+            now.$field += 1;
+            work.set(now);
+        });
+    };
+}
+
 /// How many of `body`'s blocks at the start and at the end are already what
 /// `blocks` would insert there, compared without overlapping.
 fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
@@ -5080,6 +5111,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     // differs.
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
+        count_fold_work!(built);
         insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
@@ -5109,6 +5141,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
 /// the same text runs with the same formatting. Only plain values compare, so
 /// an embedded shared type or a value that isn't XML never matches.
 fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
+    count_fold_work!(compared);
     match (old, new) {
         (XmlOut::Element(old), XmlOut::Element(new)) => {
             let len = old.len(old_txn);
@@ -5152,6 +5185,7 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
 }
 
 fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {
+    count_fold_work!(serialized);
     match node {
         XmlOut::Element(el) => {
             let mut attrs = BTreeMap::new();
