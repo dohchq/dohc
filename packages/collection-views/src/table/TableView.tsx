@@ -468,7 +468,7 @@ export function TableView({
   editingDisabled = false,
   canEditCell,
   canSortField,
-  cellStatuses = NO_STATUSES,
+  cellStatuses,
   hostCells,
   emptyText,
   acknowledgedWriteId,
@@ -511,15 +511,35 @@ export function TableView({
                 if (field.type === "button" && renderButton) return renderButton(field, record);
                 const host = hostCells?.get(field.name);
                 const edits = onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
+                const editable = edits && opensEditor(field, relationExecutor, host);
+                const label = fieldLabel?.(field.name) ?? field.name;
+                // A host with no unconfirmed changes and no cells of its own gets the plain cell, which reads no store.
+                if (!cellStatuses && !host) {
+                  return (
+                    <FieldCell
+                      field={field}
+                      label={label}
+                      indexed={context.getValue()}
+                      personLabel={personLabel}
+                      onChange={
+                        edits
+                          ? (value) => onCellChange({ recordId: record.id, recordPath: record.path, field: field.name, value })
+                          : undefined
+                      }
+                      editable={editable}
+                      onOpenLink={onOpenLink}
+                    />
+                  );
+                }
                 return (
                   <CellContent
                     field={field}
-                    label={fieldLabel?.(field.name) ?? field.name}
+                    label={label}
                     record={record}
                     indexed={context.getValue()}
-                    statuses={cellStatuses}
+                    statuses={cellStatuses ?? NO_STATUSES}
                     host={host}
-                    editable={edits && opensEditor(field, relationExecutor, host)}
+                    editable={editable}
                     onToggle={edits ? onCellChange : undefined}
                     personLabel={personLabel}
                     onOpenLink={onOpenLink}
@@ -568,8 +588,9 @@ export function TableView({
   const editingPickerWidth = editingField ? popoverWidth(editingField) : null;
 
   // The selected cell's status, read here so its words can show under it.
-  const selectedStatus = useSyncExternalStore(cellStatuses.subscribe, () =>
-    selected === null ? undefined : cellStatuses.get(selected.recordId, selected.field),
+  const statuses = cellStatuses ?? NO_STATUSES;
+  const selectedStatus = useSyncExternalStore(statuses.subscribe, () =>
+    selected === null ? undefined : statuses.get(selected.recordId, selected.field),
   );
   const noteId = useId();
   const noteRef = useRef<HTMLDivElement>(null);
@@ -741,7 +762,7 @@ export function TableView({
     if (!onCellChange || !editsAt(record, field)) return;
     const cell = { recordId: record.id, recordPath: record.path, field: field.name };
     // The keys act on what the cell shows.
-    const status = cellStatuses.get(record.id, field.name);
+    const status = statuses.get(record.id, field.name);
     const value = status ? status.value : record.values.find((entry) => entry.field === field.name)?.value ?? null;
     if (field.type === "checkbox" && (key === "Enter" || key === " ")) {
       event.preventDefault();
@@ -959,7 +980,7 @@ export function TableView({
                   subscribeToDiscardedWrites={subscribeToDiscardedWrites}
                   carried={editingField.type === "multi-select" ? carriedSelection(editing) : undefined}
                   // The edit starts from what the cell shows, so a refused value is not typed twice.
-                  indexed={shownValue(editingField.name, editingValue, cellStatuses.get(editing.recordId, editing.field))}
+                  indexed={shownValue(editingField.name, editingValue, statuses.get(editing.recordId, editing.field))}
                   emit={(value, previousValues) =>
                     onCellChange({
                       recordId: editingRow.original.id,
