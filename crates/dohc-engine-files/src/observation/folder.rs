@@ -57,6 +57,8 @@ fn digest(mut file: impl io::Read, cap: u64) -> Option<[u8; 32]> {
     }
 }
 
+#[cfg(all(unix, test))]
+pub(super) use unix::OPEN;
 #[cfg(unix)]
 pub(super) use unix::{Child, Folder};
 
@@ -73,6 +75,7 @@ mod unix {
 
     const FOLDER: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
+        .union(OFlags::NONBLOCK)
         .union(OFlags::CLOEXEC);
 
     /// One path component: never empty, `.`, `..`, or holding a `/`.
@@ -88,7 +91,37 @@ mod unix {
 
     /// An open folder. Clones share one handle.
     #[derive(Clone)]
-    pub(in super::super) struct Folder(Rc<OwnedFd>);
+    pub(in super::super) struct Folder(Rc<Handle>);
+
+    struct Handle(OwnedFd);
+
+    impl Handle {
+        fn new(fd: OwnedFd) -> Rc<Self> {
+            #[cfg(test)]
+            OPEN.with(|open| {
+                let (now, most) = open.get();
+                open.set((now + 1, most.max(now + 1)));
+            });
+            Rc::new(Self(fd))
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            OPEN.with(|open| {
+                let (now, most) = open.get();
+                open.set((now - 1, most));
+            });
+        }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Folder handles open now, and the most open at once.
+        pub(in super::super) static OPEN: std::cell::Cell<(usize, usize)> =
+            const { std::cell::Cell::new((0, 0)) };
+    }
 
     pub(in super::super) struct Child {
         name: Name,
@@ -105,7 +138,7 @@ mod unix {
         /// The workspace root. A link at the root itself is followed, as the
         /// workspace path names it.
         pub(in super::super) fn root(path: &std::path::Path) -> io::Result<Self> {
-            Ok(Self(Rc::new(rustix::fs::open(
+            Ok(Self(Handle::new(rustix::fs::open(
                 path,
                 FOLDER,
                 Mode::empty(),
@@ -120,14 +153,14 @@ mod unix {
             // NOFOLLOW guards only the last component. `Name` is one
             // component and the parent is a handle, so nothing else resolves.
             let flags = FOLDER | OFlags::NOFOLLOW;
-            let folder = rustix::fs::openat(&*self.0, &name.0, flags, Mode::empty())?;
-            Ok(Self(Rc::new(folder)))
+            let folder = rustix::fs::openat(&self.0.0, &name.0, flags, Mode::empty())?;
+            Ok(Self(Handle::new(folder)))
         }
 
         pub(in super::super) fn list(
             &self,
         ) -> io::Result<impl Iterator<Item = io::Result<Child>> + use<>> {
-            let entries = rustix::fs::Dir::read_from(&*self.0)?;
+            let entries = rustix::fs::Dir::read_from(&self.0.0)?;
             Ok(entries.filter_map(|entry| match entry {
                 Err(error) => Some(Err(error.into())),
                 Ok(entry) => Some(Ok(Child {
@@ -139,7 +172,7 @@ mod unix {
 
         fn stat(&self, name: &Name) -> io::Result<rustix::fs::Stat> {
             Ok(rustix::fs::statat(
-                &*self.0,
+                &self.0.0,
                 &name.0,
                 AtFlags::SYMLINK_NOFOLLOW,
             )?)
@@ -168,7 +201,7 @@ mod unix {
             // the feed, so the open doesn't block and only a regular file is
             // read.
             let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let opened = rustix::fs::openat(&*self.0, &child.name.0, flags, Mode::empty())
+            let opened = rustix::fs::openat(&self.0.0, &child.name.0, flags, Mode::empty())
                 .and_then(|file| Ok((rustix::fs::fstat(&file)?, file)));
             match opened {
                 Ok((stat, file))
@@ -203,6 +236,7 @@ mod unix {
                 }
                 Err(error) => return Err(error.into()),
             };
+            // Tests swap `.dohc` here, after it opened and before its file is read.
             super::super::before_open(".dohc");
             let child = Child {
                 name: Name(c"visibility.toml".to_owned()),

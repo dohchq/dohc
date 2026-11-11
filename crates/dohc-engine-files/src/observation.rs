@@ -151,10 +151,7 @@ impl ObservationWalker {
         let mut listing = Vec::with_capacity(previous_len);
         let mut failed = Vec::new();
         let mut digests = BTreeMap::new();
-        // A pending folder holds its parent open and opens from it. A parent
-        // closes once its last pending child opens, so the open folders are
-        // at most the current path's.
-        let mut stack: Vec<(Option<(Folder, Child)>, String)> = vec![(None, String::new())];
+        let mut stack: Vec<(Option<Pending>, String)> = vec![(None, String::new())];
         let folds = self.folds_names(root);
         let mut entries = 0;
         while let Some((pending, relative)) = stack.pop() {
@@ -167,12 +164,11 @@ impl ObservationWalker {
             }
             let opened = match &pending {
                 None => Ok(root_folder.clone()),
-                Some((parent, child)) => {
+                Some(pending) => {
                     before_open(&relative);
-                    parent.open(child)
+                    pending.open()
                 }
             };
-            drop(pending);
             let (dir, children) = match opened.and_then(|dir| {
                 let children = dir.list()?;
                 Ok((dir, children))
@@ -194,6 +190,7 @@ impl ObservationWalker {
             } else {
                 String::new()
             };
+            let mut folders = Vec::new();
             for child in children {
                 if token.is_cancelled() {
                     return Ok(false);
@@ -237,7 +234,7 @@ impl ObservationWalker {
                     }
                 };
                 if kind == Kind::Folder {
-                    stack.push((Some((dir.clone(), child)), path));
+                    folders.push((path, child));
                     continue;
                 }
                 if !matches!(kind, Kind::File | Kind::Symlink) || editor_noise(&normalized) {
@@ -274,6 +271,14 @@ impl ObservationWalker {
                     digests.insert(entry.path.clone(), check);
                 }
                 listing.push(entry);
+            }
+            // Subfolders open in name order, so a walk keeps folders open the
+            // same way on every volume.
+            folders.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+            let siblings = folders.len() > 1;
+            for (path, child) in folders {
+                let next = Pending::under(&dir, pending.as_ref(), siblings, child);
+                stack.push((Some(next), path));
             }
         }
         observe_visibility_policy(
@@ -327,6 +332,78 @@ impl ContentRule {
             recent: entry.racy(self.started_ms),
             digest: read.digest,
         })
+    }
+}
+
+/// How many folders a walk keeps open for subfolders still waiting their turn.
+/// Past this, a folder opens one name at a time from the deepest one kept, so
+/// a deep tree with a subfolder waiting at every level can't use up the
+/// engine's file handles.
+const KEPT_FOLDERS: usize = 64;
+
+/// A folder waiting to be listed.
+struct Pending {
+    /// The open folder its names start from.
+    from: Folder,
+    /// Its own name, after the names of its ancestors below `from`.
+    names: std::rc::Rc<Names>,
+    /// Folders kept open for this one and its ancestors.
+    kept: usize,
+}
+
+struct Names {
+    parent: Option<std::rc::Rc<Names>>,
+    child: Child,
+}
+
+impl Drop for Names {
+    // A long chain would otherwise drop one nested call per name.
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(names) = parent {
+            parent = std::rc::Rc::into_inner(names).and_then(|mut names| names.parent.take());
+        }
+    }
+}
+
+impl Pending {
+    /// `child` of the folder `dir`, which opened from `pending`, or is the
+    /// root when that is `None`. `dir` stays open for it unless a sibling
+    /// keeps it open and the walk already keeps its share.
+    fn under(dir: &Folder, pending: Option<&Pending>, siblings: bool, child: Child) -> Self {
+        let kept = pending.map_or(0, |pending| pending.kept);
+        match pending {
+            Some(pending) if siblings && kept >= KEPT_FOLDERS => Self {
+                from: pending.from.clone(),
+                names: std::rc::Rc::new(Names {
+                    parent: Some(pending.names.clone()),
+                    child,
+                }),
+                kept,
+            },
+            _ => Self {
+                from: dir.clone(),
+                names: std::rc::Rc::new(Names {
+                    parent: None,
+                    child,
+                }),
+                // An only subfolder opens next, and `dir` closes after it.
+                kept: kept + usize::from(siblings),
+            },
+        }
+    }
+
+    fn open(&self) -> std::io::Result<Folder> {
+        let mut names = vec![&self.names.child];
+        let mut parent = self.names.parent.as_deref();
+        while let Some(next) = parent {
+            names.push(&next.child);
+            parent = next.parent.as_deref();
+        }
+        names
+            .into_iter()
+            .rev()
+            .try_fold(self.from.clone(), |folder, child| folder.open(child))
     }
 }
 
@@ -1486,6 +1563,7 @@ mod tests {
             ),
         );
         let facts = f.scan(&cursor);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
         assert!(
             facts.iter().all(|fact| !fact.path.contains("secret")),
             "{facts:?}"
@@ -1512,6 +1590,7 @@ mod tests {
             ),
         );
         let facts = f.scan(&cursor);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
         assert!(
             facts.iter().all(|fact| !fact.path.contains("secret")),
             "{facts:?}"
@@ -1536,6 +1615,31 @@ mod tests {
             ),
         );
         assert_eq!(f.scan(&cursor), vec![]);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_tree_with_a_waiting_subfolder_at_every_level_keeps_few_folders_open() {
+        let f = Fixture::new();
+        let mut deep = String::new();
+        for _ in 0..KEPT_FOLDERS + 40 {
+            // `d` opens before `side`, which waits while `d` is walked.
+            f.write(&format!("{deep}side/file.md"), "s");
+            deep.push_str("d/");
+        }
+        f.write(&format!("{deep}deepest.md"), "x");
+        folder::OPEN.set((folder::OPEN.get().0, 0));
+        f.scan(&f.cursor());
+        let (_, most) = folder::OPEN.get();
+        assert!(most <= KEPT_FOLDERS + 4, "{most} folders open at once");
+        let listing = f.feed.state.lock().unwrap().listing.clone();
+        assert_eq!(listing.len(), KEPT_FOLDERS + 41);
+        assert!(
+            listing
+                .iter()
+                .any(|entry| entry.path == format!("{deep}deepest.md"))
+        );
     }
 
     #[test]
