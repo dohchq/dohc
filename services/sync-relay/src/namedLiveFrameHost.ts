@@ -148,11 +148,14 @@ function captureLiveFrameHost(options: {
       standing();
       // A recipient's share stands while it covers the document under the same
       // grant generation. The session also ends when what that share shows
-      // changes, so a reconnect opens with the new view.
-      const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
-      if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
-        !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
-        !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(view(), wireBinding)) throw new Error("Named host standing changed.");
+      // changes, so a reconnect opens with the new view. One read snapshot holds both.
+      const changed = storage.readLiveAuthority(() => {
+        const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+        return native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
+          !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
+          !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(view(), wireBinding);
+      });
+      if (changed) throw new Error("Named host standing changed.");
     } catch (error) { close(); throw error; }
   }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });
