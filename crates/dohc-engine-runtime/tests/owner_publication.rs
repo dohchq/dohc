@@ -231,7 +231,7 @@ impl Fixture {
         }
         if preserved_source {
             let source = if changes_content {
-                "# Shared\n\nChanged together.\n"
+                "# Shared\n\nChanged together."
             } else {
                 &self.text
             };
@@ -3076,7 +3076,7 @@ async fn the_handover_settle_keeps_the_new_owners_unaccepted_edit() {
     let empty = f.settle(&handle, Some(receipt)).await;
     assert!(empty.materialized);
     assert_eq!(empty.settlement_id, None);
-    assert_eq!(f.file(), "owner edit");
+    assert_eq!(f.file(), "owner edit\n");
     assert_eq!(
         f.store
             .read_with(|conn| conn.query_row(

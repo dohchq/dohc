@@ -112,6 +112,7 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
+  listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
   readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
   requestAccessRefresh: vi.fn(async () => undefined),
@@ -1585,8 +1586,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     expect(Object.keys(file.agents)).toEqual(["default"]);
 
@@ -1615,8 +1616,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
 
     await act(async () => onNotice.mock.calls[0]![1]!());
@@ -1649,8 +1650,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     await user.click(await screen.findByTestId("agent-add"));
     await user.click(screen.getByTestId("agent-runs-with-codex"));
@@ -2931,7 +2932,13 @@ describe("SettingsDialog", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  it("persists the attachment location and hides the folder name for same-folder", async () => {
+  // The text of the path that describes one attachment location radio.
+  const examplePath = (location: string) =>
+    document.getElementById(
+      screen.getByTestId(`attachment-location-${location}`).getAttribute("aria-describedby")!,
+    )?.textContent;
+
+  it("persists the attachment location and shows where each choice saves", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
@@ -2942,13 +2949,15 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    // Folder name is visible for the default (per-document) location.
-    expect(await screen.findByTestId("attachment-folder-input")).toBeTruthy();
+    const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
+    const radio = (name: string) => within(group).getByRole("radio", { name });
+    expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
+    // Each choice is described by the path a paste writes.
+    expect(examplePath("per-document")).toBe("Trips/Lisbon/assets/photo.png");
+    expect(examplePath("global-folder")).toBe("assets/photo.png");
+    expect(examplePath("same-folder")).toBe("Trips/Lisbon/photo.png");
 
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(radio("In one folder for the whole workspace"));
     // The save carries the changed control only — main merges it onto the
     // file, so the dialog's copy of the other fields never rides along.
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
@@ -2956,14 +2965,36 @@ describe("SettingsDialog", () => {
       patch: { files: { attachmentLocation: "global-folder" } },
     });
 
-    // Switching to same-folder removes the (now meaningless) folder-name row.
-    await user.selectOptions(
-      screen.getByTestId("attachment-location-select"),
-      "same-folder",
+    // The arrow keys move the choice. Beside the document uses no folder, so
+    // the folder name stays in place but cannot be edited.
+    await user.keyboard("{ArrowDown}");
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { files: { attachmentLocation: "same-folder" } },
+    });
+    const input = screen.getByTestId("attachment-folder-input") as HTMLInputElement;
+    await waitFor(() => expect(input.disabled).toBe(true));
+    expect(
+      document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
+    ).toBe("Not used when images go beside the document.");
+  });
+
+  it("names the typed folder in each example path", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
     );
-    await waitFor(() =>
-      expect(screen.queryByTestId("attachment-folder-input")).toBeNull(),
-    );
+
+    const input = await screen.findByTestId("attachment-folder-input");
+    await user.clear(input);
+    await user.type(input, "media");
+    await waitFor(() => expect(examplePath("per-document")).toBe("Trips/Lisbon/media/photo.png"));
+    expect(examplePath("global-folder")).toBe("media/photo.png");
   });
 
   it("saves and resets the default site preview mode", async () => {
@@ -3024,10 +3055,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
 
     await waitFor(() =>
       expect(
@@ -3044,8 +3072,8 @@ describe("SettingsDialog", () => {
     // edit that never landed.
     await waitFor(() =>
       expect(
-        (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-      ).toBe("per-document"),
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
     );
   });
 
@@ -3063,10 +3091,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.selectOptions(
-      await screen.findByTestId("attachment-location-select"),
-      "global-folder",
-    );
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     const input = await screen.findByTestId("attachment-folder-input");
     await user.clear(input);
     await user.type(input, "media");
@@ -3075,8 +3100,8 @@ describe("SettingsDialog", () => {
       expect((input as HTMLInputElement).value).toBe("media"),
     );
     expect(
-      (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
-    ).toBe("global-folder");
+      screen.getByTestId("attachment-location-global-folder").getAttribute("aria-checked"),
+    ).toBe("true");
   });
 
   it("shows one scoped reset action for each settings scope", async () => {
@@ -3225,15 +3250,18 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const select = await screen.findByTestId("attachment-location-select");
-    await user.selectOptions(select, "global-folder");
+    await user.click(await screen.findByTestId("attachment-location-global-folder"));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
     expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
       `Settings error: ${words}`,
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
-    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("per-document"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
 
     await act(async () => {
       await onError.mock.calls[0]![2]();

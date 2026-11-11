@@ -36,7 +36,7 @@ function prepare(root: string) {
     const doc = markdownToYDoc("Hello"), interrupted = new Y.Doc({gc: false}), restored = new Y.Doc({gc: false});
     try {
       const checkpoint = Y.encodeStateAsUpdate(doc);
-      const baseline = {...projection(`${name}-baseline`, "Hello"), checkpoint: pin(`${name}-baseline.bin`, checkpoint)};
+      const baseline = {...projection(`${name}-baseline`, "Hello\n"), checkpoint: pin(`${name}-baseline.bin`, checkpoint)};
       const updates = [append(doc, `${name}-first`, " first"), append(doc, `${name}-second`, " second")];
       const selected: Case = {baseline, updates};
       if (name !== "view") {
@@ -66,10 +66,10 @@ function prepare(root: string) {
 it("loads pinned restart bytes and a distinct pinned restore continuation recipe", () => withFixture(({seal}) => {
   const loaded = readPublicTransitionWorkload(seal(), 2);
   expect(Object.keys(loaded.cases)).toEqual([...transitionNames, "view"]);
-  expect(loaded.cases.restart.resumed!.expected.markdown.toString()).toBe("Hello first second resumed");
-  expect(loaded.cases.restore.updates.at(-1)!.expected.markdown.toString()).toBe("Hello first second");
+  expect(loaded.cases.restart.resumed!.expected.markdown.toString()).toBe("Hello first second resumed\n");
+  expect(loaded.cases.restore.updates.at(-1)!.expected.markdown.toString()).toBe("Hello first second\n");
   expect(loaded.cases.restore.resumed).toBeUndefined();
-  expect(loaded.cases.restore.continuation!.expected.markdown.toString()).toBe("Hello\n\nrecovered");
+  expect(loaded.cases.restore.continuation!.expected.markdown.toString()).toBe("Hello\n\nrecovered\n");
 }));
 it("refuses missing required transition coverage", () => withFixture(({manifest, seal}) => {
   delete manifest.cases.selectorDrift;
@@ -147,9 +147,9 @@ it("continues on fresh copied body IDs without resurrecting the discarded branch
     expect(validateInterruptedPublicUpdate(input).projectedMarkdownSha256).toBe(hash(continuation.expected.markdown));
     expect(() => validateInterruptedPublicUpdate({...input, bounds: {...input.bounds, maxSubmissionBytes: result.bytes.length - 1}})).toThrow("exceeds admitted capacity");
     Y.applyUpdate(restored, result.bytes);
-    expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered");
+    expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered\n");
     for (const update of selected.updates) Y.applyUpdate(restored, update.bytes);
-    expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered");
+    expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered\n");
     expect(() => deriveRestoreContinuation(Y.encodeStateAsUpdate(restored), continuation.recipe, selected.baseline.markdown, continuation.expected.markdown, retired)).toThrow("Actual restore projection differs");
   } finally {point.destroy(); restored.destroy();}
 }));

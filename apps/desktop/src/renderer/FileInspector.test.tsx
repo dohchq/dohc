@@ -70,13 +70,19 @@ describe("markdown WYSIWYG frontmatter seam", () => {
 
     expect(markdownEditorBody(markdown)).toBe("\n# Plan\n");
     expect(mergeMarkdownEditorBody(markdown, "# Plan\n\nMore")).toBe(
-      "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nMore",
+      "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nMore\n",
     );
   });
 
   it("leaves markdown without frontmatter untouched", () => {
     expect(markdownEditorBody("# Plan\n")).toBe("# Plan\n");
     expect(mergeMarkdownEditorBody("# Plan\n", "# Edited\n")).toBe("# Edited\n");
+  });
+
+  it("ends a saved note that isn't empty with one line break", () => {
+    // The editor body leaves out the final line break.
+    expect(mergeMarkdownEditorBody("# Plan\n", "# Edited")).toBe("# Edited\n");
+    expect(mergeMarkdownEditorBody("", "")).toBe("");
   });
 
   it("recognizes real map frontmatter with common YAML keys", () => {

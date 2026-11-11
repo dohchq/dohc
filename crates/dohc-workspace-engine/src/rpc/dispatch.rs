@@ -635,6 +635,10 @@ impl EngineService {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.heldChange" => {
+                self.ydoc_held_change(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.close" => {
                 self.ydoc_close(&ctx, request.workspace, request.params)
                     .await?
@@ -1298,6 +1302,12 @@ impl EngineService {
                     "received shares do not open live document sessions",
                 ));
             }
+            if method == "ydoc.heldChange" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares hold no saves",
+                ));
+            }
             if method == "liveApplication.provisionOwner" {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
@@ -1814,6 +1824,7 @@ mod tests {
             "ydoc.adoptCollectionRecord",
             "ydoc.close",
             "ydoc.evict",
+            "ydoc.heldChange",
             "ydoc.open",
             "ydoc.recordUpdate",
             "ydoc.resync",

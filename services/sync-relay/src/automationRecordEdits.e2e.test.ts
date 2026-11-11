@@ -182,7 +182,8 @@ it.skipIf(engine.missing)("closes remaining engines and removes storage after se
 it.skipIf(engine.missing)("settles safe imported Markdown after body and field edits expire its witness", async () => {
   const root = await tempRoot("automation-witness-checker");
   const server = await computer({root, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: {kind: "claim"}});
-  const original = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.\n`;
+  // Without the engine's final newline, the engine keeps this file as the note's source.
+  const original = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.`;
   await server.request("versionedText.write", {versionId: "main", path: "Tasks/collection.yaml",
     text: "fields: {Status: {type: text}}\n", origin: "api", publish: true}, server.workspace);
   await server.request("versionedText.write", {versionId: "main", path: "Tasks/one.md", text: original,
@@ -653,6 +654,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
+    stopLiveEditing: async () => {throw new Error("This fixture has no live editing to stop.");},
     serverRuns: {
       restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId),
       releaseRestore: async (_workspaceId, retentionId) => {await running.runs.restore(scope, [], false, retentionId); return true;},

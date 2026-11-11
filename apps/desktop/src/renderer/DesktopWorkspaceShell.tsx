@@ -193,7 +193,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { publishReopenKey } from "./documentVersionKey";
+import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -2013,13 +2013,13 @@ export function DesktopWorkspaceShell(props: {
     | { phase: "complete"; result: RebuildEngineStoreResult }
     | null
   >(null);
-  // Bumped after an engine version operation or a main-process live-session
+  // Moves after an engine version operation or a main-process live-session
   // retirement so mounted editors release their old session before reopening.
-  const [versionEpoch, setVersionEpoch] = useState(0);
+  // A Collection cell write reads the same key, so it moves in the same render.
+  const versionEpoch = useReopenKey(workspaceId);
   // For a lookup that must not act on a version a later switch replaced.
   const versionEpochRef = useRef(versionEpoch);
   versionEpochRef.current = versionEpoch;
-  useEffect(() => publishReopenKey(workspaceId, versionEpoch), [workspaceId, versionEpoch]);
   const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
@@ -2427,14 +2427,13 @@ export function DesktopWorkspaceShell(props: {
   if (liveSessionsGenerationRef.current.workspaceId !== workspaceId) {
     liveSessionsGenerationRef.current = { workspaceId, generation: null };
   }
+  useEffect(() => watchLiveSessions(workspaceId), [workspaceId]);
   useEffect(() => {
     if (captureDecidedFor !== workspaceId || syncStatus === null) return;
     const next = syncStatus.liveSessionsGeneration;
     const previous = liveSessionsGenerationRef.current.generation;
     liveSessionsGenerationRef.current.generation = next;
-    if (previous !== null && previous !== next) {
-      setVersionEpoch((epoch) => epoch + 1);
-    }
+    if (previous !== next) observeLiveSessions(workspaceId, next, previous !== null);
   }, [captureDecidedFor, syncStatus, workspaceId]);
   // The title bar dot and the Agent running notice follow main's run slot.
   const agentActive = useAgentRunActive(workspaceId, workspaceIsReady, (error, retry) =>
@@ -2646,7 +2645,7 @@ export function DesktopWorkspaceShell(props: {
       if (lineageChanged) {
         advanceCollectionWriteLineage(workspaceId);
       }
-      setVersionEpoch((epoch) => epoch + 1);
+      advanceReopenKey(workspaceId);
       // A version switch changes which timeline is true, and the boundary is
       // only worth anything before the answers it has to judge arrive.
       // Rejecting everything in flight by token was too blunt: main notifies
@@ -5244,7 +5243,7 @@ export function DesktopWorkspaceShell(props: {
       const repaintAfterChange = async () => {
         await refreshFiles();
         if (!isCurrent()) return;
-        setVersionEpoch((epoch) => epoch + 1);
+        advanceReopenKey(workspaceId);
       };
       const bestEffortRepaint = async () => {
         try {
@@ -5432,7 +5431,7 @@ export function DesktopWorkspaceShell(props: {
       try {
         await refreshFiles();
         if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
-        setVersionEpoch((epoch) => epoch + 1);
+        advanceReopenKey(workspaceId);
       } catch (repaintError) {
         console.error("[desktop] repaint after send changes failed:", repaintError);
       }
@@ -6190,10 +6189,6 @@ export function DesktopWorkspaceShell(props: {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
   }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
-  // The notes whose change dohc holds, for their band.
-  const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
-    notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
-  [props.sentNotices?.notices, workspaceId]);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
@@ -7094,7 +7089,6 @@ export function DesktopWorkspaceShell(props: {
                 onEditorReady={onEditorReady}
                 workspaceId={workspaceId}
                 path={tabPath}
-                changeHeld={heldNotes.has(tabPath)}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, and share-mount pulls all
                 // re-read the open file (every counter only ever increases).

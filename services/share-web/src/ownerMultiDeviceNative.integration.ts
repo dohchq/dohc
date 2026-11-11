@@ -100,7 +100,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const evidence = registration.evidence, markdown = Buffer.from("Hello");
+    const evidence = registration.evidence, markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,

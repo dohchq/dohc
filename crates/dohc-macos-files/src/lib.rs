@@ -684,7 +684,10 @@ pub fn copy_acl(from: impl AsFd, to: impl AsFd) -> io::Result<()> {
 /// any value over 1 MiB. An attribute that cannot be copied is skipped.
 pub fn copy_saved_xattrs(from: impl AsFd, to: impl AsFd) {
     let (from, to) = (from.as_fd(), to.as_fd());
-    let Some(names) = read_bounded(|list| rustix::fs::flistxattr(from, list)) else {
+    let Some(names) = read_bounded(
+        || rustix::fs::flistxattr_query(from),
+        |list| rustix::fs::flistxattr(from, list),
+    ) else {
         return;
     };
     for name in names.split_inclusive(|&byte| byte == 0) {
@@ -696,7 +699,10 @@ pub fn copy_saved_xattrs(from: impl AsFd, to: impl AsFd) {
         {
             continue;
         }
-        if let Some(value) = read_bounded(|value| rustix::fs::fgetxattr(from, name, value)) {
+        if let Some(value) = read_bounded(
+            || rustix::fs::fgetxattr_query(from, name),
+            |value| rustix::fs::fgetxattr(from, name, value),
+        ) {
             let _ = rustix::fs::fsetxattr(to, name, &value, rustix::fs::XattrFlags::empty());
         }
     }
@@ -795,10 +801,13 @@ fn type_name(kind: &[c_char]) -> Vec<u8> {
         .collect()
 }
 
-/// Read a value whose size `read` reports for an empty buffer, unless it is
-/// larger than [`MAX_XATTR_BYTES`] or grows between the two reads.
-fn read_bounded(read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>) -> Option<Vec<u8>> {
-    let len = read(&mut []).ok()?;
+/// Read a value whose size `query` reports, unless it is larger than
+/// [`MAX_XATTR_BYTES`] or grows between the two calls.
+fn read_bounded(
+    query: impl Fn() -> rustix::io::Result<usize>,
+    read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>,
+) -> Option<Vec<u8>> {
+    let len = query().ok()?;
     if len > MAX_XATTR_BYTES {
         return None;
     }

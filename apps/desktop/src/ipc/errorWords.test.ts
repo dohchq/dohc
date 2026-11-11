@@ -32,6 +32,8 @@ import {
   isGroupNameTaken,
   isChatMentionPageChanged,
   isDatasetServerNotFound,
+  datasetOwnerOnlyError,
+  isDatasetOwnerOnly,
   markDatasetServerNotFound,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
@@ -70,7 +72,7 @@ vi.mock("../atomicReplaceFile", async (importOriginal) => {
 
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file\'s exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.');
 });
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -93,6 +95,14 @@ it("keeps a server Collection's not found code across Electron, with the words o
   expect(isDatasetServerNotFound(acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"))).toBe(false);
   expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }))).toBe(false);
   expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
+});
+
+it("keeps a shared view's owner-only refusal code across Electron, with its words", () => {
+  const error = acrossIpc(datasetOwnerOnlyError(), "desktop:dataset");
+  expect(isDatasetOwnerOnly(error)).toBe(true);
+  expect(isDatasetServerNotFound(error)).toBe(false);
+  expect(readError(error).words).toBe("Open the original workspace to manage this Collection.");
+  expect(isDatasetOwnerOnly(acrossIpc(new Error("Open the original workspace to manage this Collection."), "desktop:dataset"))).toBe(false);
 });
 
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {

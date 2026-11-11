@@ -118,7 +118,7 @@ impl Fixture {
                 && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
                     .ok()
                     .as_deref()
-                    == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+                    == Some("[[new#part|label]] [[./new.md]] [old](old.md)\n")
             {
                 next += 1;
             }
@@ -164,7 +164,7 @@ impl Fixture {
                     std::fs::read_to_string(self.root.join(format!("source-{i:04}.md")))
                         .ok()
                         .as_deref()
-                        != Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+                        != Some("[[new#part|label]] [[./new.md]] [old](old.md)\n")
                 })
                 .collect();
             panic!(
@@ -179,7 +179,7 @@ impl Fixture {
         for i in 0..sources {
             assert_eq!(
                 std::fs::read_to_string(self.root.join(format!("source-{i:04}.md"))).unwrap(),
-                "[[new#part|label]] [[./new.md]] [old](old.md)"
+                "[[new#part|label]] [[./new.md]] [old](old.md)\n"
             );
         }
     }
@@ -276,7 +276,7 @@ async fn undo_cancels_publication_between_complete_file_placements() {
         let path = format!("source-{i:04}.md");
         assert_eq!(f.text(&path).await, BODY);
         let disk = std::fs::read_to_string(f.root.join(path)).unwrap();
-        assert!(disk == BODY || disk == "[[new#part|label]] [[./new.md]] [old](old.md)");
+        assert!(disk == BODY || disk == "[[new#part|label]] [[./new.md]] [old](old.md)\n");
     }
     let turns = placements().lock().unwrap()[&f.ws].turns.clone();
     assert_eq!(turns.iter().map(|(n, _)| n).sum::<usize>(), 1);
@@ -631,7 +631,7 @@ async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reop
     );
     assert_eq!(
         std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
-        "[[new#part|label]] [[./new.md]] [old](old.md)"
+        "[[new#part|label]] [[./new.md]] [old](old.md)\n"
     );
     f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -880,7 +880,7 @@ async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {
     );
     assert_eq!(deferred, 0);
     assert!(retry_gap.lock().unwrap().unwrap() >= Duration::from_secs(1));
-    assert_eq!(disk, "[[new#part|label]] [[./new.md]] [old](old.md)");
+    assert_eq!(disk, "[[new#part|label]] [[./new.md]] [old](old.md)\n");
 }
 
 async fn finish_one_turn(

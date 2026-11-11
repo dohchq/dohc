@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type {
   AgentsListeningEvent,
+  ChatChannelRecord,
   ChatDispatchPausedEvent,
   PersonalAgent,
   PersonalAgentChange,
@@ -33,6 +34,8 @@ const bridgeMock = {
     return () => { pausedListener = null; };
   }),
   setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
+  listChatChannels: vi.fn(async (_payload: { workspaceId: string }): Promise<{ channels: ChatChannelRecord[]; fileThreads: [] }> => ({ channels: [], fileThreads: [] })),
+  setChatArchived: vi.fn(async (_payload: { workspaceId: string; channelId: string; state: string }): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readAgentsListening: vi.fn(async (_payload: Record<string, never>): Promise<AgentsListeningEvent> => ({ agentIds: [] })),
   onAgentsListening: vi.fn((listener: (event: AgentsListeningEvent) => void) => {
     listeningListener = listener;
@@ -110,6 +113,12 @@ async function chooseAction(name: string, action: string) {
   await openAgent(name);
   await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
   await userEvent.click(screen.getByRole("menuitem", { name: action }));
+}
+// Remove on the agent's page, confirmed in its dialog.
+async function removeAgent(name: string) {
+  await openAgent(name);
+  await userEvent.click(page().getByRole("button", { name: `Remove ${name}…` }));
+  await userEvent.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
 }
 const checkButton = () => page().getByRole<HTMLButtonElement>("button", { name: /^(Send test|Try again)$/ });
 async function check(name: string) {
@@ -508,8 +517,9 @@ it("gives an agent you run Rename and Remove, and says on its page what it reach
   renderList();
   await openAgent("Claude in Terminal");
   await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename", "Remove"]);
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename"]);
   await userEvent.keyboard("{Escape}");
+  expect(page().getByRole("button", { name: "Remove Claude in Terminal…" })).toBeTruthy();
   const details = within(page().getByTestId("agent-details"));
   expect(details.getByText("Every workspace dohc opens on this computer")).toBeTruthy();
   expect(details.getByRole("radiogroup", { name: "Color of Claude in Terminal" })).toBeTruthy();
@@ -518,7 +528,7 @@ it("gives an agent you run Rename and Remove, and says on its page what it reach
 
 it("removes an agent you run, and Undo puts it back in its place", async () => {
   const { onSave, onNotice, onOrder } = renderList();
-  await chooseAction("Claude in Terminal", "Remove");
+  await removeAgent("Claude in Terminal");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
   // Its page closes, and focus goes to the Agents heading.
   expect(screen.queryByTestId("agent-page")).toBeNull();
@@ -786,7 +796,7 @@ it("shows no automations chip while only one agent can be started", () => {
 // The order since Remove stays: Undo moves only the agent it puts back.
 it("puts a removed agent back after the one it followed, in the order the file has then", async () => {
   const { onOrder, onNotice } = renderList();
-  await chooseAction("Claude in Terminal", "Remove");
+  await removeAgent("Claude in Terminal");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
   // Codex was then chosen for automations, so the file starts with it.
   const { default: claude, codex } = SETTINGS.agents;
@@ -799,7 +809,7 @@ it("puts a removed agent back after the one it followed, in the order the file h
   // wake, since it wasn't first.
   cleanup();
   const second = renderList();
-  await chooseAction("Claude in Terminal", "Remove");
+  await removeAgent("Claude in Terminal");
   await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalled());
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude! } }, source: "stored" });
   second.onNotice.mock.calls[0]![1]!();
@@ -811,7 +821,7 @@ it("puts a removed first agent back in front of the one after it, so a later aut
   const claude = testAgent({ name: "Claude Code" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   // Gemini was then chosen for automations.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, default: claude } }, source: "stored" });
@@ -830,7 +840,7 @@ it("gives automations back to the agent that woke them when its Remove is undone
   const codex = testAgent({ name: "Codex", hue: "blue" });
   // Claude in Terminal has no launch, so Claude Code wakes automations.
   const first = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await chooseAction("Claude Code", "Remove");
+  await removeAgent("Claude Code");
   await vi.waitFor(() => expect(first.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, codex } }, source: "stored" });
   first.onNotice.mock.calls[0]![1]!();
@@ -843,7 +853,7 @@ it("gives automations back to the agent that woke them when its Remove is undone
     settings: { ...SETTINGS, agents: { default: claude, codex } }, agentProblems: [{ ...BROKEN, position: 0 }],
     onSave: async (settings) => ({ settings, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] }),
   });
-  await chooseAction("Claude Code", "Remove");
+  await removeAgent("Claude Code");
   await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex } }, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] });
   second.onNotice.mock.calls[0]![1]!();
@@ -854,7 +864,7 @@ it("puts an agent dohc can't start back above the automations agent when its Rem
   const claude = testAgent({ name: "Claude Code" });
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await chooseAction("Claude in Terminal", "Remove");
+  await removeAgent("Claude in Terminal");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude, codex } }, source: "stored" });
   onNotice.mock.calls[0]![1]!();
@@ -868,7 +878,7 @@ it("undoes a Remove exactly when the file is back in the order the Remove left",
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await chooseAction("Claude Code", "Remove");
+  await removeAgent("Claude Code");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   // Gemini, then Codex, were chosen for automations.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex, gemini } }, source: "stored" });
@@ -882,11 +892,11 @@ it.each([
 ] as const)("undoes two Removes, %s, and leaves automations with the agent that held them", async (_case, undos, files, orders) => {
   const agents = { codex: testAgent({ name: "Codex", hue: "blue" }), default: testAgent({ name: "Claude Code" }), gemini: testAgent({ name: "Gemini", hue: "teal" }) };
   const { onOrder, onNotice, rerender } = renderList({ settings: { ...SETTINGS, agents } });
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   const { codex: _codex, ...afterCodex } = agents;
   rerender({ settings: { ...SETTINGS, agents: afterCodex } });
-  await chooseAction("Claude Code", "Remove");
+  await removeAgent("Claude Code");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   for (const [step, undo] of undos.entries()) {
     const file = Object.fromEntries(files[step]!.map((id) => [id, agents[id]]));
@@ -901,7 +911,7 @@ it("doesn't let Undo of a Remove take automations from the agent chosen since", 
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   // Gemini was then chosen for automations, and Claude Code removed.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
@@ -911,7 +921,7 @@ it("doesn't let Undo of a Remove take automations from the agent chosen since", 
 
 it("removes an agent, and Undo puts it back where it was", async () => {
   const { onSave, onOrder, onNotice } = renderList();
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   const saved = onSave.mock.calls[0]![0];
   expect(Object.keys(saved.agents)).toEqual(["default", "terminal"]);
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
@@ -927,21 +937,21 @@ it("says the agent stays when the saved file still lists it", async () => {
   const { onSave, onNotice, onError } = renderList();
   // Another window put Codex back before main saved the removal.
   onSave.mockResolvedValueOnce({ settings: SETTINGS, source: "stored" });
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc didn't remove Codex because the settings file still lists it."));
   // Its page stays open.
   expect(page().getByRole("button", { name: "Rename Codex" })).toBeTruthy();
   // Or as an entry dohc can't use.
   const { codex: _codex, ...rest } = SETTINGS.agents;
   onSave.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex" }] });
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
   expect(onNotice).not.toHaveBeenCalled();
 });
 
 it("leaves an agent that came back after Undo read the file", async () => {
   const { onSave, onOrder, onNotice, onError } = renderList();
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
   bridgeMock.setUserSettings.mockRejectedValueOnce(new Error(
@@ -1057,7 +1067,7 @@ it("takes back a removed agent's failed check, and Undo doesn't bring it back", 
   const { onSave, onError, onNotice, onOrder } = renderList({ onClearError });
   await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
@@ -1150,7 +1160,7 @@ it("files no notice for a check that fails after its agent was removed", async (
   const onClearError = vi.fn();
   const { onSave, onError, onNotice } = renderList({ onClearError });
   await check("Codex");
-  await chooseAction("Codex", "Remove");
+  await removeAgent("Codex");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
   await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
@@ -1719,4 +1729,104 @@ it("reports again when Try again on the toast can't read your personal agents ag
   await act(() => (reports()[0]![2] as () => Promise<void>)());
   expect(reports()).toHaveLength(2);
   expect(bridgeMock.readPersonalAgents).toHaveBeenLastCalledWith({ refresh: true });
+});
+
+it("asks before Remove, says who automations wake next, and Cancel keeps the agent", async () => {
+  const { onSave } = renderList();
+  await openAgent("Claude Code");
+  await userEvent.click(page().getByRole("button", { name: "Remove Claude Code…" }));
+  const dialog = within(screen.getByTestId("remove-agent-dialog"));
+  expect(dialog.getByText("Remove Claude Code?")).toBeTruthy();
+  expect(dialog.getByText("Its chat stays in Archived. Automations will wake Codex instead.")).toBeTruthy();
+  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("remove-agent-dialog")).toBeNull();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(screen.getByTestId("agent-page")).toBeTruthy();
+});
+
+function agentChat(id: string, agentId: string, name: string): ChatChannelRecord {
+  return { id, name, slug: `agent-${agentId}`, kind: "agent", agentId, createdAtMs: 1, updatedAtMs: 1 } as ChatChannelRecord;
+}
+
+it("lists archived agents and removed agents' chats under Archived, with their actions", async () => {
+  bridgeMock.listChatChannels.mockResolvedValue({
+    channels: [agentChat("chat-codex", "codex", "Codex"), agentChat("chat-gone", "gone", "Old helper"), agentChat("chat-hidden", "hidden", "Hidden")],
+    fileThreads: [],
+  });
+  const settings: DesktopUserSettings = {
+    ...SETTINGS,
+    sidebar: { ...SETTINGS.sidebar, archivedChats: { "ws-1": ["chat-codex"] }, hiddenChats: { "ws-1": ["chat-hidden"] } },
+  };
+  const { onNotice } = renderList({ settings });
+  const archived = within(await screen.findByTestId("agents-archived"));
+  // Codex moves from the main list to Archived; a chat taken off the list stays off.
+  expect(screen.queryAllByTestId("agent-row").map((element) => element.getAttribute("aria-label"))).toEqual(["Claude Code", "Claude in Terminal"]);
+  expect(archived.getAllByTestId("agent-row-archived").map((element) => element.dataset.agentId)).toEqual(["codex"]);
+  expect(archived.getAllByTestId("agent-row-removed").map((element) => element.textContent)).toEqual(["Old helperRemovedRemove from list…"]);
+
+  await userEvent.click(archived.getByRole("button", { name: "Unarchive Codex" }));
+  expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", channelId: "chat-codex", state: "active" });
+
+  await userEvent.click(archived.getByRole("button", { name: "Remove Old helper's chat from the list…" }));
+  const dialog = within(screen.getByTestId("hide-agent-chat-dialog"));
+  expect(dialog.getByText("Its messages stay in this workspace.")).toBeTruthy();
+  await userEvent.click(dialog.getByRole("button", { name: "Remove from list" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Old helper's chat from the list.", expect.any(Function)));
+  expect(bridgeMock.setChatArchived).toHaveBeenLastCalledWith({ workspaceId: "ws-1", channelId: "chat-gone", state: "hidden" });
+  onNotice.mock.lastCall![1]!();
+  await vi.waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenLastCalledWith({ workspaceId: "ws-1", channelId: "chat-gone", state: "active" }));
+
+  // An archived agent's page opens from its row, and Remove asks there too.
+  await userEvent.click(archived.getByRole("button", { name: "Remove Codex…" }));
+  expect(within(screen.getByTestId("remove-agent-dialog")).getByText("Remove Codex?")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(archived.getByRole("button", { name: "Codex" }));
+  expect(screen.getByTestId("agent-page").dataset.agentId).toBe("codex");
+  // Back focuses its row under Archived.
+  await back();
+  expect(document.activeElement).toBe(within(screen.getByTestId("agents-archived")).getByRole("button", { name: "Codex" }));
+});
+
+it("lists a removed agent's chat that arrived after Settings opened, once the agent leaves", async () => {
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+  const { rerender } = renderList();
+  await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1));
+  expect(screen.queryByTestId("agents-archived")).toBeNull();
+  // Codex's check starts its chat, then Codex leaves Settings.
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
+  const { codex: _codex, ...agents } = SETTINGS.agents;
+  rerender({ settings: { ...SETTINGS, agents } });
+  const archived = within(await screen.findByTestId("agents-archived"));
+  expect(archived.getAllByTestId("agent-row-removed").map((element) => element.dataset.agentId)).toEqual(["codex"]);
+});
+
+it("focuses the Agents heading after Remove from an Archived row, even when the new settings show first and the panel holds focus", async () => {
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
+  const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, archivedChats: { "ws-1": ["chat-codex"] } } };
+  let finish: (result: DesktopUserSettingsResult) => void = () => undefined;
+  const onSave = vi.fn((next: DesktopUserSettings) => new Promise<DesktopUserSettingsResult | null>((resolve) => {
+    finish = resolve;
+    void next;
+  }));
+  const { rerender } = renderList({ settings, onSave });
+  const archived = within(await screen.findByTestId("agents-archived"));
+  await userEvent.click(archived.getByRole("button", { name: "Remove Codex…" }));
+  await userEvent.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
+  const saved = onSave.mock.lastCall![0];
+  rerender({ settings: saved, onSave });
+  // The dialog's focus return lands on the panel around the list, as in Settings.
+  const panel = screen.getByTestId("agent-list").parentElement!;
+  panel.tabIndex = -1;
+  panel.focus();
+  await act(async () => finish({ settings: saved, source: "stored" }));
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+});
+
+it("brings an agent's chat back to Archived when it is removed again after its chat left the list", async () => {
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
+  const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, hiddenChats: { "ws-1": ["chat-codex"] } } };
+  renderList({ settings });
+  await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
+  await removeAgent("Codex");
+  await vi.waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", channelId: "chat-codex", state: "active" }));
 });

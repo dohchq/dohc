@@ -1,7 +1,11 @@
 //! Safe Windows file operations.
 
 #[cfg(windows)]
+mod dacl;
+#[cfg(windows)]
 mod private_dir;
+#[cfg(windows)]
+pub use dacl::{Dacl, create_new_with_dacl};
 #[cfg(windows)]
 pub use private_dir::{NotPrivate, NotPrivateReason, ensure_private_dir, not_private};
 
