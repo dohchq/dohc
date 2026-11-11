@@ -666,6 +666,14 @@ impl AdmittedLiveUpdateMetadata {
             return (agent.on_behalf_of.as_ref() == Some(&public_principal_id))
                 .then(|| (agent.agent_id.clone(), agent.attribution()));
         }
+        if let ServerDerivedLiveUpdateAuthority::Personal { principal_id } =
+            &self.accepted.authority
+        {
+            // The relay authenticated the agent itself, so no person stands beside it.
+            let agent = self.admitted_declaration()?;
+            return (agent.agent_id == *principal_id && agent.on_behalf_of.is_some())
+                .then(|| (agent.agent_id.clone(), agent.attribution()));
+        }
         let authors = self.author_snapshot.as_ref()?;
         let (_, principal, _, _) = self.accepted.authority.fields();
         let person = authors.iter().find_map(|author| match author {
@@ -5368,6 +5376,47 @@ mod tests {
             serde_json::json!([
                 {"kind":"agent","agentId":"agent-1","agentName":"Helper","onBehalfOf":"guest-1","depth":0},
                 {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
+    #[test]
+    fn field_history_credits_a_personal_agent_alone_on_behalf_of_its_owner() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let mut update = account_frame(
+            "personal",
+            1,
+            Ydoc::wire().frontmatter_set("status", "done").unwrap(),
+            false,
+        );
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Personal {
+            principal_id: "p-agent-1".into(),
+        };
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Agent {
+            agent_id: "p-agent-1".into(),
+            agent_name: Some("Helper".into()),
+            on_behalf_of: Some("owner-1".into()),
+            depth: Some(0),
+        }]);
+        ack(apply(&mut store, &mut cache, &handle, update.clone()));
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("agent".into()),
+                Some("p-agent-1".into()),
+                Some("owner-1".into())
+            )
+        );
+        assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        let authors = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), 1))
+            .unwrap()
+            .json();
+        // No person stands beside the agent.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+            serde_json::json!([
+                {"kind":"agent","agentId":"p-agent-1","agentName":"Helper","onBehalfOf":"owner-1","depth":0}
             ])
         );
     }

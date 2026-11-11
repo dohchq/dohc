@@ -4,7 +4,7 @@ use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdateMetadata, ApplicationHostCoordinate, LiveAuthorEntry,
     LiveCheckpointAuthorCoverage, LiveUpdateReceipt, LiveUpdateStructRange, MAX_CANCELLED_RESTORES,
     NativeRestoreCancellationReceipt, RelayAcceptedLiveUpdate, RetainedPrefixBody,
-    validate_checkpoint_coverage,
+    ServerDerivedLiveUpdateAuthority, validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use std::cell::RefCell;
@@ -1306,6 +1306,12 @@ pub(super) fn apply_event_envelope(
         // A record this engine already applied is redelivered through refresh, which keeps it.
         if record.names_personal_agent {
             return Err(invalid("live audit record cannot name a personal agent"));
+        }
+        if matches!(
+            record.accepted.authority,
+            ServerDerivedLiveUpdateAuthority::Personal { .. }
+        ) {
+            return Err(invalid("live audit record cannot claim personal authority"));
         }
         if !insert_event(tx, &record, &payload.manifest, passive)? {
             tx.execute("INSERT INTO live_audit_event_conflicts(workspace_id,origin_id,origin_seq,record_digest) VALUES (?1,?2,?3,?4)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.manifest.record_digest]).map_err(SyncError::persist)?;

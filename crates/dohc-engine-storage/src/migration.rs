@@ -3668,6 +3668,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_work_report.sql"),
         sets_user_version: None,
     },
+    // A live update applies under a personal agent's own authority.
+    Migration {
+        ordinal: 93,
+        id: "v2-live-personal-authority",
+        sql: include_str!("live_personal_authority.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5692,6 +5699,10 @@ mod tests {
                 "v2-chat-work-report",
                 "90b7a240622af011c5d7a9a9ab24feb41db0acc2089fddfd74bbae19c4f3eea4",
             ),
+            (
+                "v2-live-personal-authority",
+                "00536edaa3f05c210affce630f2332e76630dc67ac94fbb4f0d5ebd01bf6b1ff",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6133,6 +6144,135 @@ mod tests {
             "agent"
         );
         assert_eq!(messages(&conn), old_messages);
+    }
+
+    /// The rebuild that admits `personal` authority keeps every application,
+    /// the restore fence and first-seen range that reference one, the column
+    /// order, both indexes and the released-tail triggers. The copy back
+    /// advances no released tail, and deferral ends with the migration.
+    #[test]
+    fn live_personal_authority_rebuild_keeps_applications_and_dependents() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-personal-authority");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 92);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 93);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let digest = crate::blob::put_binary_blob(&conn, &[0, 0]).unwrap();
+        let application = |delivery: &str, cursor: i64, authority: &str| {
+            format!(
+                "INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,\
+                 delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,\
+                 restore_fence_generation,update_digest,update_byte_length,journal_cursor,\
+                 accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,\
+                 received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,\
+                 applied_instance_id,applied_connection_id,admitted_metadata_json) VALUES ('relay','ws',\
+                 '{delivery}','main','doc','lineage','a.md','[\"a.md\"]',0,'{digest}',2,{cursor},1,\
+                 {authority},10,0,{cursor},'host',1,'instance','connection','{{}}')"
+            )
+        };
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO released_tail_generations VALUES ('ws', 'main', 'doc', 1);
+             {owner}; {named}; {link};
+             INSERT INTO live_device_application_first_seen VALUES ('relay','ws','restored',0,1,0,1);
+             INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,
+                 relay_database_namespace,operation_id,input_json,receipt_json,proposal_json,
+                 proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256,
+                 application_json,application_delivery_id)
+               VALUES ('ws','main','doc','relay','restore',
+                 '{{\"oldBinding\":{{\"lineageClaimId\":\"lineage\"}},\"newFence\":1}}','{{}}','{{}}',
+                 '{digest}','{digest}','{digest}','{{}}','restored');",
+            owner = application("restored", 1, "'owner','owner',NULL,NULL"),
+            named = application("named", 2, "'named','guest','grant-named',1"),
+            link = application("link", 3, "'link','holder','grant-link',2"),
+        ))
+        .unwrap();
+        let personal = application("personal", 4, "'personal','p-agent',NULL,NULL");
+        // Before the rebuild, no application can name a personal agent.
+        assert_eq!(
+            conn.execute_batch(&personal)
+                .unwrap_err()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        let rows = |conn: &Connection, sql: &str| -> Vec<String> {
+            conn.prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let evidence = |conn: &Connection| {
+            [
+                "SELECT json_array(relay_database_namespace,workspace_id,delivery_id,main_version_id,\
+                 object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,\
+                 update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,\
+                 principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,\
+                 local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,\
+                 applied_connection_id,admitted_metadata_json) \
+                 FROM live_device_update_applications ORDER BY journal_cursor",
+                "SELECT name FROM pragma_table_info('live_device_update_applications') ORDER BY cid",
+                "SELECT json_array(type,name,sql) FROM sqlite_schema \
+                 WHERE tbl_name='live_device_update_applications' AND sql IS NOT NULL \
+                 AND type IN ('index','trigger') ORDER BY name",
+                "SELECT json_array(relay_database_namespace,workspace_id,delivery_id,ordinal,client_id,\
+                 start_clock,end_clock) FROM live_device_application_first_seen",
+                "SELECT json_array(operation_id,application_delivery_id) FROM live_restore_fences",
+                "SELECT json_array(object_id,generation) FROM released_tail_generations",
+            ]
+            .map(|sql| rows(conn, sql))
+        };
+        let old = evidence(&conn);
+        assert_eq!(old[0].len(), 3);
+        assert_eq!(old[2].len(), 5, "two indexes and three triggers");
+        assert_eq!(old[5], vec![r#"["doc",4]"#]);
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(evidence(&conn), old);
+        assert_eq!(
+            conn.query_row("PRAGMA defer_foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+
+        // A personal agent holds no grant and names itself.
+        for refused in [
+            application("personal", 4, "'personal','p-agent','grant',1"),
+            application("personal", 4, "'personal','p-agent','grant',NULL"),
+            application("personal", 4, "'personal','agent',NULL,NULL"),
+        ] {
+            assert_eq!(
+                conn.execute_batch(&refused)
+                    .unwrap_err()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        conn.execute_batch(&personal).unwrap();
+        conn.execute_batch(&application("owner", 5, "'owner','owner',NULL,NULL"))
+            .unwrap();
+        // The returned insert trigger advances the released tail once per row.
+        assert_eq!(
+            rows(
+                &conn,
+                "SELECT json_array(object_id,generation) FROM released_tail_generations"
+            ),
+            vec![r#"["doc",6]"#]
+        );
     }
 
     /// The upgrade keeps the author of each unsettled update, and counts each
