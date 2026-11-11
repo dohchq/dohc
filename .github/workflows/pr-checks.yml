@@ -324,7 +324,7 @@ jobs:
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
           compiler() {
-            cargo nextest run --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --workspace-remap "$PWD" --package dohc-compiler-owner --retries=0 --no-tests=fail
+            cargo nextest run --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --workspace-remap "$PWD" --retries=0 --no-tests=fail
             report="$PWD/.agent-artifacts/confinement/compiler.tap"
             DOHC_CONFINEMENT_SUITES=only pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
               --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \

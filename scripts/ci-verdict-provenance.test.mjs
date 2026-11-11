@@ -535,7 +535,7 @@ test("confinement reuses build artifacts without occupying worker or aggregate r
   assert.match(build, /cargo nextest archive --locked --package dohc-compiler-owner/);
   assert.doesNotMatch(build, /cargo nextest run|compiler\(\)|relay\(\)/);
   const proof = jobs.confinement.steps.find(step => step.name === "Compiler and relay confinement").run;
-  assert.match(proof, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --package dohc-compiler-owner --retries=0 --no-tests=fail/);
+  assert.match(proof, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --retries=0 --no-tests=fail/);
   assert.match(proof, /scripts\/compiler-process\.test\.mjs scripts\/stage-app-compiler\.test\.mjs/);
   assert.match(proof, /grep -qx '# skipped 0'/);
   assert.match(proof, /grep -qx '# todo 0'/);
