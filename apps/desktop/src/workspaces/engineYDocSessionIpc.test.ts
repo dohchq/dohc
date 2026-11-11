@@ -2360,7 +2360,7 @@ describe("engine Y.Doc IPC adapter", () => {
         'dohc could not save this edit to "notes/a.md". Live editing is paused for this file. Notices in dohc says why and how to resume.',
       );
       expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
     });
 
     it("settles consent without an append before retrying one capacity-refused edit", async () => {
