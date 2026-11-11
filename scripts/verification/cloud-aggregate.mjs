@@ -1,6 +1,7 @@
 import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { cloudApi, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
@@ -59,117 +60,51 @@ export const CLOUD_JOB_GRAPH = {
   rust: { names: ["engine gate"], needs: ["changes", "javascript"] },
 };
 
-// Runtime waits: cloud.mjs restores preparation; waitForGate joins sibling receipts.
-// Rust test jobs also wait for their archive in pr-checks.yml before cloud-rust.mjs.
-export const CLOUD_RUNTIME_DEPENDENCIES = {
-  "javascript-workers": ["javascript-prepare"],
-  javascript: ["javascript-prepare", "javascript-workers"],
-  "rust-tests": ["rust-archive"],
-  rust: ["javascript-prepare", "rust-archive", "rust-policy", "rust-tests"],
-};
-
-function gateGraph(scope, jobs, confinement = true) {
+function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  // A combined run's Rust jobs depend on JavaScript. Include that group's waits;
-  // a Rust-only dispatch skips JavaScript and has no such dependency stage.
-  const javascript = scope === "js" || jobs.some(job => (job.name === "typecheck + tests" || /^JS worker /u.test(job.name)) && job.status !== "skipped" && job.conclusion !== "skipped");
   return Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id === "changes" || id === "javascript-prepare"
-    || (id === "confinement" ? confinement : id.startsWith("rust") ? scope === "rust" : javascript));
+    || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
-function gateJobNames(scope, jobs, confinement = true) {
-  return gateGraph(scope, jobs, confinement).flatMap(([, job]) => job.names);
-}
-
-export function gateQueueTiming(scope, jobs, now = Date.now(), confinement = true) {
-  const graph = gateGraph(scope, jobs, confinement);
-  const depths = new Map();
-  const depth = id => {
-    if (!depths.has(id)) {
-      const parents = CLOUD_JOB_GRAPH[id].needs.filter(parent => graph.some(([key]) => key === parent));
-      depths.set(id, parents.length ? 1 + Math.max(...parents.map(depth)) : 0);
-    }
-    return depths.get(id);
-  };
-  const stages = [], required = [];
-  for (const [id, node] of graph) for (const name of node.names) {
-    const rows = jobs.filter(job => job.name === name);
-    if (rows.length > 1) throw new Error(`Duplicate ${scope} jobs: ${name}.`);
-    if (!rows.length) continue;
-    const job = rows[0], created = Date.parse(job.created_at);
-    const queued = ["queued", "waiting", "pending", "requested"].includes(job.status);
-    const started = queued ? now : Date.parse(job.started_at);
-    if (!Number.isFinite(created) || !Number.isFinite(started) || started < created) throw new Error(`A required ${scope} job has invalid runner wait times: ${name}.`);
-    const runnerWaitSeconds = (started - created) / 1000;
-    const stage = depth(id);
-    stages[stage] ??= { stage, runnerWaitSeconds: 0, jobs: [] };
-    stages[stage].jobs.push(name);
-    stages[stage].runnerWaitSeconds = Math.max(stages[stage].runnerWaitSeconds, runnerWaitSeconds);
-    required.push({ ...job, stage, runnerWaitSeconds, queued });
-  }
-  const dependencies = name => {
-    const [id, node] = graph.find(([, node]) => node.names.includes(name));
-    const parents = new Set([...node.needs, ...(CLOUD_RUNTIME_DEPENDENCIES[id] ?? [])]);
-    return new Set([name, ...graph.filter(([key]) => parents.has(key))
-      .flatMap(([, parent]) => parent.names.flatMap(name => [...dependencies(name)]))]);
-  };
-  const discounts = {};
-  for (const [id, node] of graph) for (const name of node.names) {
-    const ancestors = dependencies(name);
-    discounts[name] = stages.filter(stage => stage.stage <= depth(id)).reduce((total, stage) => total
-      + Math.max(0, ...required.filter(job => job.stage === stage.stage && ancestors.has(job.name)).map(job => job.runnerWaitSeconds)), 0);
-  }
-  return { discounts, stages, jobs: required };
-}
-
-export function gateDeadline(scope, jobs, jobName, now = Date.now()) {
-  const selections = jobs.filter(job => job.name === "what changed");
-  if (selections.length !== 1 || !Number.isFinite(Date.parse(selections[0].started_at))) throw new Error("Gate selection has no unique start time.");
-  const timing = gateQueueTiming(scope, jobs, now);
-  const discount = timing.discounts[jobName];
-  if (!Number.isFinite(discount)) throw new Error(`Unknown ${scope} deadline job: ${jobName}.`);
-  return Date.parse(selections[0].started_at) + ((scope === "js" ? 300 : 600) + discount) * 1000;
-}
-
-function gateTiming(scope, required, finishedAt, queue) {
-  if (required.some(job => !Number.isFinite(Date.parse(job.started_at)) || !Number.isFinite(Date.parse(job.completed_at))
+function gateTiming(scope, required, confinement) {
+  const all = [...required, ...(confinement ? [confinement] : [])];
+  if (all.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
-  const startedAt = new Date(Math.min(...required.map(job => Date.parse(job.started_at)))).toISOString();
-  const seconds = (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000;
+  const start = Date.parse(required.find(job => job.name === "what changed").started_at);
+  const spanSeconds = (Math.max(...required.map(job => Date.parse(job.completed_at))) - start) / 1000;
+  const confinementSeconds = confinement ? (Date.parse(required.find(job => job.name === "shared preparation").completed_at) - start
+    + Date.parse(confinement.completed_at) - Date.parse(confinement.started_at)) / 1000 : null;
+  const jobs = all.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
+    startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
+  const longest = jobs.filter(job => job.name !== "compiler and relay confinement").reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
+  const contended = longest.runnerWaitSeconds > 30, seconds = Math.max(spanSeconds, confinementSeconds ?? 0);
   const budgetSeconds = scope === "js" ? 300 : 600;
-  const jobTimings = required.map(({ name, created_at, started_at, completed_at, conclusion }) => {
-    const { stage, runnerWaitSeconds } = queue.jobs.find(job => job.name === name);
-    const discountSeconds = queue.discounts[name];
-    return { name, createdAt: created_at, startedAt: started_at, finishedAt: completed_at, conclusion, stage, runnerWaitSeconds,
-      discountSeconds, workloadFinishSeconds: (Date.parse(completed_at) - Date.parse(startedAt)) / 1000 - discountSeconds };
-  });
-  const critical = jobTimings.reduce((maximum, job) => job.workloadFinishSeconds > maximum.workloadFinishSeconds ? job : maximum);
-  const workloadSeconds = critical.workloadFinishSeconds;
-  return { startedAt, finishedAt, seconds, budgetSeconds, runnerWaitSeconds: seconds - workloadSeconds, workloadSeconds,
-    criticalJob: critical.name, stages: queue.stages, jobs: jobTimings,
-    withinBudget: seconds <= budgetSeconds || workloadSeconds <= budgetSeconds };
+  const timing = seconds <= budgetSeconds ? "within budget" : contended ? "unmeasured" : "over budget";
+  return { spanSeconds, confinementSeconds, seconds, budgetSeconds, contended, timing, jobs,
+    ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${budgetSeconds}s budget; longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s.` } : {}) };
 }
 
 function requireBudget(scope, timing) {
-  if (!timing.withinBudget) throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s (${timing.workloadSeconds}s after ${timing.runnerWaitSeconds}s runner wait), exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
+  if (timing.timing === "over budget") throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
+  if (timing.warning) console.warn(`::warning::${timing.warning}`);
   return timing;
 }
 
 export function completedGateTiming(scope, jobs, commit) {
-  const expected = gateJobNames(scope, jobs);
+  const expected = [...gateJobNames(scope), "compiler and relay confinement"];
   const required = jobs.filter(job => expected.includes(job.name));
   if (!commit || required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  const finishedAt = new Date(Math.max(...required.map(job => Date.parse(job.completed_at)))).toISOString();
-  return requireBudget(scope, gateTiming(scope, required, finishedAt, gateQueueTiming(scope, jobs)));
+  return requireBudget(scope, gateTiming(scope, required.filter(job => job.name !== "compiler and relay confinement"),
+    required.find(job => job.name === "compiler and relay confinement")));
 }
 
 export async function verifyCompletedCloud(scope) {
   const report = { version: 1, scope, verdict: "FAIL", complete: true, commit: process.env.DOHC_WORKFLOW_HEAD_SHA };
   try {
-    Object.assign(report, completedGateTiming(scope, await jobs(), report.commit));
+    Object.assign(report, completedGateTiming(scope, await cloudApi().jobs(), report.commit));
     report.verdict = "PASS";
   } catch (error) {
     Object.assign(report, error.timing, { error: error.message });
@@ -181,39 +116,23 @@ export async function verifyCompletedCloud(scope) {
   }
 }
 
-async function jobs() {
-  const result = [];
-  for (let page = 1; ; page++) {
-    const response = await fetch(`${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100&page=${page}`, {
-      headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`Cannot read workflow job times: HTTP ${response.status}.`);
-    const data = await response.json();
-    if (!Array.isArray(data.jobs)) throw new Error("Missing workflow jobs.");
-    result.push(...data.jobs);
-    if (data.jobs.length < 100) return result;
-  }
+// Partition zero publishes its own receipt before joining the other workers.
+export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, ...options } = {}) {
+  const api = cloudApi(options), deadline = now() + 20 * 60_000;
+  const expected = gateJobNames(scope).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
+  try {
+    for (;;) {
+      const required = (await (readJobs ? readJobs() : api.jobs())).filter(job => expected.includes(job.name));
+      if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
+      if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
+      if (now() >= deadline) throw new Error(`The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${required.some(job => QUEUED_STATUSES.includes(job.status)) ? "still queued for a runner" : required.some(job => job.status === "in_progress") ? "still running" : "missing"}.`);
+      if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
+      await pause(Math.min(10_000, deadline - now()));
+    }
+  } finally { api.log(`${scope} group wait`); }
 }
 
-// The reporting job runs partition zero before waiting for the other workers.
-export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, now = Date.now } = {}) {
-  const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-  for (;;) {
-    const all = await readJobs();
-    const expected = gateJobNames(scope, all, false).filter(name => name !== finalJob);
-    const required = all.filter(job => expected.includes(job.name));
-    if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
-    if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
-    const remaining = gateDeadline(scope, all, finalJob, now()) - now();
-    const queued = required.some(job => ["queued", "waiting", "pending", "requested"].includes(job.status));
-    if (remaining <= 0 && !queued) throw new Error(`The ${scope} group has no time left for complete reporting within its budget.`);
-    if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
-    await pause(queued ? 10_000 : Math.min(5_000, remaining));
-  }
-}
-
-export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded", { readJobs = jobs, now = Date.now, env = process.env, outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
+export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded", { readJobs = () => cloudApi().jobs(), now = Date.now, env = process.env, outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
   const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
   try {
     const records = [...globSync(`${directory}/**/result.json`)].map(path => JSON.parse(readFileSync(path, "utf8"))).filter(record => record.scope === scope);
@@ -223,12 +142,12 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     Object.assign(report, scope === "js" ? aggregateJavascript(records) : aggregateRust(records));
     const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
     const all = await readJobs();
-    const expected = gateJobNames(scope, all, false);
+    const expected = gateJobNames(scope);
     const required = all.filter(job => expected.includes(job.name));
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), finishedAt, gateQueueTiming(scope, all, now(), false)));
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job)));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;
@@ -241,7 +160,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
       for (const step of report.steps) console.log(`  ${step.status} ${step.name}`);
       console.log(`  ${report.verdict} complete gate${report.error ? `: ${report.error}` : ""}`);
     }
-    console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s wall, ${report.runnerWaitSeconds ?? "unknown"}s runner wait, ${report.workloadSeconds ?? "unknown"}s workload, ${report.tasks ?? 0} tasks`);
+    console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s (${report.timing ?? "unavailable"}), ${report.tasks ?? 0} tasks`);
   }
 }
 

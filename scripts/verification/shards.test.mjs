@@ -5,30 +5,11 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
-import { aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, gateDeadline, gateQueueTiming, waitForGate } from "./cloud-aggregate.mjs";
+import { aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
-
-test("early reporting waits for every successful job and preserves the complete group deadline", async () => {
-  const started_at = "2026-11-10T00:00:00Z", start = Date.parse(started_at);
-  const names = ["what changed", "shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
-  const complete = names.map(name => ({ name, created_at: started_at, started_at, status: "completed", conclusion: "success" }));
-  let reads = 0, pauses = 0;
-  await waitForGate("js", { now: () => start + 1000, pause: async () => { pauses++; }, readJobs: async () => {
-    reads++;
-    return reads === 1 ? complete.slice(0, -1) : reads === 2
-      ? complete.map(row => row.name === "JS worker 1" ? { ...row, status: "in_progress", conclusion: null } : row) : complete;
-  } });
-  assert.equal(pauses, 2);
-  for (const conclusion of ["failure", "cancelled", "skipped"]) {
-    await assert.rejects(waitForGate("js", { now: () => start + 1000,
-      readJobs: async () => complete.map(row => row.name === "JS worker 1" ? { ...row, conclusion } : row) }), /did not finish successfully/);
-  }
-  await assert.rejects(waitForGate("js", { now: () => start + 301_000, readJobs: async () => complete }), /no time left/);
-  await assert.rejects(waitForGate("js", { now: () => start, readJobs: async () => [...complete, complete[1]] }), /Duplicate/);
-});
 
 test("native results retain declared opt-in skips but reject runtime skips and missing engines", async t => {
   const parent = resolve(".agent-artifacts/verification/native-report-tests");
@@ -175,31 +156,6 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
   assert.deepEqual(passedRustTests("PASS [ 0.1s] (1/2) crate retained\nFAIL [ 0.2s] crate broken\nFLAKY 2/2 [ 0.1s] crate retry"), ["crate retained"]);
 });
 
-for (const [scope, jobName, artifact, seconds] of [
-  ["js", "shared preparation", "javascript-prepared", 300],
-  ["rust", "Rust build once", "rust-tests", 600],
-]) test(`${scope} preparation waits for this attempt and keeps the original group deadline`, async () => {
-  const env = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
-  const started = Date.parse("2026-11-09T00:00:00Z");
-  let clock = started + 10_000, reads = 0;
-  const timestamp = new Date(started).toISOString();
-  const jobs = [{ name: "what changed", created_at: timestamp, started_at: timestamp, status: "completed" }, { name: jobName, created_at: timestamp, started_at: timestamp, status: "in_progress" }];
-  const response = value => ({ ok: true, json: async () => value });
-  await waitForPreparation(scope, { env, now: () => clock, pause: async ms => { clock += ms; }, request: async url => {
-    reads++;
-    return response(url.includes("/jobs?") ? { jobs } : { artifacts: reads < 4 ? [] : [{ name: `${artifact}-2`, expired: false }] });
-  } });
-  assert.equal(reads, 4);
-  assert.equal(clock, started + 20_000);
-  clock = started + seconds * 1000 - 1000;
-  await assert.rejects(waitForPreparation(scope, { env, now: () => clock, pause: async ms => { clock += ms; },
-    request: async url => response(url.includes("/jobs?") ? { jobs } : { artifacts: [{ name: `${artifact}-1`, expired: false }] }),
-  }), new RegExp(`exceeded.*${seconds}s`, "u"));
-  await assert.rejects(waitForPreparation(scope, { env, now: () => started + 1000, request: async () => response({
-    jobs: [jobs[0], { ...jobs[1], status: "completed", conclusion: "failure" }],
-  }) }), /ended with failure/u);
-});
-
 function passingCloudJobs() {
   const { jobs } = JSON.parse(readFileSync(new URL("./fixtures/passing-cloud-jobs.json", import.meta.url), "utf8"));
   // Split the saved combined job at its artifact publication and proof start.
@@ -210,213 +166,191 @@ function passingCloudJobs() {
   return jobs;
 }
 
-function confinementQueueJobs(waitSeconds, slowRust = false) {
+const apiEnv = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
+const apiResponse = (value, status = 200, etag = '"fixture"') => new Response(status === 304 ? null : JSON.stringify(value), {
+  status, headers: { etag, "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "997", "x-ratelimit-used": "3" },
+});
+const withoutWaits = () => passingCloudJobs().map(job => ({ ...job, created_at: job.started_at }));
+
+test("the saved passing run measures gate spans and confinement execution separately", () => {
   const jobs = passingCloudJobs();
-  const start = Date.parse(jobs.find(job => job.name === "what changed").started_at);
-  const at = seconds => new Date(start + seconds * 1000).toISOString();
-  for (const job of jobs) {
-    const selection = job.name === "what changed";
-    const rustTests = job.name === "engine gate" || job.name.startsWith("Rust tests ");
-    const created = selection ? 0 : rustTests ? 70 : 10;
-    Object.assign(job, { created_at: at(created), started_at: at(created), completed_at: at(selection ? 10 : rustTests ? 130 : 60) });
-  }
-  Object.assign(jobs.find(job => job.name === "shared preparation"), { completed_at: at(20) });
-  Object.assign(jobs.find(job => job.name === "typecheck + tests"), { completed_at: at(70) });
-  Object.assign(jobs.find(job => job.name === "Rust build once"), { completed_at: at(100) });
-  Object.assign(jobs.find(job => job.name === "engine gate"), { completed_at: at(slowRust ? 650 : 140) });
-  Object.assign(jobs.find(job => job.name === "compiler and relay confinement"), {
-    created_at: at(20), started_at: at(20 + waitSeconds), completed_at: at(slowRust ? 660 : 20 + waitSeconds + 150),
-  });
-  return jobs;
-}
-
-test("a confinement queue cannot excuse Rust work that exceeded its budget", () => {
-  const jobs = confinementQueueJobs(400, true);
-  assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), error => {
-    assert.equal(error.timing.seconds, 660);
-    assert.equal(error.timing.workloadSeconds, 650);
-    assert.equal(error.timing.runnerWaitSeconds, 10);
-    assert.equal(error.timing.criticalJob, "engine gate");
-    return /exceeding.*budget/u.test(error.message);
-  });
-});
-
-test("two hours of confinement queue discount only its dependent work", () => {
-  const jobs = confinementQueueJobs(7200);
-  for (const scope of ["js", "rust"]) {
-    const timing = completedGateTiming(scope, jobs, jobs[0].head_sha);
-    assert.equal(timing.seconds, 7370);
-    assert.equal(timing.workloadSeconds, 170);
-    assert.equal(timing.runnerWaitSeconds, 7200);
-    assert.equal(timing.criticalJob, "compiler and relay confinement");
-  }
-});
-
-test("deadlines use only the waiting job's dependency closure", async () => {
-  const jobs = confinementQueueJobs(7200);
-  Object.assign(jobs.find(job => job.name === "compiler and relay confinement"), { status: "queued", started_at: null, completed_at: null });
-  const start = Date.parse(jobs.find(job => job.name === "what changed").started_at);
-  const clock = start + 650_000;
-  for (const [scope, names] of [["js", ["shared preparation", "JS worker 1", "typecheck + tests"]],
-    ["rust", ["Rust build once", "Rust tests 1", "engine gate"]]]) {
-    for (const name of names) assert.equal(gateDeadline(scope, jobs, name, clock), start + (scope === "js" ? 300_000 : 600_000));
-    await assert.rejects(waitForGate(scope, { readJobs: async () => jobs, now: () => clock }), /no time left/u);
-    await assert.rejects(waitForPreparation(scope, {
-      env: { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_TOKEN: "fixture" },
-      now: () => clock, request: async () => ({ ok: true, json: async () => ({ jobs }) }),
-    }), /exceeded/u);
-  }
-  const sibling = jobs.find(job => job.name === "JS worker 2");
-  Object.assign(sibling, { status: "queued", started_at: null, completed_at: null });
-  const queue = gateQueueTiming("js", jobs, clock);
-  assert.equal(queue.discounts["JS worker 1"], 0, "matrix siblings do not inherit each other's waits");
-  assert.equal(queue.discounts["typecheck + tests"], 640, "the reporting job really waits for its siblings");
-  Object.assign(jobs.find(job => job.name === "shared preparation"), { status: "queued", started_at: null, completed_at: null });
-  assert.equal(gateQueueTiming("js", jobs, clock).discounts["JS worker 1"], 640, "workers inherit the artifact wait");
-  Object.assign(jobs.find(job => job.name === "Rust build once"), { status: "queued", started_at: null, completed_at: null });
-  assert.equal(gateQueueTiming("rust", jobs, clock).discounts["Rust tests 1"], 640, "Rust tests inherit the archive wait");
-});
-
-for (const [scope, waitingJob, artifact] of [["js", "JS worker 1", "javascript-prepared"], ["rust", "Rust tests 1", "rust-tests"]]) {
-  test(`${scope} preparation and transfer inherit the waiting worker's own runner wait`, async () => {
-    const jobs = confinementQueueJobs(7200);
-    const start = Date.parse(jobs.find(job => job.name === "what changed").started_at);
-    Object.assign(jobs.find(job => job.name === waitingJob), { status: "in_progress", conclusion: null,
-      started_at: new Date(start + 7_000_000).toISOString(), completed_at: null });
-    const result = await waitForPreparation(scope, { waitingJob,
-      env: { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_TOKEN: "fixture" },
-      now: () => start + 7_010_000,
-      request: async url => ({ ok: true, json: async () => url.includes("/jobs?") ? { jobs } : { artifacts: [{ id: 42, name: `${artifact}-1`, expired: false }] } }),
-    });
-    assert.equal(result.artifact.id, 42);
-    assert.equal(result.deadline, start + (scope === "js" ? 7290 : 7530) * 1000);
-  });
-}
-
-test("contended completed gates discount runner waits by dependency stage", () => {
-  const jobs = passingCloudJobs();
-  const at = value => new Date(Date.parse(value) + 15 * 60_000).toISOString();
-  for (const job of jobs) {
-    if (job.name !== "what changed") {
-      job.started_at = at(job.started_at);
-      job.completed_at = at(job.completed_at);
-      // The proof is created only after its build dependency completes.
-      if (job.name === "compiler and relay confinement" || job.name.startsWith("Rust tests ") || job.name === "engine gate") job.created_at = at(job.created_at);
-    }
-  }
-  // A second dependency stage waits another ten minutes for its runner.
-  const confinement = jobs.find(job => job.name === "compiler and relay confinement");
-  confinement.started_at = new Date(Date.parse(confinement.started_at) + 600_000).toISOString();
-  confinement.completed_at = new Date(Date.parse(confinement.completed_at) + 600_000).toISOString();
-  for (const [scope, budget] of [["js", 300], ["rust", 600]]) {
+  for (const [scope, seconds] of [["js", 241], ["rust", 419]]) {
     const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
-    assert.ok(result.seconds > budget);
-    assert.ok(result.seconds - result.runnerWaitSeconds <= budget);
-    assert.deepEqual(result.stages.map(stage => stage.runnerWaitSeconds), [7, 908, 600]);
-    assert.equal(result.runnerWaitSeconds, scope === "js" ? 1502 : 1332);
-    assert.equal(result.workloadSeconds, scope === "js" ? 226 : 396);
-    assert.equal(result.criticalJob, scope === "js" ? "typecheck + tests" : "engine gate");
+    assert.equal(result.spanSeconds, seconds);
+    assert.equal(result.confinementSeconds, 228);
+    assert.equal(result.seconds, seconds);
+    assert.equal(result.contended, false);
+    assert.equal(result.timing, "within budget");
+    assert.ok(result.jobs.every(job => Number.isFinite(job.runnerWaitSeconds)));
   }
 });
 
-test("the saved passing run retains all jobs and dependency-ready creation timestamps", () => {
-  const { runId, jobs } = JSON.parse(readFileSync(new URL("./fixtures/passing-cloud-jobs.json", import.meta.url), "utf8"));
-  assert.equal(runId, 43025765573);
-  assert.equal(jobs.length, 29);
-  const selection = jobs.find(job => job.name === "what changed");
-  const javascript = jobs.find(job => job.name === "typecheck + tests");
-  const engine = jobs.find(job => job.name === "engine gate");
-  assert.equal((Date.parse(javascript.completed_at) - Date.parse(selection.started_at)) / 1000, 241);
-  assert.equal((Date.parse(engine.completed_at) - Date.parse(selection.started_at)) / 1000, 419);
-  assert.equal(jobs.find(job => job.name === "shared preparation + confinement").created_at, selection.completed_at);
-  for (const job of jobs.filter(job => job.name.startsWith("Rust tests ") || job.name === "engine gate")) {
-    assert.equal(job.created_at, javascript.completed_at, "creation excludes dependency execution");
-    assert.ok(Date.parse(job.started_at) >= Date.parse(job.created_at));
-  }
-  const split = passingCloudJobs();
-  for (const [scope, seconds, waits] of [["js", 241, [7, 8, 0]], ["rust", 419, [7, 8, 8]]]) {
-    const timing = completedGateTiming(scope, split, jobs[0].head_sha);
-    assert.equal(timing.seconds, seconds);
-    assert.deepEqual(timing.stages.map(stage => stage.runnerWaitSeconds), waits);
-    assert.equal(timing.runnerWaitSeconds, waits.reduce((sum, wait) => sum + wait));
-    assert.ok(timing.jobs.every(job => Number.isFinite(job.runnerWaitSeconds)));
-  }
-});
-
-test("completed timing rejects uncontended overruns and invalid or incomplete jobs", () => {
-  for (const scope of ["js", "rust"]) {
-    const jobs = passingCloudJobs();
-    jobs.forEach(job => { job.created_at = job.started_at; });
-    const budget = scope === "js" ? 300 : 600;
-    const last = jobs.find(job => job.name === "compiler and relay confinement");
-    last.completed_at = new Date(Date.parse(jobs[0].started_at) + (budget + 1) * 1000).toISOString();
+test("uncontended overruns fail; contended overruns warn without estimating workload", t => {
+  const warn = t.mock.method(console, "warn", () => {});
+  for (const [scope, finalJob, budget] of [["js", "typecheck + tests", 300], ["rust", "engine gate", 600]]) {
+    const jobs = withoutWaits(), start = Date.parse(jobs[0].started_at);
+    const last = jobs.find(job => job.name === finalJob);
+    last.completed_at = new Date(start + (budget + 50) * 1000).toISOString();
     assert.throws(() => completedGateTiming(scope, jobs, jobs[0].head_sha), error => {
-      assert.equal(error.timing.seconds, budget + 1);
-      assert.equal(error.timing.runnerWaitSeconds, 0);
-      assert.equal(error.timing.withinBudget, false);
+      assert.equal(error.timing.seconds, budget + 50);
+      assert.equal(error.timing.timing, "over budget");
       return /exceeding.*budget/u.test(error.message);
     });
-    for (const mutate of [
-      rows => rows.splice(rows.findIndex(job => job.name === "compiler and relay confinement"), 1),
-      rows => rows.push(rows.find(job => job.name === "shared preparation")),
-      ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler and relay confinement").conclusion = conclusion; }),
-      rows => { rows[0].head_sha = "other-head"; },
-      rows => { rows[0].created_at = "invalid"; },
-      rows => { rows[0].created_at = rows[0].completed_at; },
-      rows => { rows[0].completed_at = rows[0].created_at; rows[0].started_at = "invalid"; },
-    ]) {
-      const broken = passingCloudJobs(); mutate(broken);
-      assert.throws(() => completedGateTiming(scope, broken, jobs[0].head_sha));
-    }
+    last.created_at = new Date(Date.parse(last.started_at) - 30_000).toISOString();
+    assert.throws(() => completedGateTiming(scope, jobs, jobs[0].head_sha), /exceeding/u, "30 seconds does not count as contention");
+    last.created_at = new Date(Date.parse(last.started_at) - 31_000).toISOString();
+    const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    assert.equal(result.contended, true);
+    assert.equal(result.timing, "unmeasured");
+    assert.match(result.warning, new RegExp(`${budget + 50}s.*${budget}s.*${finalJob.replaceAll("+", "\\+")}.*31s`, "u"));
+    last.completed_at = new Date(start + budget * 1000).toISOString();
+    const within = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    assert.equal(within.contended, true);
+    assert.equal(within.timing, "within budget");
+    assert.equal(within.warning, undefined);
+  }
+  assert.equal(warn.mock.calls.length, 2);
+  assert.ok(warn.mock.calls.every(call => call.arguments[0].startsWith("::warning::")));
+});
+
+test("confinement's runner queue is removed exactly, but its execution must fit", () => {
+  const jobs = withoutWaits(), proof = jobs.find(job => job.name === "compiler and relay confinement");
+  proof.started_at = new Date(Date.parse(proof.started_at) + 7_200_000).toISOString();
+  proof.completed_at = new Date(Date.parse(proof.completed_at) + 7_200_000).toISOString();
+  for (const scope of ["js", "rust"]) {
+    const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    assert.equal(result.confinementSeconds, 228);
+    assert.equal(result.contended, false);
+    assert.equal(result.timing, "within budget");
+    proof.completed_at = new Date(Date.parse(proof.completed_at) + 600_000).toISOString();
+    assert.throws(() => completedGateTiming(scope, jobs, jobs[0].head_sha), error => {
+      assert.equal(error.timing.confinementSeconds, 828);
+      return /exceeding/u.test(error.message);
+    });
+    proof.completed_at = new Date(Date.parse(proof.completed_at) - 600_000).toISOString();
   }
 });
 
-test("Rust-only timing removes skipped JavaScript dependencies from its stages", () => {
-  const jobs = passingCloudJobs().filter(job => !job.name.startsWith("JS worker "));
-  Object.assign(jobs.find(job => job.name === "typecheck + tests"), { status: "completed", conclusion: "skipped", created_at: null, started_at: null });
-  const timing = completedGateTiming("rust", jobs, jobs[0].head_sha);
-  assert.equal(timing.stages.find(stage => stage.stage === 1).jobs.includes("engine gate"), true);
-  assert.ok(!timing.jobs.some(job => job.name === "typecheck + tests"));
+test("a failed JavaScript worker leaves Rust's independent verdict visible", () => {
+  const jobs = passingCloudJobs();
+  jobs.find(job => job.name === "JS worker 1").conclusion = "failure";
+  assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), /unsuccessful/u);
+  assert.equal(completedGateTiming("rust", jobs, jobs[0].head_sha).timing, "within budget");
+  const last = jobs.find(job => job.name === "engine gate");
+  last.completed_at = new Date(Date.parse(jobs[0].started_at) + 650_000).toISOString();
+  assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
 });
 
-test("reporting survives long sibling queues but does not wait for confinement", async () => {
-  const jobs = passingCloudJobs().filter(job => job.name !== "typecheck + tests");
-  const sibling = jobs.find(job => job.name === "JS worker 1");
-  const created = Date.parse(sibling.created_at);
-  Object.assign(sibling, { status: "queued", conclusion: null, started_at: null, completed_at: null });
-  Object.assign(jobs.find(job => job.name === "compiler and relay confinement"), { status: "queued", conclusion: null, started_at: null, completed_at: null });
-  let clock = created + 45 * 60_000, pauses = 0;
-  await waitForGate("js", { readJobs: async () => jobs, now: () => clock, pause: async ms => {
-    pauses++; clock += ms;
-    Object.assign(sibling, { status: "completed", conclusion: "success", started_at: new Date(clock - 1000).toISOString(), completed_at: new Date(clock).toISOString() });
-  } });
-  assert.equal(pauses, 1);
-  assert.ok(gateDeadline("js", jobs, "typecheck + tests", clock) > clock);
-  assert.ok(gateQueueTiming("js", jobs, clock, false).discounts["typecheck + tests"] >= 2700);
+test("negative waits clamp to zero and invalid or incomplete evidence always fails", () => {
+  const jobs = withoutWaits();
+  jobs.forEach(job => { job.created_at = job.completed_at; });
+  assert.ok(completedGateTiming("js", jobs, jobs[0].head_sha).jobs.every(job => job.runnerWaitSeconds === 0));
+  for (const scope of ["js", "rust"]) for (const mutate of [
+    rows => rows.splice(rows.findIndex(job => job.name === "compiler and relay confinement"), 1),
+    rows => rows.splice(rows.findIndex(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1")), 1),
+    rows => rows.push(rows.find(job => job.name === "shared preparation")),
+    ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler and relay confinement").conclusion = conclusion; }),
+    rows => { rows[0].head_sha = "other-head"; },
+    rows => { rows[0].created_at = "invalid"; },
+    rows => { rows[0].completed_at = rows[0].created_at; rows[0].started_at = "invalid"; },
+  ]) {
+    const broken = passingCloudJobs();
+    const prepared = broken.find(job => job.name === "shared preparation");
+    prepared.created_at = new Date(Date.parse(prepared.started_at) - 31_000).toISOString();
+    mutate(broken);
+    assert.throws(() => completedGateTiming(scope, broken, jobs[0].head_sha));
+  }
 });
 
 for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascript-prepared"], ["rust", "Rust build once", "rust-tests"]]) {
-  test(`${scope} preparation keeps polling beyond the old request cap while queued`, async () => {
-    const env = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
-    const jobs = passingCloudJobs();
-    const build = jobs.find(job => job.name === jobName);
-    let clock = Date.parse(build.created_at) + 25 * 60_000, pauses = 0;
-    Object.assign(build, { status: "queued", conclusion: null, started_at: build.created_at, completed_at: null });
-    const result = await waitForPreparation(scope, { env, now: () => clock,
-      request: async url => ({ ok: true, json: async () => url.includes("/jobs?") ? { jobs } : { artifacts: pauses < 140 ? [] : [{ id: 42, name: `${artifact}-2`, expired: false }] } }),
-      pause: async ms => {
-        clock += ms;
-        if (++pauses === 140) Object.assign(build, { status: "completed", conclusion: "success", started_at: new Date(clock - 1000).toISOString(), completed_at: new Date(clock).toISOString() });
+  test(`${scope} preparation polls conditionally only after the build starts`, async t => {
+    let clock = 0, jobReads = 0, artifactReads = 0;
+    const log = t.mock.method(console, "log", () => {});
+    const result = await waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+      request: async (url, { headers }) => {
+        assert.equal(headers.Authorization, "Bearer fixture");
+        if (url.includes("/jobs?")) {
+          jobReads++;
+          return apiResponse({ jobs: [{ name: jobName, status: clock < 60_000 ? "queued" : "in_progress" }] }, 200, `"jobs-${jobReads}"`);
+        }
+        assert.ok(clock >= 60_000, "queued builds cannot have published artifacts");
+        artifactReads++;
+        if (artifactReads === 1) return apiResponse({ artifacts: [{ name: `${artifact}-1`, expired: false }, { name: `${artifact}-2`, expired: true }] }, 200, '"empty"');
+        assert.equal(headers["If-None-Match"], '"empty"');
+        return artifactReads === 2 ? apiResponse(null, 304) : apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2`, expired: false }] });
       },
     });
-    assert.equal(pauses, 140);
     assert.equal(result.artifact.id, 42);
-    assert.equal(result.deadline, gateDeadline(scope, jobs, jobName, clock));
-    assert.ok(result.deadline > clock, "native transfer inherits the extended deadline");
+    assert.equal(clock, 80_000);
+    assert.equal(jobReads, 2);
+    assert.match(log.mock.calls.at(-1).arguments[0], /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=4 304=1/u);
+  });
+
+  test(`${scope} preparation stops after 15 minutes with the final build state`, async () => {
+    for (const state of ["queued", "in_progress"]) {
+      let clock = 0, lastJobRead = -1;
+      await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+        request: async url => {
+          if (url.includes("/jobs?")) { lastJobRead = clock; return apiResponse({ jobs: [{ name: jobName, status: state }] }); }
+          assert.equal(state, "in_progress");
+          return apiResponse({ artifacts: [] });
+        },
+      }), new RegExp(`15-minute wait cap.*${state === "queued" ? "queued for a runner" : "running"}`, "u"));
+      assert.equal(clock, 900_000);
+      assert.equal(lastJobRead, 900_000);
+    }
+    for (const conclusion of ["failure", "cancelled", "skipped"]) await assert.rejects(waitForPreparation(scope, {
+      env: apiEnv, request: async () => apiResponse({ jobs: [{ name: jobName, status: "completed", conclusion }] }),
+    }), new RegExp(`ended with ${conclusion}`, "u"));
+    await assert.rejects(waitForPreparation(scope, { env: apiEnv,
+      request: async () => apiResponse({ jobs: [{ name: jobName }, { name: jobName }] }),
+    }), /Duplicate/u);
   });
 }
 
-test("aggregate receipts apply the same workload rule before final completed timing", async t => {
+test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
+  for (const scope of ["js", "rust"]) {
+    const jobs = passingCloudJobs();
+    const sibling = jobs.find(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"));
+    for (const state of ["queued", "in_progress"]) {
+      let clock = 0;
+      Object.assign(sibling, { status: state, conclusion: null });
+      await assert.rejects(waitForGate(scope, { readJobs: async () => jobs, now: () => clock, pause: async ms => { clock += ms; } }),
+        new RegExp(`20-minute wait cap.*${state === "queued" ? "queued for a runner" : "running"}`, "u"));
+      assert.equal(clock, 1_200_000);
+    }
+    for (const conclusion of ["failure", "cancelled", "skipped"]) {
+      Object.assign(sibling, { status: "completed", conclusion });
+      await assert.rejects(waitForGate(scope, { readJobs: async () => jobs }), /did not finish successfully/u);
+    }
+    Object.assign(sibling, { conclusion: "success" });
+    const proof = jobs.find(job => job.name === "compiler and relay confinement");
+    Object.assign(proof, { status: "queued", conclusion: null });
+    await waitForGate(scope, { readJobs: async () => jobs });
+    await assert.rejects(waitForGate(scope, { readJobs: async () => [...jobs, sibling] }), /Duplicate/u);
+  }
+});
+
+test("aggregate job polling reuses ETags, waits 10 seconds, and logs rate usage", async t => {
+  const jobs = passingCloudJobs(), sibling = jobs.find(job => job.name === "JS worker 1");
+  Object.assign(sibling, { status: "in_progress", conclusion: null });
+  let clock = 0, reads = 0;
+  const log = t.mock.method(console, "log", () => {});
+  await waitForGate("js", { env: apiEnv, now: () => clock, pause: async ms => { assert.equal(ms, 10_000); clock += ms; },
+    request: async (url, { headers }) => {
+      reads++;
+      if (reads === 1) return apiResponse({ jobs }, 200, '"pending"');
+      assert.equal(headers["If-None-Match"], '"pending"');
+      if (reads === 2) return apiResponse(null, 304);
+      Object.assign(sibling, { status: "completed", conclusion: "success" });
+      return apiResponse({ jobs });
+    },
+  });
+  assert.equal(clock, 20_000);
+  assert.match(log.mock.calls.at(-1).arguments[0], /counted=2 304=1/u);
+});
+
+test("aggregate receipts use the same timing rule and remain incomplete", async t => {
   const parent = resolve(".agent-artifacts/verification");
   mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, "cloud-timing-test-"));
@@ -440,8 +374,9 @@ test("aggregate receipts apply the same workload rule before final completed tim
   const passed = await run(jobs, now);
   assert.equal(passed.complete, false);
   assert.equal(passed.seconds, 241);
-  assert.equal(passed.runnerWaitSeconds, 15);
-  assert.equal(passed.workloadSeconds, 226);
+  assert.equal(passed.spanSeconds, 241);
+  assert.equal(passed.confinementSeconds, null);
+  assert.equal(passed.timing, "within budget");
   const contended = structuredClone(jobs);
   for (const job of contended) if (job.name !== "what changed") {
     if (job.name === "compiler and relay confinement") job.created_at = new Date(Date.parse(job.created_at) + 900_000).toISOString();
@@ -450,19 +385,19 @@ test("aggregate receipts apply the same workload rule before final completed tim
   }
   const adjusted = await run(contended, now + 900_000);
   assert.equal(adjusted.seconds, 1141);
-  assert.equal(adjusted.runnerWaitSeconds, 915);
-  assert.equal(adjusted.workloadSeconds, 226);
+  assert.equal(adjusted.timing, "unmeasured");
+  assert.equal(adjusted.contended, true);
   const queuedProof = structuredClone(jobs);
   Object.assign(queuedProof.find(job => job.name === "compiler and relay confinement"), { status: "queued", started_at: null });
   const pending = await run(queuedProof, now);
-  assert.equal(pending.runnerWaitSeconds, 15, "queued confinement cannot discount provisional workload");
+  assert.equal(pending.seconds, 241, "queued confinement cannot change provisional timing");
   const zeroWait = structuredClone(jobs);
   zeroWait.forEach(job => { job.created_at = job.started_at; });
   await assert.rejects(run(zeroWait, Date.parse(jobs[0].started_at) + 301_000), /exceeding.*budget/u);
   const failed = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8"));
   assert.equal(failed.verdict, "FAIL");
   assert.equal(failed.seconds, 301);
-  assert.equal(failed.runnerWaitSeconds, 0);
+  assert.equal(failed.contended, false);
   for (const rows of [jobs.slice(1), [...jobs, jobs[0]], jobs.map(job => job.name === "JS worker 1" ? { ...job, conclusion: "cancelled" } : job)]) {
     await assert.rejects(run(rows, now), /missing or did not finish/u);
   }

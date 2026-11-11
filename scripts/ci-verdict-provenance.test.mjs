@@ -410,7 +410,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   for (const job of [tests, jobs.rust]) {
     assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
     const install = job.steps.findIndex(step => step.name === "Install dependencies");
-    const wait = job.steps.findIndex(step => step.run === `node scripts/verification/wait-preparation.mjs rust "${job === jobs.rust ? "engine gate" : "Rust tests ${{ matrix.shard }}"}"`);
+    const wait = job.steps.findIndex(step => step.run === "node scripts/verification/wait-preparation.mjs rust");
     const download = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
     assert.ok(install >= 0 && install < wait && wait < download);
     assert.equal(job.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");
@@ -534,6 +534,8 @@ test("confinement reuses build artifacts without occupying worker or aggregate r
   const build = jobs["javascript-prepare"].steps.map(step => step.run ?? "").join("\n");
   assert.match(build, /cargo nextest archive --locked --package dohc-compiler-owner/);
   assert.doesNotMatch(build, /cargo nextest run|compiler\(\)|relay\(\)/);
+  const restore = jobs.confinement.steps.find(step => step.name === "Restore prepared artifacts").run;
+  assert.match(restore, /tar .*javascript-prepared.*\n.*assertPrepared\(\{ engineOnly: true \}\)/);
   const proof = jobs.confinement.steps.find(step => step.name === "Compiler and relay confinement").run;
   assert.match(proof, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --retries=0 --no-tests=fail/);
   assert.match(proof, /scripts\/compiler-process\.test\.mjs scripts\/stage-app-compiler\.test\.mjs/);
@@ -547,7 +549,7 @@ test("confinement reuses build artifacts without occupying worker or aggregate r
   assert.match(proof, /wait "\$relay_pid" \|\| status=1/);
 });
 
-test("timing stages match the workflow dependency graph and timeout backstops", () => {
+test("job names match the workflow graph and timeout backstops", () => {
   const {jobs} = load(workflow);
   assert.deepEqual(Object.keys(CLOUD_JOB_GRAPH).sort(), Object.keys(jobs).filter(name => name !== "verification").sort());
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
@@ -649,7 +651,8 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(run({...manual, "javascript-prepare": {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
   }
-  const failedJavascript = run(jobs("true", "true", "failure", "success", "success"));
+  const failedJavascript = run(jobs("true", "true", "failure", "success", "success"), "pull_request", "all",
+    completed.map(row => row.name === "JS worker 1" ? {...row, conclusion: "failure"} : row));
   assert.equal(failedJavascript.status, 1);
   assert.match(failedJavascript.stdout, /PASS \(rust completed group\)/,
     "a failed JavaScript gate must not omit the Rust group's completed timing verdict");

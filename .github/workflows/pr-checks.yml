@@ -311,7 +311,9 @@ jobs:
           name: javascript-prepared-${{ github.run_attempt }}
           path: /tmp/prepared
       - name: Restore prepared artifacts
-        run: tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
+        run: |
+          tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
+          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared({ engineOnly: true });"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: compiler-tests-${{ github.run_attempt }}
@@ -572,7 +574,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       - name: Wait for the shared Rust archive
-        run: node scripts/verification/wait-preparation.mjs rust "Rust tests ${{ matrix.shard }}"
+        run: node scripts/verification/wait-preparation.mjs rust
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: rust-tests-${{ github.run_attempt }}
@@ -660,7 +662,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       - name: Wait for the shared Rust archive
-        run: node scripts/verification/wait-preparation.mjs rust "engine gate"
+        run: node scripts/verification/wait-preparation.mjs rust
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: rust-tests-${{ github.run_attempt }}
