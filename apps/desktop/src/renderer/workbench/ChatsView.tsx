@@ -143,6 +143,7 @@ import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
+import { ShareRowMark } from "./shareRowMark";
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -3096,6 +3097,11 @@ export function ChatsView(props: {
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
     [joinedByWire],
   );
+  // The share a Group row stands for, while that share lasts.
+  const groupShareId = useCallback((channel: ChatChannelRecord) => {
+    const joined = joinedFor(channel);
+    return joined && joined.ended !== true ? joined.shareId : null;
+  }, [joinedFor]);
   const agentChats = useMemo(
     () => overview.status === "ready" ? orderAgentChats(overview.channels, settingsAgents) : [],
     [overview, settingsAgents],
@@ -3410,52 +3416,6 @@ export function ChatsView(props: {
     commitShareListing(ticket, session, shares);
     return session === sessionGeneration.current && shares?.relay.state === "answered";
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
-  // A notice's Open can name an invitation that arrived after Chats last
-  // listed it. Each reveal reads the shares again and pulls message requests,
-  // whose poll stops while a conversation tab is open.
-  //
-  // Chats owes each reveal an outcome until it reports `shown`. A newer
-  // reveal replaces the one owed, so an older reveal's reads report nothing.
-  const outcomeOwed = useRef<ChatsInvitation | null>(null);
-  const [revealRead, setRevealRead] = useState<{ reveal: ChatsInvitation; answered: boolean } | null>(null);
-  useEffect(() => {
-    if (revealInvitation === undefined) return;
-    const reveal = revealInvitation;
-    outcomeOwed.current = reveal;
-    void Promise.all([refreshShares(), refreshDms("open")]).then(([shares, messages]) => {
-      if (outcomeOwed.current === reveal) setRevealRead({ reveal, answered: shares && messages });
-    });
-  }, [refreshDms, refreshShares, revealInvitation]);
-  const { onInvitationOutcome } = props;
-  const reportedRead = useRef<typeof revealRead>(null);
-  // After every commit, so a row counts as soon as it is on screen.
-  useEffect(() => {
-    const reveal = outcomeOwed.current;
-    if (reveal === null || onInvitationOutcome === undefined) return;
-    if (invitationListed(reveal.shareId)) {
-      outcomeOwed.current = null;
-      onInvitationOutcome(reveal.shareId, "shown");
-      return;
-    }
-    if (revealRead?.reveal !== reveal || reportedRead.current === revealRead) return;
-    reportedRead.current = revealRead;
-    // `absent` needs this reveal's own reads to have answered, and what is on
-    // screen to still be an answer: a later failed read leaves a list that
-    // cannot say the invitation isn't there.
-    const listAnswered = channelShares !== null && shareReadFailure === null && dmAvailable;
-    onInvitationOutcome(reveal.shareId, revealRead.answered && listAnswered ? "absent" : "failed");
-  });
-  // The invitation's row, or the Group or conversation it already became,
-  // archived ones included.
-  function invitationListed(shareId: string): boolean {
-    if (viewRef.current?.querySelector(`[data-invitation="${CSS.escape(shareId)}"]`)) return true;
-    if (dms.some((dm) => dm.shareId === shareId)) return true;
-    if (declinedDmRequests.some((request) => request.shareId === shareId)) return true;
-    const joined = channelShares?.joined.find((answer) => answer.joined?.shareId === shareId && answer.joined.ended !== true);
-    return joined !== undefined && overview.status === "ready" &&
-      overview.channels.some((channel) => channel.wireId === joined.channelWireId);
-  }
-
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic
   // activity ping only reaches the badge path, which deliberately never asks
@@ -3699,6 +3659,56 @@ export function ChatsView(props: {
     [props.userSettings, settingsAgents, personalNames],
   );
   const [archiveOpen, setArchiveOpen] = useState(false);
+
+  // A notice's Open can name an invitation that arrived after Chats last
+  // listed it. Each reveal reads the shares again and pulls message requests,
+  // whose poll stops while a conversation tab is open.
+  //
+  // Chats owes each reveal an outcome. A newer reveal replaces the one owed,
+  // so an older reveal's reads report nothing.
+  const [owed, setOwed] = useState<{ reveal: ChatsInvitation; answered?: boolean } | null>(null);
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    const reveal = revealInvitation;
+    setOwed({ reveal });
+    void Promise.all([refreshShares(), refreshDms("open")]).then(([shares, messages]) => {
+      setOwed((current) => (current?.reveal === reveal ? { reveal, answered: shares && messages } : current));
+    });
+  }, [refreshDms, refreshShares, revealInvitation]);
+  const { onInvitationOutcome } = props;
+  const owedReveal = owed?.reveal ?? null;
+  // `shown` comes only from a row reporting itself (ShareRowMark), so it
+  // means the row is in the mounted list. Once a reveal is shown, the shell
+  // ignores anything more about it.
+  const reportRow = useMemo(() => {
+    if (owedReveal === null || onInvitationOutcome === undefined) return null;
+    return (shareId: string, row: HTMLElement) => {
+      if (shareId !== owedReveal.shareId) return;
+      row.scrollIntoView({ block: "nearest" });
+      setOwed((current) => (current?.reveal === owedReveal ? null : current));
+      onInvitationOutcome(shareId, "shown");
+    };
+  }, [owedReveal, onInvitationOutcome]);
+  // An archived Group or conversation mounts its row only while Archived is
+  // open, so a reveal of one opens Archived, in this render so the row mounts
+  // in the same commit.
+  const revealArchived = useMemo(() => {
+    if (owedReveal === null) return false;
+    const { shareId } = owedReveal;
+    if (dms.some((dm) => dm.shareId === shareId && archivedIds.has(dm.channelId))) return true;
+    return overview.status === "ready" &&
+      overview.channels.some((channel) => archivedIds.has(channel.id) && groupShareId(channel) === shareId);
+  }, [archivedIds, dms, groupShareId, overview, owedReveal]);
+  if (revealArchived && !archiveOpen) setArchiveOpen(true);
+  useEffect(() => {
+    if (owed?.answered === undefined || onInvitationOutcome === undefined) return;
+    // `absent` needs this reveal's own reads to have answered, and the list
+    // on screen to still be an answer: a later failed read, or another
+    // account's session, leaves a list that cannot say the invitation isn't
+    // there.
+    const listAnswered = shareReadFailure === null && dmAvailable;
+    onInvitationOutcome(owed.reveal.shareId, owed.answered && listAnswered ? "absent" : "failed");
+  }, [dmAvailable, onInvitationOutcome, owed, shareReadFailure]);
   const setChatArchived = useCallback(
     async (channelId: string, label: string, archived: boolean): Promise<void> => {
       try {
@@ -5390,6 +5400,7 @@ export function ChatsView(props: {
     const unread = channel.unreadCount > 0;
     return (
       <li key={channel.id}>
+        <ShareRowMark shareId={groupShareId(channel)} report={reportRow} />
         <NavRow
           testId="chats-channel"
           data={{
@@ -5448,6 +5459,7 @@ export function ChatsView(props: {
   function dmRow(dm: DmRecord, archived: boolean) {
     return (
       <li key={dm.channelId}>
+        <ShareRowMark shareId={dm.shareId} report={reportRow} />
         <NavRow
           testId="chats-dm-item"
           data={{ "data-channel-id": dm.channelId, ...(archived ? { "data-archived": "true" } : {}) }}
@@ -5597,6 +5609,7 @@ export function ChatsView(props: {
                     aria-current={markedInvitation?.shareId === row.shareId ? "true" : undefined}
                     className={`mx-1 flex min-h-8 items-center gap-2 rounded-md px-2 py-1${markedInvitation?.shareId === row.shareId ? " bg-selected" : ""}`}
                   >
+                    <ShareRowMark shareId={row.shareId} report={reportRow} />
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
@@ -5677,6 +5690,7 @@ export function ChatsView(props: {
                     request={request}
                     state="pending"
                     marked={markedInvitation?.shareId === request.shareId}
+                    report={reportRow}
                     busy={dmRequestBusy !== null}
                     onAccept={() => setAcceptingDmRequest(request)}
                     onDecline={() => void setDmRequestDeclined(request, true)}
@@ -5694,6 +5708,7 @@ export function ChatsView(props: {
                         key={request.shareId}
                         request={request}
                         state="declined"
+                        report={reportRow}
                         busy={dmRequestBusy !== null}
                         onRequestAgain={() =>
                           void setDmRequestDeclined(request, false)

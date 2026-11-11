@@ -24,6 +24,11 @@ const MISSING_COPY =
 // A Group invitation or message request waits in Chats.
 const CHATS_COPY = "Find it in Chats, in a workspace of your own.";
 const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces first.`;
+// Why Chats has not shown the invitation. With chats off there is nothing to
+// read again, so `copy` stands alone, without Try again.
+export type HandoffChatsOutcome =
+  | { shareId: string; outcome: "absent" | "failed" }
+  | { shareId: string; outcome: "off"; copy: string };
 // What Chats found when it could not show the invitation.
 const CHATS_OUTCOME_COPY = {
   absent: "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
@@ -75,7 +80,7 @@ export function ShareHandoffSurface(props: {
   // with Join or Accept. Without it, the card says where to find it.
   openInChats?: (invitation: { shareId: string; inputs: number }) => void;
   // Why Chats has not shown it yet, and Try again, which reads Chats again.
-  chatsOutcome?: { shareId: string; outcome: "absent" | "failed" };
+  chatsOutcome?: HandoffChatsOutcome;
   onRetryChats?: () => void;
   mountInto?: {
     workspaceId: string;
@@ -285,20 +290,22 @@ export function ShareHandoffSurface(props: {
     );
   }
 
-  const chatsOutcome = opensInChats && props.chatsOutcome?.shareId === shareId ? props.chatsOutcome.outcome : null;
+  const chatsOutcome = opensInChats && props.chatsOutcome?.shareId === shareId ? props.chatsOutcome : null;
   if (chatsOutcome !== null) {
-    const copy = CHATS_OUTCOME_COPY[chatsOutcome];
+    const copy = chatsOutcome.outcome === "off" ? chatsOutcome.copy : CHATS_OUTCOME_COPY[chatsOutcome.outcome];
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <div className="flex items-start gap-2">
-          <p role="alert" data-testid={`handoff-chats-${chatsOutcome}`} className="m-0 min-w-0 flex-1 text-xs leading-relaxed text-danger">
+          <p role="alert" data-testid={`handoff-chats-${chatsOutcome.outcome}`} className="m-0 min-w-0 flex-1 text-xs leading-relaxed text-danger">
             {copy}
           </p>
           <CopyButton label="Copy" pinName iconOnly getText={() => copy} />
         </div>
-        <SecondaryButton type="button" onClick={props.onRetryChats}>
-          Try again
-        </SecondaryButton>
+        {chatsOutcome.outcome === "off" ? null : (
+          <SecondaryButton type="button" onClick={props.onRetryChats}>
+            Try again
+          </SecondaryButton>
+        )}
       </HandoffCard>
     );
   }
