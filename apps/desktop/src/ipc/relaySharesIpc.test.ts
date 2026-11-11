@@ -10,6 +10,7 @@ import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers } from "./relaySharesIpc";
+import { watchReleaseOutsideFile } from "./stopAndRestoreIpc";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -783,6 +784,26 @@ describe("owner live document enrollment", () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
       await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
       expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    });
+
+    // Stop and restore removes the page after the Stop, so it must hear that
+    // the file may lack edits the failed release did not write.
+    it("tells Stop and restore a release that failed after the server stopped left edits outside the file", async () => {
+      const h = harness(); h.request.mockResolvedValue(retired);
+      const ordinary = released();
+      const stopWith = async (fail: boolean) => {
+        h.ownerLiveStop.mockImplementation(async (...args) => {
+          if (fail && args[1] === "release") throw new Error("conflict-stale-target");
+          return ordinary(...args);
+        });
+        const release = watchReleaseOutsideFile<Workspace>(h.ownerLiveStop);
+        const actions = createOwnerLiveDocumentActions<Workspace, Operation>({...h.ownerHandlersDependencies, ownerLiveStop: release.ownerLiveStop});
+        await expect(actions.stop({workspaceId, path: "live.md", objectId: "object"}, {workspace: h.workspace, assertCurrent() {}})).resolves.toEqual({keptEdits: "none"});
+        return release.outsideFile();
+      };
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      expect(await stopWith(true)).toBe(true);
+      expect(await stopWith(false)).toBe(false);
     });
 
     it("says live editing stopped when the page leaves its path after the server stopped", async () => {
