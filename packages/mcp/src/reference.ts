@@ -176,6 +176,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
     ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
     ["chat", "reply", "th_1", "--as-agent", "--work", "done", "--link", "https://example.com/pull/7", "Opened", "a", "pull", "request"],
   ],
+  retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
   export: [
@@ -255,6 +256,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
+  dohc_retry_chat_run: { cli: "chatRetry" },
   dohc_press_button: { cli: "automationPress" },
   dohc_inspect_buttons: { cli: "automationButtons" },
 };
@@ -489,6 +491,7 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   links: "chatLinks",
   "file-mentions": "chatFileMentions",
   "create-group": "groupCreate",
+  retry: "chatRetry",
 };
 
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's
@@ -612,6 +615,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 - The CLI and the app must be the same build. Otherwise the CLI stops with \`CLI/app version mismatch — restart the app\`.
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
+
+A desktop MCP tool refuses an argument it does not take. The error names that argument and lists the ones the tool takes.
 
 Partial form creation returns \`{ kind: "partial", created, failedStage, reason, retry }\`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 

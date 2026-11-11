@@ -12,7 +12,7 @@ import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, retryChatRun, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import {
@@ -2558,6 +2558,79 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
+  // Try again from the CLI and MCP runs through the chat's own service, which
+  // keeps the two-attempt limit, and only for a caller who may post here.
+  describe("chat retry", () => {
+    function stoppedRun(retryable: boolean): string[] {
+      const retried: string[] = [];
+      serverOptions.chatRuns = {
+        dispatchStateForThread: async () => ({
+          liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false,
+          failedRun: {
+            runId: "run-stopped", triggerMessageId: "message-asked", retryable,
+            words: "Nova didn't reply. Its run ended with an error.",
+            ...(retryable ? {} : { nextStep: { kind: "message" as const, agentId: "default", name: "Nova", handle: "nova" } }),
+          },
+        }),
+        async retryStoppedRun(workspaceId, threadId, runId) {
+          retried.push(`${workspaceId}/${threadId}/${runId}`);
+          return true;
+        },
+      };
+      return retried;
+    }
+
+    async function conversation() {
+      if (!store) throw new Error("Store is not available");
+      const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const started = await store.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
+        author: { kind: "human", displayName: "Sam" }, body: "@nova summarize this",
+      });
+      return { channelId: general.id, threadId: started.thread.id };
+    }
+
+    it("runs a stopped request again for someone who may post", async () => {
+      const { threadId } = await conversation();
+      const retried = stoppedRun(true);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .resolves.toEqual({ ok: true, status: "queued", threadId: cliThreadId(threadId) });
+      expect(retried).toEqual([`${WORKSPACE_ID}/${threadId}/run-stopped`]);
+      expect(calls.writes).toBe(1);
+    });
+
+    it("says why a request that had its attempts can't run again", async () => {
+      const { threadId } = await conversation();
+      const retried = stoppedRun(false);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "human", thread: threadId })).resolves.toEqual({
+        ok: false,
+        reason: "Nova didn't reply. Its run ended with an error. It can't run again. Mention @nova to ask again.",
+      });
+      expect(retried).toEqual([]);
+    });
+
+    it("refuses someone who may only read the conversation, before any retry", async () => {
+      const { channelId, threadId } = await conversation();
+      const retried = stoppedRun(true);
+      await makeChannelReadOnly(channelId);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("You can only read this.");
+      chatRow.sharedChannels = [];
+      chatRow.shareView = {
+        shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
+        grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
+      };
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("Chats are read-only in this shared view.");
+      registryWorkspace = { ...registryWorkspace, readOnly: true };
+      context.readOnly = true;
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("chats are not available in a read-only shared view");
+      expect(retried).toEqual([]);
+      expect(calls.writes).toBe(0);
+    });
+  });
+
   it("keeps MCP chat reads available in read-only workspaces while refusing writes", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -3725,6 +3798,10 @@ describe("CLI socket server", () => {
     // The agent names no run; the server it calls names the run it works for.
     const ctx: ToolContext = { root: nestedRoot, home: stateDir, runId: "run_live", request: (value) => invoke(value.verb, value.args) };
     await expect(startGroupChat(ctx, { group: "general", body: "Publish the trip app." })).resolves.toEqual({
+      ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
+    });
+    // Nor does it run a stopped request there again.
+    await expect(retryChatRun(ctx, { threadId: "thread-1" })).resolves.toEqual({
       ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
     });
     expect(calls.openWorkspace).toBe(opened);

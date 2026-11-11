@@ -1611,6 +1611,40 @@ fn live_capture_labels_default_at_the_primitive() {
     );
 }
 
+/// A code file recorded as binary before code files were stored as text keeps
+/// its binary head. Capturing its unchanged bytes as text records nothing.
+#[test]
+fn text_capture_of_a_binary_heads_bytes_records_nothing() {
+    let (_scratch, mut store) = open_store();
+    let source = "export const answer = 42;\n";
+    let binary = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(
+            &ingest_binary("src/a.ts", source.as_bytes(), 10),
+            &NO_FAULTS,
+        )
+        .expect("binary capture");
+    let text = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("src/a.ts", source, 20), &NO_FAULTS)
+        .expect("text capture of the same bytes");
+    assert!(text.deduped, "an unchanged file recorded a moment");
+    assert_eq!(text.moment.moment_id, binary.moment_id);
+    assert_eq!(text.snapshot.text, source);
+    let listed = VersionedTextStore::new(&mut store)
+        .list_moments(&ListMomentsQuery {
+            workspace_id: WS.to_owned(),
+            version_id: Some(VERSION.to_owned()),
+            object_id: Some(binary.object_id.clone()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .expect("list moments");
+    assert_eq!(
+        listed.moments.len(),
+        1,
+        "an unchanged file recorded a moment"
+    );
+}
+
 /// A respell is not a deletion, so a head retires when the disk shows its
 /// file stored under another spelling, whoever owns it, but only when that
 /// loses nothing. Each refused case breaks one condition and keeps the head,

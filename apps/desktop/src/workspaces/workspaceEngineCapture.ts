@@ -651,7 +651,8 @@ export interface WorkspaceEngineCapture {
     // one. An update with a head may be empty.
     onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
-    onEditRefused?: (requestId: string, message: string) => void;
+    // `paused`: this file's queue for the server takes no more edits.
+    onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
@@ -2557,7 +2558,7 @@ export function createWorkspaceEngineCapture(
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
-    onEditRefused?: (requestId: string, message: string) => void;
+    onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
     onSettled: (
       result: {
         sha256: string;
@@ -2750,6 +2751,9 @@ export function createWorkspaceEngineCapture(
       if (refusedEditorRecords.length === 0) return false;
       record.refusal.editorVisible = true;
       const reason = error instanceof Error ? error.message : "";
+      // This file's queue for the server takes no more: the server refused an
+      // earlier edit, or too many wait to reach it.
+      const paused = reason.includes("owner-outbox-frozen");
       const explanation = reason.includes("pending-edits-limit")
         ? "Too many edits are waiting to save."
         : reason.includes("update-too-large")
@@ -2758,8 +2762,7 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
-            // The server refused this file's earlier edits, so its queue takes no more.
-            : reason.includes("owner-outbox-frozen")
+            : paused
               ? "Live editing is paused for this file."
             : unanswered
               ? "No answer after three attempts."
@@ -2767,7 +2770,7 @@ export function createWorkspaceEngineCapture(
       const what = refusedEditorRecords.length > 1 ? "edits" : "an edit";
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
-      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message);
+      input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message, paused);
       return true;
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {

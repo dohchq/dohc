@@ -21,7 +21,8 @@ import type {
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { Agent, AgentWithLaunch } from "../settings/userSettings";
+import type { Agent, AgentRunLogsSettings, AgentWithLaunch } from "../settings/userSettings";
+import { markRunLogEnded, removeExpiredRunLogs } from "./runLogRetention";
 import type { AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -149,6 +150,7 @@ export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
 const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
+export const RUN_LOG_SWEEP_MS = 24 * 60 * 60 * 1000;
 export const APP_QUIT_EXIT_CODE = 143;
 
 export const SELF_TEST_RESTRICTED_DETAIL =
@@ -208,6 +210,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   ): AwaitableAgentDispatchStore;
   // The person's agents, in the order the settings file lists them.
   readDispatchAgents(): Promise<Agent[]>;
+  // How long the settings file keeps a finished run's log.
+  readRunLogKeepDays?(): Promise<AgentRunLogsSettings["keepDays"]>;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
@@ -423,6 +427,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   >();
   const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
+  let runLogSweepTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
   let stopped = true;
@@ -747,6 +752,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     if (!live.child.hasExited()) return false;
+    await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
     // Try again waits for the process to exit, so read the run again.
@@ -1016,6 +1022,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       await oweRunNotice(workspace, runId);
       await options.dispatchStoreFor(workspace).failRun({ runId, reason: failure.reason });
       failure.failed = true;
+      // A launch that failed can leave its log or MCP config behind.
+      await markRunLogEnded(actualLogPath(runId, failure.claim.run.logPath), nowMs()).catch(reportError);
       notifyRunUpdated(workspace, failure.claim.run.threadId);
     }
     const requeued = failure.requeue && (await options.requeueFailedTrigger?.({
@@ -1416,6 +1424,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
+      // Its recorded end is now, so cleanup counts its log's age from now.
+      await markRunLogEnded(actualLogPath(claim.run.runId, claim.run.logPath), nowMs()).catch(reportError);
       notifyRunUpdated(workspace, claim.run.threadId);
       await settleRunNotice(workspace, claim.run.runId);
     }
@@ -1564,12 +1574,34 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     started = true;
     stopped = false;
     shuttingDown = false;
-    for (const workspace of options.listOpenWorkspaces()) {
-      void scanWorkspace(workspace.workspaceId).catch(reportError);
-    }
+    const scans = options.listOpenWorkspaces().map((workspace) =>
+      scanWorkspace(workspace.workspaceId).catch(reportError));
     pumpTimer = setInterval(() => {
       schedulePump();
     }, CHAT_DISPATCH_PUMP_MS);
+    // Cleanup keeps any log whose run has no recorded end, so this order is
+    // only tidiness: recovery records interrupted runs' ends first, and this
+    // pass already counts them.
+    void Promise.all(scans).then(() => sweepRunLogs());
+    runLogSweepTimer = setInterval(() => void sweepRunLogs(), RUN_LOG_SWEEP_MS);
+  }
+
+  // At start and once a day, removes the logs of runs that ended longer ago
+  // than the settings file keeps them. A running agent's log stays.
+  async function sweepRunLogs(): Promise<void> {
+    if (!options.readRunLogKeepDays) return;
+    try {
+      await removeExpiredRunLogs({
+        stateDir: options.stateDir(),
+        keepDays: await options.readRunLogKeepDays(),
+        nowMs: nowMs(),
+        isRunning: (runId) =>
+          [...liveRuns.values()].some((live) => live.claim.run.runId === runId) ||
+          [...selfTests.values()].some((test) => test.runId === runId),
+      });
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   function setPaused(next: boolean): void {
@@ -2006,6 +2038,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             // so its exit is what lets held requests start.
             const forget = () => {
               if (selfTests.get(workspaceId) !== test) return;
+              void markRunLogEnded(logPath, nowMs()).catch(reportError);
               selfTests.delete(workspaceId);
               if (!selfTestReservations.has(workspaceId) && !stopped) {
                 void scanWorkspace(workspaceId).catch(reportError);
@@ -2128,6 +2161,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           // The self-test already failed; the caller reads that failure, not this one.
         }
         reportError(error);
+        // A launch that failed can leave its log behind.
+        await markRunLogEnded(logPath, nowMs()).catch(reportError);
         // A restrict that landed while the self-test was starting stops it here.
         if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
@@ -2149,6 +2184,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopped = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
+    if (runLogSweepTimer) clearInterval(runLogSweepTimer);
+    runLogSweepTimer = null;
     for (const timer of recoveryTimers.values()) clearTimeout(timer);
     recoveryTimers.clear();
     recoveryAttempts.clear();
@@ -2156,10 +2193,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const appQuitRuns: LiveRun[] = [];
     const runWorkspacesToRelease: LiveRun[] = [];
     const quitProcesses: RunnerProcess[] = [];
+    const selfTestLogs: string[] = [];
     for (const test of selfTests.values()) {
       if (test.killEscalation) clearTimeout(test.killEscalation);
       test.killEscalation = null;
       quitProcesses.push(test.child);
+      selfTestLogs.push(actualLogPath(test.runId));
     }
     for (const live of liveRuns.values()) {
       if (live.killEscalation) clearTimeout(live.killEscalation);
@@ -2216,10 +2255,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
     await Promise.all(quitTerminations);
+    await Promise.all(selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)));
     await Promise.all(
       [
         ...runWorkspacesToRelease.map(async (live) => {
           try {
+            await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
             await clearLiveAttribution(live);
           } catch (error) {
             reportError(error);

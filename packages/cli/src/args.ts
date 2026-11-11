@@ -110,6 +110,7 @@ type CliCommandBody =
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
+  | { verb: "chatRetry"; thread: string }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
       verb: "automationPress";
@@ -705,6 +706,21 @@ const CHAT_VERBS = {
         body,
         ...chatAgent(input),
       };
+    },
+  },
+  retry: {
+    capabilityId: "agent.run.retry",
+    summary: "Run an agent's stopped request in a conversation again, as Try again does.",
+    operands: "<thread>",
+    notes: [
+      "dohc chat show reports a stopped run under dispatch.lastRun.",
+      "Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.",
+    ],
+    parse: ({ operands }) => {
+      const [thread, ...extra] = operands;
+      if (!thread) fail("retry requires a thread id");
+      noExtraArgs(extra, "retry");
+      return { verb: "chatRetry", thread };
     },
   },
   react: {

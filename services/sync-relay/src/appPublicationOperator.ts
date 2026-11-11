@@ -7,6 +7,12 @@ import { RelayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 import { OPERATOR_MAX_REQUEST_BYTES, OPERATOR_TIMEOUT_MS, parseOperatorRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
+function copiesMessage({publicationIds, total}: {publicationIds: string[]; total: number}): string {
+  if (total === 0) return "\nThe owner has no other active publication of this app.";
+  const more = total > publicationIds.length ? `\nThese are the first ${publicationIds.length}. Run this takedown again after disabling them to list the rest.` : "";
+  return `\nThe owner has ${total} other active ${total === 1 ? "publication" : "publications"} of this app. They keep serving until you disable each one:\n${publicationIds.join("\n")}${more}`;
+}
+
 export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication" | "liftAppPublishingHold">, path: string, secretPath: string) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   const unix = uid !== undefined, directory = dirname(path);
@@ -72,8 +78,8 @@ export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "
           return;
         }
         const result = storage.disableAppPublication({...request, nowMs: Date.now()});
-        reply({code: 0, message: `Disabled publication ${result.publicationId}. Its owner cannot publish apps on this server until you lift the hold.`,
-          publicationId: result.publicationId, authorityRevision: result.authorityRevision, operatorTakedown: result.operatorTakedown});
+        reply({code: 0, message: `Disabled publication ${result.publicationId}. Its owner cannot publish apps on this server until you lift the hold.${copiesMessage(result.otherActiveCopies)}`,
+          publicationId: result.publicationId, authorityRevision: result.authorityRevision, operatorTakedown: result.operatorTakedown, otherActiveCopies: result.otherActiveCopies});
       } catch (error) {
         if (error instanceof RelayError && error.code === "not_found") reply({code: 3, message: `Publication ${request.publicationId} was not found. Check the publication ID.`});
         else if (error instanceof RelayError && error.code === "bad_request") reply({code: 2, message: error.message});

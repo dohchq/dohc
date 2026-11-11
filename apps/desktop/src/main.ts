@@ -457,6 +457,7 @@ import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
+import { readOwnerDraftState } from "./workspaces/ownerDraftRead";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -568,6 +569,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
+import { runLogKeepDays } from "./agents/runLogRetention";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
 import { createPersonalAgentRoster } from "./agents/personalAgentRoster";
@@ -2762,6 +2764,7 @@ const activity = {
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+      ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
@@ -3652,6 +3655,8 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  readRunLogKeepDays: async () =>
+    runLogKeepDays(await readCachedUserSettingsFile(stateDir())),
   agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,
@@ -5232,6 +5237,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
+  onLiveEditsPaused: (workspaceId, path) => desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,
@@ -5248,6 +5254,12 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
   },
   isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
+  ownerDraftState: (workspace, path) => requireEngineSessions().run(workspace, async session => {
+    const client = desktopEngine.daemon?.currentClient();
+    if (!(client instanceof EngineClient)) throw new Error("dohc could not read this note. Restart dohc and try again.");
+    return readOwnerDraftState(client, session.workspace, path, async () =>
+      (await withEngineAdapter(workspace, adapter => adapter.getActiveVersion({ workspaceId: workspace.workspaceId })))?.id ?? "main");
+  }),
   sharedCaptureFor: async (workspace) => {
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;

@@ -554,9 +554,9 @@ body {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
-/* While a menu is open (useDismiss), a press on the titlebar must reach the
- * page so it can close the menu. */
-:root[data-menu-open] .titlebar-drag {
+/* While a menu (useDismiss) or a dialog (overlayStack) is open, a press on
+ * the titlebar must reach the page so it can close it. */
+:root:is([data-menu-open], [data-modal-open]) .titlebar-drag {
   -webkit-app-region: no-drag;
 }
 

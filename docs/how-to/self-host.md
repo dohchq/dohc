@@ -569,7 +569,9 @@ The takedown also holds app publishing for the owner's account on this server.
 While the hold is on, the relay refuses every new publication and republication from that account.
 That includes the same app on a new share link, an edited copy, and the app in another workspace.
 The owner's other publications keep serving, including copies of the same app published before the takedown.
-Disable each of those by its own publication ID.
+The command lists the owner's other active publications of the same app, such as the app on another share link or in another workspace.
+Disable each of those by its own publication ID. An edited copy has a different bundle, so the list leaves it out.
+The list shows up to 50 publications. Run the same takedown again to list the rest.
 The hold belongs to the account. Deleting the account removes it.
 
 To lift the hold, run the same command with `--lift-hold` instead of `--reason`.

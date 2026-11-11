@@ -243,6 +243,12 @@ export function isYdocAuthorCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "LIMIT_EXCEEDED") === "ydoc-author-capacity";
 }
 
+// The note's queue of edits for the server takes no more: the server refused
+// an earlier edit, or the queue reached its limit and waits for delivery.
+export function isOwnerOutboxFrozenRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "owner-outbox-frozen";
+}
+
 function isYdocSettlementPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
 }

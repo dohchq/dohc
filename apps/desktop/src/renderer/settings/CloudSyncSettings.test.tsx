@@ -683,7 +683,7 @@ describe("CloudSyncSettings", () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
       render(
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })} />
         </Overlay>,
       );
@@ -709,7 +709,7 @@ describe("CloudSyncSettings", () => {
     ] as const)("says how to %s with a passphrase left in the field", async (_, secretState, start, typed, words) => {
       const user = userEvent.setup();
       render(
-        <Overlay onClose={vi.fn()} closeOnBackdrop>
+        <Overlay onClose={vi.fn()}>
           <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: secretState })} />
         </Overlay>,
       );
@@ -728,7 +728,7 @@ describe("CloudSyncSettings", () => {
       bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."));
       const onClose = vi.fn();
       render(
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })} />
         </Overlay>,
       );

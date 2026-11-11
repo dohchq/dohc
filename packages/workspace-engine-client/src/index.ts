@@ -14,6 +14,7 @@ export {
   isFileLockedRefusal,
   isVolumeSharesNewFilesRefusal,
   isIdempotencyKeyReuseRefusal,
+  isOwnerOutboxFrozenRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,

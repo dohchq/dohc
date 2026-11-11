@@ -33,4 +33,15 @@ describe("run details", () => {
     expect(screen.queryByTestId("chats-run-model")).toBeNull();
     expect(screen.getByTestId("chats-run-command").textContent).toBe("claude");
   });
+
+  it("says a removed log was removed instead of naming a file that is gone", () => {
+    render(<RunDetails run={{ ...run, logPath: "/state/run-logs/run-1.log" }} />);
+    expect(screen.getByTestId("chats-run-log-path").textContent).toBe("/state/run-logs/run-1.log");
+    expect(screen.getByTestId("chats-run-copy-log")).toBeTruthy();
+    cleanup();
+    render(<RunDetails run={{ ...run, logRemoved: true }} />);
+    expect(screen.getByTestId("chats-run-log-removed").textContent).toBe("Removed");
+    expect(screen.queryByTestId("chats-run-log-path")).toBeNull();
+    expect(screen.queryByTestId("chats-run-copy-log")).toBeNull();
+  });
 });

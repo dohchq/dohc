@@ -199,7 +199,8 @@ interface DesktopCliServerDependencies<State> {
     workspaceId: string,
     target?: ChatRelayIdentityTarget,
   ): Promise<unknown>;
-  chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
+  chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> }
+    & NonNullable<CliServerOptions["chatRuns"]>;
   rememberPendingCliRunMessageLink(link: CliRunMessageLink, pending: boolean): void;
 }
 
@@ -747,6 +748,7 @@ export function createDesktopCliServer<State>(
         resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
       },
       chatWrites,
+      chatRuns: chatDispatchService,
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
