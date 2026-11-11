@@ -746,7 +746,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // A Cancel withholds an acknowledgement only before its first
                 // byte. A started frame must finish, or the broken stream ends
                 // the connection, so the guard then ignores the Cancel. Every
-                // poll still runs under the guard's own check: no byte goes
+                // write still runs under the guard's own check: no byte goes
                 // out once retirement, a workspace close, or the deadline has
                 // ended the answer, except that a read's started frame
                 // finishes unless its owner retired.
@@ -754,13 +754,10 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // Set once a read's started frame meets its deadline: it
                 // finishes, and only retirement interrupts it.
                 let mut finishing = false;
-                loop {
-                    let flushing = offset == length;
+                while offset < length {
                     // The client cannot read the response before its last
                     // byte, so the frame and the reservations go just before it.
-                    let bytes: &[u8] = if flushing {
-                        &[]
-                    } else if offset + 1 < length {
+                    let bytes: &[u8] = if offset + 1 < length {
                         &frame[offset..]
                     } else {
                         frame = Vec::new();
@@ -770,12 +767,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     let step = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
                         let mut poll = || {
-                            let pinned = std::pin::Pin::new(&mut output);
-                            result = if flushing {
-                                pinned.poll_flush(cx).map(|result| result.map(|()| Some(0)))
-                            } else {
-                                pinned.poll_write(cx, bytes).map(|result| result.map(Some))
-                            };
+                            result = std::pin::Pin::new(&mut output)
+                                .poll_write(cx, bytes)
+                                .map(|result| result.map(Some));
                         };
                         let admitted = if finishing {
                             guard.with_unretired(&mut poll)
@@ -822,14 +816,16 @@ async fn write_output<W: AsyncWrite + Unpin>(
                             },
                         ));
                     };
-                    if flushing {
-                        break;
-                    }
                     if count == 0 {
                         return Err(io::Error::new(io::ErrorKind::WriteZero, "stdout closed"));
                     }
                     offset += count;
                 }
+                // The output holds the whole answer, so a retirement from here
+                // on has nothing left to stop. Flushing outside the guard
+                // keeps it from ending the connection and every other
+                // request on it.
+                output.flush().await?;
                 lock(&active_egress).remove(&request_id);
             }
             OutputItem::Progress(message) => {
@@ -871,6 +867,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     write_blob_egress(&mut output, response, egress, None, limits, || {}).await;
                 lock(&active_egress).remove(&request_id);
                 outcome?;
+                output.flush().await?;
             }
             OutputItem::GuardedBlob {
                 response,
@@ -940,6 +937,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     continue 'items;
                 }
                 result?;
+                // As for a guarded answer: once the output holds the whole
+                // answer, a retirement no longer ends the connection.
+                output.flush().await?;
             }
         }
     }
@@ -1088,6 +1088,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
 /// Streams `egress` and then `response`. Before each frame it stops, with an
 /// error envelope, once the request or its `guard` was cancelled or expired;
 /// a `guard` no longer current for another reason ends it with an error.
+/// The caller flushes the last frame.
 async fn write_blob_egress<W: AsyncWrite + Unpin>(
     output: &mut W,
     response: Response,
@@ -1165,8 +1166,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
     };
     drop(egress);
     release();
-    output.write_all(&last).await?;
-    output.flush().await
+    output.write_all(&last).await
 }
 
 fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireError> {
@@ -2911,74 +2911,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guarded_output_retires_while_write_or_flush_is_blocked() {
-        for flush_only in [false, true] {
-            for retire_owner in [false, true] {
-                if flush_only && !retire_owner {
-                    // A Cancel lets a started flush finish.
-                    // `a_cancel_during_the_flush_finishes_the_acknowledgement` covers it.
-                    continue;
-                }
-                let cancel = CancelSignal::new();
-                let retired = CancelSignal::new();
-                let dropped = Arc::new(AtomicBool::new(false));
-                let polled = Arc::new(Notify::new());
-                let bytes = Arc::new(AtomicUsize::new(0));
-                let guard = Arc::new(TestOutputGuard {
-                    cancel: cancel.clone(),
-                    retired: retired.clone(),
-                    deadline: None,
-                    dropped: dropped.clone(),
-                    read_connection: None,
-                });
-                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                tx.send(OutputItem::Guarded {
-                    response: WireResponse {
-                        id: 9,
-                        result: serde_json::json!({"status":"applied"}),
-                    },
-                    guard,
-                })
+    async fn guarded_output_retires_while_its_first_write_is_blocked() {
+        // A retirement during the flush after the last byte is
+        // `a_retirement_during_the_last_flush_ends_only_that_answer`.
+        for retire_owner in [false, true] {
+            let cancel = CancelSignal::new();
+            let retired = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let polled = Arc::new(Notify::new());
+            let bytes = Arc::new(AtomicUsize::new(0));
+            let guard = Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: retired.clone(),
+                deadline: None,
+                dropped: dropped.clone(),
+                read_connection: None,
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.send(OutputItem::Guarded {
+                response: WireResponse {
+                    id: 9,
+                    result: serde_json::json!({"status":"applied"}),
+                },
+                guard,
+            })
+            .await
+            .unwrap();
+            drop(tx);
+            let writer = BlockedWriter {
+                polled: polled.clone(),
+                flush_only: false,
+                bytes: bytes.clone(),
+            };
+            let task = tokio::spawn(async move {
+                write_output(
+                    writer,
+                    &mut rx,
+                    &WireLimits::default(),
+                    Arc::new(Mutex::new(HashMap::new())),
+                )
                 .await
-                .unwrap();
-                drop(tx);
-                let writer = BlockedWriter {
-                    polled: polled.clone(),
-                    flush_only,
-                    bytes: bytes.clone(),
-                };
-                let task = tokio::spawn(async move {
-                    write_output(
-                        writer,
-                        &mut rx,
-                        &WireLimits::default(),
-                        Arc::new(Mutex::new(HashMap::new())),
-                    )
-                    .await
-                });
-                polled.notified().await;
-                if retire_owner {
-                    retired.cancel();
-                } else {
-                    cancel.cancel();
-                }
-                let result = tokio::time::timeout(Duration::from_secs(2), task)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                if flush_only {
-                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
-                } else {
-                    result.unwrap();
-                }
-                assert!(
-                    dropped.load(Ordering::SeqCst),
-                    "response disposal releases its reservation"
-                );
-                if !flush_only {
-                    assert_eq!(bytes.load(Ordering::SeqCst), 0);
-                }
+            });
+            polled.notified().await;
+            if retire_owner {
+                retired.cancel();
+            } else {
+                cancel.cancel();
             }
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "response disposal releases its reservation"
+            );
+            assert_eq!(bytes.load(Ordering::SeqCst), 0);
         }
     }
 
@@ -3151,21 +3140,162 @@ mod tests {
 
     #[tokio::test]
     async fn closing_the_workspace_ends_a_cancelled_acknowledgement() {
-        for flushing in [false, true] {
-            let guard = Arc::new(OwnerTestGuard::default());
-            let (writer, mut reader) = eight_byte_pipe(flushing);
-            let (task, _active) = write_acknowledgement_then_response(writer, guard.clone());
-            let mut transcript = vec![0; 8];
-            reader.read_exact(&mut transcript).await.unwrap();
-            guard.cancel.cancel();
-            guard.close_workspace();
-            reader.read_to_end(&mut transcript).await.unwrap();
-            assert_eq!(
-                task.await.unwrap().unwrap_err().kind(),
-                io::ErrorKind::ConnectionAborted
-            );
-            assert_eq!(transcript.len(), 8, "no byte follows the close");
+        let guard = Arc::new(OwnerTestGuard::default());
+        let (writer, mut reader) = eight_byte_pipe(false);
+        let (task, _active) = write_acknowledgement_then_response(writer, guard.clone());
+        let mut transcript = vec![0; 8];
+        reader.read_exact(&mut transcript).await.unwrap();
+        guard.cancel.cancel();
+        guard.close_workspace();
+        reader.read_to_end(&mut transcript).await.unwrap();
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(transcript.len(), 8, "no byte follows the close");
+    }
+
+    /// Writes into `output`. Its `interrupt_at`th flush runs `interrupt`, then
+    /// waits once, as a full pipe makes a flush wait.
+    struct InterruptDuringFlush<'a> {
+        output: &'a mut Vec<u8>,
+        flushes: usize,
+        interrupt_at: usize,
+        interrupt: Option<Box<dyn FnOnce() + Send>>,
+    }
+
+    impl AsyncWrite for InterruptDuringFlush<'_> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.get_mut().output.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
         }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.flushes + 1 == this.interrupt_at
+                && let Some(interrupt) = this.interrupt.take()
+            {
+                interrupt();
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.flushes += 1;
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retirement_during_the_last_flush_ends_only_that_answer() {
+        for interruption in ["owner retires", "workspace closes", "connection retires"] {
+            let retired = CancelSignal::new();
+            let owner = Arc::new(OwnerTestGuard::default());
+            let guard: Arc<dyn OutputGuard> = if interruption == "owner retires" {
+                Arc::new(TestOutputGuard {
+                    cancel: CancelSignal::new(),
+                    retired: retired.clone(),
+                    deadline: None,
+                    dropped: Arc::new(AtomicBool::new(false)),
+                    read_connection: None,
+                })
+            } else {
+                owner.clone()
+            };
+            let interrupt: Box<dyn FnOnce() + Send> = match interruption {
+                "owner retires" => Box::new(move || retired.cancel()),
+                "workspace closes" => Box::new(move || owner.close_workspace()),
+                _ => Box::new(move || owner.connection.cancel()),
+            };
+            // Answer 9, then another answer under the same guard, then an
+            // unguarded response on the same connection.
+            let (tx, mut rx) = tokio::sync::mpsc::channel(3);
+            for (id, guard) in [(9, guard.clone()), (11, guard)] {
+                tx.try_send(OutputItem::Guarded {
+                    response: WireResponse {
+                        id,
+                        result: serde_json::json!({"status":"applied"}),
+                    },
+                    guard,
+                })
+                .unwrap();
+            }
+            tx.try_send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .unwrap();
+            drop(tx);
+            let active: ActiveEgress = Arc::new(Mutex::new(HashMap::from([(9, None), (11, None)])));
+            let mut transcript = Vec::new();
+            let output = InterruptDuringFlush {
+                output: &mut transcript,
+                flushes: 0,
+                interrupt_at: 1,
+                interrupt: Some(interrupt),
+            };
+            write_output(output, &mut rx, &WireLimits::default(), active.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{interruption}: {error}"));
+            assert_eq!(response_ids(&transcript), [9, 10], "{interruption}");
+            assert!(lock(&active).is_empty(), "{interruption}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retirement_during_a_blob_answers_last_flush_ends_only_that_answer() {
+        let retired = CancelSignal::new();
+        let interrupt = retired.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(guarded_blob(Arc::new(TestOutputGuard {
+            cancel: CancelSignal::new(),
+            retired,
+            deadline: None,
+            dropped: Arc::new(AtomicBool::new(false)),
+            read_connection: None,
+        })))
+        .unwrap();
+        tx.try_send(OutputItem::Envelope(Envelope::Response(WireResponse {
+            id: 10,
+            result: serde_json::Value::Null,
+        })))
+        .unwrap();
+        drop(tx);
+        let limits = WireLimits {
+            max_blob_chunk_bytes: 512 * 1024,
+            ..WireLimits::default()
+        };
+        let mut transcript = Vec::new();
+        let output = InterruptDuringFlush {
+            output: &mut transcript,
+            flushes: 0,
+            // BlobStart, one FIN chunk, then the terminal response.
+            interrupt_at: 3,
+            interrupt: Some(Box::new(move || interrupt.cancel())),
+        };
+        write_output(
+            output,
+            &mut rx,
+            &limits,
+            Arc::new(Mutex::new(HashMap::from([(9, None)]))),
+        )
+        .await
+        .expect("the answer's bytes were all out before the owner retired");
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&transcript);
+        let mut responses = Vec::new();
+        while let Some(frame) = decoder.next_frame().unwrap() {
+            if let Frame::Control(payload) = frame
+                && let Envelope::Response(response) = decode_control(&payload, &limits).unwrap()
+            {
+                responses.push(response.id);
+            }
+        }
+        assert_eq!(responses, [9, 10]);
     }
 
     /// Takes at most 8 bytes per write. The client cancels during the first
