@@ -138,6 +138,7 @@ interface TestHarnessOptions {
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
+  ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
 }
 
 function rendererSession(
@@ -196,6 +197,7 @@ function harness(
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
     sharedCaptureFor: options.sharedCaptureFor,
+    ownerDraftState: options.ownerDraftState,
     resolveDocumentPath,
     onError,
   });
@@ -2518,6 +2520,30 @@ describe("engine Y.Doc IPC adapter", () => {
       const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
       expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.\n");
       await h.ipc.shutdown();
+    });
+
+    // #2705: a shared note's file waits for the server, so an agent that reads
+    // it after an edit kept on this device must see the edit, not the file.
+    it("reads a shared note no editor holds from its draft, edits still on their way included", async () => {
+      const draft = Y.encodeStateAsUpdate(markdownToYDoc("# Plan\n\nBefore.\n\nKept here."));
+      const ownerDraftState = vi.fn(async (_workspace: unknown, path: string) => path === "notes/a.md" ? draft : null);
+      const h = harness(editableSession(), { ownerDraftState });
+      const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
+      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.\n\nKept here.\n");
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/b.md" }))
+        .resolves.toEqual({ path: "notes/b.md", state: null });
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+      // The editor that holds the note answers for it, and a shared view never asks.
+      await h.ipc.open(new FakeSender(7), openPayload);
+      ownerDraftState.mockClear();
+      expect(documentMarkdown((await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" })).state!))
+        .toBe("# Plan\n\nBefore.\n");
+      await h.ipc.shutdown();
+      h.setReadOnly(true);
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }))
+        .resolves.toEqual({ path: "notes/a.md", state: null });
+      expect(ownerDraftState).not.toHaveBeenCalled();
     });
   });
 
