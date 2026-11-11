@@ -115,10 +115,49 @@ fn a_block_holding_an_embedded_type_is_replaced() {
     let markdown = format!("{spelled}\n\nKept.\n");
     doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
         .expect(&markdown);
-    assert_eq!(
-        doc.project_richdoc().unwrap(),
-        folded(&markdown).project_richdoc().unwrap()
+    // The projection spells a kept embed the same way, so check the block
+    // now holds the file's text rather than the embed.
+    let text = doc.richdoc_block_text(0).unwrap();
+    let txn = doc.doc.transact();
+    let chunks = text.diff(&txn, YChange::identity);
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| matches!(chunk.insert, Out::Any(Any::String(_)))),
+        "{chunks:?}"
     );
+}
+
+#[test]
+fn a_body_holding_a_value_that_is_not_xml_is_replaced_whole() {
+    // yrs's XML API can't hold a plain value in a body, so another type
+    // writes one under the same root name.
+    let source = yrs::Doc::new();
+    let body = source.get_or_insert_array(ROOT_BODY);
+    {
+        let mut txn = source.transact_mut();
+        let paragraph = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        paragraph.push_back(&mut txn, XmlTextPrelim::new("Kept."));
+        body.push_back(&mut txn, 7);
+    }
+    let update = source
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let doc = Ydoc::wire();
+    doc.doc
+        .transact_mut()
+        .apply_update(Update::decode_v1(&update).unwrap())
+        .unwrap();
+    assert_eq!(
+        doc.doc
+            .get_or_insert_xml_fragment(ROOT_BODY)
+            .len(&doc.doc.transact()),
+        2
+    );
+    let markdown = "Changed.\n\nKept.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    assert_eq!(body_json(&doc), body_json(&folded(markdown)));
 }
 
 #[test]

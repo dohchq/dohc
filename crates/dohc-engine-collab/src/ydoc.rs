@@ -5062,35 +5062,44 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     blocks: &[MdBlock<'_>],
 ) -> (u32, u32) {
     let len = body.len(txn);
-    // `children` stops at a value that is not XML, so a body holding one keeps nothing.
-    if len == 0 || blocks.is_empty() || body.children(txn).count() as u32 != len {
+    if len == 0 || blocks.is_empty() {
+        return (0, 0);
+    }
+    // Read by index, a block walks every item before it, deleted ones too,
+    // so the body is read once. `children` stops at a value that is not
+    // XML, so a body holding one keeps nothing.
+    let old: Vec<XmlOut> = body.children(txn).collect();
+    if old.len() as u32 != len {
         return (0, 0);
     }
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    // Whether the body's block at `index` is exactly the one `block` inserts.
-    // Each block is built alone, and only until the first that differs.
-    let mut kept = |index: u32, block: &MdBlock<'_>| {
-        let at = fresh.len(&scratch_txn);
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, at, block);
-        if fresh.len(&scratch_txn) != at + 1 {
+    // Whether `old` is exactly the block `block` inserts. Each block is built
+    // alone at the front of the scratch body, and only until the first that
+    // differs.
+    let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
+        let before = fresh.len(&scratch_txn);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
+        if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }
-        match (body.get(txn, index), fresh.get(&scratch_txn, at)) {
-            (Some(old), Some(new)) => {
-                plain_xml(txn, &old) && xml_json(txn, old) == xml_json(&scratch_txn, new)
-            }
-            _ => false,
-        }
+        fresh.get(&scratch_txn, 0).is_some_and(|new| {
+            plain_xml(txn, old) && xml_json(txn, old.clone()) == xml_json(&scratch_txn, new)
+        })
     };
     let most = len.min(blocks.len() as u32);
     let mut start = 0;
-    while start < most && kept(start, &blocks[start as usize]) {
+    while start < most && kept(&old[start as usize], &blocks[start as usize]) {
         start += 1;
     }
     let mut end = 0;
-    while start + end < most && kept(len - 1 - end, &blocks[blocks.len() - 1 - end as usize]) {
+    while start + end < most
+        && kept(
+            &old[(len - 1 - end) as usize],
+            &blocks[blocks.len() - 1 - end as usize],
+        )
+    {
         end += 1;
     }
     (start, end)
