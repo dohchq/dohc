@@ -593,8 +593,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "upstream SQLite UNC misdetection leaks SHM locks for raw verbatim drive paths"]
-    fn raw_verbatim_readers_pin_checkpoint_locks() {
+    fn raw_verbatim_readers_release_checkpoint_locks() {
         reader_checkpoint_race(true);
     }
 
