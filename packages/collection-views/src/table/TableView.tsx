@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -15,7 +25,7 @@ import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
 import { Tooltip, useTooltip } from "../tooltip";
 import { FieldTypeIcon } from "../values";
-import { CellEditor, FieldCell } from "./cells";
+import { CellEditor, FieldCell, composing, type CellMove } from "./cells";
 
 /**
  * One inline edit, surfaced for the host to apply through its own write path
@@ -81,6 +91,14 @@ export interface TableViewProps {
   relationExecutor?: CollectionQueryExecutor;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
+  /**
+   * The name people read for a field. A host that keys fields by id provides
+   * it; absent, the key is the name. Built once by the host: a new function
+   * rebuilds every column.
+   */
+  fieldLabel?: (field: string) => string;
+  /** The name people read for a record. Absent, its title, name, or filename. */
+  recordName?: (record: CollectionRecord) => string;
   /** Marks by field name. Built once by the host, so rows never pay for them. */
   fieldMarks?: ReadonlyMap<string, TableFieldMark>;
   /**
@@ -113,6 +131,32 @@ const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
 const columnWidth = (index: number) => (index === 0 ? TITLE_COLUMN_WIDTH : COLUMN_WIDTH);
+/** A field column's left edge, measured from the first field's. */
+const columnLeft = (index: number) => (index === 0 ? 0 : TITLE_COLUMN_WIDTH + (index - 1) * COLUMN_WIDTH);
+
+// Relation editing needs query access to the related collection; without an
+// executor the cell stays read-only. Checkboxes commit through onChange and
+// never open an editor. Buttons store no value.
+function opensEditor(field: FieldDefinition, relationExecutor: CollectionQueryExecutor | undefined): boolean {
+  return (
+    field.type !== "checkbox" &&
+    field.type !== "button" &&
+    (field.type !== "relation" || relationExecutor !== undefined)
+  );
+}
+
+/** The fields whose edit a typed character starts. */
+const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person"]);
+
+/** Rows and columns each arrow key moves the selection by. */
+const ARROWS: Readonly<Record<string, readonly [number, number]>> = {
+  ArrowUp: [-1, 0],
+  ArrowDown: [1, 0],
+  ArrowLeft: [0, -1],
+  ArrowRight: [0, 1],
+};
+
+const clamp = (index: number, count: number) => Math.max(0, Math.min(index, count - 1));
 
 function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: number; onClick: () => void }) {
   return (
@@ -134,14 +178,19 @@ function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: nu
 }
 
 /**
- * The one cell whose editor is open, addressed by record id and field name
- * so an active edit survives a store refresh (a new records array) and a
- * sort-driven row move. Row index and record object identity are both
+ * One cell, addressed by record id and field key so the selection and an
+ * open edit survive a store refresh (a new records array), a sort-driven row
+ * move, and scrolling. Row index and record object identity are both
  * unstable across refreshes; this pair is not.
  */
-interface EditingCell {
+interface TableCell {
   recordId: string;
   field: string;
+}
+
+/** The cell whose editor is open, and the character that opened it, if one did. */
+interface EditingCell extends TableCell {
+  typed?: string;
 }
 
 /**
@@ -204,6 +253,8 @@ export function TableView({
   onOpenRecord,
   relationExecutor,
   personLabel,
+  fieldLabel,
+  recordName,
   fieldMarks,
   renderButton,
   onNearEnd,
@@ -215,28 +266,23 @@ export function TableView({
   );
   const rowWidth = fields.reduce((total, _field, index) => total + columnWidth(index), 0);
 
+  const [selected, setSelected] = useState<TableCell | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
 
+  // Selection stays out of the columns: a click or an arrow key must not
+  // rebuild them.
   const columns = useMemo(
     () =>
       helper.columns(
-        fields.map((field) => {
-          // Relation editing needs query access to the related collection;
-          // without an executor the cell stays read-only. Checkboxes commit
-          // through onChange and never open an editor. Buttons store no value.
-          const editable =
-            !editingDisabled &&
-            onCellChange !== undefined &&
-            field.type !== "checkbox" &&
-            field.type !== "button" &&
-            (field.type !== "relation" || relationExecutor !== undefined);
-          return helper.accessor(
+        fields.map((field) =>
+          helper.accessor(
             (record) => record.values.find((entry) => entry.field === field.name),
             {
               id: field.name,
               cell: (context) => field.type === "button" && renderButton ? renderButton(field, context.row.original) : (
                 <FieldCell
                   field={field}
+                  label={fieldLabel?.(field.name) ?? field.name}
                   indexed={context.getValue()}
                   personLabel={personLabel}
                   onChange={
@@ -250,22 +296,14 @@ export function TableView({
                           })
                       : undefined
                   }
-                  onEditStart={
-                    editable
-                      ? () =>
-                          setEditing({
-                            recordId: context.row.original.id,
-                            field: field.name,
-                          })
-                      : undefined
-                  }
+                  editable={!editingDisabled && onCellChange !== undefined && opensEditor(field, relationExecutor)}
                 />
               ),
             },
-          );
-        }),
+          ),
+        ),
       ),
-    [fields, onCellChange, editingDisabled, personLabel, relationExecutor, renderButton],
+    [fields, onCellChange, editingDisabled, personLabel, fieldLabel, relationExecutor, renderButton],
   );
 
   const table = useTable({
@@ -276,6 +314,19 @@ export function TableView({
   });
   const rows = table.getRowModel().rows;
 
+  const selectedRowIndex = useMemo(
+    () => (selected === null ? -1 : rows.findIndex((row) => row.id === selected.recordId)),
+    [rows, selected],
+  );
+  const selectedColumnIndex =
+    selected === null ? -1 : fields.findIndex((field) => field.name === selected.field);
+  // Where the selected cell is, while the table shows its record and field.
+  const at =
+    selectedRowIndex >= 0 && selectedColumnIndex >= 0
+      ? { row: selectedRowIndex, column: selectedColumnIndex }
+      : null;
+  const selectedCellId = useId();
+
   const editingRowIndex =
     editing === null ? -1 : rows.findIndex((row) => row.id === editing.recordId);
   const editingRow = editingRowIndex >= 0 ? rows[editingRowIndex] : undefined;
@@ -284,6 +335,133 @@ export function TableView({
   const editingValue = editingRow?.original.values.find((entry) => entry.field === editingField?.name);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLFieldSetElement>(null);
+  const gutter = onOpenRecord ? OPEN_COLUMN_WIDTH : 0;
+
+  // A key that moves the selection or closes the editor sets this, always
+  // with a state change. After that render the grid takes focus and scrolls
+  // the selected cell clear of its edges and its sticky header.
+  const reveal = useRef(false);
+  useLayoutEffect(() => {
+    if (!reveal.current) return;
+    reveal.current = false;
+    const grid = scrollRef.current;
+    if (!grid) return;
+    grid.focus({ preventScroll: true });
+    if (!at) return;
+    const top = at.row * ROW_HEIGHT;
+    const bottom = top + ROW_HEIGHT + HEADER_HEIGHT;
+    if (top < grid.scrollTop) grid.scrollTop = top;
+    else if (bottom > grid.scrollTop + grid.clientHeight) grid.scrollTop = bottom - grid.clientHeight;
+    // The first field brings the Open gutter back with it.
+    const left = at.column === 0 ? 0 : gutter + columnLeft(at.column);
+    const right = gutter + columnLeft(at.column + 1);
+    if (left < grid.scrollLeft) grid.scrollLeft = left;
+    else if (right > grid.scrollLeft + grid.clientWidth) grid.scrollLeft = right - grid.clientWidth;
+  });
+
+  const select = (row: number, column: number) => {
+    const record = rows[row];
+    const field = fields[column];
+    if (!record || !field) return;
+    setSelected({ recordId: record.id, field: field.name });
+    reveal.current = true;
+  };
+
+  // One cell on or back, wrapping to the next or previous row. Null past
+  // either end of the table.
+  const beside = (row: number, column: number, back: boolean): [number, number] | null => {
+    const next = column + (back ? -1 : 1);
+    if (next >= 0 && next < fields.length) return [row, next];
+    const wrapped = row + (back ? -1 : 1);
+    if (wrapped < 0 || wrapped >= rows.length) return null;
+    return [wrapped, back ? fields.length - 1 : 0];
+  };
+
+  const closeEditor = (move?: CellMove) => {
+    setEditing(null);
+    // A click away closes the editor too, and focus belongs to what was clicked.
+    if (!editorRef.current?.contains(document.activeElement)) return;
+    reveal.current = true;
+    if (!move || !editingField) return;
+    const column = fields.indexOf(editingField);
+    if (move === "down") select(clamp(editingRowIndex + 1, rows.length), column);
+    else select(...(beside(editingRowIndex, column, move === "previous") ?? [editingRowIndex, column]));
+  };
+
+  const clickCell = (row: number, column: number) => {
+    // An editor holding a value it cannot save keeps its place and takes
+    // focus, as a dialog's field does, so the value is not lost unseen.
+    const held = editorRef.current?.querySelector<HTMLElement>("[data-unsaved]");
+    if (held) return held.focus();
+    const record = rows[row];
+    const field = fields[column];
+    if (!record || !field) return;
+    const cell = { recordId: record.id, field: field.name };
+    setSelected(cell);
+    if (onCellChange && !editingDisabled && opensEditor(field, relationExecutor)) setEditing(cell);
+    // A host-drawn button keeps the focus its press took.
+    else if (field.type !== "button") scrollRef.current?.focus({ preventScroll: true });
+  };
+
+  const onGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Header buttons, row controls, and the open editor keep their own keys.
+    if (event.target !== event.currentTarget || composing(event)) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const { key } = event;
+    if (editorRef.current) {
+      // An editor left open without focus takes the first Escape.
+      if (key === "Escape" && !editingDisabled) setEditing(null);
+      return;
+    }
+    if (!at) {
+      if (ARROWS[key]) {
+        event.preventDefault();
+        select(0, 0);
+      }
+      return;
+    }
+    const record = rows[at.row]?.original;
+    const field = fields[at.column];
+    if (!record || !field) return;
+    if (key === "Tab") {
+      const to = beside(at.row, at.column, event.shiftKey);
+      // Past the first or last cell, Tab leaves the grid.
+      if (!to) return;
+      event.preventDefault();
+      return select(...to);
+    }
+    if (key === "Escape") return setSelected(null);
+    const arrow = ARROWS[key];
+    if (arrow) {
+      event.preventDefault();
+      return select(clamp(at.row + arrow[0], rows.length), clamp(at.column + arrow[1], fields.length));
+    }
+    if (key === " ") {
+      event.preventDefault();
+      return onOpenRecord?.(record);
+    }
+    if (!onCellChange || editingDisabled) return;
+    const cell = { recordId: record.id, recordPath: record.path, field: field.name };
+    const value = record.values.find((entry) => entry.field === field.name)?.value ?? null;
+    if (key === "Enter") {
+      event.preventDefault();
+      if (field.type === "checkbox") onCellChange({ ...cell, value: value !== true });
+      else if (opensEditor(field, relationExecutor)) setEditing({ recordId: record.id, field: field.name });
+      return;
+    }
+    // A relation's records are removed in its picker.
+    if (!opensEditor(field, relationExecutor) || field.type === "relation") return;
+    if (key === "Delete" || key === "Backspace") {
+      event.preventDefault();
+      const empty = value === null || (Array.isArray(value) && value.length === 0);
+      if (!empty) onCellChange({ ...cell, value: field.type === "multi-select" ? [] : null });
+    } else if (key.length === 1 && TYPED_INTO.has(field.type)) {
+      event.preventDefault();
+      setEditing({ recordId: record.id, field: field.name, typed: key });
+    }
+  };
+
   // Keep the edited row mounted while it is scrolled out of the virtual
   // window so its editor overlay never floats over an empty gap.
   const rangeExtractor = useCallback(
@@ -333,7 +511,13 @@ export function TableView({
       ref={scrollRef}
       role="grid"
       aria-rowcount={records.length + (onNewRecord ? 2 : 1)}
-      className="h-full overflow-auto"
+      aria-activedescendant={at ? selectedCellId : undefined}
+      // One Tab stop for every cell: arrow keys move inside the grid.
+      tabIndex={rows.length > 0 && fields.length > 0 ? 0 : undefined}
+      // The selected cell's ring shows where the keys act. With no cell
+      // selected the grid wears the halo, inset so its scroller cannot clip it.
+      className={`h-full overflow-auto ${at ? "outline-none" : "focus-visible:-outline-offset-2"}`}
+      onKeyDown={onGridKeyDown}
     >
       <div className="w-max min-w-full pb-6 pr-5">
         <div role="row" className="sticky top-0 z-20 flex bg-bg" style={{ height: HEADER_HEIGHT }}>
@@ -341,6 +525,7 @@ export function TableView({
             <div role="columnheader" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} />
           ) : null}
           {fields.map((field, index) => {
+            const label = fieldLabel?.(field.name) ?? field.name;
             // A button stores no value to sort by, so its header is a label.
             if (field.type === "button") {
               return (
@@ -351,14 +536,14 @@ export function TableView({
                   style={{ width: columnWidth(index) }}
                 >
                   <FieldTypeIcon type={field.type} className="shrink-0 text-subtle" />
-                  <span className="truncate">{field.name}</span>
+                  <span className="truncate">{label}</span>
                 </div>
               );
             }
             return (
               <FieldHeader
                 key={field.name}
-                name={field.name}
+                name={label}
                 type={field.type}
                 width={columnWidth(index)}
                 sorted={primarySort?.field === field.name ? primarySort.direction : null}
@@ -394,7 +579,10 @@ export function TableView({
                     >
                       <button
                         type="button"
-                        aria-label={`Open ${recordLabel(row.original)}`}
+                        // Space on a selected cell opens its record, so the
+                        // rows add no Tab stops.
+                        tabIndex={-1}
+                        aria-label={`Open ${recordName?.(row.original) ?? recordLabel(row.original)}`}
                         title="Open"
                         className="grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
                         onClick={() => onOpenRecord(row.original)}
@@ -403,18 +591,28 @@ export function TableView({
                       </button>
                     </div>
                   ) : null}
-                  {row.getAllCells().map((cell, index) => (
-                    <div
-                      key={cell.id}
-                      role="gridcell"
-                      className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
-                        index === 0 ? "font-medium" : ""
-                      }`}
-                      style={{ width: columnWidth(index) }}
-                    >
-                      <table.FlexRender cell={cell} />
-                    </div>
-                  ))}
+                  {row.getAllCells().map((cell, index) => {
+                    const isSelected = at?.row === item.index && at.column === index;
+                    return (
+                      <div
+                        key={cell.id}
+                        role="gridcell"
+                        id={isSelected ? selectedCellId : undefined}
+                        aria-selected={isSelected || undefined}
+                        className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
+                          index === 0 ? "font-medium" : ""
+                        } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
+                        style={{ width: columnWidth(index) }}
+                        onClick={(event) => {
+                          // A dialog the host's button opens is the cell's
+                          // child in React, not on the page.
+                          if (event.currentTarget.contains(event.target as Node)) clickCell(item.index, index);
+                        }}
+                      >
+                        <table.FlexRender cell={cell} />
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}
@@ -428,6 +626,7 @@ export function TableView({
                 // steal its clicks. Remounting on cell switch resets the
                 // editor's inputs to the next cell's value.
                 key={`${editing.recordId}:${editing.field}`}
+                ref={editorRef}
                 data-cell-editor=""
                 disabled={editingDisabled}
                 onBlurCapture={(event) => {
@@ -436,17 +635,14 @@ export function TableView({
                 className="dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
                 style={{
                   top: editingRowIndex * ROW_HEIGHT,
-                  left:
-                    (openColumn ? OPEN_COLUMN_WIDTH : 0) +
-                    fields
-                      .slice(0, fields.indexOf(editingField))
-                      .reduce((total, _field, index) => total + columnWidth(index), 0),
+                  left: gutter + columnLeft(fields.indexOf(editingField)),
                   width: columnWidth(fields.indexOf(editingField)),
                   minHeight: ROW_HEIGHT,
                 }}
               >
                 <CellEditor
                   field={editingField}
+                  typed={editing.typed}
                   acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
                   subscribeToDiscardedWrites={subscribeToDiscardedWrites}
                   indexed={editingValue}
@@ -459,7 +655,7 @@ export function TableView({
                       ...(previousValues === undefined ? {} : { previousValues }),
                     })
                   }
-                  close={() => setEditing(null)}
+                  close={closeEditor}
                   onCreateOption={
                     onCreateOption
                       ? (option, value, previousValues) =>

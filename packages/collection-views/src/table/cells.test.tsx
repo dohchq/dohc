@@ -175,7 +175,7 @@ describe("FieldCell display", () => {
     const button: FieldDefinition = { name: "Mark paid", type: "button" };
     const stray = flaggedValue("Mark paid", true, "expected-empty");
     const { container } = render(
-      <FieldCell field={button} indexed={stray} onEditStart={() => {}} />,
+      <FieldCell field={button} indexed={stray} editable />,
     );
     expect(screen.getByText("Mark paid")).toBeDefined();
     expect(screen.queryByText("true")).toBeNull();
@@ -230,20 +230,22 @@ describe("FieldCell display", () => {
 });
 
 describe("FieldCell editing", () => {
-  it("opens editing from the display button", () => {
-    const onEditStart = vi.fn();
-    render(
-      <FieldCell
-        field={field("title")}
-        indexed={indexedValue("title", "Ship it")}
-        onEditStart={onEditStart}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Ship it" }));
-    expect(onEditStart).toHaveBeenCalledOnce();
+  it("draws an editable value as a button that Tab skips", () => {
+    render(<FieldCell field={field("title")} indexed={indexedValue("title", "Ship it")} editable />);
+    expect(screen.getByRole("button", { name: "Ship it" }).tabIndex).toBe(-1);
   });
 
-  it("renders no edit button without onEditStart", () => {
+  it("names a checkbox and a button by the field's label, not its key", () => {
+    const { rerender } = render(
+      <FieldCell field={{ name: "f-3", type: "checkbox" }} label="Shipped" indexed={indexedValue("f-3", true)} />,
+    );
+    expect(screen.getByRole("checkbox", { name: "Shipped" })).toBeDefined();
+    rerender(<FieldCell field={{ name: "f-4", type: "button" }} label="Mark paid" indexed={undefined} />);
+    expect(screen.getByText("Mark paid")).toBeDefined();
+    expect(screen.queryByText("f-4")).toBeNull();
+  });
+
+  it("renders no edit button unless editable", () => {
     render(<FieldCell field={field("title")} indexed={indexedValue("title", "Ship it")} />);
     expect(screen.queryByRole("button")).toBeNull();
   });
@@ -330,7 +332,7 @@ describe("CellEditor", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("parses a number edit and drops an unparseable one", () => {
+  it("parses a number edit, and saves an emptied one as null", () => {
     const emit = writeEmitter();
     const { unmount } = renderEditor({ fieldName: "estimate", value: 1, emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("1");
@@ -340,13 +342,107 @@ describe("CellEditor", () => {
     unmount();
 
     emit.mockClear();
+    renderEditor({ fieldName: "estimate", value: 1, emit });
+    const second = screen.getByDisplayValue<HTMLInputElement>("1");
+    fireEvent.change(second, { target: { value: "  " } });
+    fireEvent.keyDown(second, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it("keeps a number that does not parse open, says what to do, and saves nothing", () => {
+    const emit = writeEmitter();
     const close = vi.fn();
     renderEditor({ fieldName: "estimate", value: 1, emit, close });
-    const second = screen.getByDisplayValue<HTMLInputElement>("1");
-    fireEvent.change(second, { target: { value: "not a number" } });
-    fireEvent.keyDown(second, { key: "Enter" });
+    const input = screen.getByDisplayValue<HTMLInputElement>("1");
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.change(input, { target: { value: "twelve" } });
+    for (const leave of [
+      () => fireEvent.keyDown(input, { key: "Enter" }),
+      () => fireEvent.keyDown(input, { key: "Tab" }),
+      () => fireEvent.blur(input),
+    ]) {
+      leave();
+      expect(emit).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+    }
+    const error = screen.getByRole("alert");
+    expect(error.textContent).toBe("This value is not a number. Enter a number.");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(error.id);
+    expect(input.hasAttribute("data-unsaved")).toBe(true);
+
+    fireEvent.change(input, { target: { value: "12" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(12);
+    expect(close).toHaveBeenCalledExactlyOnceWith("down");
+  });
+
+  it("cancels a number that does not parse on Escape", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    renderEditor({ fieldName: "estimate", value: 1, emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("1");
+    fireEvent.change(input, { target: { value: "twelve" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Escape" });
+    // Closing blurs the input. A cancelled edit must not save on that blur.
+    fireEvent.change(input, { target: { value: "12" } });
+    fireEvent.blur(input);
     expect(emit).not.toHaveBeenCalled();
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it.each([
+    ["Enter", false, "down"],
+    ["Tab", false, "next"],
+    ["Tab", true, "previous"],
+  ] as const)("saves once on %s (shift %s) and moves the selection %s", (key, shiftKey, move) => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "New" } });
+    // fireEvent returns false when the handler prevented the key's default.
+    expect(fireEvent.keyDown(input, { key, shiftKey })).toBe(key !== "Tab");
+    // The blur that closing causes must not save the edit a second time.
+    fireEvent.blur(input);
+    expect(emit).toHaveBeenCalledExactlyOnceWith("New");
+    expect(close).toHaveBeenCalledExactlyOnceWith(move);
+  });
+
+  it("saves once on blur, without moving the selection", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "New" } });
+    fireEvent.blur(input);
+    fireEvent.blur(input);
+    expect(emit).toHaveBeenCalledExactlyOnceWith("New");
+    expect(close).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it("leaves Tab in a date editor to the date's own parts", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    renderEditor({ fieldName: "due", value: "2026-09-15", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("2026-09-15");
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it.each(["title", "estimate", "owner", "link"])("starts a %s edit from the typed character, with the caret after it", (fieldName) => {
+    const emit = writeEmitter();
+    render(
+      <CellEditor acknowledgedWriteId={0} field={field(fieldName)} typed="7"
+        indexed={indexedValue(fieldName, fieldName === "estimate" ? 1 : "Old")} emit={emit} close={vi.fn()} />,
+    );
+    const input = screen.getByRole<HTMLInputElement>("textbox");
+    expect(input.value).toBe("7");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([1, 1]);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(fieldName === "estimate" ? 7 : "7");
   });
 
   it("commits a date edit", () => {

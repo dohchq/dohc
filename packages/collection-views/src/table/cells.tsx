@@ -1,4 +1,5 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { CircleAlert } from "lucide-react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -12,6 +13,8 @@ import { OptionPill, optionColor, PersonChip, shortDate } from "../values";
 
 export interface FieldCellProps {
   field: FieldDefinition;
+  /** The field's name as people read it. Absent, the key is the name. */
+  label?: string;
   /** The record's indexed value for this field; undefined when unset. */
   indexed: CollectionIndexedValue | undefined;
   /** Maps a person field's user id to a display name. Falls back to the id. */
@@ -23,12 +26,12 @@ export interface FieldCellProps {
    */
   onChange?: (value: CollectionValue) => void;
   /**
-   * Opens the cell's editor. The table owns which cell is editing and
-   * renders one CellEditor in an overlay above the rows, so a tall editor
-   * is never clipped by the fixed row height. Absent means the cell is
-   * read-only.
+   * Draws the value as a button, so assistive technology hears that the
+   * cell opens. The table starts the edit from a click anywhere in the cell
+   * and renders one CellEditor in an overlay above the rows, so a tall
+   * editor is never clipped by the fixed row height.
    */
-  onEditStart?: () => void;
+  editable?: boolean;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -134,31 +137,82 @@ function wrapFlagged(
 
 // During IME composition, Enter and Escape work the candidate list. Some
 // browsers mark those keys only with keyCode 229.
-function composing(event: KeyboardEvent): boolean {
+export function composing(event: KeyboardEvent): boolean {
   return event.nativeEvent.isComposing || event.keyCode === 229;
 }
+
+/** Where the selection goes when a key closes an editor: one row down, or one cell on or back. */
+export type CellMove = "down" | "next" | "previous";
 
 interface CellInputProps {
   defaultValue: string;
   type?: string;
-  commit: (raw: string) => void;
-  cancel: () => void;
+  /** The value `raw` saves as. Undefined keeps the editor open and shows `invalid`. */
+  parse: (raw: string) => CollectionValue | undefined;
+  /** What is wrong with a value `parse` refuses, and what to do. */
+  invalid?: string;
+  /** The edit began with a typed character, so the caret follows it. */
+  caretAtEnd?: boolean;
+  emit: (value: CollectionValue) => void;
+  close: (move?: CellMove) => void;
 }
 
-function CellInput({ defaultValue, type = "text", commit, cancel }: CellInputProps) {
+function CellInput({ defaultValue, type = "text", parse, invalid, caretAtEnd = false, emit, close }: CellInputProps) {
+  const [refused, setRefused] = useState(false);
+  const errorId = useId();
+  // Enter and Tab close the editor, which can blur the input. One edit saves once.
+  const done = useRef(false);
+  // A date input keeps Tab for its day, month, and year.
+  const moves = type !== "date";
+  const save = (raw: string, move?: CellMove) => {
+    if (done.current) return;
+    const value = parse(raw);
+    if (value === undefined) return setRefused(true);
+    done.current = true;
+    emit(value);
+    close(move);
+  };
   return (
-    <input
-      autoFocus
-      type={type}
-      defaultValue={defaultValue}
-      className="w-full rounded border border-line bg-bg px-1 text-[13px]"
-      onKeyDown={(event) => {
-        if (composing(event)) return;
-        if (event.key === "Enter") commit(event.currentTarget.value);
-        else if (event.key === "Escape") cancel();
-      }}
-      onBlur={(event) => commit(event.currentTarget.value)}
-    />
+    <>
+      <input
+        autoFocus
+        type={type}
+        defaultValue={defaultValue}
+        aria-invalid={refused || undefined}
+        aria-describedby={refused ? errorId : undefined}
+        // The table keeps this editor open while it holds a value it cannot save.
+        data-unsaved={refused || undefined}
+        className="w-full rounded border border-line bg-bg px-1 text-[13px]"
+        onFocus={
+          caretAtEnd
+            ? (event) => {
+                const end = event.currentTarget.value.length;
+                event.currentTarget.setSelectionRange(end, end);
+              }
+            : undefined
+        }
+        onKeyDown={(event) => {
+          if (composing(event)) return;
+          if (event.key === "Enter") save(event.currentTarget.value, moves ? "down" : undefined);
+          else if (event.key === "Tab" && moves) {
+            event.preventDefault();
+            save(event.currentTarget.value, event.shiftKey ? "previous" : "next");
+          } else if (event.key === "Escape") {
+            done.current = true;
+            close();
+          }
+        }}
+        onBlur={(event) => save(event.currentTarget.value)}
+      />
+      {refused ? (
+        <p id={errorId} role="alert" className="m-0 mt-1 flex items-start gap-1 text-[12px] text-danger">
+          <span aria-hidden className="flex h-lh shrink-0 items-center">
+            <CircleAlert size={12} />
+          </span>
+          {invalid}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -265,6 +319,8 @@ function MultiSelectEditor({
 export interface CellEditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
+  /** The character that started a text, number, url, or person edit. It replaces the old value. */
+  typed?: string;
   /** Highest saved edit id reflected in this indexed value; 0 before any edit. */
   acknowledgedWriteId: number;
   subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
@@ -273,7 +329,8 @@ export interface CellEditorProps {
    * path and returns a monotonically increasing edit id; this package never writes.
    */
   emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
-  close: () => void;
+  /** Closes the editor. A key that saves also says where the selection goes. */
+  close: (move?: CellMove) => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
    * options do not have yet. The host must add `option` to the schema first
@@ -291,6 +348,7 @@ export interface CellEditorProps {
 export function CellEditor({
   field,
   indexed,
+  typed,
   acknowledgedWriteId,
   subscribeToDiscardedWrites,
   emit,
@@ -303,19 +361,19 @@ export function CellEditor({
     emit(next);
     close();
   };
+  const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close };
   switch (field.type) {
     case "number":
       return (
         <CellInput
-          defaultValue={asText(value)}
-          commit={(raw) => {
+          {...textInput}
+          parse={(raw) => {
             const trimmed = raw.trim();
-            if (trimmed === "") return commitAndClose(null);
+            if (trimmed === "") return null;
             const parsed = Number(trimmed);
-            if (Number.isFinite(parsed)) return commitAndClose(parsed);
-            close();
+            return Number.isFinite(parsed) ? parsed : undefined;
           }}
-          cancel={close}
+          invalid="This value is not a number. Enter a number."
         />
       );
     case "date":
@@ -323,8 +381,9 @@ export function CellEditor({
         <CellInput
           type="date"
           defaultValue={typeof value === "string" ? value : ""}
-          commit={(raw) => commitAndClose(raw === "" ? null : raw)}
-          cancel={close}
+          parse={(raw) => raw || null}
+          emit={emit}
+          close={close}
         />
       );
     case "select": {
@@ -339,7 +398,7 @@ export function CellEditor({
           onKeyDown={(event) => {
             if (event.key === "Escape") close();
           }}
-          onBlur={onCreateOption ? undefined : close}
+          onBlur={onCreateOption ? undefined : () => close()}
         >
           <option value="" />
           {field.options.map((option) => (
@@ -404,34 +463,20 @@ export function CellEditor({
     // source yet, so edits work on the raw id; the trim keeps a
     // whitespace-only entry from indexing as a flagged empty id.
     case "person":
-      return (
-        <CellInput
-          defaultValue={asText(value)}
-          commit={(raw) => {
-            const id = raw.trim();
-            commitAndClose(id === "" ? null : id);
-          }}
-          cancel={close}
-        />
-      );
+      return <CellInput {...textInput} parse={(raw) => raw.trim() || null} />;
     // text, url: a plain text value.
     default:
-      return (
-        <CellInput
-          defaultValue={asText(value)}
-          commit={(raw) => commitAndClose(raw === "" ? null : raw)}
-          cancel={close}
-        />
-      );
+      return <CellInput {...textInput} parse={(raw) => raw || null} />;
   }
 }
 
 export function FieldCell({
   field,
+  label = field.name,
   indexed,
   personLabel,
   onChange,
-  onEditStart,
+  editable = false,
 }: FieldCellProps) {
   const reason =
     indexed !== undefined && indexed.validation.status === "flagged"
@@ -443,7 +488,7 @@ export function FieldCell({
   if (field.type === "button") {
     return wrapFlagged(
       reason,
-      <span className="truncate text-[13px] text-muted">{field.name}</span>,
+      <span className="truncate text-[13px] text-muted">{label}</span>,
     );
   }
 
@@ -453,7 +498,9 @@ export function FieldCell({
       reason,
       <input
         type="checkbox"
-        aria-label={field.name}
+        aria-label={label}
+        // The grid is the Tab stop. Enter on the selected cell toggles the box.
+        tabIndex={-1}
         checked={checked}
         disabled={onChange === undefined}
         onChange={() => onChange?.(!checked)}
@@ -465,16 +512,16 @@ export function FieldCell({
   const shown = reason === null
     ? <FieldValue field={field} indexed={indexed} personLabel={personLabel} />
     : <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>;
-  if (!onEditStart) return wrapFlagged(reason, shown);
+  if (!editable) return wrapFlagged(reason, shown);
   return wrapFlagged(
     reason,
     <button
       type="button"
-      // min-h keeps an empty cell clickable: with no text the button's
-      // content box collapses to zero height and the cell cannot be edited
-      // by mouse at all.
+      // The grid is the Tab stop. Enter on the selected cell opens the editor.
+      tabIndex={-1}
+      // min-h keeps an empty cell's button a target: with no text its
+      // content box collapses to zero height.
       className="flex min-h-5 w-full min-w-0 items-center text-left text-[13px]"
-      onClick={onEditStart}
     >
       {shown}
     </button>,
