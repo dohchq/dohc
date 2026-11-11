@@ -3063,6 +3063,55 @@ describe("chatDispatchService", () => {
     })]);
   });
 
+  it("stamps an interrupted run's log before startup cleanup reads it", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Keep my log.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId, agentId: "default",
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default", command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    const logs = join(fixture.stateRoot, "run-logs");
+    const log = join(logs, `${interrupted.run.runId}.log`);
+    await mkdir(logs, { recursive: true });
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 40 * 24 * 60 * 60 * 1000);
+    for (const file of [log, join(logs, "run-old.log")]) {
+      await writeFile(file, "started");
+      await utimes(file, lastWrite, lastWrite);
+    }
+    fixture.now.value = restarted;
+    // Recovery is slow: it waits until the test lets it read open runs.
+    let recover!: () => void;
+    const recovering = new Promise<void>((resolve) => { recover = resolve; });
+    const dispatch = fixture.serviceOptions.dispatchStoreFor(fixture.workspace);
+    const openRuns = dispatch.openRuns.bind(dispatch);
+    vi.spyOn(dispatch, "openRuns").mockImplementation(async (...args) => {
+      await recovering;
+      return openRuns(...args);
+    });
+    const logAgeWhenRead: number[] = [];
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      listOpenWorkspaces: () => [fixture.workspace],
+      readRunLogKeepDays: async () => {
+        logAgeWhenRead.push(restarted - (await stat(log)).mtimeMs);
+        return 30;
+      },
+    });
+    service.start();
+    recover();
+    try {
+      await vi.waitFor(async () => expect(await readdir(logs)).toEqual([`${interrupted.run.runId}.log`]));
+      expect(logAgeWhenRead).toEqual([0]);
+      expect((await stat(log)).mtimeMs).toBe(restarted);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it("retries a failed local-only scan after the daemon recovers", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();

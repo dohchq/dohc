@@ -1572,13 +1572,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     started = true;
     stopped = false;
     shuttingDown = false;
-    for (const workspace of options.listOpenWorkspaces()) {
-      void scanWorkspace(workspace.workspaceId).catch(reportError);
-    }
+    const scans = options.listOpenWorkspaces().map((workspace) =>
+      scanWorkspace(workspace.workspaceId).catch(reportError));
     pumpTimer = setInterval(() => {
       schedulePump();
     }, CHAT_DISPATCH_PUMP_MS);
-    void sweepRunLogs();
+    // Recovery stamps an interrupted run's end on its log first, so cleanup
+    // doesn't count that log's age from before dohc stopped.
+    void Promise.all(scans).then(() => sweepRunLogs());
     runLogSweepTimer = setInterval(() => void sweepRunLogs(), RUN_LOG_SWEEP_MS);
   }
 
