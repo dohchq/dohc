@@ -3,17 +3,40 @@
 import type { Page, TestInfo } from "@playwright/test";
 import type { DohcDesktopBridge, NoticeRow } from "../../src/ipc/bridgeContract";
 import { withEngineDb } from "./engineDb";
+import { readHistoryMoments } from "./history";
 
 const COULD_NOT_UPDATE = /could not update/;
 const PROBE_MS = 10_000;
+// How long the closing probes wait before reading History again, to see whether a credited row arrives late.
+const LATE_READ_MS = 120_000;
 const fail = (error: unknown) => String(error).slice(0, 2000);
 
-function withDeadline<T>(promise: Promise<T>, what: string): Promise<T> {
+function withDeadline<T>(promise: Promise<T>, what: string, ms = PROBE_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     promise,
-    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} gave no answer in ${PROBE_MS} ms`)), PROBE_MS); }),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} gave no answer in ${ms} ms`)), ms); }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/** The owner's whole History for the note: a summary of each row as an annotation, every record as an attachment. */
+export async function recordHistory(page: Page, info: TestInfo, workspaceId: string, path: string, when: string): Promise<void> {
+  const name = `RETEST owner History ${when}`;
+  try {
+    const moments = await withDeadline(readHistoryMoments(page, workspaceId, path), "History", 30_000);
+    if (moments === null) {
+      info.annotations.push({ type: name, description: "History gave no list" });
+      return;
+    }
+    info.annotations.push({ type: name, description: JSON.stringify(moments.map(row => ({
+      id: row.id, origin: row.origin, authors: row.authors ?? [], momentOrder: row.momentOrder,
+      recordedAt: new Date(row.recordedAtMs).toISOString(), operation: row.operation,
+      names: [row.liveAuthorName, row.personAuthorName, row.agentAuthorName].filter(Boolean),
+    }))) });
+    await info.attach(name, { contentType: "application/json", body: JSON.stringify(moments, null, 2) });
+  } catch (error) {
+    info.annotations.push({ type: name, description: `read failed: ${fail(error)}` });
+  }
 }
 
 /** A screenshot attachment, or an annotation saying why there is none. */
@@ -132,11 +155,12 @@ export function watchReadOnly(page: Page, info: TestInfo, who: string): () => Pr
 }
 
 /**
- * The closing probes: stop the watch, then both apps' notices and engine refusals. Runs once, at the fixme or, when
+ * The closing probes: stop the watch, then the owner's History, both apps' notices and engine refusals, and History
+ * and the owner's refusals again two minutes later. Runs once, at the fixme or, when
  * the test fails before it, before teardown closes the apps.
  */
 export function closingProbes(info: TestInfo): {
-  set: (probe: { stopWatching: () => Promise<void>; owner: Page; recipient: Page; ownerRoot: string; recipientRoot: string }) => void;
+  set: (probe: { stopWatching: () => Promise<void>; owner: Page; recipient: Page; ownerRoot: string; recipientRoot: string; workspaceId: string; path: string }) => void;
   run: (when: string) => Promise<void>;
 } {
   let pending: Parameters<ReturnType<typeof closingProbes>["set"]>[0] | undefined;
@@ -147,10 +171,16 @@ export function closingProbes(info: TestInfo): {
       pending = undefined;
       if (!probe) return;
       await probe.stopWatching();
+      await recordHistory(probe.owner, info, probe.workspaceId, probe.path, when);
       await recordCouldNotUpdate(probe.owner, info, "owner", when);
       await recordCouldNotUpdate(probe.recipient, info, "recipient", when);
       await recordEngineRefusals(probe.ownerRoot, info, "owner", when);
       await recordEngineRefusals(probe.recipientRoot, info, "recipient", when);
+      // Does a credited row ever arrive? Read History and the refusals again after a longer wait.
+      await new Promise(resolve => setTimeout(resolve, LATE_READ_MS));
+      const later = `${when}, ${LATE_READ_MS / 1000} s later`;
+      await recordHistory(probe.owner, info, probe.workspaceId, probe.path, later);
+      await recordEngineRefusals(probe.ownerRoot, info, "owner", later);
     },
   };
 }

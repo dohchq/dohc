@@ -12,7 +12,7 @@ import {ownerEnrollment} from "./helpers/engineDb";
 import {approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa} from "./helpers/selfHostOnboarding";
 import {activeWorkspace, createTempWorkspace, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles, type TempWorkspace} from "./helpers/workspace";
 // RETEST INSTRUMENTATION (never merge): diagnostic probes.
-import {attachShot, closingProbes, recordCouldNotUpdate, watchReadOnly} from "./helpers/retestProbe";
+import {attachShot, closingProbes, recordCouldNotUpdate, recordHistory, watchReadOnly} from "./helpers/retestProbe";
 
 test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
 
@@ -139,7 +139,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     const recipient = await launch(recipientTemp);
     // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
     probes.set({stopWatching: watchReadOnly(recipient.page, info, "recipient"), owner: page, recipient: recipient.page,
-      ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath});
+      ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH});
     await test.step("the recipient opens the Edit share and adds R1", async () => {
       const received = recipient.page;
       await received.getByTestId("first-run-open-share").click();
@@ -164,6 +164,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), {timeout: 60_000}).toContain(R1);
     });
     // RETEST INSTRUMENTATION (never merge): any "could not update" notice once R1 has reached the owner's file.
+    await recordHistory(page, info, workspace.workspaceId, PATH, "after R1 reached the owner");
     await recordCouldNotUpdate(page, info, "owner", "after R1 reached the owner");
     await recordCouldNotUpdate(recipient.page, info, "recipient", "after R1 reached the owner");
 
