@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { EvalCase, RecordedCall, RunRecord } from "./case";
 
@@ -110,13 +110,16 @@ export function readTranscript(lines: readonly string[]): {
 
 /** Rewrites a built-in tool's absolute path as the workspace path a case names, such as `notes/plan.md`. */
 export function workspacePaths(calls: readonly RecordedCall[], root: string): RecordedCall[] {
-  // The separator keeps a sibling folder whose name starts with the root's out of it.
-  const inRoot = (value: unknown): value is string =>
-    typeof value === "string" && `${value}${sep}`.toLowerCase().startsWith(`${root}${sep}`.toLowerCase());
+  // `relative` reads either separator and, on Windows, either letter case. A path that climbs
+  // out of the root, such as a sibling folder whose name starts the same, is left alone.
+  const inRoot = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || !isAbsolute(value)) return undefined;
+    const path = relative(root, value);
+    return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path) ? undefined : path.split(sep).join("/");
+  };
   return calls.map((call) => ({
     ...call,
-    args: Object.fromEntries(Object.entries(call.args).map(([key, value]) =>
-      [key, inRoot(value) ? relative(root, value).split(sep).join("/") : value])),
+    args: Object.fromEntries(Object.entries(call.args).map(([key, value]) => [key, inRoot(value) ?? value])),
   }));
 }
 

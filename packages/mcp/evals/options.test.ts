@@ -19,6 +19,7 @@ describe("eval command line", () => {
   it.each([
     [["--out", "runs/a", "--case"], "--case takes a value"],
     [["--out", "runs/a", "--baseline", "--dry-run"], "--baseline takes a value"],
+    [["--out", "runs/a", "--baseline", ""], "--baseline takes a value"],
     [["--out", "runs/a", "--samples", "0"], "--samples takes a whole number of 1 or more"],
     [["--out", "runs/a", "--samples", "nope"], "--samples takes a whole number of 1 or more"],
     [["--out", "runs/a", "--samples", "Infinity"], "--samples takes a whole number of 1 or more"],

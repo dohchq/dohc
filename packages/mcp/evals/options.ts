@@ -35,7 +35,7 @@ export function readOptions(argv: readonly string[]): RunOptions {
       switches.add(name);
     } else if ((VALUE_FLAGS as readonly string[]).includes(name)) {
       const value = argv[index + 1];
-      if (value === undefined || value.startsWith("--")) throw new Error(`${name} takes a value`);
+      if (value === undefined || value === "" || value.startsWith("--")) throw new Error(`${name} takes a value`);
       values.set(name, value);
       index += 1;
     } else {

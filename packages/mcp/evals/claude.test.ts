@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { readTranscript, sampleEnvironment, workspacePaths } from "./claude";
 
 const line = (event: unknown) => JSON.stringify(event);
@@ -19,10 +19,11 @@ describe("eval samples", () => {
   });
 
   it("names a built-in tool's path as the workspace does, and leaves a sibling folder's path alone", () => {
-    const root = join("/tmp", "eval", "workspace");
-    const sibling = join("/tmp", "eval", "workspace-other", "plan.md");
-    expect(workspacePaths([{ tool: "Edit", args: { file_path: join(root, "notes", "plan.md"), other: sibling, new_string: "x" }, ok: true }], root))
-      .toEqual([{ tool: "Edit", args: { file_path: "notes/plan.md", other: sibling, new_string: "x" }, ok: true }]);
+    const root = resolve("eval", "workspace");
+    const sibling = resolve("eval", "workspace-other", "plan.md");
+    const args = { file_path: join(root, "notes", "plan.md"), mixed: `${root}/notes/plan.md`, other: sibling, new_string: "notes/plan.md is done", limit: 5 };
+    expect(workspacePaths([{ tool: "Edit", args, ok: true }], root))
+      .toEqual([{ tool: "Edit", args: { ...args, file_path: "notes/plan.md", mixed: "notes/plan.md" }, ok: true }]);
   });
 
   it("reads the calls, their outcomes, and the answer from Claude Code's output", () => {
