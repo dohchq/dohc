@@ -15,8 +15,8 @@ use dohc_engine_runtime::search::{
     FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
-    CaptureSecretRetire, CollectionReconciliation, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    ActorHandle, CaptureBatchReads, CaptureIngest, CaptureIngestBinary, CaptureRetire,
+    CaptureSecret, CaptureSecretRetire, CollectionReconciliation, MAX_CAPTURE_INGEST_BATCH_BYTES,
     MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard,
 };
 use dohc_engine_storage::hex_sha256;
@@ -1464,14 +1464,17 @@ impl StoreCaptureSink {
         #[cfg(feature = "harness")]
         let roundtrip_phase =
             dohc_engine_storage::capture_phase::Measure::new("actor_roundtrip_including_retry");
+        // A busy retry reuses the first attempt's reader folds.
+        let mut reads = CaptureBatchReads::default();
         let results = self.batch_retry.run(|| {
-            self.actor.capture_ingest_batch_blocking(
+            self.actor.capture_ingest_batch_reusing_reads_blocking(
                 Arc::clone(&inputs),
                 Arc::clone(&self.search_policy),
                 self.leases.clone(),
                 Arc::new(NoFaults),
                 self.shadow_root.clone(),
                 Arc::clone(&root_guard),
+                &mut reads,
             )
         });
         #[cfg(feature = "harness")]

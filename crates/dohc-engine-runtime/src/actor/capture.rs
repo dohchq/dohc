@@ -1595,11 +1595,21 @@ impl ActorHandle {
         let mut indices: Vec<_> = (0..inputs.len()).collect();
         let mut reader_deadline = None;
         for attempt in 0..=2 {
-            let _ = &reads.folds;
-            let folds = if attempt < 2 {
-                reader::prepare_blocking(self, inputs.clone(), &root_dir, &mut reader_deadline)
-            } else {
-                Arc::new(Vec::new())
+            let folds = match (attempt, &reads.folds) {
+                (0, Some(folds)) => folds.clone(),
+                (0 | 1, _) => {
+                    let folds = reader::prepare_blocking(
+                        self,
+                        inputs.clone(),
+                        &root_dir,
+                        &mut reader_deadline,
+                    );
+                    if attempt == 0 {
+                        reads.folds = Some(folds.clone());
+                    }
+                    folds
+                }
+                _ => Arc::new(Vec::new()),
             };
             let (batch_inputs, search_policy, leases, faults, token, root_dir, root_guard) = (
                 inputs.clone(),
