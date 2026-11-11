@@ -7,7 +7,11 @@ import type {RelayLogChange} from "./relayLogWait";
 // once, and the next read starts only after that one has ended, so a read that
 // ignores its signal never overlaps its successor or outlives stop().
 export function startRelayWatch(input: {
-  wait: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
+  wait: (since: number, signal: AbortSignal, known?: number) => Promise<RelayLogChange>;
+  // The rows this device appended past the cursor, so its own uploads do not
+  // count as a change. `settled` resolves once a push that may have landed
+  // more has ended, or answers undefined when none runs.
+  ownAppends?: { known(): number; settled(): Promise<void> | undefined };
   initialDelayMs: number;
   maxDelayMs: number;
   // The log moved past `since`. The watch waits for the next cursor.
@@ -68,11 +72,12 @@ export function startRelayWatch(input: {
         if (next !== undefined) continue;
       }
       const from = since;
+      const known = input.ownAppends?.known();
       const controller = new AbortController();
       read = controller;
       // Abort only asks the read to end; the worker still waits for it.
       const result = yield* Effect.uninterruptible(Effect.exit(Effect.tryPromise({
-        try: () => input.wait(from, controller.signal),
+        try: () => input.wait(from, controller.signal, known),
         catch: (error) => error,
       })));
       read = undefined;
@@ -84,6 +89,17 @@ export function startRelayWatch(input: {
         input.failed(Cause.squash(result.cause));
       } else {
         reportWatch(result.value.watched);
+        // The relay counted `known` rows as ours. If a push may have landed
+        // more, or this device has since confirmed more, ask again with the new
+        // count: the relay answers at once if another device appended.
+        const own = known !== undefined && result.value.hasMore && result.value.known === known && input.ownAppends;
+        if (own) {
+          const settled = own.settled();
+          if (settled || own.known() !== known) {
+            if (settled) yield* Effect.promise(() => settled);
+            continue;
+          }
+        }
         if (result.value.hasMore) {
           since = undefined;
           watching = undefined;
