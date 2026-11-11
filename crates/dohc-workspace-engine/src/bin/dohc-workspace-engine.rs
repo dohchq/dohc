@@ -308,11 +308,18 @@ where
     let writer_signal = writer_gone_tx.clone();
     let writer_active_egress = Arc::clone(&active_egress);
     let writer_connection = Arc::clone(&connection);
+    let connection_retired = connection.handle().cancel_signal();
     let input_closed = Arc::new(AtomicBool::new(false));
     let writer_input_closed = Arc::clone(&input_closed);
     let writer = tokio::spawn(async move {
-        let result =
-            write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
+        let result = write_connection_output(
+            output,
+            &mut output_rx,
+            &writer_limits,
+            writer_active_egress,
+            &connection_retired,
+        )
+        .await;
         // Read before this task retires anything, so a writer failure that came
         // before the client closed its input stays a failure.
         let after_input_closed = writer_input_closed.load(Ordering::SeqCst);
@@ -719,12 +726,48 @@ fn reap_completed(tasks: &mut JoinSet<()>) {
 /// a later `Cancel` must not turn that answer into CANCELLED.
 type ActiveEgress = Arc<Mutex<HashMap<u64, Option<CancelSignal>>>>;
 
+#[cfg(test)]
 async fn write_output<W: AsyncWrite + Unpin>(
-    mut output: W,
+    output: W,
     output_rx: &mut tokio::sync::mpsc::Receiver<OutputItem>,
     limits: &WireLimits,
     active_egress: ActiveEgress,
 ) -> Result<(), io::Error> {
+    write_connection_output(
+        output,
+        output_rx,
+        limits,
+        active_egress,
+        &CancelSignal::new(),
+    )
+    .await
+}
+
+/// Writes `output_rx` to `output` until the channel closes. An answer whose
+/// bytes are all out is flushed whatever its guard says, until
+/// `connection_retired` ends the connection.
+async fn write_connection_output<W: AsyncWrite + Unpin>(
+    mut output: W,
+    output_rx: &mut tokio::sync::mpsc::Receiver<OutputItem>,
+    limits: &WireLimits,
+    active_egress: ActiveEgress,
+    connection_retired: &CancelSignal,
+) -> Result<(), io::Error> {
+    // The flush after an answer's last byte. Only the end of the connection
+    // stops it.
+    async fn flush_answer<W: AsyncWrite + Unpin>(
+        output: &mut W,
+        connection_retired: &CancelSignal,
+    ) -> Result<(), io::Error> {
+        tokio::select! {
+            biased;
+            () = connection_retired.cancelled() => Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "connection retired",
+            )),
+            result = output.flush() => result,
+        }
+    }
     let mut negotiated_limits = limits.clone();
     'items: while let Some(item) = output_rx.recv().await {
         if let OutputItem::Envelope(Envelope::HelloAck(ack)) = &item {
@@ -825,7 +868,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // on has nothing left to stop. Flushing outside the guard
                 // keeps it from ending the connection and every other
                 // request on it.
-                output.flush().await?;
+                flush_answer(&mut output, connection_retired).await?;
                 lock(&active_egress).remove(&request_id);
             }
             OutputItem::Progress(message) => {
@@ -939,7 +982,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 result?;
                 // As for a guarded answer: once the output holds the whole
                 // answer, a retirement no longer ends the connection.
-                output.flush().await?;
+                flush_answer(&mut output, connection_retired).await?;
             }
         }
     }
@@ -3192,7 +3235,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_retirement_during_the_last_flush_ends_only_that_answer() {
-        for interruption in ["owner retires", "workspace closes", "connection retires"] {
+        // The connection's own end still stops the flush:
+        // `a_client_closing_its_input_during_a_flush_ends_the_daemon_cleanly`.
+        for interruption in ["owner retires", "workspace closes"] {
             let retired = CancelSignal::new();
             let owner = Arc::new(OwnerTestGuard::default());
             let guard: Arc<dyn OutputGuard> = if interruption == "owner retires" {
@@ -3206,10 +3251,10 @@ mod tests {
             } else {
                 owner.clone()
             };
-            let interrupt: Box<dyn FnOnce() + Send> = match interruption {
-                "owner retires" => Box::new(move || retired.cancel()),
-                "workspace closes" => Box::new(move || owner.close_workspace()),
-                _ => Box::new(move || owner.connection.cancel()),
+            let interrupt: Box<dyn FnOnce() + Send> = if interruption == "owner retires" {
+                Box::new(move || retired.cancel())
+            } else {
+                Box::new(move || owner.close_workspace())
             };
             // Answer 9, then another answer under the same guard, then an
             // unguarded response on the same connection.
