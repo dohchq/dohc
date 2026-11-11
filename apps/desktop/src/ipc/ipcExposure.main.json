@@ -266,6 +266,7 @@
     "desktop:reset-user-settings",
     "desktop:reset-workspace-settings",
     "desktop:resolve-automation-controls",
+    "desktop:resolve-chat-decision",
     "desktop:resolve-work-link",
     "desktop:resolve-workspace-version-conflict",
     "desktop:restore-engine-moment-file",
