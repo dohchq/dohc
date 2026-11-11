@@ -88,16 +88,18 @@ function keepFirst(list: FirstFiles, file: WorkspaceFileEntry): void {
   if (shown.length > FILES_SHOWN) shown.pop();
 }
 
-// One pass over the listing. A dataset's folder holds its dataset.json.
+// One pass over the listing. A dataset's folder holds its dataset.json, except
+// one in `unclaimed`, whose dataset.json names no Collection on this computer.
 // Sketches and other files are never sorted whole: Home shows only the first few.
 export function classifyFiles(
   files: readonly WorkspaceFileEntry[],
   collectionFolders: ReadonlySet<string>,
   appFolders: ReadonlySet<string>,
+  unclaimed: ReadonlySet<string>,
 ): HomeKinds {
   const owners = new Set([...collectionFolders, ...appFolders]);
   for (const file of files) {
-    if (basenameOf(file.path) === "dataset.json") owners.add(dirnameOf(file.path));
+    if (basenameOf(file.path) === "dataset.json" && !unclaimed.has(dirnameOf(file.path))) owners.add(dirnameOf(file.path));
   }
   const pages: WorkspaceFileEntry[] = [];
   const sketches: FirstFiles = { shown: [], count: 0 };

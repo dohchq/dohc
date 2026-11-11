@@ -29,7 +29,7 @@ import { createDesktopAutomationControls } from "./workspaces/desktopAutomationC
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
 import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
-import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
+import { invalidateDatasetAddresses, isDatasetDescriptor, unclaimedDatasetFolders } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { hasWorkspaceLiveDrafts, hasRetainedLiveDraft, listKeptTyping, listLiveDraftRecovery, removeKeptTyping, removeLiveDraftCopies, preserveLiveDraft, removeWorkspaceLiveDrafts, workspaceDraftStore } from "./workspaces/liveDraftRecovery";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
@@ -6745,6 +6745,17 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, agentName: (agentId) => cachedAgents.find(({ id }) => id === agentId)?.name, localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
+    unclaimedDatasetFolders: async ({ workspace, signal }) => {
+      const folders = await withEngineAdapter(workspace, adapter => unclaimedDatasetFolders(adapter, workspace.workspaceId, signal, {
+        listed: () => workspaceFileListings.hasFile(workspace.workspaceId, workspace.attachmentId, isDatasetDescriptor),
+        kept: async () => {
+          const authority = await collectionsAuthorityFor(workspace, signal);
+          if (authority.kind === "server") throw new Error("Another computer keeps this workspace's Collections.");
+          return authority.local.keptDatasetIds();
+        },
+      }));
+      return folders ?? [];
+    },
     historyCollections: async operation => {
       const { workspace } = operation;
       const authority = await collectionsAuthorityFor(workspace, operation.signal);

@@ -123,6 +123,20 @@ export class WorkspaceFileListingCache {
     return result;
   }
 
+  /**
+   * Whether the listing in hand has a file `matches` accepts, once its walk
+   * finishes. Undefined with no listing in hand, or when its walk fails.
+   */
+  async hasFile(workspaceId: string, attachmentId: symbol, matches: (path: string) => boolean): Promise<boolean | undefined> {
+    const entry = this.#listings.get(workspaceId);
+    if (entry?.attachmentId !== attachmentId) return undefined;
+    try {
+      return (await entry.listing).files.some(file => matches(file.path));
+    } catch {
+      return undefined;
+    }
+  }
+
   observe(workspaceId: string, attachmentId: symbol, facts: readonly FileObservationFact[]): void {
     // Rules are read separately on every IPC response; they cannot change this path cache.
     const visible = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, this.platform));

@@ -109,9 +109,13 @@ it("requires an archived Collection and current owner review of both data and af
   await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
   expect(f.host.deletionStatus("owner",scope)).toEqual({deleted:false});
   f.host.archiveDataset("owner",scope);
+  // The store still keeps an archived Collection, and only its owner learns which ones it keeps.
+  expect(f.host.keptDatasetIds("owner",{workspaceId:scope.workspaceId})).toEqual([scope.datasetId]);
+  expect(() => f.host.keptDatasetIds("helper",{workspaceId:scope.workspaceId})).toThrow("You do not have access to this Collection.");
   const current = f.host.deletePreview("owner",scope);
   await expect(f.host.deleteDataset("owner",{...request,expected:current.cursor,reviewToken:current.reviewToken})).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
   expect(f.host.list("owner",{workspaceId:scope.workspaceId,includeArchived:true}).datasets).toEqual([]);
+  expect(f.host.keptDatasetIds("owner",{workspaceId:scope.workspaceId})).toEqual([]);
   for (const table of ["dohc_dataset_catalog","dohc_dataset_bindings","dohc_dataset_events","dohc_dataset_receipts","dohc_dataset_checkpoints","dohc_dataset_attempts","dohc_dataset_lifecycle"])
     expect(f.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
   expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(1);

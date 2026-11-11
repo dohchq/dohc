@@ -2360,7 +2360,7 @@ describe("notices sent to you", () => {
   });
   function withRuns(bridge: ReturnType<typeof makeBridge>) {
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [],
     }));
     // Main finds each automation's Collection by its id.
     bridge.findAutomationCollection.mockResolvedValue({ status: "found", collectionPath: "tasks" });
