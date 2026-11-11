@@ -500,3 +500,540 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
         "the retried close materializes the drained projection"
     );
 }
+
+fn lineage_claim(db: &std::path::Path, key: &DocKey) -> Option<String> {
+    let store = EngineStore::open_read_only(db).expect("open probe store");
+    dohc_engine_collab::read_marker(&store, key)
+        .expect("read marker")
+        .expect("marker")
+        .lineage_claim_id
+}
+
+/// Park one `ydoc.update` from `origin` behind a live session. A base names
+/// itself as its lineage. Returns the lineage it parked under.
+fn park(
+    db: &std::path::Path,
+    key: &DocKey,
+    (origin, origin_seq, relay_seq): (&str, i64, i64),
+    lineage: Option<&str>,
+    bytes: &[u8],
+) -> String {
+    let mut store = EngineStore::open(db, 100).expect("open store");
+    let blob_sha = store.put_binary_blob(bytes).expect("blob");
+    let lineage = lineage.map_or_else(|| blob_sha.clone(), str::to_owned);
+    let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: WS.to_owned(),
+        origin_id: origin.to_owned(),
+        origin_seq,
+        relay_seq: Some(relay_seq),
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": blob_sha.clone(),
+            "lineageClaimId": lineage.clone(),
+            "isBaseState": lineage == blob_sha
+        }),
+        recorded_at_ms: 100 + relay_seq,
+    };
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park");
+    lineage
+}
+
+/// File writes that have not landed: pending, or stopped by a conflict.
+fn unfinished_writes(db: &std::path::Path) -> i64 {
+    let store = EngineStore::open_read_only(db).expect("open probe store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id GLOB 'ydoc-mat_*' AND status IN ('pending','conflict')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count unfinished writes")
+}
+
+fn head_text(db: &std::path::Path) -> String {
+    let mut store = EngineStore::open_read_only(db).expect("open probe store");
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .read_text(WS, "main", PATH)
+        .expect("read head")
+        .expect("head")
+        .text
+}
+
+fn conflict_files(scratch: &ScratchDir) -> Vec<String> {
+    std::fs::read_dir(scratch.path().join("notes"))
+        .expect("notes dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".conflict"))
+        .collect()
+}
+
+/// #2813. A resync applies a parked edit without writing the file. Another
+/// edit on the same lineage then parks behind the session, and the close
+/// applies it. Its write expects the file to hold the resync's edit, so the
+/// close must write both pending edits in order, leaving the file equal to
+/// the note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
+    use dohc_engine_collab::Ydoc;
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let resynced = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("resync");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before",
+        "the resync applies the edit without writing the file"
+    );
+    assert_eq!(unfinished_writes(&db), 1);
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&resynced.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    actor
+        .ydoc_close_session_materialized(
+            scratch.path().to_path_buf(),
+            key,
+            Arc::new(()),
+            301,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the close writes every pending edit");
+    assert_eq!(deferred_rows(&db), 0);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again",
+        "the file matches the note"
+    );
+    assert_eq!(head_text(&db), "before parked again");
+    assert_eq!(unfinished_writes(&db), 0);
+    assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    supervisor.close(&db).expect("close actor");
+}
+
+/// The issue's own order: after a resync, a rival version and an edit on it
+/// park behind the session. The close drains them and leaves the file
+/// matching the note, with no write left owed and no conflict copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_after_a_resync_and_a_rival_version_leaves_the_file_matching() {
+    use dohc_engine_collab::Ydoc;
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    actor
+        .ydoc_resync(key.clone(), claim, CancellationToken::new(), None)
+        .await
+        .expect("resync");
+    supervisor.close(&db).expect("close actor");
+
+    let rival = Ydoc::wire();
+    rival.plaintext_insert(0, "rival");
+    let rival_base = rival.encode_full_state();
+    let rival_edit = rival.plaintext_insert(5, " edit");
+    let rival_claim = park(&db, &key, ("rival", 0, 2), None, &rival_base);
+    park(&db, &key, ("rival", 1, 3), Some(&rival_claim), &rival_edit);
+    assert_eq!(deferred_rows(&db), 2, "the rival's base and edit park");
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    actor
+        .ydoc_close_session_materialized(
+            scratch.path().to_path_buf(),
+            key,
+            Arc::new(()),
+            301,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the close drains the rival");
+    assert_eq!(deferred_rows(&db), 0);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        head_text(&db),
+        "the file matches the note"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    supervisor.close(&db).expect("close actor");
+}
+
+/// Two resyncs each apply a parked edit without writing the file, and a
+/// settle follows with no close between. The head's write expects the file
+/// to hold the first resync's edit, so the settle must write both in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_after_two_resyncs_writes_both_edits() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let first = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("first resync");
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&first.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    let second = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("second resync");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before",
+        "neither resync writes the file"
+    );
+    assert_eq!(unfinished_writes(&db), 2);
+    actor
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key,
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim,
+            second.head_blob_sha256.clone(),
+            "two-resyncs".into(),
+            Arc::new(()),
+            301,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("the settle writes the file");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// When an older write fails for a passing reason, the settle stops before
+/// the head's write, which expects the file to hold the older one. Both stay
+/// owed, and a retried settle lands them in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let first = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("first resync");
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&first.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    let second = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("second resync");
+    assert_eq!(unfinished_writes(&db), 2);
+    let settle = |faults: Arc<dyn dohc_engine_storage::FaultInjector>, now| {
+        actor.ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim.clone(),
+            second.head_blob_sha256.clone(),
+            "older-write-fails".into(),
+            Arc::new(()),
+            now,
+            faults,
+            CancellationToken::new(),
+            None,
+            None,
+        )
+    };
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    let refused = settle(faults.clone(), 301)
+        .await
+        .expect_err("the older write fails, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+                reason: "settlement-materialization-pending"
+            })
+        ),
+        "a passing failure asks the caller to retry: {refused:?}"
+    );
+    assert!(faults.fired(), "the older write reaches the injected fault");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before",
+        "nothing is written"
+    );
+    assert_eq!(unfinished_writes(&db), 2, "both writes stay owed");
+    assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+
+    settle(Arc::new(NoFaults), 302)
+        .await
+        .expect("the retried settle writes the file");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// When an older write fails for a reason that won't pass on its own, here a
+/// link in the file's place, the settle stops with that reason rather than
+/// asking the caller to retry forever. Once the file is back, a settle lands
+/// both writes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_is_blocked_says_why() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let first = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("first resync");
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&first.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    let second = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("second resync");
+    assert_eq!(unfinished_writes(&db), 2);
+    let settle = |now| {
+        actor.ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim.clone(),
+            second.head_blob_sha256.clone(),
+            "older-write-blocked".into(),
+            Arc::new(()),
+            now,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+    };
+    let outside = scratch.path().join("outside.md");
+    std::fs::write(&outside, "before").expect("outside file");
+    std::fs::remove_file(&file).expect("remove file");
+    std::os::unix::fs::symlink(&outside, &file).expect("link in the file's place");
+    let refused = settle(301)
+        .await
+        .expect_err("the older write is blocked, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Materialize(
+                dohc_engine_files::MaterializeError::SymlinkTarget
+            )
+        ),
+        "a link won't go away on its own, so the settle says so: {refused:?}"
+    );
+    assert_eq!(unfinished_writes(&db), 2, "both writes stay owed");
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside file"),
+        "before",
+        "nothing is written through the link"
+    );
+
+    std::fs::remove_file(&file).expect("remove link");
+    std::fs::write(&file, "before").expect("file back");
+    settle(302)
+        .await
+        .expect("once the file is back, the settle writes it");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// Three resyncs owe three writes, and an outside edit leaves the file holding
+/// what the second would write. The first then conflicts and the second stays
+/// owed, but the head's write would find the file it expects. The settle must
+/// stop rather than write the head past the owed one, and report the file as
+/// changed on disk, as the head's own conflict would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let mut previous = {
+        let actor = supervisor.open(&db, 200).expect("open actor").actor;
+        actor
+            .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+            .await
+            .expect("first resync")
+    };
+    supervisor.close(&db).expect("close actor");
+    for (seq, text) in [(2, " again"), (3, " more")] {
+        let peer = Ydoc::wire();
+        peer.apply(&previous.initial_update).expect("peer state");
+        let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+        let edit = peer.plaintext_insert(end, text);
+        park(
+            &db,
+            &key,
+            ("peer", seq, seq),
+            Some(claim.as_deref().expect("lineage")),
+            &edit,
+        );
+        let actor = supervisor
+            .open(&db, 100 + 100 * seq)
+            .expect("reopen actor")
+            .actor;
+        previous = actor
+            .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+            .await
+            .expect("resync");
+        supervisor.close(&db).expect("close actor");
+    }
+    assert_eq!(unfinished_writes(&db), 3);
+    std::fs::write(&file, "before parked again").expect("outside edit");
+
+    let actor = supervisor.open(&db, 400).expect("reopen actor").actor;
+    let refused = actor
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key,
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim,
+            previous.head_blob_sha256.clone(),
+            "older-write-conflicts".into(),
+            Arc::new(()),
+            401,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("an older write didn't land, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::ConflictStaleTarget
+            )
+        ),
+        "the outside edit makes the file changed on disk: {refused:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again",
+        "the head's write does not pass the owed one"
+    );
+    supervisor.close(&db).expect("close actor");
+}
