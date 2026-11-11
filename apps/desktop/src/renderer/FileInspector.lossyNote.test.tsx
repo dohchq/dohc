@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -69,6 +69,9 @@ type EngineHead = { sha256?: string | null; committed?: true };
 type RemoteUpdateListener = (event: { sessionId: string; update: Uint8Array; head?: EngineHead; lineageGeneration: number }) => void;
 const remoteUpdateListeners = new Set<RemoteUpdateListener>();
 const lineageReplacementListeners = new Set<(event: EngineYDocLineageReplacementEvent) => void>();
+const noticeListeners = new Set<() => void>();
+// The change the engine holds for a.md, in the tests that hold one.
+const HELD = { path: "a.md", file: LOSSY, held: LOSSY.replace("See [the docs][docs].", "See [the setup docs][docs] first.") };
 const EMPTY_UPDATE = new Uint8Array([0, 0]);
 
 // What `edit` changes in the engine's document, as main forwards it.
@@ -82,6 +85,7 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
   let read = 0;
   remoteUpdateListeners.clear();
   lineageReplacementListeners.clear();
+  noticeListeners.clear();
   const bridgeMock = {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -124,6 +128,13 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     }),
     acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ accepted: true as const, updates: [] })),
     onEngineYDocSaveState: vi.fn(() => () => undefined),
+    readHeldChange: vi.fn<DohcDesktopBridge["readHeldChange"]>(async () => ({ change: null })),
+    onNoticesChanged: vi.fn((listener: () => void) => {
+      noticeListeners.add(listener);
+      return () => {
+        noticeListeners.delete(listener);
+      };
+    }),
   };
   vi.stubGlobal("dohcDesktop", bridgeMock);
   return bridgeMock;
@@ -147,12 +158,122 @@ describe("a lossy note", () => {
   });
 
   it("says when dohc holds a change to it", async () => {
-    bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
-    render(<FileInspector workspaceId="ws-1" path="a.md" changeHeld />);
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange.mockResolvedValue({ change: HELD });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("dohc held a change, because saving it would rewrite parts it can't show.");
+    await waitFor(() => expect(notice.textContent).toContain("dohc held a change, because saving it would rewrite parts it can't show."));
     expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+  });
+
+  it("asks the engine about its own hold once it opens lossy, and again when Notices change", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange.mockResolvedValue({ change: HELD });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(notice.textContent).toContain("dohc held a change"));
+    expect(bridge.readHeldChange).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", path: "a.md" });
+    // The hold ends, and main signals a Notices change: the band clears.
+    bridge.readHeldChange.mockResolvedValue({ change: null });
+    act(() => noticeListeners.forEach(listener => listener()));
+    await waitFor(() => expect(notice.textContent).not.toContain("dohc held a change"));
+    expect(bridge.readHeldChange).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("lossy-note-show-change")).toBeNull();
+  });
+
+  it("asks nothing about holds for a note dohc can show", async () => {
+    const bridge = bridgeFor([{ text: WRITTEN, contentHash: sha(WRITTEN) }]);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-editor");
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+    expect(bridge.readHeldChange).not.toHaveBeenCalled();
+    expect(bridge.onNoticesChanged).not.toHaveBeenCalled();
+  });
+
+  it("shows what saving the held change would write against the file, as a diff", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange.mockResolvedValue({ change: HELD });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    const dialog = await screen.findByTestId("held-change-dialog");
+    // The band's read, then the review's own fresh read.
+    expect(bridge.readHeldChange).toHaveBeenCalledTimes(2);
+    expect(bridge.readHeldChange).toHaveBeenLastCalledWith({ workspaceId: "ws-1", path: "a.md" });
+    const diff = await within(dialog).findByTestId("held-change-diff");
+    const removed = [...diff.querySelectorAll('[data-kind="removed"] code')].map(line => line.textContent);
+    const added = [...diff.querySelectorAll('[data-kind="added"] code')].map(line => line.textContent);
+    // The file's lines are the removed side; the held change's are the added side.
+    expect(removed).toEqual(["Removed: See [the docs][docs]."]);
+    expect(added).toEqual(["Added: See [the setup docs][docs] first."]);
+    // Word marks show the words that changed inside the line.
+    expect([...diff.querySelectorAll("ins")].map(mark => mark.textContent?.trim())).toEqual(["setup", "first"]);
+    expect(within(dialog).getByTestId("held-change-legend").textContent).toBe("− In the file+ Held change, if saved");
+    expect(within(dialog).getByTestId("held-change-counts").textContent).toContain("1 line added, 1 line removed");
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("held-change-dialog")).toBeNull();
+    // Reviewing reads and changes nothing.
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("says a held change is too large to show, and retries a failed read in place", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange
+      .mockResolvedValueOnce({ change: { path: "a.md", tooLarge: true } })
+      .mockRejectedValueOnce(new Error("engine busy"))
+      .mockResolvedValueOnce({ change: { path: "a.md", tooLarge: true } });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    const failed = await screen.findByTestId("held-change-failed");
+    expect(failed.textContent).toContain("dohc could not read the held change.");
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    expect((await screen.findByTestId("held-change-too-large")).textContent).toBe("This change is too large to show here.");
+    expect(screen.queryByTestId("held-change-diff")).toBeNull();
+    expect(bridge.readHeldChange).toHaveBeenCalledTimes(3);
+  });
+
+  it("previews a change after its edits finish syncing, through Try again", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange
+      .mockResolvedValueOnce({ change: { path: "a.md", unavailable: "waitingForSync" } })
+      .mockResolvedValueOnce({ change: { path: "a.md", unavailable: "waitingForSync" } })
+      .mockResolvedValue({ change: { path: "a.md", tooLarge: true } });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    const waiting = await screen.findByTestId("held-change-waiting");
+    expect(waiting.textContent).toContain("dohc could not preview this change while edits wait to sync.");
+    expect(screen.queryByTestId("held-change-diff")).toBeNull();
+    expect(screen.queryByTestId("held-change-counts")).toBeNull();
+    await user.click(within(waiting).getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("held-change-too-large");
+    expect(screen.queryByTestId("held-change-waiting")).toBeNull();
+  });
+
+  it("says it can't preview a change whose saved text it can't reproduce", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    bridge.readHeldChange.mockResolvedValue({ change: { path: "a.md", unavailable: "unsupported" } });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await user.click(await screen.findByTestId("lossy-note-show-change"));
+    expect((await screen.findByTestId("held-change-unavailable")).textContent).toBe("dohc can't preview this change.");
+    expect(screen.queryByTestId("held-change-diff")).toBeNull();
+  });
+
+  it("offers Show change only while dohc holds a change", async () => {
+    bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("lossy-note-notice");
+    expect(screen.queryByTestId("lossy-note-show-change")).toBeNull();
   });
 
   it("offers no Edit anyway in a received share, whose session drops the consent", async () => {

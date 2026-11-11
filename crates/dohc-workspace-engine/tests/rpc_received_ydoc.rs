@@ -342,3 +342,41 @@ async fn received_ydoc_guard_keeps_configured_outbox_read() {
     assert_eq!(header["binding"]["workspaceId"], "received");
     assert_eq!(header["pendingEntryCount"], 1);
 }
+
+#[tokio::test]
+async fn received_share_refuses_held_change_reads() {
+    let workspace = ScratchDir::new().unwrap();
+    let received = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_handle = open(&transport, &workspace, false).await;
+    let received_handle = open(&transport, &received, true).await;
+    let params = json!({ "path": "note.md" });
+    let owned = call(
+        &transport,
+        &workspace_handle,
+        2,
+        "ydoc.heldChange",
+        params.clone(),
+    )
+    .await;
+    assert_eq!(owned["change"], Value::Null);
+    let error = call_error(&transport, &received_handle, 3, "ydoc.heldChange", params).await;
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert_eq!(error.message, "received shares hold no saves");
+    call(
+        &transport,
+        &workspace_handle,
+        4,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+    call(
+        &transport,
+        &received_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}

@@ -37,7 +37,7 @@ type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "documentRead" | "documentHeld" | "fileChats"; path: string }
   | { verb: "collectionSetFields"; recordPath: string; fields: Record<string, string>; agent?: string }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
@@ -303,6 +303,13 @@ const DOCUMENT_VERBS = {
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
     parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
+  },
+  held: {
+    capabilityId: "document.held.read",
+    summary: "Show a change dohc held: the file's text and what saving the change would write.",
+    operands: "<path>",
+    notes: ["Prints null when nothing is held for the file."],
+    parse: input => ({ verb: "documentHeld", path: parsePath(input, "document held") }),
   },
   edit: {
     capabilityId: "document.edit",
