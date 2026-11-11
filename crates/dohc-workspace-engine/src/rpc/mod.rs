@@ -12,6 +12,7 @@ pub(super) mod held_documents;
 pub(super) mod history;
 pub(super) mod kept_copies;
 pub(crate) mod live_application;
+pub(super) mod live_changes;
 pub(super) mod markdown_recovery;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;

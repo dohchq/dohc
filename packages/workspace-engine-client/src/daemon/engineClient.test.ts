@@ -180,6 +180,29 @@ describe("private owner delivery transport", () => {
       await transport.ownerYDocStopRetired(request,stopTarget.document);
     } finally {transport.close();}
   });
+  it("records who stopped or resumed live editing, and rejects a reply it does not recognize", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const author = {kind: "person", personId: "person-1"} as const;
+    const begin = {objectId: "doc", path: "a.md", action: "stopped", author, before: "ready"} as const;
+    const {objectId, before: _before, ...pending} = begin;
+    const changes = [{objectId, pending: {...pending, changeId: "c1", atMs: 5}}];
+    const replies: JsonValue[] = [{changeId: "c1", atMs: 5}, null, {finished: true}, {changes}, {changeId: "c1", atMs: 5, author}, {finished: 1}, {changes: [{objectId: "doc", pending: {...changes[0]!.pending, action: "paused"}}]}];
+    const sent: unknown[] = [];
+    peer.onEnvelope = e => {if (e.type === "request") {sent.push([e.method, e.params]); peer.send({type: "response", id: e.id, result: replies.shift() ?? null});}};
+    try {
+      expect(await transport.ownerLiveChangeBegin(request, begin)).toEqual({changeId: "c1", atMs: 5});
+      // A self-reported name the engine cannot store is left out.
+      expect(await transport.ownerLiveChangeBegin(request, {...begin, before: "retired", author: {kind: "agent", agentId: "a", agentName: "x".repeat(65), onBehalfOf: "person-1", depth: 1}})).toBeNull();
+      expect(await transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "applied"})).toBe(true);
+      expect(await transport.ownerLiveChangeList(request, ["doc"])).toEqual(changes);
+      expect(sent).toEqual([["ydoc.liveChange.begin", begin], ["ydoc.liveChange.begin", {...begin, before: "retired", author: {kind: "agent", agentId: "a", onBehalfOf: "person-1", depth: 1}}],
+        ["ydoc.liveChange.finish", {objectId: "doc", changeId: "c1", outcome: "applied"}], ["ydoc.liveChange.list", {objectIds: ["doc"]}]]);
+      await expect(transport.ownerLiveChangeBegin(request, begin)).rejects.toThrow("Invalid live change response.");
+      await expect(transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "unrecorded"})).rejects.toThrow("Invalid live change response.");
+      await expect(transport.ownerLiveChangeList(request, [])).rejects.toThrow("Invalid live change list.");
+    } finally {transport.close();}
+  });
   it.each([null, "active", "sealed", "quarantined", "absent bytes", "extra", "binding extra", "cursor mismatch"])("decodes listed draft %s and retains page policy", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();

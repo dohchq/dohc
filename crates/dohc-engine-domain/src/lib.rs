@@ -30,6 +30,7 @@ pub mod chats;
 pub mod collections;
 pub mod conflicts;
 pub mod error;
+pub mod live_changes;
 pub mod merge;
 pub mod names;
 pub mod normalize;

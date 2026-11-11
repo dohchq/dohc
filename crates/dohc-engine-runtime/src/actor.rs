@@ -43,6 +43,7 @@ pub use link_rewrites::RewriteStop;
 mod held_change;
 mod journal;
 mod live_application;
+mod live_changes;
 mod markdown_recovery;
 pub use held_change::{HeldChangeAction, HeldChangeResult};
 mod materialization;

@@ -389,7 +389,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // The run dohc dispatched that this request proved it is, with the run's
   // secret. The socket sets it per request; without it, the request is no run's.
   run?: CliRunCaller;
-  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  stopSync?(author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   shareLinkAgents?: {
     list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
