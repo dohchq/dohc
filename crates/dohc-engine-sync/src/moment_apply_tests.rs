@@ -9191,3 +9191,6 @@ fn ended_recovery_restore_fence_waits_without_notice_or_fingerprint() {
 
 #[path = "moment_apply_tests/owner_retirement.rs"]
 mod owner_retirement;
+
+#[path = "moment_apply_tests/drained_admission.rs"]
+mod drained_admission;
