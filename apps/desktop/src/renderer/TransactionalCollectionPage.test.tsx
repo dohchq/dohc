@@ -188,7 +188,9 @@ describe("transactional Collection page", () => {
     expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
     expect(result.onError.mock.calls.at(-1)![2]).toBeNull();
     expect(screen.queryByText("Change not confirmed")).toBeNull();
-    expect(screen.getAllByRole("button", { name: "New record" })[0]!.hasAttribute("disabled")).toBe(false);
+    // The edit stays open with what was typed, and without the old revision's error.
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(screen.queryByText("dohc could not confirm this change.")).toBeNull();
     await act(async () => { retry?.(); pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } }); });
     expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
     expect(result.onNotice).not.toHaveBeenCalled();
@@ -417,7 +419,7 @@ describe("transactional Collection page", () => {
     render(<TransactionalCollectionPage {...first.props} />);
     expect((await screen.findByLabelText<HTMLInputElement>("Name")).value).toBe("Alicia");
   });
-  it("opens no edit again that was cancelled, has no changes, or belongs to rules that changed", async () => {
+  it("opens no edit again that was cancelled or has no changes, and flags a kept value whose field changed meanwhile", async () => {
     const reopen = async (props: React.ComponentProps<typeof TransactionalCollectionPage>, typed: string | null, cancel = false) => {
       const view = render(<TransactionalCollectionPage {...props} />);
       fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
@@ -428,10 +430,17 @@ describe("transactional Collection page", () => {
     const { props } = setup(); cleanup();
     await reopen(props, null);
     await reopen(props, "Alicia", true);
-    await reopen(props, "Alicia");
-    render(<TransactionalCollectionPage {...props} dataset={{ ...dataset(), revision: 2, revisionSha256: "b".repeat(64) }} />);
+    const unchanged = render(<TransactionalCollectionPage {...props} />);
     await screen.findByText("Alice");
     expect(screen.queryByLabelText("Name")).toBeNull();
+    unchanged.unmount();
+    await reopen(props, "Alicia");
+    const retyped = dataset(); retyped.revision = 2; retyped.revisionSha256 = "b".repeat(64);
+    retyped.tables[0]!.fields.find(field => field.fieldId === name)!.type = "number";
+    render(<TransactionalCollectionPage {...props} dataset={retyped} />);
+    const kept = await screen.findByLabelText<HTMLInputElement>("Name");
+    expect(kept.readOnly).toBe(true); expect(kept.value).toBe("Alicia");
+    expect(screen.getByText("This field changed, so this value can't be saved. Copy it if you need it, then clear it.")).toBeTruthy();
   });
 
   it("cancels a field open in details on Escape from Done, and the next Escape closes details", async () => {
@@ -950,4 +959,235 @@ it("shows the ⚡ button beside New record, and a ⚡ that names the automations
   fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
   const details = screen.getByRole("dialog", { name: "Record details" });
   expect(within(details).getAllByRole("img", { name: "Automation" })).toHaveLength(2);
+});
+
+describe("when the Collection's fields change", () => {
+  /** The next revision of the fixture, changed by `change`. */
+  const revised = (revision: number, change: (next: TransactionalDatasetDescription) => void = () => undefined) => {
+    const next = dataset(); next.revision = revision; next.revisionSha256 = String(revision % 10).repeat(64); change(next); return next;
+  };
+  const field = (description: TransactionalDatasetDescription, fieldId: string) => description.tables[0]!.fields.find(entry => entry.fieldId === fieldId)!;
+  const operation = (description: TransactionalDatasetDescription, operationId: string) => description.operations.find(entry => entry.operationId === operationId)!;
+  const retype = (fieldId: string, type: "text" | "number") => (next: TransactionalDatasetDescription) => { field(next, fieldId).type = type; };
+  const reads = (invoke: { mock: { calls: Array<[TransactionalInvoke, ...unknown[]]> } }) => invoke.mock.calls.map(([request]) => request).filter(request => request.operationId === read);
+  const CHANGED = "This field changed, so this value can't be saved. Copy it if you need it, then clear it.";
+
+  it("keeps the table, its search and its page, and reads the same records again in place", async () => {
+    const current = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
+      request.revision === 2 ? current.promise : Promise.resolve({ result: page("Alice", true) }));
+    const result = setup({ invoke }); await screen.findByText("Alice");
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Ali" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled")).toBe(false));
+    const table = screen.getByRole("table"), box = screen.getByRole<HTMLInputElement>("searchbox");
+    fireEvent.change(box, { target: { value: "Alice B" } }); box.focus();
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(amount, "text"))} />);
+    // The rows stay without the retyped field's old number, and nothing says the page is loading.
+    expect(screen.getByRole("table")).toBe(table);
+    expect(within(table).getByText("Alice")).toBeTruthy();
+    expect(within(table).queryByText("5")).toBeNull();
+    expect(screen.queryByText("Loading records…")).toBeNull();
+    expect(document.activeElement).toBe(box); expect(box.value).toBe("Alice B");
+    expect(reads(invoke).at(-1)).toMatchObject({ revision: 2, input: { limit: 50, search: "Ali", after: { id: 1, value: "Alice" } } });
+    await act(async () => current.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
+    expect(within(table).getByText("five")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled")).toBe(false);
+    expect(result.onError).not.toHaveBeenCalled();
+  });
+
+  it("goes back to the first page when the field it is sorted by changes", async () => {
+    const invoke = vi.fn(async (_request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: page("Alice", true) }));
+    const result = setup({ invoke }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Amount" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled")).toBe(false));
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(amount, "text"))} />);
+    await waitFor(() => expect(reads(invoke).at(-1)!.revision).toBe(2));
+    expect(reads(invoke).at(-1)!.input).toEqual({ limit: 50, sort: { fieldId: amount, direction: "asc" } });
+    expect(screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("keeps an open record open, without the values of fields that changed, until the read fills them in", async () => {
+    const current = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.revision === 2 ? current.promise : Promise.resolve({ result: page() }));
+    const result = setup({ invoke }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(amount, "text"))} />);
+    const details = within(screen.getByRole("dialog", { name: "Record details" }));
+    expect(details.getByText("Alice")).toBeTruthy();
+    expect(details.queryByText("5")).toBeNull();
+    await act(async () => current.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
+    expect(details.getByText("five")).toBeTruthy();
+  });
+
+  it("keeps a new record's typing, and asks to clear a value its field can no longer take before it saves the rest", async () => {
+    const team = id(8);
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "7" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => {
+      retype(amount, "text")(next); field(next, name).name = "Full name";
+      next.tables[0]!.fields.push({ fieldId: team, name: "Team", type: "text", required: false, unique: false, default: "Blue" });
+      operation(next, read).fieldIds.push(team); operation(next, create).fieldIds.push(team);
+    })} />);
+    // A renamed field keeps its value. A field the rules add takes its default.
+    expect(screen.getByLabelText<HTMLInputElement>("Full name").value).toBe("Bob");
+    expect(screen.getByLabelText<HTMLInputElement>("Team").value).toBe("Blue");
+    // The retyped field shows what was typed, read-only, with a way to copy it and one to clear it.
+    const typed = screen.getByLabelText<HTMLInputElement>("Amount");
+    expect(typed.readOnly).toBe(true); expect(typed.value).toBe("7");
+    expect(screen.getByText(CHANGED)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy value" })).toBeTruthy();
+    // Saving writes nothing under the new type: it points at the field instead.
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(false);
+    expect(document.activeElement).toBe(typed);
+    fireEvent.click(screen.getByRole("button", { name: "Clear value" }));
+    const cleared = screen.getByLabelText<HTMLInputElement>("Amount");
+    expect(cleared.readOnly).toBe(false); expect(cleared.value).toBe("");
+    expect(document.activeElement).toBe(cleared);
+    expect(screen.queryByText(CHANGED)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
+    expect(result.invoke.mock.calls.find(([request]) => request.operationId === create)![0]).toMatchObject({
+      revision: 2, input: { values: { [name]: "Bob", [amount]: null, [status]: "New", [team]: "Blue" } },
+    });
+  });
+
+  it("flags a typed value only while its field can't take it, through changes in a row", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "Reviewed" } });
+    const show = (description: TransactionalDatasetDescription) => result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} />);
+    const flagged = () => screen.queryAllByRole("textbox").filter(input => (input as HTMLInputElement).readOnly).map(input => input.getAttribute("aria-label"));
+    // New options that still hold the value, and a field that stops being required, flag nothing.
+    show(revised(2, next => { field(next, status).options = ["Reviewed", "Done"]; field(next, name).required = false; }));
+    expect(flagged()).toEqual([]);
+    // Options without the value, and a field that changes type, flag it.
+    show(revised(3, next => { field(next, status).options = ["New", "Done"]; retype(name, "number")(next); }));
+    expect(flagged()).toEqual(["Name", "Status"]);
+    // Once the fields take the values again, they are what was typed, with nothing flagged.
+    show(revised(4));
+    expect(flagged()).toEqual([]);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(screen.getByLabelText<HTMLSelectElement>("Status").value).toBe("Reviewed");
+  });
+
+  it("keeps a cell being edited open, and saves it against the new rules once its old value is cleared", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read
+      ? { result: request.revision === 2 ? { rows: [{ id: 1, version: 2, values: { [name]: 42, [amount]: 5, [status]: "New" } }], nextCursor: null } : page() }
+      : { result: { id: 1, version: 3 } });
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(name, "number"))} />);
+    const cell = within(screen.getByRole("form", { name: "Edit Name" }));
+    expect(cell.getByLabelText<HTMLInputElement>("Name").readOnly).toBe(true);
+    expect(cell.getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    await waitFor(() => expect(reads(invoke).at(-1)!.revision).toBe(2));
+    fireEvent.click(cell.getByRole("button", { name: "Clear value" }));
+    // Cleared, the cell shows the record's value under the new type, and its input takes focus.
+    await waitFor(() => expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("42"));
+    expect(document.activeElement).toBe(screen.getByLabelText("Name"));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "43" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    expect(invoke.mock.calls.find(([request]) => request.operationId === edit)![0]).toMatchObject({ revision: 2, input: { id: 1, expectedVersion: 2, values: { [name]: 43 } } });
+  });
+
+  it("keeps a form whose change the rules no longer allow, and says so beside it", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => { next.operations = next.operations.filter(entry => entry.operationId !== create); })} />);
+    const form = within(screen.getByRole("form", { name: "New record" }));
+    expect(form.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(form.getByText("The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.")).toBeTruthy();
+    expect(form.getByRole("button", { name: "Create record" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(form.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form", { name: "New record" })).toBeNull();
+  });
+
+  it("keeps Undo last edit while its fields still take its values, and drops it once one can't", async () => {
+    const result = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Undo last edit" });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => { field(next, amount).name = "Total"; field(next, name).required = false; })} />);
+    await waitFor(() => expect(reads(result.invoke).at(-1)!.revision).toBe(2));
+    expect(screen.getByRole("button", { name: "Undo last edit" })).toBeTruthy();
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(3, retype(name, "number"))} />);
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
+  });
+
+  it("shows the refusal when the view sorts or filters by a field that is gone", async () => {
+    const activeView = { viewId: id(30), name: "By amount", kind: "table" as const, search: "", filters: [{ fieldId: amount, value: 5 }], sort: { fieldId: amount, direction: "asc" as const } };
+    const refusal = Error("This view names a field that is gone.");
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => { if (request.revision === 2) throw refusal; return { result: page() }; });
+    const result = setup({ invoke, activeView }); await screen.findByText("Alice");
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => {
+      next.tables[0]!.fields = next.tables[0]!.fields.filter(entry => entry.fieldId !== amount);
+      for (const entry of next.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== amount);
+    })} />);
+    await waitFor(() => expect(result.onError).toHaveBeenCalledWith("dohc could not load People.", refusal, expect.any(Function), `collection-load:${id(1)}:${id(2)}`));
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.queryByText("Loading records…")).toBeNull();
+  });
+
+  it("reads once for a burst of changes, and stops the reads each newer change makes stale", async () => {
+    const pending = new Map<number, ReturnType<typeof deferred<{ result: AppBackendJson }>>>(), signals = new Map<number, AbortSignal>();
+    const invoke = vi.fn((request: TransactionalInvoke, signal: AbortSignal): Promise<{ result: AppBackendJson }> => {
+      if (request.revision === 1) return Promise.resolve({ result: page() });
+      const reply = deferred<{ result: AppBackendJson }>(); pending.set(request.revision, reply); signals.set(request.revision, signal); return reply.promise;
+    });
+    const result = setup({ invoke }); await screen.findByText("Alice");
+    for (const revision of [2, 3, 4]) result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(revision)} />);
+    expect([2, 3, 4].map(revision => signals.get(revision)?.aborted)).toEqual([true, true, false]);
+    await act(async () => { pending.get(4)!.resolve({ result: page("Current") }); pending.get(2)!.resolve({ result: page("Stale") }); });
+    expect(screen.getByText("Current")).toBeTruthy(); expect(screen.queryByText("Stale")).toBeNull();
+  });
+
+  it("keeps everything while the Collection goes offline and comes back", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Undo last edit" });
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Ali" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(reads(result.invoke).at(-1)!.input).toMatchObject({ search: "Ali" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open record 1" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const table = screen.getByRole("table");
+    result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />);
+    expect(screen.getByRole("table")).toBe(table);
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBeTruthy();
+    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("Ali");
+    await waitFor(() => expect(reads(result.invoke).at(-1)!.input).toMatchObject({ search: "Ali" }));
+    result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: false, savedAtMs: 2 }} />);
+    expect(screen.getByRole("table")).toBe(table);
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Undo last edit" })).toBeTruthy();
+  });
+
+  it("keeps an open form's typing while the Collection is offline, and saves it once it is back", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(screen.getByRole("button", { name: "Create record" }).hasAttribute("disabled")).toBe(true);
+    result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: false, savedAtMs: 2 }} />);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create record" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
+  });
 });

@@ -305,3 +305,20 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
   expect(details().textContent).not.toContain(later);
   expect(details().textContent).not.toContain("no longer");
 });
+it("reads a board again in place when fields it does not group by change, and opens it afresh when its group field changes",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:1,version:1,values:{name:"First task",status:"Todo"}}]:[]}};
+  });
+  const result=setup(invoke);
+  const card=await screen.findByText("First task");
+  const reads=()=>invoke.mock.calls.filter(([request])=>request.revision===2).length;
+  const added={...dataset,revision:2,revisionSha256:"b".repeat(64),tables:[{...dataset.tables[0]!,fields:[...dataset.tables[0]!.fields,{fieldId:"notes",name:"Notes",type:"text" as const,required:false,unique:false}]}]};
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={added}/>);
+  await waitFor(()=>expect(reads()).toBeGreaterThan(0));
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  await waitFor(()=>expect(screen.getByText("First task")).toBe(card));
+  const regrouped={...added,revision:3,revisionSha256:"c".repeat(64),tables:[{...added.tables[0]!,fields:added.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field)}]};
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
+  await waitFor(()=>expect(screen.getByText("First task")).not.toBe(card));
+});
