@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { VERSIONED_METHOD } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -242,10 +243,11 @@ function fixture(options: {
     reopen: (store: ReturnType<typeof createAutomationRunStore>) => {const old = automations; automations = automationsFor(store); return old;} };
 }
 
-async function capturedFiles(paths: string[]) {
+async function capturedFiles(paths: string[], edits = ["shared edit"]) {
   const rootPath = await createTestScratch("dohc-stop-restore-policy-");
   const attachmentId = Symbol("stop-restore-policy");
-  const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback: new VersionedLoopbackEngine() });
+  const loopback = new VersionedLoopbackEngine();
+  const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback });
   const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath, attachmentId }, sessions).store;
   await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
   const files = [];
@@ -254,8 +256,10 @@ async function capturedFiles(paths: string[]) {
     await writeFile(join(rootPath, path), "owner original");
     const target = { workspaceId: WORKSPACE_ID, versionId: "main", path, metadata: { origin: "sync" as const } };
     await store.writeTextFile({ ...target, text: "owner original" });
-    const changed = await store.writeTextFile({ ...target, text: "shared edit", publish: true });
-    files.push({ path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false });
+    for (const text of edits) {
+      const changed = await store.writeTextFile({ ...target, text, publish: true });
+      files.push({ path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false });
+    }
   }
   const engineCapture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath, attachmentId, rustEngineSessions: sessions, store });
   const f = fixture({ engineCapture, rootPath, ledger: {
@@ -265,7 +269,7 @@ async function capturedFiles(paths: string[]) {
     await mkdir(join(rootPath, ".dohc"), { recursive: true });
     await writeFile(join(rootPath, ".dohc/files.toml"), policy);
   };
-  return { ...f, rootPath, store, engineCapture, writePolicy, files };
+  return { ...f, rootPath, store, engineCapture, writePolicy, files, loopback };
 }
 
 describe("stop and restore in main", () => {
@@ -1364,6 +1368,36 @@ ${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
       restored: [],
       review: [{ path: SCHEMA, reason: "changed-since" }],
     });
+  });
+
+  it("restores a note whose server settlement of their earlier edit arrived after their later one", async () => {
+    const f = await capturedFiles(["notes/a.md"], ["shared edit", "shared edit 2"]);
+    const [first] = f.files;
+    // The settlement of their first edit is recorded last, with that edit's time and text.
+    const settlement = "late-settlement";
+    const send = f.loopback.sendRequest.bind(f.loopback);
+    vi.spyOn(f.loopback, "sendRequest").mockImplementation(async request => {
+      const params = request.params as Record<string, unknown> | undefined;
+      if (request.method === VERSIONED_METHOD.momentsGet && params?.momentId === settlement) {
+        const response = await send({ ...request, params: { ...params, momentId: first!.momentId } });
+        const moment = response.result as Record<string, unknown>;
+        return { ...response, result: { ...moment, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true } } as typeof response;
+      }
+      const response = await send(request);
+      if (request.method !== VERSIONED_METHOD.momentsList || params?.objectId !== first!.objectId || params?.beforeMomentOrder !== undefined) return response;
+      type Page = { moments: Array<Record<string, unknown>> };
+      const page = response.result as Page;
+      const all = (await send({ ...request, params: { ...params, limit: 100 } })).result as Page;
+      const row = all.moments.find(moment => moment.momentId === first!.momentId)!;
+      const moments = [{ ...row, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true }, ...page.moments];
+      return { ...response, result: { ...page, moments: moments.slice(0, page.moments.length) } } as typeof response;
+    });
+    try {
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [{ path: "notes/a.md" }], review: [], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
   });
 
   it("keeps local content and unsettled drafts for review with the engine's reason", async () => {

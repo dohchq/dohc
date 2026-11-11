@@ -7719,8 +7719,21 @@ export function createWorkspaceEngineCapture(
             }
             const head = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 1});
             if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId) throw new RestoreHeadChangedError(path);
-            expectedAbsent = expected.operation === "delete";
-            if (!expectedAbsent) expectedSha256 = expected.payload.after.sha256 ?? createHash("sha256").update(expected.payload.after.text).digest("hex");
+            // A record-only settlement changes no file and can arrive after later
+            // edits, so the file holds the newest moment that changed it.
+            let changed = expected;
+            for (let beforeMomentOrder: number | null | undefined; expected.syncRecordOnly && beforeMomentOrder !== null;) {
+              const page = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 100,
+                ...(beforeMomentOrder !== undefined ? {beforeMomentOrder} : {})});
+              const newest = page.moments.find(row => !row.syncRecordOnly);
+              if (newest) {
+                changed = await engine.getMoment({ workspaceId, momentId: newest.id }) ?? expected;
+                break;
+              }
+              beforeMomentOrder = page.nextBeforeMomentOrder;
+            }
+            expectedAbsent = changed.operation === "delete";
+            if (!expectedAbsent) expectedSha256 = changed.payload.after.sha256 ?? createHash("sha256").update(changed.payload.after.text).digest("hex");
             const live = liveYDocSessions.get(path);
             if (live) {
               // Keep the canonical session and its queued edits intact. Closing it
