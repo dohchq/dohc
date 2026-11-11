@@ -186,6 +186,7 @@ interface CaptureOptions {
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
+  onSecretKeyUnavailable?: WorkspaceEngineCaptureOptions["onSecretKeyUnavailable"];
   onOutsideWriteCopies?: WorkspaceEngineCaptureOptions["onOutsideWriteCopies"];
   onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
   onKeptFiles?: WorkspaceEngineCaptureOptions["onKeptFiles"];
@@ -2943,7 +2944,7 @@ describe("workspaceEngineCapture batch capture", () => {
       get(target, property) {
         if (property === "watcherStatus") return async () => ({ running: true, degraded: false, terminal: false,
           deferredWrites: [], keptFiles: [["native.md", "saved-native.md"]], retainedCopies: { count: 2, bytes: 20 },
-          recoveryUnavailable: true, heldFiles: [] });
+          recoveryUnavailable: true, secretKeyUnavailable: "key-missing", heldFiles: [] });
         if (property === "listKeptCopies") return async () => native;
         if (property === "listPendingCollectionAdoptions") return adoptions;
         if (property === "flushCapture") return async () => undefined;
@@ -2951,16 +2952,17 @@ describe("workspaceEngineCapture batch capture", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const kept = vi.fn(), retained = vi.fn(), recovery = vi.fn(), held = vi.fn(), outside = vi.fn();
+    const kept = vi.fn(), retained = vi.fn(), recovery = vi.fn(), secretKey = vi.fn(), held = vi.fn(), outside = vi.fn();
     const outcomes = vi.fn(), errors = vi.fn();
     const engine = capture(root, { store, rustEngineSessions: sessions, onKeptFiles: kept, onRetainedCopies: retained,
-      onRecoveryUnavailable: recovery, onHeldFiles: held, onOutsideWriteCopies: outside, onCaptureOutcome: outcomes, onError: errors });
+      onRecoveryUnavailable: recovery, onSecretKeyUnavailable: secretKey, onHeldFiles: held, onOutsideWriteCopies: outside, onCaptureOutcome: outcomes, onError: errors });
     try {
       engine.start();
       await engine.flush();
       expect(kept).toHaveBeenCalledWith([["native.md", "saved-native.md"]]);
       expect(retained).toHaveBeenCalledWith({ count: 2, bytes: 20 });
       expect(recovery).toHaveBeenCalledWith(true);
+      expect(secretKey).toHaveBeenCalledWith("key-missing");
       expect(held).toHaveBeenCalledWith([]);
       expect(adoptions).toHaveBeenCalled();
       expect(outcomes).toHaveBeenLastCalledWith(null, null);

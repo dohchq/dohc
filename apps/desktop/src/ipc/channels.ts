@@ -302,6 +302,7 @@ export const CHANNELS = {
   getSyncStatus: "desktop:get-sync-status",
   retryOwnerLiveDelivery: "desktop:retry-owner-live-delivery",
   retryFileRecovery: "desktop:retry-file-recovery",
+  retrySecretKey: "desktop:retry-secret-key",
   retryCloudSync: "desktop:retry-cloud-sync",
   rebuildEngineStore: "desktop:rebuild-engine-store",
   startAgentRun: "desktop:start-agent-run",

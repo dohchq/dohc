@@ -203,6 +203,7 @@
   "retryFileRecovery",
   "retryOwnerLiveDelivery",
   "retryOwnerLiveShare",
+  "retrySecretKey",
   "retryShareHandoff",
   "retuneRelayShareLink",
   "revealAutomationHolds",

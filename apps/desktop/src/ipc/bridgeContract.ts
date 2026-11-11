@@ -1468,6 +1468,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  // Why protected files such as `.env` wait on the workspace secret key, as
+  // the engine's code, such as `key-missing`. Omitted while the key works.
+  secretKeyUnavailable: z.string().min(1).optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
   // A protected file's change a sync replaced, kept on this computer, as
@@ -8126,6 +8129,7 @@ export interface DohcDesktopBridge
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
+  retrySecretKey(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
