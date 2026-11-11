@@ -169,7 +169,9 @@ function recordBinding(f: ReturnType<typeof registered>, selectorPaths: readonly
 it('charges a recorded binding\'s wide selectors and provenance on a recipient\'s edit before committing within workspace quota', () => {
   const f = registered();
   try {
-    const paths = ['docs', ...Array.from({ length: 99 }, (_, index) => `other/${index}/${'x'.repeat(200)}`)];
+    // In a binding's canonical order, by UTF-8 bytes.
+    const paths = ['docs', ...Array.from({ length: 99 }, (_, index) => `other/${index}/${'x'.repeat(200)}`)]
+      .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
     recordBinding(f, paths);
     const input = f.capture(f.update(), 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' }), initial = Number(f.journalRows().usage);
     expect(input.updateBytes.byteLength).toBeLessThan(100);

@@ -666,7 +666,9 @@ it.each(['generation','host'] as const)('revalidates a private pending activatio
 it('transfers owner metadata quota for a recorded binding of 100 maximum-length selectors and detects a changed binding',async()=>{
   const f=fixture();try{
     await f.prepare()
+    // In a binding's canonical order, by UTF-8 bytes, which its pending activation compares exactly.
     const selectors=['docs',...Array.from({length:99},(_,index)=>`${index}`.padEnd(1024,'x'))]
+      .sort((left,right)=>Buffer.compare(Buffer.from(left),Buffer.from(right)))
     const recorded=JSON.parse(String(f.raw.prepare('SELECT binding_json FROM sync_relay_service_activations').get()!.binding_json))
     f.raw.prepare('UPDATE sync_relay_service_activations SET binding_json=?').run(JSON.stringify({...recorded,selectorPaths:selectors}))
     const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))

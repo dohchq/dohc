@@ -281,12 +281,24 @@ it.each(["grant", "coverage", "restore", "host"])("invalidates the capture when 
   expect(f.peer.closed).toBe(false); expect(f.changes.listenerCount()).toBe(0);
 });
 
-it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("keeps a recipient capture when its share is %s and still covers the document", async (_case, paths) => {
+// A share edit that still covers the document changes what the recipient is
+// shown, so its session ends. A ticket minted before the edit still redeems,
+// and the session it opens shows the share as it is now.
+it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("ends a named recipient's session when its share is %s, and a new session shows the new view", async (_case, paths) => {
   const f = await setup();
+  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => report } });
+  const minted = await tickets.mint({ objectId: binding.objectId }, scope);
   f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths, versionId: null }), scope.shareId);
   f.changes.notify(); await Promise.resolve();
-  expect(f.capture.invalidated.aborted).toBe(false);
-  f.capture.assertCurrent();
+  expect(f.capture.invalidated.aborted).toBe(true);
+  expect(() => f.capture.assertCurrent()).toThrow();
+  const ticket = (await tickets.redeem(minted!.token, scope))!;
+  expect(ticket.binding).toEqual(binding);
+  const reconnected = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
+  cleanup.push(async () => { reconnected.close(); });
+  const sync = await reconnected.openSync(Uint8Array.of(0), new AbortController().signal);
+  expect(sync.binding).toEqual({ ...binding, workspaceId: `named:${scope.grantId}`, selectorPaths: paths });
+  sync.close(); reconnected.assertCurrent();
 });
 
 // Only the relay attributes work to a personal agent. The host refuses before it reads who records.

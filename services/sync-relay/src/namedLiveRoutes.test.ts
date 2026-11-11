@@ -1044,6 +1044,29 @@ it.each([
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
 });
 
+// A share narrowed from a folder to the file still covers it, but changes what
+// the recipient is shown. The open connection closes, and a reconnect shows
+// the share as it is now.
+it.each([
+  ["named", false, "docs/a.md", ["docs/a.md"]],
+  ["link", true, "a.md", ["a.md"]],
+] as const)("closes a %s connection when its folder share narrows to the file, and a reconnect shows the new view", async (_kind, link, currentPath, selectorPaths) => {
+  const f = await fixture(limits, link);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
+  const first = f.connect((await f.mint()).token); expect(await first.status).toBe(101);
+  const opened = await startProvider(first);
+  await opened.until(() => opened.provider.state().status === "live");
+  expect(opened.provider.state().binding).toMatchObject({currentPath: "docs/a.md", selectorPaths: ["docs"]});
+  const closed = once(first.ws, "close");
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}));
+  f.changes.notify(); await closed;
+  expect(f.native.invalidated.aborted).toBe(false);
+  const second = f.connect((await f.mint()).token); expect(await second.status).toBe(101);
+  const reopened = await startProvider(second);
+  await reopened.until(() => reopened.provider.state().status === "live");
+  expect(reopened.provider.state().binding).toMatchObject({currentPath, selectorPaths, objectId: binding.objectId});
+});
+
 it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s live connection", async kind => {
   const f = await fixture(limits, kind === "link", undefined, kind === "owner", kind === "desktop");
   const minted = kind === "owner" ? {token: ""} : await f.mint();
@@ -1500,7 +1523,8 @@ it.each((["direct", "claimed-email", "link-dependent"] as const).flatMap(kind =>
     expect(await socket.status).toBe(101);
     const {provider, until} = await startProvider(socket);
     await until(() => provider.state().status === "live");
-    expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`});
+    // A named recipient sees its own share's selector, not the lineage's recorded binding.
+    expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`, selectorPaths: ["docs"]});
     expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
     expect(f.native.binding.workspaceId).toBe(scope.workspaceId);
 });

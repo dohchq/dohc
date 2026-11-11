@@ -309,12 +309,12 @@ async function withBindingFixture(run: (storage: SyncRelayStorage, path: string)
   } finally { storage.close(); }
 }
 
-it("reads the owner's baseline binding and exact named authority, preserving the stored fence across reopen", async () => {
+it("reads the baseline binding for owner and named alike, with exact named authority, preserving the stored fence across reopen", async () => {
   await withBindingFixture((storage, path) => {
     const before = raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all());
     for (const actor of [ownerActor, namedActor]) {
-      // The owner holds the document without a share, so its binding is the baseline's own path.
-      const selectorPaths = actor.kind === "owner" ? ["docs/a.md"] : ["docs"];
+      // Nothing is recorded, so every editor gets the baseline's own path. The named share decides only admission.
+      const selectorPaths = ["docs/a.md"];
       const request = { document: { ...readDocument }, actor: { ...actor } };
       const result = storage.resolveCurrentLiveDocumentBinding(request);
       expect(result).toEqual({ kind: "current", host: readHost,
@@ -399,6 +399,20 @@ it.each([
 ])("refuses a named actor on selector damage or drift, which the owner never reads: %s", async selector => {
   await withBindingFixture((storage, path) => {
     raw(path, db => db.prepare("UPDATE sync_relay_shares SET selector_json = ?").run(selector));
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason: "stale-selector" });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
+      .toMatchObject({ kind: "current", binding: { selectorPaths: ["docs/a.md"] } });
+  });
+});
+
+// A share path may run to 1024 UTF-16 code units; a binding holds 1024 UTF-8
+// bytes. Admission refuses a share whose view can't form a binding, before any
+// ticket is minted, rather than at capture.
+it("refuses a named actor whose share selects a path no binding can hold", async () => {
+  await withBindingFixture((storage, path) => {
+    const wide = Array.from({ length: 3 }, () => "日".repeat(120)).join("/");
+    expect(Buffer.byteLength(wide)).toBeGreaterThan(1024);
+    raw(path, db => db.prepare("UPDATE sync_relay_shares SET selector_json = ?").run(JSON.stringify({ paths: ["docs", wide], versionId: null })));
     expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason: "stale-selector" });
     expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
       .toMatchObject({ kind: "current", binding: { selectorPaths: ["docs/a.md"] } });
