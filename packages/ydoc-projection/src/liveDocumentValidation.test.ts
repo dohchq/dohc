@@ -412,7 +412,8 @@ describe('public Markdown schema', () => {
   })
   it('rejects absent version and unobservable CRLF flags', () => {
     refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
-    refused(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
+    // A nonempty note shows the flag in its final newline; an empty one cannot.
+    refused(encode('', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
   })
   it('refuses frontmatter text longer than a live document', () => {
     refused(encode('---\ntitle: A\n---\n\nText', doc => {
@@ -423,7 +424,7 @@ describe('public Markdown schema', () => {
     const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
       setFrontmatterValue(doc, 'title', 'B')
     }))
-    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText')
+    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText\n')
   })
   it.each([undefined, new Uint8Array([1]), new Y.Text('discarded'), new Y.Doc()])('rejects nonpublic frontmatter values %#', value => {
     refused(encode('Text', doc => doc.getMap('frontmatter').set('value', value)))
@@ -452,12 +453,13 @@ describe('public Markdown schema', () => {
     refused(encode('Text', doc => (doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'hidden')))
     refused(encode('Text', doc => ((doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText).format(0, 1, { unknown: {} })), 'projection-mutated')
   })
-  it('accepts full 2 MiB as one text run, and refuses one UTF-8 byte over', () => {
+  it('accepts a full 2 MiB file as one text run, and refuses one UTF-8 byte over', () => {
+    // The limit counts the projected file, final newline included.
     const limit = 2 * 1024 * 1024
-    expect(accepted(encode('x'.repeat(limit))).projectedMarkdownByteLength).toBe(limit)
-    refused(encode('x'.repeat(limit + 1)), 'capacity-refused')
-    expect(accepted(encode('é'.repeat(limit / 2))).projectedMarkdownByteLength).toBe(limit)
-    refused(encode(`${'é'.repeat(limit / 2)}x`), 'capacity-refused')
+    expect(accepted(encode('x'.repeat(limit - 1))).projectedMarkdownByteLength).toBe(limit)
+    refused(encode('x'.repeat(limit)), 'capacity-refused')
+    expect(accepted(encode(`${'é'.repeat(limit / 2 - 1)}x`)).projectedMarkdownByteLength).toBe(limit)
+    refused(encode('é'.repeat(limit / 2)), 'capacity-refused')
   }, 60_000)
   it('accepts signed int64 shared values and escaped sentinel keys', () => {
     for (const markdown of [
@@ -691,7 +693,7 @@ describe('private journal evidence and ownership', () => {
       const continued = journal({ ...input(checkpoint), suffix: [], candidate })
       expect(continued.kind).toBe('accepted')
       if (continued.kind !== 'accepted') return
-      expect(accepted(continued.evidence.stateUpdate).projectedMarkdown).toBe('Continued')
+      expect(accepted(continued.evidence.stateUpdate).projectedMarkdown).toBe('Continued\n')
       const withDeletedPrefix = journal({ ...call, suffix: [call.candidate], candidate })
       expect(withDeletedPrefix.kind).toBe('accepted')
       if (withDeletedPrefix.kind === 'accepted') expect(withDeletedPrefix.evidence.stateUpdate).toEqual(continued.evidence.stateUpdate)
@@ -1005,7 +1007,7 @@ it('refuses an update that binds a source the document does not import as, and d
     meta.set('dohcMarkdownSourceProjectionSha256', digest(projection.yDocToMarkdown(doc)))
   }
   expect(journal(journalFixture([forge]))).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
-  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text')
+  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text\n')
 })
 
 it('never projects a preserved source that holds text the document lacks', () => {

@@ -2,14 +2,14 @@
  "seed": 1013,
  "contentKind": "richdoc",
  "updates": [
-  "AQHqyIvHAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTMA",
-  "AQHqyIvHAwEoAQtmcm9udG1hdHRlcgVjb3VudAF9AgA=",
-  "AQXqyIvHAwIHAQRib2R5AwlwYXJhZ3JhcGgHAOrIi8cDAgYGAOrIi8cDAwRib2xkBHRydWWE6siLxwMEEGxpbmUKY29udFrDvHJpY2iG6siLxwMTBGJvbGQEbnVsbAA=",
-  "AQPqyIvHAxWH6siLxwMCAwlwYXJhZ3JhcGgHAOrIi8cDFQYEAOrIi8cDFgvwn5iA8J+OiWHMgQA=",
-  "AQHqyIvHAx3E6siLxwME6siLxwMFAVgA"
+  "AQHS9dUaACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAxMwA=",
+  "AQHS9dUaASgBC2Zyb250bWF0dGVyBWNvdW50AX0CAA==",
+  "AQXS9dUaAgcBBGJvZHkDCXBhcmFncmFwaAcA0vXVGgIGBgDS9dUaAwRib2xkBHRydWWE0vXVGgQQbGluZQpjb250WsO8cmljaIbS9dUaEwRib2xkBG51bGwA",
+  "AQPS9dUaFYfS9dUaAgMJcGFyYWdyYXBoBwDS9dUaFQYEANL11RoWC/CfmIDwn46JYcyBAA==",
+  "AQHS9dUaHcTS9dUaBNL11RoFAVgA"
  ],
- "mergedUpdateB64": "AQvqyIvHAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTMoAQtmcm9udG1hdHRlcgVjb3VudAF9AgcBBGJvZHkDCXBhcmFncmFwaAcA6siLxwMCBgYA6siLxwMDBGJvbGQEdHJ1ZYTqyIvHAwQQbGluZQpjb250WsO8cmljaIbqyIvHAxMEYm9sZARudWxsh+rIi8cDAgMJcGFyYWdyYXBoBwDqyIvHAxUGBADqyIvHAxYL8J+YgPCfjolhzIHE6siLxwME6siLxwMFAVgA",
- "stateVectorB64": "AerIi8cDHg==",
+ "mergedUpdateB64": "AQvS9dUaACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAxMygBC2Zyb250bWF0dGVyBWNvdW50AX0CBwEEYm9keQMJcGFyYWdyYXBoBwDS9dUaAgYGANL11RoDBGJvbGQEdHJ1ZYTS9dUaBBBsaW5lCmNvbnRaw7xyaWNohtL11RoTBGJvbGQEbnVsbIfS9dUaAgMJcGFyYWdyYXBoBwDS9dUaFQYEANL11RoWC/CfmIDwn46JYcyBxNL11RoE0vXVGgUBWAA=",
+ "stateVectorB64": "AdL11Roe",
  "expected": {
   "frontmatter": {
    "alpha": "value-1013",
@@ -35,6 +35,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1013\ncount: 2\n---\n\n**Xline\ncontZürich**\n\n😀🎉á"
+  "markdown": "---\nalpha: value-1013\ncount: 2\n---\n\n**Xline\ncontZürich**\n\n😀🎉á\n"
  }
 }

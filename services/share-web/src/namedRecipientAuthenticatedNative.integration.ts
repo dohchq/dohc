@@ -125,7 +125,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const evidence = registration.evidence, markdown = Buffer.from("Hello");
+    const evidence = registration.evidence, markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
@@ -280,13 +280,13 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     const reviewed = OwnerRestoreActionResponse.review.parse(await ownerRequest(`${prefix}/review`, {}));
     if (!reviewed.result || "kind" in reviewed.result) throw Error("Full loss review unavailable.");
     expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown);
-    expect(reviewed.result.content.restoredMarkdown).toBe("Hello");
+    expect(reviewed.result.content.restoredMarkdown).toBe("Hello\n");
     expect(reviewed.result.acceptedEvents).toHaveLength(2);
     expect(reviewed.result.acceptedEvents.map(row => row.metadata.accepted.authority.principalId)).toEqual(users.map(row => row.id));
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
     const restored = OwnerRestoreActionResponse.confirm.parse(await ownerRequest(`${prefix}/confirm`, {proposalDigest: reviewed.result.proposalDigest}));
     expect(restored.result.kind).toBe("resumed"); expect(restored.status.phase).toBe("resumed");
-    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
     const repeated = OwnerRestoreActionResponse.confirm.parse(await ownerRequest(`${prefix}/confirm`, {proposalDigest: reviewed.result.proposalDigest}));
     expect(repeated.result.kind).toBe("resumed");
     expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");

@@ -1672,7 +1672,7 @@ mod nested_contract_production_folds {
                         version_id: "main".into(),
                         object_id: "probe".into(),
                         path: "notes/probe.md".into(),
-                        text: "Other settled body".into(),
+                        text: "Other settled body\n".into(),
                         moment_id: "seed-settled".into(),
                         metadata_origin: "ydoc".into(),
                         metadata_summary: None,
@@ -1697,7 +1697,7 @@ mod nested_contract_production_folds {
                 .write_with(&NoFaults, |tx| {
                     tx.execute(
                         "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='probe'",
-                        [dohc_engine_storage::hex_sha256(b"Other settled body")],
+                        [dohc_engine_storage::hex_sha256(b"Other settled body\n")],
                     )
                     .map_err(SyncError::persist)
                 })
@@ -1723,7 +1723,7 @@ mod nested_contract_production_folds {
                 .content;
             let journaled:i64=store.read_with(|conn|conn.query_row("SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update' AND imported=0",[],|row|row.get(0))).unwrap();
             assert!(result.is_err(), "{source}");
-            assert_eq!(canonical, "Other settled body", "{source}");
+            assert_eq!(canonical, "Other settled body\n", "{source}");
             assert_eq!(journaled, 0, "{source}");
         }
     }

@@ -1803,8 +1803,8 @@ type EngineReplaceFile = (path: string, temporary: string, data: string | Uint8A
 // production code always goes through WorkspaceEngineCaptureOptions.diskWriter
 // defaulting.
 // With `replaceFile`, the engine writes the temp after the checks here. On
-// macOS a temp Node creates takes the folder's inherited ACL entries; the
-// engine creates it without them and gives it the replaced file's ACL.
+// macOS and Windows a temp Node creates takes the folder's inherited ACL
+// entries; the engine gives it the replaced file's ACL instead.
 export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineReplaceFile): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
@@ -2024,10 +2024,10 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(
     rootPath,
-    process.platform === "darwin"
+    process.platform === "darwin" || process.platform === "win32"
       ? async (path, temporary, data) => {
           const { replaceFile } = await engineStore();
-          if (!replaceFile) throw new Error("This engine can't write a file whole on macOS.");
+          if (!replaceFile) throw new Error("This engine can't write a file whole.");
           await replaceFile({ path, temporary, data });
         }
       : undefined,

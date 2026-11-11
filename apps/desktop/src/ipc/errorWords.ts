@@ -756,7 +756,7 @@ export function outsideVersionWaitingMessage(path: string): string {
 
 // Capture holds every refused outside edit with one reason, so these words
 // name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
-export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file's exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.";
+export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
 
 export function captureHeldLiveMessage(path: string): string {
   return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
