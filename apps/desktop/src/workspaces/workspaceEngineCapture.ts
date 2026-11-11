@@ -1,5 +1,6 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
+import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
 import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
@@ -805,6 +806,11 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  // The files on disk, of those `files` lists, that the active version does
+  // not track, such as files over History's size limit or ones its rules
+  // leave out. They have one copy for every version, so a change to one
+  // changes it in Main too. null on Main, which never lists the files.
+  notVersioned(files: () => Promise<readonly string[]>): Promise<string[] | null>;
   resolveFileForPath(path: string): Promise<{ objectId: string; path: string } | null>;
   // Reverse lookup for projections that must name a linked object's current
   // active-version path after renames.
@@ -7974,6 +7980,35 @@ export function createWorkspaceEngineCapture(
     },
 
     resolveFileForPath,
+
+    async notVersioned(listFiles) {
+      // A version switch queued ahead decides where the change lands. The
+      // change itself queues behind it, so the wait costs nothing on Main.
+      await chain;
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      // Main tracks every file it can, so there the disk is never read.
+      if (versionId === ENGINE_MAIN_VERSION_ID) return null;
+      // A file saved a moment ago then reads as tracked.
+      await engine.flushCapture?.();
+      const files = await listFiles();
+      if (files.length === 0) return [];
+      // A few files resolve by path. Past that, one listing of the version
+      // takes fewer engine calls than resolving each file.
+      let untracked: string[];
+      if (files.length > MAX_FILE_RESOLVE_TARGETS * 4) {
+        const tracked = new Set((await listTextFileMetadata(engine, versionId)).map(file => file.path));
+        untracked = files.filter(file => !tracked.has(file));
+      } else {
+        const results = await resolveEngineFileTargets(engine, workspaceId, files.map(path => ({ path })), undefined, versionId);
+        untracked = files.filter((_, index) => results[index]?.status !== "found");
+      }
+      // Protected files, such as .env, follow each version in the secret store.
+      // A store that can't answer leaves them to be asked about.
+      if (!untracked.some(isSecretPath)) return untracked;
+      const secrets = new Set((await secretStoreFor().listSecretFiles({ workspaceId, versionId }).catch(() => [])).map(stat => stat.path));
+      return untracked.filter(file => !secrets.has(file));
+    },
 
     async fileObjectIdForPath(path) {
       return (await resolveFileForPath(path))?.objectId ?? null;

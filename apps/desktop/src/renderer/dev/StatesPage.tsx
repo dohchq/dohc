@@ -97,6 +97,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, Explorer, TreeRow, explorerMenuItems, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
 import { PendingShareMarks, type PathMarks } from "../workbench/pendingShareMarks";
+import { NotVersionedMarks, type NotVersionedPaths } from "../workbench/notVersionedMarks";
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
 import { doneNotice, undoRefusedNotice } from "../workbench/explorerOperationNotices";
@@ -455,6 +456,7 @@ const treeRowCallbacks = {
 };
 
 const EVERY_PATH_MARKED: PathMarks = { subscribe: () => () => undefined, has: () => true };
+const EVERY_PATH_NOT_VERSIONED: NotVersionedPaths = { ...EVERY_PATH_MARKED, under: (paths) => [...paths] };
 
 function Row(props: {
   name: string;
@@ -2089,6 +2091,10 @@ function Pane(props: { theme: "light" | "dark" }) {
           <PendingShareMarks.Provider value={EVERY_PATH_MARKED}>
             <Row name="pending share.md" />
           </PendingShareMarks.Provider>
+          <NotVersionedMarks.Provider value={EVERY_PATH_NOT_VERSIONED}>
+            <Row name="not versioned.mp4" />
+            <Row name="not versioned, active.mp4" active />
+          </NotVersionedMarks.Provider>
           <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
           <Row name="quarterly-planning-and-budget-review-2026" folder />
         </ul>

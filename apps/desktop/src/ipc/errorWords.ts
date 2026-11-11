@@ -392,6 +392,9 @@ export function readError(error: unknown): ReadError {
     const [title = "", ...body] = message.split("\n");
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
+  // The Explorer asks before changing these files. Anywhere else the
+  // sentence says what happened; the file names follow it.
+  if (name === "NotVersionedError") return { words: message.split("\n")[0] ?? message, mapped: false, cause: null };
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
   }
@@ -680,6 +683,15 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** History's current rules refused a restore. Its words say why and what to do next. */
 export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
+}
+
+/**
+ * The files a rename, move or delete in a version would change in Main too,
+ * because the version does not track them, or null for any other error.
+ */
+export function notVersionedPaths(error: unknown): string[] | null {
+  const { name, message } = parse(error);
+  return name === "NotVersionedError" ? message.split("\n").slice(1).filter(Boolean) : null;
 }
 
 /** A folder move or delete refused while a page in it has live editing on. Try again reruns it. */

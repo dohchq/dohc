@@ -453,8 +453,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
   historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
   duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
-  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
-  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
+  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
+  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string, confirmNotVersioned?: boolean): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
@@ -2710,11 +2710,12 @@ async function dispatchWorkspace(
         const origin = documentEditOrigin(context, options, request.args.agent);
         if (request.verb === "fileMove") {
           const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
-            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
+            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}),
+            ...(request.args.confirmNotVersioned ? { confirmNotVersioned: true } : {}) }, origin, request.args.requestId);
           if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
           return result;
         }
-        const result = await context.deletePath(request.args.path, origin, request.args.requestId);
+        const result = await context.deletePath(request.args.path, origin, request.args.requestId, request.args.confirmNotVersioned);
         if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
         return result;
       } catch (error) {

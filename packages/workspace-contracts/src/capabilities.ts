@@ -132,6 +132,7 @@ export const CAPABILITIES = {
   "file.observation.retry": capability("Retry reading a workspace's file changes.", {ipc: ["retryFileObservation"]}),
   "app.recognition.read": capability("Read folder app recognition for contextual offers.", {ipc: ["getFolderApp"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"], mcp: {owner: ["dohc_list_versions"]}, mcpReason: "Shared profiles omit this owner read. Owning-workspace admission and the History path policy remain the gates."}),
+  "version.unversioned.list": capability("List the files the active version does not track, which have one copy for every version.", {ipc: ["listNotVersionedFiles"]}),
   "version.create": capability("Create a workspace version.", {ipc: ["createWorkspaceVersion"], mcp: {owner: ["dohc_create_version"]}, mcpReason: "Shared profiles omit this owner write. Owning-workspace admission and the History path policy remain the gates."}),
   "version.switch": capability("Switch workspace versions.", {ipc: ["switchWorkspaceVersion"], mcp: {owner: ["dohc_switch_version"]}, mcpReason: "Shared profiles omit this owner write. Owning-workspace admission and the History path policy remain the gates."}),
   "version.compare": capability("Compare workspace versions.", {ipc: ["compareWorkspaceVersions", "countWorkspaceVersionChanges"], mcp: {owner: ["dohc_compare_version"]}, mcpReason: "Shared profiles omit this owner read. Owning-workspace admission and the History path policy remain the gates."}),

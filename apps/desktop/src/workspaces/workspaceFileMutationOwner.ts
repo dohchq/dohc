@@ -384,7 +384,7 @@ export function createWorkspaceFileMutationOwner<
           if (!receivedShare) {
             assertWritableWorkspace(workspace);
             return DeleteWorkspacePathResult.parse(await deleteWorkspacePathByHand({ workspace, assertCurrent },
-              input.relativePath, person, { capture, emptyFolderOnly: input.emptyFolderOnly, requestId: randomUUID(), trashItem: dependencies.trashItem,
+              input.relativePath, person, { capture, emptyFolderOnly: input.emptyFolderOnly, confirmNotVersioned: input.confirmNotVersioned, requestId: randomUUID(), trashItem: dependencies.trashItem,
                 markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path) }));
           }
           return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {

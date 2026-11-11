@@ -223,6 +223,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { createPathMarks, PendingShareMarks } from "./workbench/pendingShareMarks";
+import { createNotVersionedMarks, NotVersionedMarks } from "./workbench/notVersionedMarks";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, sourcePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
@@ -2219,6 +2220,7 @@ export function DesktopWorkspaceShell(props: {
   // themselves, so a change leaves the Explorer and every other row alone; an
   // open note's editor shows its own state.
   const [pendingShareMarks] = useState(createPathMarks);
+  const [notVersionedMarks] = useState(createNotVersionedMarks);
   const pendingShare = syncStatus?.ownerPendingShare;
   useEffect(() => {
     pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
@@ -5937,6 +5939,7 @@ export function DesktopWorkspaceShell(props: {
 
   const explorerView = (
     <PendingShareMarks.Provider value={pendingShareMarks}>
+    <NotVersionedMarks.Provider value={notVersionedMarks}>
       <Explorer
         workspaceId={workspaceId}
         mode={wb.explorerMode}
@@ -5995,6 +5998,7 @@ export function DesktopWorkspaceShell(props: {
         onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
+    </NotVersionedMarks.Provider>
     </PendingShareMarks.Provider>
   );
 
@@ -6488,6 +6492,29 @@ export function DesktopWorkspaceShell(props: {
     // controls, so they re-read instead of going stale.
     refreshKey: versionEpoch,
   });
+  // In a version other than Main, the files it does not track have one copy
+  // for every version. The Explorer marks them and asks before changing one.
+  // A listing change asks again, a moment later, so a burst of listings asks
+  // once and a new file that is one gets its mark.
+  const activeVersionId = workspaceVersions.onMain ? null : workspaceVersions.active?.id ?? null;
+  useEffect(() => {
+    notVersionedMarks.set([]);
+  }, [activeVersionId, captureAvailable, notVersionedMarks, workspaceId]);
+  useEffect(() => {
+    if (!captureAvailable || activeVersionId === null) return;
+    let current = true;
+    const timer = window.setTimeout(() => {
+      void bridge().listNotVersionedFiles({ workspaceId }).then(({ paths }) => {
+        if (current) notVersionedMarks.set(paths ?? []);
+      }).catch(() => {
+        // The marks only show the way; main still refuses each change and asks.
+      });
+    }, 250);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [activeVersionId, captureAvailable, files, notVersionedMarks, workspaceId]);
   const shareVersion = shareView
     ? undefined
     : (version: { id: string; name: string }) =>

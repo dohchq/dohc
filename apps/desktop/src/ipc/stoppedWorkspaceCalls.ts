@@ -51,6 +51,7 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
     workspaceVersionOperations.listWorkspaceVersionConflicts,
     workspaceVersionOperations.countWorkspaceVersionConflicts,
     workspaceVersionOperations.listWorkspaceVersions,
+    workspaceVersionOperations.listNotVersionedFiles,
     historyOperations.listHistory,
     historyOperations.listVersionLastChanges,
     captureRecoveryOperations.getCaptureRecoveryStatus,
