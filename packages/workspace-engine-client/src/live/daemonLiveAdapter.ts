@@ -215,6 +215,12 @@ export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
 }
 
+// The engine's Markdown reader refused the note as too dense to check
+// (#3575). A note's past edits count, so asking again never clears it.
+export function isDocumentTooDenseRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "document-too-dense";
+}
+
 // The engine's own database was busy and its bounded retry budget ran out
 // (`StorageError::FileLocked`, which the store documents as intact and the
 // operation as retryable). Not the artifact lock above and not the user's

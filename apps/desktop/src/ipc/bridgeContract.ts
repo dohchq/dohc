@@ -7716,7 +7716,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
+export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files", "document-too-dense"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({

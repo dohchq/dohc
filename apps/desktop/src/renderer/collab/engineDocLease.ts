@@ -2,6 +2,7 @@ import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState"
 import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import * as Y from "yjs";
 import { authorCapacityMessage } from "./authorCapacityMessage";
+import { DOCUMENT_TOO_DENSE_WORDS } from "../../ipc/errorWords";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
 import {
   declareSceneRoots,
@@ -1134,7 +1135,8 @@ function createEngineDocSession(
     }
     pendingSavedSeq = null;
     if (event.state.kind === "error" || event.state.kind === "changed-on-disk") {
-      reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
+      reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path)
+        : event.saveFailure?.reason === "document-too-dense" ? DOCUMENT_TOO_DENSE_WORDS : null), event.authorCapacity);
       return;
     }
     if (event.state.kind === "saving") {

@@ -1,6 +1,6 @@
 import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
-import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
+import { DOCUMENT_TOO_DENSE_WORDS, isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
@@ -76,6 +76,7 @@ import {
   isYDocSessionUnreleasedError,
   isConflictStaleTargetCause,
   isVolumeSharesNewFilesCause,
+  isDocumentTooDenseCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
   type WorkspaceEngineYDocProviderSession,
@@ -156,8 +157,10 @@ interface EngineYDocSessionIpcOptions {
 // permissions to new files; otherwise the file is checked. The engine refuses
 // a save over a file that is gone, so a missing file with that refusal was
 // deleted outside dohc. A shared view's file is its host's, so only a local
-// file says so. A file that cannot be checked names no reason.
+// file says so. A file that cannot be checked names no reason. A note too
+// dense to check is refused whatever the file allows.
 function saveFailureReason(absolutePath: string, failure: unknown, shared: boolean): SaveFailureReason {
+  if (isDocumentTooDenseCause(failure)) return "document-too-dense";
   if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
@@ -1576,6 +1579,8 @@ async function applyDocumentEdit(
       throw new LiveDocumentEditAppliedError(
         isConflictStaleTargetCause(error)
           ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+          : isDocumentTooDenseCause(error)
+          ? `The edit is in ${path}. ${DOCUMENT_TOO_DENSE_WORDS} Retrying won't help.`
           : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
         { cause: error },
       );
