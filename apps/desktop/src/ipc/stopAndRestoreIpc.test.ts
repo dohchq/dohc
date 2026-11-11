@@ -72,7 +72,7 @@ function fixture(options: {
   changed?: boolean;
   otherWindow?: boolean;
   restoreError?: Error;
-  stopLiveEditing?: (path: string) => Promise<{keptEdits: "none" | "kept" | "recovered"}>;
+  stopLiveEditing?: (path: string, objectId: string) => Promise<{keptEdits: "none" | "kept" | "recovered"}>;
   undoRunsOf?: CollectionAutomations["undoRunsOf"];
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean, retentionId: string) => Promise<Pass>;
   syncNow?: () => Promise<void>;
@@ -221,7 +221,7 @@ function fixture(options: {
     sharesChanged,
     requireEngineCapture: async () => ({ capture: options.engineCapture ?? capture }),
     localPerson: async () => account.person,
-    stopLiveEditing: async (_operation, path) => await options.stopLiveEditing?.(path) ?? { keptEdits: "none" },
+    stopLiveEditing: async (_operation, path, objectId) => await options.stopLiveEditing?.(path, objectId) ?? { keptEdits: "none" },
     queuePull,
     deletePath: async () => undefined,
     notifyRenderer: () => undefined,
@@ -1402,7 +1402,7 @@ ${SHARED_LIVE_RESTORE_BODY}` }],
       stopLiveEditing: vi.fn(async () => { delete options.restoreError; return { keptEdits: "none" as const }; }) };
     await expect(fixture(options).call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
       .resolves.toMatchObject({ restored: [{ path: SCHEMA, removed: true }], review: [], unfinished: null });
-    expect(options.stopLiveEditing).toHaveBeenCalledWith(SCHEMA);
+    expect(options.stopLiveEditing).toHaveBeenCalledWith(SCHEMA, "o-schema");
     const waiting = fixture({ ledger, restoreError: new LivePageOwnedError(LIVE),
       stopLiveEditing: async () => { throw liveStopWaitingError(new Error("timed out")); } });
     await expect(waiting.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({

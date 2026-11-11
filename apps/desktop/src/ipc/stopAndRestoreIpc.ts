@@ -136,7 +136,7 @@ export function registerStopAndRestoreIpc<
    * The owner's Stop live editing for one page, as Live documents runs it.
    * "kept" also covers edits its release left outside the file.
    */
-  stopLiveEditing(operation: Operation, path: string): Promise<{keptEdits: "none" | "kept" | "recovered"}>;
+  stopLiveEditing(operation: Operation, path: string, objectId: string): Promise<{keptEdits: "none" | "kept" | "recovered"}>;
   /** Asks the workspace's sync to pull now. */
   queuePull(workspaceId: string): void;
   /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
@@ -627,9 +627,9 @@ export function registerStopAndRestoreIpc<
               throw error;
             }
           },
-          stopLiveEditing: async path => {
+          stopLiveEditing: async (path, objectId) => {
             try {
-              const {keptEdits} = await dependencies.stopLiveEditing(operation, path);
+              const {keptEdits} = await dependencies.stopLiveEditing(operation, path, objectId);
               return keptEdits === "kept" ? "kept" : "stopped";
             } catch (error) {
               if (isLiveStopWaiting(error)) return "waiting";

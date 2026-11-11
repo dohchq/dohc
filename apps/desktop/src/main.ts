@@ -7486,7 +7486,7 @@ function registerIpcHandlers(): void {
     localPerson,
     // Stop and restore removes the page next, so a release that left edits
     // outside the file, deferred or with its Markdown write held, counts as kept.
-    stopLiveEditing: async (operation, path) => {
+    stopLiveEditing: async (operation, path, objectId) => {
       let outsideFile = false;
       const actions = createOwnerLiveDocumentActions<DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
         ...ownerLiveDocumentDependencies,
@@ -7499,8 +7499,10 @@ function registerIpcHandlers(): void {
       const workspaceId = operation.workspace.workspaceId;
       const document = await ownerLiveDocumentDependencies.liveDocument(operation.workspace, {path});
       operation.assertCurrent();
-      const result = await actions.stop({workspaceId, path, ...(document ? {objectId: document.objectId} : {})}, operation);
-      if (document) sendRendererActivity({workspaceId, liveDocumentStopped: document.objectId});
+      // Only the page Stop and restore found at this path.
+      if (document?.objectId !== objectId) throw new Error(`"${path}" changed. Open Live documents to check it.`);
+      const result = await actions.stop({workspaceId, path, objectId}, operation);
+      sendRendererActivity({workspaceId, liveDocumentStopped: objectId});
       return outsideFile ? {keptEdits: "kept"} : result;
     },
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),

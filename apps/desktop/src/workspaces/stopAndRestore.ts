@@ -27,7 +27,7 @@ import { sendsMessages } from "@dohc/automation-executor/collection-automation-r
 // another computer's history holds.
 
 const LIVE_STOP_STILL_WAITING = "dohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.";
-const LIVE_EDITS_KEPT = "In Notices, save a recovery copy of them, then restore it again.";
+const LIVE_EDITS_KEPT = "Check Notices for them, then restore it again.";
 const SCHEMA_FILE = "collection.yaml";
 const AUTOMATIONS_FILE = "automations.yaml";
 
@@ -88,12 +88,12 @@ export interface StopAndRestoreDependencies {
     | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
   /**
-   * The owner's Stop live editing for the page at `path`, as Live documents
-   * runs it. "stopped": every live edit is in the file. "kept": it stopped
+   * The owner's Stop live editing for the page `objectId` at `path`, as Live
+   * documents runs it. "stopped": every live edit is in the file. "kept": it stopped
    * and kept edits the file does not have. "waiting": dohc keeps the Stop
    * and sends it again. Any other refusal throws.
    */
-  stopLiveEditing?(path: string): Promise<"stopped" | "kept" | "waiting">;
+  stopLiveEditing?(path: string, objectId: string): Promise<"stopped" | "kept" | "waiting">;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
   /** Removes a workspace folder only when it is empty. */
@@ -270,8 +270,9 @@ export async function restoreDirectWrites(
     };
   };
   // The file's newest moment when it goes back; null when passed over or listed for review.
+  // After `stoppedLive`, the review says live editing is off and how to turn it back on.
   const headIfAllTheirs = async (entry: Written, after: readonly string[],
-    readLater: ReturnType<typeof laterReader>): Promise<{ head: string } | "waiting" | null> => {
+    readLater: ReturnType<typeof laterReader>, stoppedLive = false): Promise<{ head: string } | "waiting" | null> => {
     const theirs = new Set(entry.all.map((file) => file.momentId));
     let snapshotHead = entry.first.momentId;
     for (const id of after) {
@@ -332,7 +333,9 @@ export async function restoreDirectWrites(
     }
     if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) return null;
     const path = head !== null && head.operation !== "delete" ? head.path : entry.last.path;
-    review.set(path, { path, reason: "changed-since", changedBy });
+    review.set(path, stoppedLive
+      ? { path, reason: "restore-refused", detail: `dohc stopped live editing for "${path}" and kept it, because ${changedBy ?? "another author"} changed it too\nResume live editing for it in Live documents.`.slice(0, 500) }
+      : { path, reason: "changed-since", changedBy });
     return null;
   };
   for (const entry of written) {
@@ -393,13 +396,14 @@ export async function restoreDirectWrites(
   // else, or edits the Stop kept outside the file, keep the page for review.
   const stopLiveEditingThenRestore = async (entry: Written, refusal: string) => {
     const path = entry.last.path;
+    const kept = `dohc stopped live editing for "${path}" and kept edits that aren't in its file\n${LIVE_EDITS_KEPT}`;
     const keep = (detail: string) => {
       review.set(path, { path, reason: "restore-refused", detail: detail.slice(0, 500) });
       return null;
     };
     let stopped: "stopped" | "kept" | "waiting";
     try {
-      stopped = await dependencies.stopLiveEditing!(path);
+      stopped = await dependencies.stopLiveEditing!(path, entry.first.objectId);
     } catch (error) {
       dependencies.assertCurrent();
       console.warn("[desktop] Stop and restore could not stop live editing:", error);
@@ -407,13 +411,15 @@ export async function restoreDirectWrites(
     }
     dependencies.assertCurrent();
     if (stopped === "waiting") return keep(`${livePageTitle(path, "restore")}\n${LIVE_STOP_STILL_WAITING}`);
-    if (stopped === "kept") return keep(`dohc stopped live editing for "${path}" and kept edits that aren't in its file\n${LIVE_EDITS_KEPT}`);
+    if (stopped === "kept") return keep(kept);
     const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
-    const found = await headIfAllTheirs(entry, after, laterReader());
+    const found = await headIfAllTheirs(entry, after, laterReader(), true);
     if (found === "waiting") return keep(`dohc stopped live editing for "${path}"\nRestore it again in a moment.`);
     if (found === null) return null;
     dependencies.assertCurrent();
-    return dependencies.restore(entry.first.momentId, found.head, isCreatedSchema(entry));
+    const retried = await dependencies.restore(entry.first.momentId, found.head, isCreatedSchema(entry));
+    // A release the engine deferred still holds the page, with its edits outside the file.
+    return retried.kind === "refused" && retried.refusal === "live-page-owned" ? keep(kept) : retried;
   };
   const restored: RestoreReceipt[] = [];
   const receipts = durableBatch<Receipt>(async batch => {
