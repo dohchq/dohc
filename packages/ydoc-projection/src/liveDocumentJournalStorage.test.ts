@@ -278,7 +278,16 @@ it.each(['candidate', 'final', 'admitted-cut', 'call'] as const)('linearizes %s 
   try {
     const input: LiveUpdateJournalCommitInput = { ...f.capture(f.update()), validation: { kind: 'refused', source, reason: 'capacity-refused' } }, before = f.journalRows()
     if (source === 'candidate' || source === 'final') expect(f.storage.commitLiveUpdateJournal(input)).toEqual({ result: { kind: 'refused', reason: 'capacity-refused' }, admitted: null })
-    else expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(source === 'call' ? /integration/ : /exceeds the validation policy/)
+    else expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(source === 'call' ? /integration/ : /Impossible admitted/)
+    expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
+it.each(['candidate', 'final', 'admitted-cut'] as const)('refuses a %s note too dense to check without retained facts', source => {
+  const f = registered()
+  try {
+    const input: LiveUpdateJournalCommitInput = { ...f.capture(f.update()), validation: { kind: 'refused', source, reason: 'document-too-dense' } }, before = f.journalRows()
+    expect(f.storage.commitLiveUpdateJournal(input)).toEqual({ result: { kind: 'refused', reason: 'document-too-dense' }, admitted: null })
     expect(f.journalRows()).toEqual(before)
   } finally { f.close() }
 })
@@ -962,7 +971,7 @@ it('rejects corrupted retained update bytes in cut, replay and committed recover
   } finally { f.close() }
 })
 
-it('retries an individually valid stale edit and preserves a fresh combined-body capacity refusal', () => {
+it('retries an individually valid stale edit and refuses a fresh combined body over the limit as too dense', () => {
   const f = registered()
   try {
     const first = f.capture(f.update('left', 'x'.repeat(1_100_000)), 'left')
@@ -973,8 +982,8 @@ it('retries an individually valid stale edit and preserves a fresh combined-body
     expect(f.storage.commitLiveUpdateJournal(first).result.kind).toBe('accepted')
     expect(f.storage.commitLiveUpdateJournal(second).result).toEqual({ kind: 'retry', reason: 'admission-unavailable' })
     const fresh = f.capture(second.updateBytes, 'right')
-    expect(fresh.validation).toMatchObject({ kind: 'refused', source: 'final', reason: 'capacity-refused' })
-    expect(f.storage.commitLiveUpdateJournal(fresh).result).toEqual({ kind: 'refused', reason: 'capacity-refused' })
+    expect(fresh.validation).toMatchObject({ kind: 'refused', source: 'final', reason: 'document-too-dense' })
+    expect(f.storage.commitLiveUpdateJournal(fresh).result).toEqual({ kind: 'refused', reason: 'document-too-dense' })
     expect(f.raw.prepare('SELECT COUNT(*) AS n FROM sync_relay_live_update_journal').get()!.n).toBe(1)
     expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + first.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
@@ -997,7 +1006,8 @@ it.each(['damaged-advance', 'regressed'] as const)('does not classify a %s journ
   } finally { f.close() }
 })
 
-it('keeps real admitted-cut capacity distinct without changing accepted history', () => {
+// A note admitted before the bound, or under a wider policy, is refused on its next frame as too dense; the socket stays open.
+it('refuses the next frame of an admitted note over the policy as too dense without changing accepted history', () => {
   const witness = {
     "policy": {
       "maxStructVisits": 20,
@@ -1099,13 +1109,9 @@ it('keeps real admitted-cut capacity distinct without changing accepted history'
     const empty = new Y.Doc()
     const noop = Y.encodeStateAsUpdate(empty); empty.destroy()
     const next = f.capture(noop, 'next')
-    expect(next.validation).toMatchObject({ kind: 'refused', source: 'admitted-cut', reason: 'capacity-refused' })
+    expect(next.validation).toMatchObject({ kind: 'refused', source: 'admitted-cut', reason: 'document-too-dense' })
     const before = f.journalRows()
-    expect(() => f.storage.commitLiveUpdateJournal(next)).toThrow(/exceeds the validation policy/)
-    try { f.storage.commitLiveUpdateJournal(next) } catch (error) {
-      expect((error as Error).constructor.name).toBe('LiveJournalAdmittedCapacityError')
-      expect(error).toMatchObject({ source: 'admitted-cut', reason: 'capacity-refused' })
-    }
+    expect(f.storage.commitLiveUpdateJournal(next)).toEqual({ result: { kind: 'refused', reason: 'document-too-dense' }, admitted: null })
     expect(f.journalRows()).toEqual(before)
     expect(f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document }).kind).toBe('cut')
   } finally { f.close() }

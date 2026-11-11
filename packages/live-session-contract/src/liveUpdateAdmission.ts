@@ -21,6 +21,7 @@ export const LIVE_UPDATE_REFUSAL_VALUES = [
   "baseline-missing",
   "delivery-conflict",
   "capacity-refused",
+  "document-too-dense",
 ] as const;
 
 export const LIVE_UPDATE_RETRY_VALUES = [

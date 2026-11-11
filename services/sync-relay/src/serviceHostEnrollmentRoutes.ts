@@ -210,7 +210,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     // host copy is missing an owner edit retires its held activation.
     const block = host.blocked(row);
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
-      block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
+      block === "live-edit-unadmitted" ? "live-edit-unadmitted" : block === "document-too-dense" ? "document-too-dense" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};

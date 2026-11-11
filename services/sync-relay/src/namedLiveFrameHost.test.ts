@@ -569,6 +569,41 @@ it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation fro
   expect(await second.submit({...input, deliveryId: "next-edit"}, signal)).toMatchObject({result: "success"});
   expect(validate).toHaveBeenCalledTimes(2); expect(buffers.usage()).toBe(0);
 }, 120_000);
+// A relay upgrade can leave a stored note over a stricter bound. Its next frame gets the too-dense refusal
+// instead of an error that drops the connection, and the same session answers the frame after it.
+it("refuses the next frame of a stored note over the bound as too dense and keeps the session usable", async () => {
+  const f = registered({deployment: true}), peer = await setup();
+  cleanup.push(async () => f.close());
+  expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Admitted"), "admitted")).result.kind).toBe("accepted");
+  const document = f.input.evidence.document, read = f.storage.readLiveUpdateJournalCut({document});
+  if (read.kind !== "cut") throw new Error("Expected a cut");
+  const current = f.storage.resolveCurrentLiveDocumentBinding({document, actor: f.actor});
+  if (current.kind !== "current") throw new Error("Expected current binding");
+  const updates = [f.update("title", "Refused"), f.update("title", "Refused again")];
+  const call = (candidate: Uint8Array) => ({document: read.cut.document, currentPath: read.cut.currentPath,
+    checkpoint: read.cut.checkpoint.bytes, suffix: read.cut.suffix.map(row => row.bytes), candidate});
+  let strict: ReturnType<typeof createLiveMarkdownJournalValidator> | undefined;
+  for (let limit = 1; limit < 5_000 && !strict; limit++) {
+    const candidate = createLiveMarkdownJournalValidator({...journalPolicy, maxStructVisits: limit});
+    const result = candidate(call(updates[0]!));
+    if (result.kind === "refused" && result.source === "admitted-cut") strict = candidate;
+  }
+  if (!strict) throw new Error("No budget refuses only the admitted history.");
+  const validator = strict;
+  const validate = vi.fn(async ({retainStateUpdate: _retainStateUpdate, ...input}: Parameters<OwnerOutboxAdmission["validate"]>[0]) => validator(input));
+  const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage,
+    native: {...peer.native, coordinate: current.host, binding: current.binding}, bounds: peer.bounds, validate});
+  cleanup.push(async () => session.close());
+  const signal = new AbortController().signal;
+  for (const [index, updateBytes] of updates.entries()) {
+    expect(await session.submit({deliveryId: `refused-${index}`, updateDigest: hash(updateBytes), updateBytes}, signal))
+      .toEqual({result: "refused", reason: "document-too-dense"});
+    expect(session.invalidated.aborted).toBe(false);
+  }
+  expect(validate).toHaveBeenCalledTimes(2);
+  expect(f.raw.prepare("SELECT delivery_id FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()).toEqual([{delivery_id: "admitted"}]);
+});
+
 it("reads one cut when one slot frees for thirty waiting submissions", async () => {
   const f = await setup(64);
   journal(f);

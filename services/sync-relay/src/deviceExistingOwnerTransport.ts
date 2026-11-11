@@ -10,6 +10,7 @@ import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFence, parseNativeRestoreFenceReceipt} from "./liveRestoreFence.js";
 import {parseOwnerLiveSyncConfig} from "./liveSyncConfig.js";
+import {SERVICE_KEPT_EDITS_REASONS} from "./storage/serviceKeptEdits.js";
 
 export interface ExistingOwnerSession {
   readonly nativeSessionId: string;
@@ -336,7 +337,7 @@ export function startExistingOwnerDeviceTransport(options: {
         } else if (operation.method === "liveApplication.quarantineOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
           const params = configRecord(operation.params, ["registrationId", "reason", "deliveryId", "refusalKey"]);
-          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict" && params.reason !== "capacity-refused" && params.reason !== "invalid-update") throw new Error("Invalid owner quarantine reason.");
+          if (typeof params.reason !== "string" || !SERVICE_KEPT_EDITS_REASONS.includes(params.reason)) throw new Error("Invalid owner quarantine reason.");
           const response = await config.client.sendRequest({...request, method: "ydoc.ownerOutbox.quarantine",
             params: {outboxId: registration.outboxId, reason: params.reason, refusal: {deliveryId: string(params.deliveryId), key: string(params.refusalKey)}}}, signal);
           owner.assertCurrent(); result = response.result;

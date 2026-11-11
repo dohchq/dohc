@@ -64,6 +64,7 @@ export type OrderedLiveUpdateCutRefusalReason =
   | 'invalid-schema'
   | 'projection-mutated'
   | 'capacity-refused'
+  | 'document-too-dense'
 
 export interface ValidatedCutInputEvidence {
   readonly updateDigest: string

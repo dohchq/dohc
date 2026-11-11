@@ -15,7 +15,7 @@ import {settlementResponse,settlementPending,type CommittedSettlement} from "./l
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
-import {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,type ServiceActivationStore} from "./storage/serviceActivation";
+import {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooDense,ServiceActivationTooLarge,type ServiceActivationStore} from "./storage/serviceActivation";
 import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {DepartedOwnerDelivery} from "./storage/liveCommittedDelivery";
@@ -61,7 +61,7 @@ export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceAc
  * Why a document waits for its owner: the engine refused it or its capture ran validation out of memory,
  * its copy here is missing an owner edit, or it has no Y.Doc lineage to activate.
  */
-export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage";
+export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage"|"document-too-dense";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
@@ -111,7 +111,7 @@ export class ServiceActivationDriver {
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
   // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
-  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
+  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"|"document-too-dense"}|{reason:"without-lineage";update:number}|
     {reason:"released-lineage-unsettled";digest:string}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
@@ -628,10 +628,11 @@ export class ServiceActivationDriver {
             validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
-          const tooLarge=error instanceof ServiceActivationTooLarge;
-          if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge)throw error;
-          // The same capture would run its validation out of memory again, so it waits for its owner.
+          const tooLarge=error instanceof ServiceActivationTooLarge,tooDense=error instanceof ServiceActivationTooDense;
+          if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge && !tooDense)throw error;
+          // The same capture would run its validation out of memory, or be too dense, again, so it waits for its owner.
           if(tooLarge)this.#blocked.set(key,{reason:"refused"});
+          if(tooDense)this.#blocked.set(key,{reason:"document-too-dense"});
           await releaseStale();
           return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }

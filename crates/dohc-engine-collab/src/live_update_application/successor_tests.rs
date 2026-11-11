@@ -1327,7 +1327,12 @@ fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
 /// damage, refuses the succession with no writes.
 #[test]
 fn a_successor_reopens_no_other_quarantine() {
-    for reason in ["delivery-conflict", "capacity-refused", "invalid-update"] {
+    for reason in [
+        "delivery-conflict",
+        "capacity-refused",
+        "invalid-update",
+        "document-too-dense",
+    ] {
         let mut f = quarantined_seed_released().0;
         successor(&mut f);
         write(

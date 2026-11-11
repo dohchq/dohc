@@ -33,7 +33,10 @@ export type OrdinaryActivationBaseline=Pick<LiveMarkdownRegistrationEvidence,"pr
 /** What validating a cut leaves for the writer transaction: the bytes it charged and the projections of the wanted prefixes. */
 export interface OrdinaryActivationProof {readonly charged:number;readonly projections:readonly (Projection&{readonly index:number})[]}
 export type OrdinaryActivationValidation={kind:"accepted";baseline:OrdinaryActivationBaseline;proof?:OrdinaryActivationProof}|{kind:"refused";message:string}|
-  {kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
+  {kind:"document-too-dense"}|{kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
+/** The capture, or a state its history held, is too dense to check live. */
+class TooDense extends Error {}
+const checkDensity=(result:{kind:string;reason?:string})=>{if(result.kind==="refused"&&result.reason==="document-too-dense")throw new TooDense();};
 export type OrdinaryActivationValidator=(work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>;
 /**
  * Validates a capture against the history `readOrdinaryActivationHistory` read for it. Runs in a
@@ -42,12 +45,12 @@ export type OrdinaryActivationValidator=(work:OrdinaryActivationWork,signal?:Abo
 export function validateOrdinaryActivation(work:OrdinaryActivationWork,policy:OrderedLiveUpdateCutPolicy):Exclude<OrdinaryActivationValidation,{kind:"capacity-refused"|"retry"}>{
   const {document,currentPath,baselineBytes}=work,validateRegistration=createLiveMarkdownRegistrationValidator(policy);
   const base=validateRegistration({document,currentPath,checkpoint:baselineBytes});
-  if(base.kind!=="accepted")return {kind:"refused",message:"Native activation does not match the ordinary source."};
+  if(base.kind!=="accepted")return base.reason==="document-too-dense"?{kind:"document-too-dense"}:{kind:"refused",message:"Native activation does not match the ordinary source."};
   const baseline={checkpoint:{updateDigest:base.evidence.checkpoint.updateDigest,ranges:base.evidence.checkpoint.ranges},
     projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength};
   if(!work.cut)return {kind:"accepted",baseline};
   try{return {kind:"accepted",baseline,proof:checkOrdinaryActivationHistory(work,work.cut,baseline,validateRegistration,createLiveMarkdownHistoryValidator(policy))};}
-  catch(error){return {kind:"refused",message:error instanceof Error?error.message:String(error)};}
+  catch(error){return error instanceof TooDense?{kind:"document-too-dense"}:{kind:"refused",message:error instanceof Error?error.message:String(error)};}
 }
 function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNullable<OrdinaryActivationWork["cut"]>,baseline:OrdinaryActivationBaseline,
   validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>,validateHistory:ReturnType<typeof createLiveMarkdownHistoryValidator>):OrdinaryActivationProof{
@@ -57,10 +60,12 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
   const projects=(evidence:Projection)=>evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
   charge(fullState.length);
   const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
+  checkDensity(full);
   requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
   if(settled){
     // The state the source settlement settled, from bytes the read charged.
     const state=validateRegistration({document,currentPath:source.currentPath,checkpoint:settled.state});
+    checkDensity(state);
     requireValue(state.kind==="accepted"&&state.evidence.stateUpdateSha256===settled.stateSha256&&projects(state.evidence),"Native activation source settlement is not proved.");
   }
   // One pass validates the history and, from the source's prefix on, checks that every prefix keeps its projection,
@@ -75,7 +80,7 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
     projected&&=index===next++&&(index<start||projects(evidence));
     if(keep.has(index))projections.push({index,projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
   }});
-  requireValue(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
+  checkDensity(result);
   requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
   const captured=full.evidence,ordinary=result.evidence;
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&

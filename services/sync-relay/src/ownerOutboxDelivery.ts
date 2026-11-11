@@ -266,7 +266,7 @@ export async function drainOwnerOutbox(options: OwnerOutboxScope & {
       if (committed.result.kind !== "accepted") {
         // Final refusals of this candidate freeze its whole queue. Contention returned retry above;
         // validator integration and admitted-cut failures threw in storage.
-        if (["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"].includes(committed.result.reason)) {
+        if (SERVICE_KEPT_EDITS_REASONS.includes(committed.result.reason)) {
           await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: committed.result.reason}));
           adoption.applied();
           return {admittedEntries, hasMore: false};

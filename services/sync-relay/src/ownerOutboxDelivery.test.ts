@@ -332,7 +332,7 @@ it("retains configured entry and byte limits without acknowledging unread update
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
-it.each(["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
+it.each(["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update", "document-too-dense"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
   const f = fixture(3), other = fixture(3);
   // An out-of-memory check answers capacity-refused, and commit refuses the entry the same way.
   if (reason === "capacity-refused") f.validate.mockReturnValue({kind: "refused", reason, source: "final"});
@@ -782,7 +782,7 @@ it("admits an owner-outbox entry when its admitted cut exceeds the former activa
     objectId: f.binding.objectId, lineageClaimId: f.binding.lineageClaimId},
     currentPath: f.binding.currentPath, checkpoint, suffix: [], candidate: Uint8Array.of(0, 0)};
   expect(createLiveMarkdownJournalValidator({...profile.validation, maxIndexOperations: 10_000_000})(input))
-    .toMatchObject({kind: "refused", reason: "capacity-refused", source: "admitted-cut"});
+    .toMatchObject({kind: "refused", reason: "document-too-dense", source: "admitted-cut"});
   f.storage.readLiveUpdateJournalCut = () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array(checkpoint)}, suffix: []}});
   const validate = vi.fn(config.validateAdmission);
   expect(await f.run({admission: {...f.admission, validate}})).toEqual({admittedEntries: 1, hasMore: false});

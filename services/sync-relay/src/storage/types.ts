@@ -600,7 +600,7 @@ export type LiveJournalValidation =
       readonly projectedMarkdownByteLength: number;
   } }
   | { readonly kind: "refused";
-      readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
+      readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused" | "document-too-dense";
       readonly source: "call" | "admitted-cut" | "candidate" | "final" };
 export interface LiveUpdateJournalCommitInput {
   readonly trustedAccount?: {readonly accountId: string; readonly name: string};

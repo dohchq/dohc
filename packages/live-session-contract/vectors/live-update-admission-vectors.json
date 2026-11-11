@@ -14,7 +14,8 @@
       "provenance-refused",
       "baseline-missing",
       "delivery-conflict",
-      "capacity-refused"
+      "capacity-refused",
+      "document-too-dense"
     ],
     "retries": [
       "admission-unavailable",

@@ -152,7 +152,11 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   async deliver(authority: FreshOwnerAuthority, envelopeValue: OwnerYDocDeliveryEnvelope): Promise<OwnerYDocDeliveryResult> {
     const attempt = this.active;
     if (!attempt || !this.current(attempt) || attempt.authority !== authority || attempt.envelope || !isDeepStrictEqual(attempt.binding, envelopeValue.binding)) return {kind: "retry"};
-    if (envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes || digest(envelopeValue.update) !== envelopeValue.updateDigest) {this.stop(attempt); return {kind: "retry"};}
+    // No note within the live bound takes an edit this large, so it can never be admitted.
+    if (envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes) {
+      const tooDense = {kind: "quarantine", reason: "document-too-dense"} as const; this.stop(attempt, tooDense); return tooDense;
+    }
+    if (digest(envelopeValue.update) !== envelopeValue.updateDigest) {this.stop(attempt); return {kind: "retry"};}
     const declared = envelopeValue.agentDeclaration;
     let agentDeclaration: AgentDeclaration | undefined;
     try {agentDeclaration = declared === undefined ? undefined : parseAgentDeclaration(declared);} catch {this.stop(attempt); return {kind: "retry"};}
@@ -237,7 +241,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.receipt = {deliveryId, updateDigest, journalCursor, acceptingHostEpoch};
             await this.finishReceipt(attempt);
           }
-          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused", "capacity-refused", "invalid-update"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
+          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused", "capacity-refused", "invalid-update", "document-too-dense"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
           else this.stop(attempt);
         }
         if (transfer && this.current(attempt)) {
