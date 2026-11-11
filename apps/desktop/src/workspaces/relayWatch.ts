@@ -9,9 +9,9 @@ import type {RelayLogChange} from "./relayLogWait";
 export function startRelayWatch(input: {
   wait: (since: number, signal: AbortSignal, known?: number) => Promise<RelayLogChange>;
   // The rows this device appended past the cursor, so its own uploads do not
-  // count as a change. `settled` resolves once a push that may have landed
-  // more has ended, or answers undefined when none runs.
-  ownAppends?: { known(): number; settled(): Promise<void> | undefined };
+  // count as a change. `recheck` asks the relay at once, with the count as it
+  // stands, at a moment no upload of this device runs.
+  ownAppends?: { known(): number; recheck(since: number, signal: AbortSignal): Promise<RelayLogChange> };
   initialDelayMs: number;
   maxDelayMs: number;
   // The log moved past `since`. The watch waits for the next cursor.
@@ -50,6 +50,19 @@ export function startRelayWatch(input: {
     return Effect.sync(settle);
   });
 
+  // One read the watch waits for. Undefined when a new cursor or stop() replaced it.
+  const readOnce = (run: (signal: AbortSignal) => Promise<RelayLogChange>) => Effect.gen(function* () {
+    const controller = new AbortController();
+    read = controller;
+    // Abort only asks the read to end; the worker still waits for it.
+    const result = yield* Effect.uninterruptible(Effect.exit(Effect.tryPromise({
+      try: () => run(controller.signal),
+      catch: (error) => error,
+    })));
+    read = undefined;
+    return controller.signal.aborted ? undefined : result;
+  });
+
   const finished = Effect.runPromiseExit(Effect.gen(function* () {
     let since: number | undefined;
     let backoff = false;
@@ -73,31 +86,25 @@ export function startRelayWatch(input: {
       }
       const from = since;
       const known = input.ownAppends?.known();
-      const controller = new AbortController();
-      read = controller;
-      // Abort only asks the read to end; the worker still waits for it.
-      const result = yield* Effect.uninterruptible(Effect.exit(Effect.tryPromise({
-        try: () => input.wait(from, controller.signal, known),
-        catch: (error) => error,
-      })));
-      read = undefined;
+      const result = yield* readOnce(signal => input.wait(from, signal, known));
       // Replacing our own read does not invalidate its last watch report.
-      if (controller.signal.aborted) continue;
+      if (result === undefined) continue;
       if (result._tag === "Failure") {
         reportWatch(false);
         backoff = true;
         input.failed(Cause.squash(result.cause));
       } else {
         reportWatch(result.value.watched);
-        // The relay counted `known` rows as ours. If a push may have landed
-        // more, or this device has since confirmed more, ask again with the new
-        // count: the relay answers at once if another device appended.
-        const own = known !== undefined && result.value.hasMore && result.value.known === known && input.ownAppends;
-        if (own) {
-          const settled = own.settled();
-          if (settled || own.known() !== known) {
-            if (settled) yield* Effect.promise(() => settled);
-            continue;
+        // The relay counted `known` rows as ours, but an upload may have
+        // added rows since. The recheck answers exactly; a failed one counts
+        // as a change.
+        if (result.value.hasMore && known !== undefined && result.value.known === known && input.ownAppends) {
+          const ownAppends = input.ownAppends;
+          const recheck = yield* readOnce(signal => ownAppends.recheck(from, signal));
+          if (recheck === undefined) continue;
+          if (recheck._tag === "Success") {
+            reportWatch(recheck.value.watched);
+            if (!recheck.value.hasMore) continue;
           }
         }
         if (result.value.hasMore) {

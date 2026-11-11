@@ -26,14 +26,14 @@ export function createRelayLogWait(input: {
   relay: SyncRelayConnection;
   holdMs?: number;
   nowMs?: () => number;
-}): (since: number, signal: AbortSignal, known?: number) => Promise<RelayLogChange> {
-  const holdMs = input.holdMs ?? RELAY_LOG_HOLD_MS;
+}): (since: number, signal: AbortSignal, known?: number, holdMs?: number) => Promise<RelayLogChange> {
+  const defaultHoldMs = input.holdMs ?? RELAY_LOG_HOLD_MS;
   const nowMs = input.nowMs ?? (() => Date.now());
   // The relay's current coordinate. A held read names it the way a pull does;
   // the relay refuses a stale one, and the next read asks for it again.
   let identity: RelayWorkspaceIdentity | null | undefined;
   let watched = false;
-  const read = async (since: number, abort: AbortSignal, known: number | undefined): Promise<RelayLogChange> => {
+  const read = async (since: number, abort: AbortSignal, known: number | undefined, holdMs: number): Promise<RelayLogChange> => {
     // One deadline bounds the coordinate read and the held read together.
     const signal = AbortSignal.any([abort, AbortSignal.timeout(holdMs + 15_000)]);
     if (identity === undefined) {
@@ -71,8 +71,8 @@ export function createRelayLogWait(input: {
     watched = result.watched;
     return {hasMore: result.hasMore, watched, ...(result.known === undefined ? {} : {known: result.known})};
   };
-  return async (since, signal, known) => {
-    try { return await read(since, signal, known); }
+  return async (since, signal, known, holdMs = defaultHoldMs) => {
+    try { return await read(since, signal, known, holdMs); }
     catch (error) { if (!signal.aborted) watched = false; throw error; }
   };
 }

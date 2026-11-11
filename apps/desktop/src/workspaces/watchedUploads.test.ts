@@ -349,18 +349,20 @@ it("rechecks a wake even if a watched push reports draining multiple edits", asy
 
 // A relay log that answers held reads the way the relay does: past `since`, more
 // rows than the reader's `known`, echoing the count it applied. `counts: false`
-// is a relay that predates `known`.
-function countingRelay(options: {counts: boolean} = {counts: true}) {
+// is a relay that predates `known`. Its answers reach the desktop `replyMs` late.
+function countingRelay(options: {counts?: boolean; replyMs?: number} = {}) {
+  const counts = options.counts ?? true;
   let head = 0, watched = false, reported = false;
   const waiters = new Set<() => boolean>();
   const wake = () => {for (const check of [...waiters]) check();};
-  const wait = vi.fn((since: number, signal: AbortSignal, known?: number) => new Promise<RelayLogChange>((resolve, reject) => {
-    const applied = options.counts && known !== undefined && known <= 1024 ? known : undefined;
+  const wait = vi.fn((since: number, signal: AbortSignal, known?: number, holdMs?: number) => new Promise<RelayLogChange>((resolve, reject) => {
+    const applied = counts && known !== undefined && known <= 1024 ? known : undefined;
     const check = () => {
       const hasMore = head - since > (applied ?? 0);
-      if (!hasMore && watched === reported) return false;
+      if (!hasMore && watched === reported && holdMs !== 0) return false;
       waiters.delete(check); reported = watched;
-      resolve({hasMore, watched, ...(applied === undefined ? {} : {known: applied})});
+      const answer = {hasMore, watched, ...(applied === undefined ? {} : {known: applied})};
+      if (options.replyMs) setTimeout(() => resolve(answer), options.replyMs); else resolve(answer);
       return true;
     };
     if (check()) return;
@@ -370,11 +372,15 @@ function countingRelay(options: {counts: boolean} = {counts: true}) {
   return {wait, get head() {return head;}, append: (rows: number) => {head += rows; wake();}, watch: () => {watched = true; wake();}};
 }
 
-function countingFixture(relay: ReturnType<typeof countingRelay>) {
+function countingFixture(relay: ReturnType<typeof countingRelay>, pushMs = 0) {
   const listeners = new Set<(path: string) => void>();
   const pushed = (rows: number) => ({pushed: rows, hasMore: false, originsPushed: [], sharingDeclined: [], ownerAdmissionPending: []});
   // Each upload lands one row; the relay wakes the held read before the response arrives.
-  const push = vi.fn(async (): Promise<PushWorkspaceToRelayResult> => {relay.append(1); await Promise.resolve(); return pushed(1);});
+  const push = vi.fn(async (): Promise<PushWorkspaceToRelayResult> => {
+    relay.append(1);
+    await (pushMs ? new Promise(resolve => setTimeout(resolve, pushMs)) : Promise.resolve());
+    return pushed(1);
+  });
   const pull = vi.fn(async (): Promise<PullWorkspaceFromRelayResult> => ({fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: relay.head, sharingDeclined: []}));
   const capture = {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}),
     onDurableLocalChange: (handler: (path: string) => void) => {listeners.add(handler); return () => listeners.delete(handler);}} as unknown as WorkspaceEngineCapture;
@@ -388,9 +394,10 @@ async function typeFor(f: ReturnType<typeof countingFixture>, ms: number) {
   for (let t = 0; t < ms; t += 100) {f.edit(); await vi.advanceTimersByTimeAsync(100);}
 }
 
-async function startWatched(relay: ReturnType<typeof countingRelay>) {
-  vi.useFakeTimers(); const f = countingFixture(relay); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
-  relay.watch(); await vi.advanceTimersByTimeAsync(0);
+async function startWatched(relay: ReturnType<typeof countingRelay>, pushMs = 0) {
+  vi.useFakeTimers(); const f = countingFixture(relay, pushMs); const started = f.sync.start();
+  await vi.advanceTimersByTimeAsync(pushMs); await started;
+  relay.watch(); await vi.advanceTimersByTimeAsync(100);
   f.pull.mockClear(); f.push.mockClear();
   return f;
 }
@@ -440,9 +447,20 @@ it("pulls once for an upload whose response was lost, and still sees another dev
 it("pulls once its uploads pass the count the relay keeps", async () => {
   const relay = countingRelay(), f = await startWatched(relay);
   f.push.mockImplementation(async () => {relay.append(600); await Promise.resolve(); return f.pushed(600);});
-  await typeFor(f, 300);
+  await typeFor(f, 200);
   expect(f.pull).not.toHaveBeenCalled();
-  await typeFor(f, 1_700);
+  await typeFor(f, 100);
   expect(f.pull).toHaveBeenCalledTimes(1);
   await f.sync.stop();
+});
+
+it("pulls another device's row while each upload outlasts the upload interval", async () => {
+  const relay = countingRelay({replyMs: 50}), f = await startWatched(relay, 300);
+  await typeFor(f, 3_000);
+  expect(f.push.mock.calls.length).toBeGreaterThan(7);
+  expect(f.pull).not.toHaveBeenCalled();
+  relay.append(1);
+  await typeFor(f, 2_000);
+  expect(f.pull).toHaveBeenCalledTimes(1);
+  const stopped = f.sync.stop(); await vi.advanceTimersByTimeAsync(300); await stopped;
 });

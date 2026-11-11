@@ -84,7 +84,8 @@ export interface CloudSyncEngineOptions {
   // `signal` when it no longer needs the answer, and waits for the promise to
   // settle before it waits again or stops. `known` counts the rows this
   // desktop's own uploads added past `since`, which are no change to pull.
-  waitForChange?: (since: number, signal: AbortSignal, known?: number) => Promise<RelayLogChange>;
+  // `holdMs: 0` asks for an answer at once.
+  waitForChange?: (since: number, signal: AbortSignal, known?: number, holdMs?: number) => Promise<RelayLogChange>;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -206,15 +207,21 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // cursor the wait starts from. Each new cursor starts it again at zero. A
   // row it misses, such as one whose response was lost, wakes one pull.
   let ownAppended = 0;
-  // Settles when the running watched upload has counted what it added.
-  let ownUpload: Promise<void> | undefined;
   // Pulls 30 s after the first counted row, so a count that is wrong can hide
   // another device's row for no longer than that.
   let ownAppendedTimer: ReturnType<typeof setTimeout> | undefined;
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
     wait: options.waitForChange,
-    ownAppends: { known: () => ownAppended, settled: () => ownUpload },
+    // On the pass chain, so no upload runs while the relay counts.
+    ownAppends: { known: () => ownAppended, recheck: (since, signal) => {
+      const result = chain.then(() => {
+        signal.throwIfAborted();
+        return options.waitForChange!(since, signal, ownAppended, 0);
+      });
+      chain = result.then(() => undefined, () => undefined);
+      return result;
+    } },
     initialDelayMs: initialBackoffMs,
     maxDelayMs: maxBackoffMs,
     watched: setWatched,
@@ -326,8 +333,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       if (!watchedDirty || watchedPushPaused || !canUploadWatched()) return;
       const before = visibleState();
       const eventsBefore = changeEvents;
-      let counted!: () => void;
-      ownUpload = new Promise(resolve => {counted = resolve;});
       try {
         watchedDirty = false;
         lastWatchedStart = Date.now();
@@ -348,8 +353,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           queuePull();
         } else handleFailure(error, undefined, true);
       } finally {
-        ownUpload = undefined;
-        counted();
         if (visibleState() !== before && changeEvents === eventsBefore) emitChange();
       }
     }).finally(() => {
