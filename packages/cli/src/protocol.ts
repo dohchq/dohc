@@ -288,6 +288,7 @@ const fileMoveArgsSchema = z.object({
   fromPath: documentPathArg,
   toPath: documentPathArg,
   overwrite: z.boolean().optional(),
+  confirmNotVersioned: z.boolean().optional(),
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
@@ -295,6 +296,7 @@ const fileDuplicateArgsSchema = z.object({...argsBase, path: documentPathArg, ag
 const fileDeleteArgsSchema = z.object({
   ...argsBase,
   path: documentPathArg,
+  confirmNotVersioned: z.boolean().optional(),
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();

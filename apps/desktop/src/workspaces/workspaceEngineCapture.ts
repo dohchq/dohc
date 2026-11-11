@@ -1,5 +1,6 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
+import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
 import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
@@ -805,6 +806,11 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  // The files on disk, of those `files` lists, that the active version does
+  // not track, such as files over History's size limit or ones its rules
+  // leave out. They have one copy for every version, so a change to one
+  // changes it in Main too. null on Main, which never lists the files.
+  notVersioned(files: () => Promise<readonly string[]>): Promise<string[] | null>;
   resolveFileForPath(path: string): Promise<{ objectId: string; path: string } | null>;
   // Reverse lookup for projections that must name a linked object's current
   // active-version path after renames.
@@ -7974,6 +7980,27 @@ export function createWorkspaceEngineCapture(
     },
 
     resolveFileForPath,
+
+    async notVersioned(listFiles) {
+      // Main tracks every file it can, so a change there neither waits for
+      // capture nor reads the disk.
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      if (versionId === ENGINE_MAIN_VERSION_ID) return null;
+      // Drain capture work, so a file saved a moment ago reads as tracked.
+      await chain;
+      await engine.flushCapture?.();
+      const files = await listFiles();
+      if (files.length === 0) return [];
+      // A few files resolve by path. Past that, one listing of the version
+      // takes fewer engine calls than resolving each file.
+      if (files.length > MAX_FILE_RESOLVE_TARGETS * 4) {
+        const tracked = new Set((await listTextFileMetadata(engine, versionId)).map(file => file.path));
+        return files.filter(file => !tracked.has(file));
+      }
+      const results = await resolveEngineFileTargets(engine, workspaceId, files.map(path => ({ path })), undefined, versionId);
+      return files.filter((_, index) => results[index]?.status !== "found");
+    },
 
     async fileObjectIdForPath(path) {
       return (await resolveFileForPath(path))?.objectId ?? null;

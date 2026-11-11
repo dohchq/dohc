@@ -212,7 +212,7 @@ describe("VersionMenu", () => {
   });
 
   it("opens the New version dialog from New version…, with focus in its name field", async () => {
-    const same = "Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.";
+    const same = "Chats are the same in every version. Files over 5\u00a0MB (text over 10\u00a0MB) aren't copied, so changing one here changes it in Main too.";
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     bridgeMock.listVersionLastChanges.mockResolvedValue({ versions: [{ versionId: "main", lastChange: { atMs: Date.now() - 4 * 60_000, personName: "Sam" } }] });
     const user = userEvent.setup();

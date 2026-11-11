@@ -28,7 +28,7 @@ import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 type PathChangeWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol; readOnly?: boolean; shareView?: unknown };
 
 export interface PathChangeOptions {
-  capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove">>;
+  capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove" | "notVersioned">>;
   requestId: string;
   linkRewrites?: LinkRewriteContext;
   trashItem(absolutePath: string): Promise<void>;
@@ -155,6 +155,43 @@ async function admitTree(rootPath: string, admitted: AdmittedPath, allowed: (pat
   return { ...target, files };
 }
 
+// A rename, move or delete, in a version, of files that version does not
+// track. Each has one copy for every version, so the change happens in Main
+// too. The message is a sentence, then one file per line.
+export class NotVersionedError extends Error {
+  override name = "NotVersionedError";
+  constructor(readonly paths: readonly string[]) {
+    super([notVersionedSentence(paths), ...paths].join("\n"));
+  }
+}
+
+function notVersionedSentence(paths: readonly string[]): string {
+  return paths.length === 1
+    ? `This change also happens in Main, because ${paths[0]} isn't versioned.`
+    : `This change also happens in Main, because ${paths.length} files here aren't versioned.`;
+}
+
+// An agent's answer: the same refusal, and how to change the files anyway.
+export function notVersionedReason(paths: readonly string[]): string {
+  const one = paths.length === 1;
+  return [notVersionedSentence(paths), one ? "" : `They are ${paths.join(", ")}.`,
+    `To change ${one ? "it" : "them"} anyway, repeat the call with confirmNotVersioned set to true.`].filter(Boolean).join(" ");
+}
+
+// The files at or under the entries, which `spell` names as on disk, that the
+// active version does not track. None on Main, which reads no disk for it, or
+// without capture.
+async function notVersionedAt(rootPath: string, capture: Partial<Pick<WorkspaceEngineCapture, "notVersioned">> | null,
+  spell: () => Promise<readonly (string | null)[]>): Promise<string[]> {
+  if (!capture?.notVersioned) return [];
+  return await capture.notVersioned(async () => (await Promise.all((await spell()).map(entry => entry === null ? []
+    : historyFilesUnder(rootPath, entry, () => true, () => false).catch(() => [])))).flat()) ?? [];
+}
+
+// An agent's path as it is spelled on disk, or null where it leads nowhere
+// the change could go. The change itself then says why.
+const spelledOnDisk = (rootPath: string, path: string) => admitPath(rootPath, path).then(entry => entry.physical, () => null);
+
 // The regular files at or under `entry` that History records. A link moves
 // as itself and is never followed; a folder the policy wholly excludes, or
 // one History cannot address, is not read.
@@ -254,10 +291,10 @@ export function assertMoveDocumentKind(from: string, to: string, word: "move" | 
     `A ${word} cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename" | "checkFolderMove" | "checkPageMove">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename" | "checkFolderMove" | "checkPageMove" | "notVersioned">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
-  operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
+  operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean },
   author: MomentWriteAuthor, options: PathChangeOptions,
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   // The source's spelling on disk, read before the lock only if the guard needs it.
@@ -266,11 +303,16 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
     const { physical } = await admitPath(rootPath, input.fromPath);
     await preCheck.check(physical, await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false));
     return physical;
-  })).then(() => {
+  })).then(async () => {
     // A refusal is answered as every failed move is, not thrown.
     const refusal = preCheck.refusal();
-    return refusal ? async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: refusal.message })
-      : prepareMoveWorkspacePath(operation, input, author, options);
+    if (refusal) return async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: refusal.message });
+    if (!input.confirmNotVersioned) {
+      const paths = await notVersionedAt(rootPath, options.capture, () =>
+        Promise.all([input.fromPath, ...(input.overwrite ? [input.toPath] : [])].map(path => spelledOnDisk(rootPath, path))));
+      if (paths.length) return async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: notVersionedReason(paths) });
+    }
+    return prepareMoveWorkspacePath(operation, input, author, options);
   });
 }
 
@@ -303,8 +345,8 @@ function historyOff(path: string, action: "move" | "rename" | "delete", folder: 
   return new HistoryOffError(`${historyOffTitle(path, action)}\n${folder ? HISTORY_OFF_FOLDER_BODY : HISTORY_OFF_PAGE_BODY}`);
 }
 
-export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
-  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
+export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string; confirmNotVersioned?: boolean },
+  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove" | "notVersioned">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
   // The app's own source check, which accepts names admitPath refuses.
   const rootPath = operation.workspace.rootPath, preCheck = movePreCheck(options.capture);
   await options.beforeMove?.(async () => {
@@ -316,6 +358,11 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
   });
   const refusal = preCheck.refusal();
   if (refusal) throw refusal;
+  if (!input.confirmNotVersioned) {
+    const paths = await notVersionedAt(rootPath, options.capture, async () =>
+      [(await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath)).physicalFromPath]);
+    if (paths.length) throw new NotVersionedError(paths);
+  }
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
     await options.admit?.();
@@ -691,6 +738,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   path: string,
   author: MomentWriteAuthor,
   options: PathChangeOptions,
+  confirmNotVersioned?: boolean,
 ): Promise<() => Promise<CliResultByVerb["fileDelete"] & Partial<OperationRecovery>>> {
   const workspace = operation.workspace, rootPath = workspace.rootPath;
   const failed = `dohc could not delete ${path}.`;
@@ -698,6 +746,13 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   const releaseRecovery = beginPendingRecovery(operationId);
   try {
     assertWritable(operation);
+    if (!confirmNotVersioned) {
+      const paths = await notVersionedAt(rootPath, options.capture, async () => [await spelledOnDisk(rootPath, path)]);
+      if (paths.length) {
+        releaseRecovery();
+        return async () => ({ ok: false, deleted: [], path, reason: notVersionedReason(paths) });
+      }
+    }
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       let gone: string[] = [];
       // The capture settles, closes and checks this endpoint before the hold.
@@ -807,11 +862,15 @@ export async function deleteWorkspacePathByHand(
   operation: PathChangeOperation,
   path: string,
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
-  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean; markChanged?: () => void; admit?: () => Promise<void> },
+  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean; markChanged?: () => void; admit?: () => Promise<void>; confirmNotVersioned?: boolean },
 ): Promise<{ trashed: boolean } & Partial<OperationRecovery>> {
   const workspace = operation.workspace, rootPath = workspace.rootPath;
   assertWritable(operation);
   const { capture } = options;
+  if (!options.emptyFolderOnly && !options.confirmNotVersioned) {
+    const paths = await notVersionedAt(rootPath, capture, async () => [await prepareWorkspaceDelete(rootPath, path)]);
+    if (paths.length) throw new NotVersionedError(paths);
+  }
   const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
   const change = async (markChanged: () => void) => {
     if (options.emptyFolderOnly) {

@@ -897,7 +897,7 @@ export async function createWorkspaceDirectory(
 // only word an early refusal; the desktop decides.
 export async function moveWorkspacePath(
   ctx: ToolContext,
-  args: { fromPath: string; toPath: string; overwrite?: boolean; summary?: string },
+  args: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean; summary?: string },
   agent?: string,
 ) {
   const from = await safeResolve(ctx, args.fromPath, "entry");
@@ -910,6 +910,7 @@ export async function moveWorkspacePath(
   return requestCli(ctx, "fileMove", {
     fromPath: from.normalized, toPath: to.normalized,
     ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
+    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}),
     agent, requestId: randomUUID(),
   });
 }
@@ -923,13 +924,14 @@ export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: stri
 
 export async function deleteWorkspacePath(
   ctx: ToolContext,
-  args: { path: string; summary?: string },
+  args: { path: string; confirmNotVersioned?: boolean; summary?: string },
   agent?: string,
 ) {
   // A link is deleted as a link, not followed.
   const resolved = await safeResolve(ctx, args.path, "entry");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "fileDelete", { path: resolved.normalized, agent, requestId: randomUUID() });
+  return requestCli(ctx, "fileDelete", { path: resolved.normalized,
+    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}), agent, requestId: randomUUID() });
 }
 
 // --- dohc_list_workspaces / cloud binding helpers ---------------------------

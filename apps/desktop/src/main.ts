@@ -216,7 +216,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { createLocalChangeAuthor, isReservedPath } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
@@ -7676,6 +7676,9 @@ function registerIpcHandlers(): void {
         capture: activity.engineCaptureFor(operation.workspace.workspaceId, operation.workspace.rootPath),
         requestId: randomUUID(), trashItem: path => shell.trashItem(path), markChanged, admit,
         markDeleted: path => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(operation.workspace.attachmentId, path),
+        // Undo of an import this session made, unchanged since: removing it
+        // leaves every version as it was before the import.
+        confirmNotVersioned: true,
       },
     ),
   });
@@ -7770,6 +7773,9 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, activity,
+    // Share mounts and dohc's own files are no file of the person's.
+    listDiskFiles: async workspaceId => (await listFiles(requireWorkspace(workspaceId).rootPath)).files
+      .map(file => file.path).filter(path => !isReservedPath(path)),
     // A version change can change which notes wait for the server.
     notifyRenderer: target => { notifyRenderer(target); ownerPendingShare.refresh(target.workspaceId); },
     localPerson,

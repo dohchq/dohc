@@ -76,6 +76,7 @@
   "desktop:retry-history-capture": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + assertWritableWorkspace" } },
   "desktop:retry-file-observation": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-workspace-versions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-not-versioned-files": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:switch-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:compare-workspace-versions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
