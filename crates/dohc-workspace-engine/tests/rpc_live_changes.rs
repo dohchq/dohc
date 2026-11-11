@@ -151,17 +151,27 @@ async fn an_action_the_relay_already_shows_records_nothing() {
         );
     }
     assert_eq!(list(&transport, &handle, &["doc"]).await, stopped);
-    // Every other status leaves the action something to do.
+    // Every other status leaves the action something to do. Each case has its
+    // own document, since a pending change keeps a second one from beginning.
     for before in ["paused", "unavailable", "absent"] {
         for action in ["stopped", "resumed"] {
+            let object = format!("{action}-from-{before}");
             assert!(
-                begin(&transport, &handle, "other", action, agent(), before).await["changeId"]
+                begin(&transport, &handle, &object, action, agent(), before).await["changeId"]
                     .is_string(),
-                "{action} from {before}"
+                "{object}"
             );
         }
     }
-    let resume = begin(&transport, &handle, "other", "resumed", agent(), "retired").await;
+    let resume = begin(
+        &transport,
+        &handle,
+        "resumed-from-retired",
+        "resumed",
+        agent(),
+        "retired",
+    )
+    .await;
     assert!(resume["changeId"].is_string());
 }
 
