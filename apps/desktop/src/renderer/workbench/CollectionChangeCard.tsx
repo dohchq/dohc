@@ -22,22 +22,23 @@ import { CHANGE_ICONS, CHANGE_LOSS, CollectionChangeReviewDialog } from "./Colle
 const notNowKey = (workspaceId: string, messageId: string) => `dohc:change-card:not-now:${workspaceId}:${messageId}`;
 const readNotNow = (key: string) => { try { return localStorage.getItem(key) === "1"; } catch { return false; } };
 const by = (name: string, atMs: number | null) => atMs === null ? name : `${name} · ${formatClock(atMs)}`;
-/**
- * What a failed Apply says. Someone who sees the Collection through a share can't change its rules, which no retry fixes.
- * The server answers "not found" for a Collection the caller can't change, so a 404 names the server.
- */
-export const collectionApplyFailure = (name: string) => (error: unknown) => isDatasetOwnerOnly(error)
-  ? { words: `You can't apply changes to ${name}. Ask its owner to apply it.`, retry: false, ownerOnly: true }
-  : isDatasetServerNotFound(error)
+/** What a failed Apply says. The server answers "not found" for a Collection the caller can't change, so a 404 names the server. */
+export const collectionApplyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
   ? { words: `The server that keeps ${name} refused this change. Nothing changed. Ask its owner to apply it.`, retry: false }
   : { words: ipcErrorMessage(error, `dohc could not apply the change to ${name}.`), retry: true };
+/**
+ * What a card that couldn't load says. Someone who sees the Collection through a share can't read its saved rules,
+ * which only its owner can change, so a retry can't help.
+ */
+export const collectionLoadFailure = (name: string) => (error: unknown): CollectionChangeLoadFailure => isDatasetOwnerOnly(error)
+  ? { words: `You can't apply changes to ${name}. Ask its owner to apply it.`, ownerOnly: true }
+  : { words: ipcErrorMessage(error, "dohc could not read this change."), ownerOnly: false };
+export type CollectionChangeLoadFailure = { words: string; ownerOnly: boolean };
 /** What Apply says when it holds a change that records made delete more than the card shows. */
 export const collectionDeletesMoreFailure = (was: { records: number; values: number }, now: { records: number; values: number }) => ({
   words: `Records changed after it was sent, and it would now delete ${collectionDeletesMore(was, now)}. Review the source change to apply it.`, retry: false });
 
-export type CollectionChangeCardPhase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" }
-  // `ownerOnly`: the person can't make this change, which no retry fixes.
-  | { kind: "failed"; words: string; retry: boolean; ownerOnly?: boolean };
+export type CollectionChangeCardPhase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
 
 // The last change each card showed this session, so a card the chat list
 // draws again, as it scrolls back into view, keeps its height from the start.
@@ -81,7 +82,7 @@ export function CollectionChangeCard(props: {
   // The attached file names the Collection, so the card's frame and heading draw once it answers.
   const [proposal, setProposal] = useState<CollectionChangeProposal | null>(() => shownChanges.get(shownKey)?.proposal ?? null);
   const [change, setChange] = useState<CollectionChange | null>(() => shownChanges.get(shownKey) ?? null);
-  const [loadFailure, setLoadFailure] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<CollectionChangeLoadFailure | null>(null);
   const [phase, setPhase] = useState<CollectionChangeCardPhase>({ kind: "idle" });
   const key = notNowKey(workspaceId, message.id);
   const [notNow, setNotNow] = useState(() => readNotNow(key));
@@ -107,14 +108,14 @@ export function CollectionChangeCard(props: {
         if (!current) return;
         remember(shownKey, loaded);
         setChange(loaded);
-      } catch (error) { if (current) setLoadFailure(ipcErrorMessage(error, "dohc could not read this change.")); }
+      } catch (error) { if (current) setLoadFailure(collectionLoadFailure(read.name)(error)); }
     })();
     return () => { current = false; };
   }, [workspaceId, path, shownKey, since, reload, props.appliedBy?.id, props.undoneBy?.id]);
 
   // A failure stays on the card while it shows. Once the chat closed it goes to the shell's toasts,
   // where Try again runs the same Apply or Undo again.
-  const fail = (failure: { words: string; retry: boolean; ownerOnly?: boolean }, error: unknown, again: () => void) => {
+  const fail = (failure: { words: string; retry: boolean }, error: unknown, again: () => void) => {
     if (mounted.current) setPhase({ kind: "failed", ...failure });
     else props.onError(failure.words, error, failure.retry ? again : undefined);
   };
@@ -198,7 +199,7 @@ export function CollectionChangeCardView(props: {
   proposal: CollectionChangeProposal;
   /** Null while History and the Collection answer. */
   change: CollectionChange | null;
-  loadFailure: string | null;
+  loadFailure: CollectionChangeLoadFailure | null;
   phase: CollectionChangeCardPhase;
   notNow: boolean;
   appliedBy?: ChatMessageRecord;
@@ -234,14 +235,15 @@ export function CollectionChangeCardView(props: {
   </div>;
   if (change === null || state === null) {
     const loadFailure = props.loadFailure;
-    // The rows wait for History and the Collection. Only a failed read offers Try again.
+    // The rows wait for History and the Collection. Only a failed read offers Try again, and not one only the owner can make.
     return <div data-testid={testId("loading")} className="mt-2 w-full max-w-[740px] overflow-hidden rounded-lg border border-line bg-panel">
       {heading()}
       {loadFailure !== null ? <div data-testid={testId("load-failed")} className="flex items-start gap-2 px-3.5 py-2.5 text-[12px] text-ink">
-        <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
-        <span className="min-w-0">{loadFailure}</span>
-        <CopyButton iconOnly label="Copy" pinName getText={() => loadFailure} />
-        <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetryLoad}>Try again</SecondaryButton>
+        {loadFailure.ownerOnly ? <LockKeyhole size={14} strokeWidth={1.9} aria-hidden data-testid={testId("owner-only")} className="mt-px shrink-0 text-muted" />
+          : <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />}
+        <span className="min-w-0">{loadFailure.words}</span>
+        <CopyButton iconOnly label="Copy" pinName getText={() => loadFailure.words} />
+        {loadFailure.ownerOnly ? null : <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetryLoad}>Try again</SecondaryButton>}
       </div> : <div className="flex min-h-8 items-center py-1.5 pl-10 pr-3.5">
         <SkeletonRows rows={1} className="w-full" label={`Loading the change to ${proposal.name}`} />
       </div>}
@@ -294,8 +296,7 @@ export function CollectionChangeCardView(props: {
     </ul>
     {note !== null && noteAt === -1 ? <p className="mx-3.5 mb-2 text-[12px] text-muted">{note}</p> : null}
     {phase.kind === "failed" && !busy ? <div role="alert" data-testid={testId("failed")} className="mx-3.5 mb-2.5 mt-0.5 flex items-start gap-2 rounded-md border border-danger/45 bg-bg px-2.5 py-2 text-[12px] text-ink">
-      {phase.ownerOnly ? <LockKeyhole size={14} strokeWidth={1.9} aria-hidden data-testid={testId("owner-only")} className="mt-px shrink-0 text-muted" />
-        : <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />}
+      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
       <span className="min-w-0">{phase.words}</span>
       <CopyButton iconOnly label="Copy" pinName getText={() => phase.words} />
     </div> : null}

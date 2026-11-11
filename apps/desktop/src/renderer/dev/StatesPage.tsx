@@ -29,7 +29,7 @@ import type {
 import { collectionsElsewhereWords, datasetOwnerOnlyError, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
 import { collectionChangeDeletes, type CollectionChangeProposal, type CollectionChangeRow } from "../../workspaces/collectionChange";
 import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
-import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
+import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure, collectionLoadFailure } from "../workbench/CollectionChangeCard";
 import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
 import { HeldChangeCard, type HeldChangeRead } from "../heldChangeReview";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
@@ -3124,8 +3124,8 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
           </div>
         </Specimen>
-        <Specimen label="from a shared view, which only the owner can apply: lock, no Try again">
-          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(datasetOwnerOnlyError()) }} /></div>
+        <Specimen label="in a shared view, which only the owner can apply: lock, no Try again">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(null)} loadFailure={collectionLoadFailure("Volunteers")(datasetOwnerOnlyError())} /></div>
         </Specimen>
         <Specimen label="Not now">
           <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
