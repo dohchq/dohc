@@ -118,7 +118,15 @@ export function ThreadedChat(props: {
     };
     onScroll();
     node.addEventListener("scroll", onScroll, { passive: true });
-    return () => node.removeEventListener("scroll", onScroll);
+    // A pane or its messages can change size with no scroll, such as a window
+    // that grows until every message fits. The position is read again then.
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onScroll);
+    resized?.observe(node);
+    if (node.firstElementChild) resized?.observe(node.firstElementChild);
+    return () => {
+      node.removeEventListener("scroll", onScroll);
+      resized?.disconnect();
+    };
   }, [hasList, streamShown]);
   useEffect(() => {
     if (atEnd) seenCount.current = stream.length;
