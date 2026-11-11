@@ -2771,6 +2771,72 @@ describe("notices sent to you", () => {
       expect(ends).toEqual([]);
     });
 
+    it("stops saying it isn't there once a notice's Open shows another invitation, though another account then signs in", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { bridge, shares, syncs } = heldBridge();
+        let session!: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void;
+        bridge.onCloudSessionChanged.mockImplementation((listener: typeof session) => {
+          session = listener;
+          return () => {};
+        });
+        const OTHER: NoticeRow = {
+          ...MENTION, noticeId: "share:3", kind: "share-received", workspaceId: null, recipientShareId: "share-3",
+          title: "Ana shared a Group with you", target: {},
+        };
+        const notices = { ...sentNotices([OTHER]), toast: OTHER };
+        const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE], { sentNotices: notices });
+        await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+        await answerEvery(syncs, dmSyncResult());
+        await answerEvery(syncs, dmSyncResult());
+        await answerEvery(shares, NO_INVITATION);
+        await screen.findByTestId("handoff-chats-absent");
+        // Chats now reads for the other invitation, and another account's
+        // reads never answer. What the previous account's lists said about
+        // this one must not stay up.
+        const before = shares.length;
+        fireEvent.click(await screen.findByTestId("sent-notice-toast-open"));
+        await waitFor(() => expect(shares.length).toBeGreaterThan(before));
+        act(() => session({ sessionKey: "other-account", phase: "ready" }));
+        await act(async () => undefined);
+        expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+        await act(() => vi.advanceTimersByTimeAsync(INVITATION_WAIT_MS));
+        expect(await screen.findByTestId("handoff-chats-late")).toBeTruthy();
+        expect(ends).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stops saying it isn't there once the person leaves Chats, though another account then signs in", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { bridge, shares, syncs } = heldBridge();
+        let session!: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void;
+        bridge.onCloudSessionChanged.mockImplementation((listener: typeof session) => {
+          session = listener;
+          return () => {};
+        });
+        const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+        await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+        await answerEvery(syncs, dmSyncResult());
+        await answerEvery(syncs, dmSyncResult());
+        await answerEvery(shares, NO_INVITATION);
+        await screen.findByTestId("handoff-chats-absent");
+        // Chats unmounts, so nothing keeps what its lists said current.
+        fireEvent.click(screen.getByTestId("activity-explorer"));
+        await waitFor(() => expect(screen.queryByTestId("chats-join-shared")).toBeNull());
+        act(() => session({ sessionKey: "other-account", phase: "ready" }));
+        await act(async () => undefined);
+        expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+        await act(() => vi.advanceTimersByTimeAsync(INVITATION_WAIT_MS));
+        expect(await screen.findByTestId("handoff-chats-late")).toBeTruthy();
+        expect(ends).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("says dohc could not open it yet once Chats takes too long, and a row that mounts later still ends it", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {

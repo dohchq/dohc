@@ -3318,9 +3318,10 @@ export function DesktopWorkspaceShell(props: {
     setOpenedFromLink({ to: "chats-invitation", ...invitation });
   };
   // Chats reports the newest reveal's lists, and a notice's Open can point
-  // that at another invitation, so only this handoff's invitation counts. A
-  // row for it counts whichever reveal is newest.
-  const handleInvitationProgress = useCallback((shareId: string, lists: InvitationLists) => {
+  // that at another invitation, so only this handoff's invitation counts.
+  // Chats withdraws them once it stops keeping them current (a newer reveal,
+  // or leaving Chats). A row for it counts whichever reveal is newest.
+  const handleInvitationProgress = useCallback((shareId: string, lists: InvitationLists | null) => {
     if (handoffInChats.current?.shareId !== shareId) return;
     setHandoffChats((current) => current?.shareId === shareId ? { ...current, lists } : current);
   }, []);

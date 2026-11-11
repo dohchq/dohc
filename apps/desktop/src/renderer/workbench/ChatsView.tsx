@@ -673,8 +673,9 @@ export function ChatsView(props: {
   revealInvitation?: ChatsInvitation;
   onInvitationRevealed?: () => void;
   // What each list's reads since the newest reveal said, sent again whenever
-  // that changes.
-  onInvitationProgress?: (shareId: string, lists: InvitationLists) => void;
+  // that changes. Withdrawn (null) once this Chats stops keeping it current:
+  // before each change, and when Chats unmounts.
+  onInvitationProgress?: (shareId: string, lists: InvitationLists | null) => void;
   // While a reveal is owed, each row that stands for a share reports its share
   // id when it mounts, and again for each newer reveal.
   onShareRowMounted?: (shareId: string) => void;
@@ -3713,8 +3714,10 @@ export function ChatsView(props: {
     };
   }, [owedReveal, onShareRowMounted]);
   useEffect(() => {
-    if (owed === null) return;
-    onInvitationProgress?.(owed.reveal.shareId, { shares: owed.shares, dms: owed.dms });
+    if (owed === null || onInvitationProgress === undefined) return;
+    const { shareId } = owed.reveal;
+    onInvitationProgress(shareId, { shares: owed.shares, dms: owed.dms });
+    return () => onInvitationProgress(shareId, null);
   }, [onInvitationProgress, owed]);
   // An archived Group or conversation mounts its row only while Archived is
   // open, so a reveal of one opens Archived, in this render so the row mounts
