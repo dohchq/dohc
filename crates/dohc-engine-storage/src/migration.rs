@@ -3668,6 +3668,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_work_report.sql"),
         sets_user_version: None,
     },
+    // A merged path compares against what was last merged there.
+    Migration {
+        ordinal: 93,
+        id: "v2-merge-bases",
+        sql: include_str!("merge_bases.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5691,6 +5698,10 @@ mod tests {
             (
                 "v2-chat-work-report",
                 "90b7a240622af011c5d7a9a9ab24feb41db0acc2089fddfd74bbae19c4f3eea4",
+            ),
+            (
+                "v2-merge-bases",
+                "3ea47abe3fbbb37351f430d6d9eb299af3f9c23bda34407a6653357ea3752122",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
