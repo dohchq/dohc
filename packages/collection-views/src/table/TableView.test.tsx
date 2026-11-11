@@ -327,7 +327,7 @@ describe("selection and keys", () => {
       return [Number(row.dataset.index), [...row.children].indexOf(active) - gutter];
     };
     /** Presses a key on the grid. False when the grid kept the key from the browser. */
-    const press = (key: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean } = {}) =>
+    const press = (key: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean } = {}) =>
       fireEvent.keyDown(grid, { key, ...modifiers });
     const editorInput = () => grid.querySelector<HTMLInputElement>("[data-cell-editor] input");
     // A click on the checkbox cell's own padding selects it and opens nothing.
@@ -553,19 +553,28 @@ describe("selection and keys", () => {
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
   });
 
-  it("opens the selected row's record with Space, and toggles a checkbox with Enter", () => {
+  it("opens the selected row's record with Ctrl+Enter or ⌘+Enter, and toggles a checkbox with Enter or Space", () => {
     const onOpenRecord = vi.fn((_record: CollectionRecord) => {});
     const { press, selectDone, onCellChange } = setup({ onOpenRecord });
     selectDone(1);
-    expect(press(" ")).toBe(false);
-    expect(onOpenRecord).toHaveBeenCalledOnce();
-    expect(onOpenRecord.mock.calls[0]?.[0].id).toBe("rec-b");
+    expect(press("Enter", { ctrlKey: true })).toBe(false);
+    press("Enter", { metaKey: true });
+    expect(onOpenRecord.mock.calls.map(([record]) => record.id)).toEqual(["rec-b", "rec-b"]);
+    expect(onCellChange).not.toHaveBeenCalled();
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
 
     press("Enter");
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-b", recordPath: "tasks/rec-b.md", field: "done", value: true,
     });
+    expect(press(" ")).toBe(false);
+    expect(onCellChange).toHaveBeenCalledTimes(2);
+
+    // On any other cell Space changes nothing, and never scrolls the table.
+    press("ArrowLeft");
+    expect(press(" ")).toBe(false);
+    expect(onCellChange).toHaveBeenCalledTimes(2);
+    expect(onOpenRecord).toHaveBeenCalledTimes(2);
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
   });
 

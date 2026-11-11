@@ -407,8 +407,10 @@ export function TableView({
   const onGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // Header buttons, row controls, and the open editor keep their own keys.
     if (event.target !== event.currentTarget || composing(event)) return;
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
     const { key } = event;
+    // Ctrl+Enter, or ⌘ on a Mac, opens the record. Other shortcuts are the app's.
+    const opens = (event.ctrlKey || event.metaKey) && key === "Enter";
+    if (event.altKey || ((event.ctrlKey || event.metaKey) && !opens)) return;
     if (editorRef.current) {
       // An editor left open without focus takes the first Escape.
       if (key === "Escape" && !editingDisabled) setEditing(null);
@@ -424,6 +426,10 @@ export function TableView({
     const record = rows[at.row]?.original;
     const field = fields[at.column];
     if (!record || !field) return;
+    if (opens) {
+      event.preventDefault();
+      return onOpenRecord?.(record);
+    }
     if (key === "Tab") {
       const to = beside(at.row, at.column, event.shiftKey);
       // Past the first or last cell, Tab leaves the grid.
@@ -437,17 +443,19 @@ export function TableView({
       event.preventDefault();
       return select(clamp(at.row + arrow[0], rows.length), clamp(at.column + arrow[1], fields.length));
     }
-    if (key === " ") {
-      event.preventDefault();
-      return onOpenRecord?.(record);
-    }
+    // Space scrolls a focused scroller. Here it only ticks a checkbox.
+    if (key === " ") event.preventDefault();
     if (!onCellChange || editingDisabled) return;
     const cell = { recordId: record.id, recordPath: record.path, field: field.name };
     const value = record.values.find((entry) => entry.field === field.name)?.value ?? null;
+    if (field.type === "checkbox" && (key === "Enter" || key === " ")) {
+      event.preventDefault();
+      return onCellChange({ ...cell, value: value !== true });
+    }
+    if (key === " ") return;
     if (key === "Enter") {
       event.preventDefault();
-      if (field.type === "checkbox") onCellChange({ ...cell, value: value !== true });
-      else if (opensEditor(field, relationExecutor)) setEditing({ recordId: record.id, field: field.name });
+      if (opensEditor(field, relationExecutor)) setEditing({ recordId: record.id, field: field.name });
       return;
     }
     // A relation's records are removed in its picker.
