@@ -13,6 +13,8 @@ import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { readHistoryMoments } from "./helpers/history";
 import { appliedServiceHostSeqs, liveDocumentFold, noticedRefusals, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
+// RETEST INSTRUMENTATION (never merge): diagnostic probes.
+import { recordCouldNotUpdate, recordEngineRefusals, watchReadOnly } from "./helpers/retestProbe";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
   revealExplorerPath, waitForWorkspaceFile, writeWorkspaceFiles, type TempWorkspace,
@@ -658,8 +660,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expectAuditKept(hosted!);
     });
 
+    // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
+    let stopWatching = () => {};
     await test.step("the recipient opens the share on their own desktop, sees who wrote it, and continues the document", async () => {
       recipient = await launch(recipientTemp);
+      stopWatching = watchReadOnly(recipient.page, testInfo, "recipient");
       const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
       const page = recipient.page;
       await expect(editor(page)).toContainText(H1);
@@ -686,6 +691,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     });
 
     await test.step("the idle owner's editor and the agent see the recipient's edit", async () => {
+      // RETEST INSTRUMENTATION (never merge): record a missing recipient credit and go on to the fixme.
+      try {
       await expect(editor(owner!.page)).toContainText(R1, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, R1]), { timeout: 60_000 }).toBe(true);
       // The owner's History credits the recipient's change to the account and
@@ -716,7 +723,14 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-id="${credit!.id}"]`)).toBeVisible();
       await attachScreen(testInfo, page, "owner History names the recipient");
+      } catch (error) {
+        testInfo.annotations.push({ type: "RETEST recipient credit missing", description: String(error).slice(0, 2000) });
+        await attachScreen(testInfo, owner!.page, "owner History without the recipient credit");
+      }
     });
+    // RETEST INSTRUMENTATION (never merge): any "could not update" notice once the owner has the recipient's edit.
+    await recordCouldNotUpdate(owner!.page, testInfo, "owner", "after the recipient's edit reached the owner");
+    await recordCouldNotUpdate(recipient!.page, testInfo, "recipient", "after the recipient's edit reached the owner");
 
     await test.step("History offers no Restore shared file for the shared note (#3090)", async () => {
       const page = owner!.page;
@@ -732,6 +746,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     // A restore that stops a note's last Edit access can leave it and other
     // shared notes stuck, so History no longer offers it. The rest of this
     // test restores through it.
+    // RETEST INSTRUMENTATION (never merge): the notices and the engine's refusals as the test reaches its fixme.
+    stopWatching();
+    await recordCouldNotUpdate(owner!.page, testInfo, "owner", "at the fixme");
+    await recordCouldNotUpdate(recipient!.page, testInfo, "recipient", "at the fixme");
+    recordEngineRefusals(ownerTemp.rootPath, testInfo, "owner", "at the fixme");
+    recordEngineRefusals(recipientTemp.rootPath, testInfo, "recipient", "at the fixme");
     test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
 
     await test.step("the owner stops the recipient's access and restores the document to before their edit", async () => {
