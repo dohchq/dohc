@@ -1,3 +1,4 @@
+import { fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { test, expect, type Page, type Locator } from "@playwright/test";
@@ -56,9 +57,9 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
     await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
+    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before sharing");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
     await collection.getByLabel("Manage Collection", { exact: true }).click();
     // Add a real authored rule through the normal reviewed source-change path.
     const definition = JSON.parse(await readFile(join(workspace.rootPath, "Registrations/dataset.json"), "utf8")) as DatasetDefinition;
@@ -150,7 +151,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(editorTabTestId(path)).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    const names = collection.getByRole("button", { name: /^Edit Name for record / });
+    const names = await fieldCells(collection, "Name");
     await expect(names).toHaveCount(2);
     expect(await names.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant"]));
     const beforePublications = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ action: "list", workspaceId, appRoot: "registrations-form" }), workspaceId);
@@ -166,7 +167,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await renameReview.getByRole("button", { name: "Approve change", exact: true }).click();
     await expect(renameReview).toBeHidden();
     expect(await readFile(operationPath, "utf8")).toBe(customSource);
-    await expect(collection.getByRole("button", { name: /^Edit Participant for record / })).toHaveCount(2);
+    await expect(await fieldCells(collection, "Participant")).toHaveCount(2);
 
     // The approved app still uses the previous display label and binding. No republish.
     await form.getByRole("button", { name: "Submit another response", exact: true }).click();
@@ -182,7 +183,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toContainText("This registration is not allowed.");
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    const participants = collection.getByRole("button", { name: /^Edit Participant for record / });
+    const participants = await fieldCells(collection, "Participant");
     await expect(participants).toHaveCount(3);
     expect(await participants.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant", "After field rename"]));
     const afterPublications = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ action: "list", workspaceId, appRoot: "registrations-form" }), workspaceId);
@@ -248,9 +249,9 @@ test("@dataset-completion history reverses an authored rule against current reco
     const refused = await page.evaluate(async request => window.dohcDesktop!.dataset(request), invoke);
     expect(refused).toMatchObject({ kind: "refused", code: "registration_closed" });
     await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("row", { name: "New record", exact: true }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
+    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Registered after rule change");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Registered after rule change");
     const management = collection.getByLabel("Manage Collection", { exact: true });
     if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
     await collection.getByRole("button", { name: "History", exact: true }).click();
@@ -269,14 +270,14 @@ test("@dataset-completion history reverses an authored rule against current reco
     await review.getByRole("checkbox", { name: "I reviewed this change and its effect on existing data" }).check();
     await review.getByRole("button", { name: "Approve change", exact: true }).click();
     await expect(review).toBeHidden();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Registered after rule change");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Registered after rule change");
     const current = await page.evaluate(async input => window.dohcDesktop!.dataset({ action: "describe", ...input }), { workspaceId, datasetPath: definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json" });
     if (current.kind !== "description") throw Error("Expected reversed Collection.");
     const accepted = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { ...invoke, revision: current.dataset.revision, revisionSha256: current.dataset.revisionSha256, idempotencyKey: "accepted-after-reversal" });
     expect(accepted).toMatchObject({ kind: "invoked", replayed: false });
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveCount(2);
-    expect(await collection.getByRole("button", { name: /^Edit Name for record / }).allTextContents()).toEqual(expect.arrayContaining(["Registered after rule change", "Blocked participant"]));
+    await expect(await fieldCells(collection, "Name")).toHaveCount(2);
+    expect(await (await fieldCells(collection, "Name")).allTextContents()).toEqual(expect.arrayContaining(["Registered after rule change", "Blocked participant"]));
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });

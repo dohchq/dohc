@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
+import { editCell, fieldCells } from "./helpers/dataCollection";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
@@ -32,12 +33,12 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Recovery proof", exact: true });
     await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    const newRecord = collection.getByRole("row", { name: "New record" });
+    const newRecord = collection.getByRole("form", { name: "New record" });
     await newRecord.getByLabel("Name", { exact: true }).fill("Before agent edit");
     await newRecord.getByLabel("Receipt", { exact: true }).setInputFiles({ name: "receipt.txt", mimeType: "text/plain", buffer: receipt });
     await expect(newRecord.getByText(/receipt\.txt.*Save to attach/)).toBeVisible();
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before agent edit");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Before agent edit");
 
     const listed = await dataset(page, { action: "list", workspaceId });
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
@@ -58,11 +59,9 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     const agentResult = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: source.rootPath, actor: "agent", request: retryRequest } }, { stateDir: source.homeDir });
     expect(agentResult).toMatchObject({ kind: "invoked", replayed: false });
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before owner edit");
-    await collection.getByRole("button", { name: /^Edit Name for record / }).click();
-    await collection.getByRole("form", { name: "Edit Name" }).getByLabel("Name").fill("Saved before recovery");
-    await collection.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Saved before recovery");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Before owner edit");
+    await editCell(collection, await fieldCells(collection, "Name"), "Saved before recovery");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Saved before recovery");
     const before = await dataset(page, readRequest);
     const historyRequest = { ...scope, action: "history" as const, limit: 50 };
     const historyBefore = await dataset(page, historyRequest);
@@ -111,7 +110,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await recovery.getByRole("button", { name: "Restore Collection", exact: true }).click();
     await expect(recovery).toBeHidden();
     const recovered = restored.getByRole("region", { name: "Recovery proof", exact: true });
-    await expect(recovered.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Saved before recovery");
+    await expect(await fieldCells(recovered, "Name")).toHaveText("Saved before recovery");
     // Claiming a new host adds an authority checkpoint, not a user edit.
     const recoveredRead = { ...before, revision: before.revision + 1 };
     expect(await dataset(restored, readRequest)).toEqual(recoveredRead);
@@ -133,7 +132,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await expect(latest.getByText('"Before owner edit"', { exact: true })).toBeVisible();
     await restored.screenshot({ path: test.info().outputPath("restored-history.png") });
     await latest.getByRole("button", { name: "Undo edit", exact: true }).click();
-    await expect(recovered.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before owner edit");
+    await expect(await fieldCells(recovered, "Name")).toHaveText("Before owner edit");
     await history.getByRole("button", { name: "Close", exact: true }).click();
     await expect(recovered.getByRole("button", { name: "Download Receipt", exact: true })).toBeVisible();
     assertDesktopEngineHealthy(restoredDesktop.logs);

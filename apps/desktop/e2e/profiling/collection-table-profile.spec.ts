@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { cpus, freemem, platform, totalmem } from "node:os";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetSources } from "../../src/workspaces/datasetGenerator";
+import { fieldCells } from "../helpers/dataCollection";
 import { launchDesktopApp } from "../helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "../helpers/workspace";
 
@@ -28,7 +29,10 @@ function statistics(values: number[]) {
   return { count: values.length, p50: sorted[Math.ceil(sorted.length * .5) - 1], p95: sorted[Math.ceil(sorted.length * .95) - 1], p99: sorted[Math.ceil(sorted.length * .99) - 1], max: sorted.at(-1), samplesMs: values };
 }
 
-/** Starts at the actual click event and stops at a painted, settled 50-row table. */
+/**
+ * Starts at the actual click event and stops at a painted, settled page of 50 records.
+ * The table draws only the rows in view, so its row count says how many records it holds.
+ */
 async function tableSample(page: Page, initial: boolean) {
   return page.evaluate(({ initial, title }) => new Promise<number>((resolve, reject) => {
     const region = () => document.querySelector<HTMLElement>(`section[aria-label="${title}"]`);
@@ -41,7 +45,7 @@ async function tableSample(page: Page, initial: boolean) {
     const observer = new MutationObserver(() => {
       const current = region();
       changed ||= current !== previous || current?.getAttribute("aria-busy") === "true";
-      if (finishing || !started || !changed || !current || current.getAttribute("aria-busy") !== "false" || current.querySelectorAll("tbody tr").length !== 50) return;
+      if (finishing || !started || !changed || !current || current.getAttribute("aria-busy") !== "false" || current.querySelector('[role="grid"]')?.getAttribute("aria-rowcount") !== "51" || !current.querySelector('[role="row"][data-index]')) return;
       finishing = true;
       requestAnimationFrame(() => requestAnimationFrame(() => {
         const latest = region();
@@ -58,7 +62,7 @@ async function tableSample(page: Page, initial: boolean) {
 /** Captures real keyboard input and waits for a paint; Playwright transport latency is outside the sample. */
 async function inputSample(page: Page) {
   await page.evaluate(() => {
-    const input = document.querySelector<HTMLInputElement>('form[aria-label="Edit Name"] input[aria-label="Name"]');
+    const input = document.querySelector<HTMLInputElement>("[data-cell-editor] input");
     if (!input || input.disabled) throw Error("The record editor is unavailable.");
     (window as Window & { collectionInputSample?: Promise<number> }).collectionInputSample = new Promise((resolve, reject) => {
       let started = 0;
@@ -135,10 +139,11 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
     const warm: number[] = [], input: number[] = [];
     for (let index = 0; index < samples; index++) warm.push(await tableSample(page, false));
     const collection = page.getByRole("region", { name: title, exact: true });
-    await collection.getByRole("button", { name: /^Edit Name for record / }).first().click();
-    await collection.getByRole("form", { name: "Edit Name" }).getByLabel("Name", { exact: true }).focus();
+    await (await fieldCells(collection, "Name")).first().click();
+    await collection.locator("[data-cell-editor] input").focus();
     for (let index = 0; index < samples; index++) input.push(await inputSample(page));
-    await collection.getByRole("button", { name: "Cancel", exact: true }).click();
+    // Escape cancels the edit, so the samples change no record.
+    await page.keyboard.press("Escape");
     const evidence = {
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(),
@@ -146,7 +151,7 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
       dataset: { ...selection, rowCount, seed, checkpoint: checkpoint.expected, approvedRevision: checkpoint.revision.revision, approvedRevisionHash: checkpoint.revision.revisionSha256, schemaSha256: hash(files[definition.schemaPath]!), sourceSha256: hash(source) },
       measurements: { coldOpenMs: coldMs, warmTable: statistics(warm), inputFeedback: statistics(input) },
       targets: { warmTableP95Ms: 300, inputFeedbackP95Ms: 100 },
-      boundaries: { realRenderer: true, path: "Collection refresh → owner IPC → approved read → painted 50-row table", input: "keydown → changed controlled input → two animation frames", seed: "Owner fixture action in 128-row transactions, followed by approved checkpoint", network: false, quietHost: "Not assumed; record concurrent load separately", thresholdsEnforced: false },
+      boundaries: { realRenderer: true, path: "Collection refresh → owner IPC → approved read → painted page of 50 records", input: "keydown → changed cell editor input → two animation frames", seed: "Owner fixture action in 128-row transactions, followed by approved checkpoint", network: false, quietHost: "Not assumed; record concurrent load separately", thresholdsEnforced: false },
     };
     await writeFile(test.info().outputPath("collection-performance.json"), JSON.stringify(evidence, null, 2));
     await test.info().attach("collection-performance", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
