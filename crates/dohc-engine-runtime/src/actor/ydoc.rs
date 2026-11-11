@@ -5695,4 +5695,72 @@ mod pending_write_order_tests {
             "second edit"
         );
     }
+
+    /// Recovery replays a note's writes in order, and each expects the file
+    /// to hold the one before it. If the older write fails on a locked file,
+    /// the head's write waits for it instead of conflicting, and the next
+    /// recovery lands both. Without the stop, the head's write conflicted and
+    /// the next recovery landed the older write, so the file went back to
+    /// text the note had moved past.
+    #[test]
+    fn recovery_leaves_an_older_write_alone_once_the_head_conflicted() {
+        let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+        // A conflicted write reads the note's document row.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind,                      updated_at_ms, path)                      VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("the note's document row");
+        let older = writes[0].clone();
+        let lock = super::super::history_operations::turns::tests::PlacementFault::jobs(
+            scratch.path(),
+            std::sync::Arc::new(move |job| {
+                (job.job_id == older).then_some(dohc_engine_files::MaterializeError::FileLocked)
+            }),
+        );
+        let locked = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("recovery while the file is locked");
+        drop(lock);
+        let status = |store: &EngineStore, id: &str| {
+            store
+                .load_materialization_job(id)
+                .expect("load")
+                .expect("job")
+                .status
+        };
+        let after_lock = [status(&store, &writes[0]), status(&store, &writes[1])];
+        // Reopening the engine runs this recovery again.
+        let reopened = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            7,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("recovery after reopening");
+        let after_reopen = [status(&store, &writes[0]), status(&store, &writes[1])];
+        let on_disk = std::fs::read_to_string(scratch.path().join("note.md")).expect("file");
+        assert_eq!(
+            on_disk, "second edit",
+            "after the lock {after_lock:?} (failed {}), after reopening {after_reopen:?}              (completed {}, failed {})",
+            locked.failed, reopened.completed, reopened.failed,
+        );
+        assert_eq!(after_lock, [JobStatus::Pending, JobStatus::Pending]);
+        assert_eq!(locked.failed, 2, "both writes are still owed");
+        assert_eq!(after_reopen, [JobStatus::Complete, JobStatus::Complete]);
+    }
 }

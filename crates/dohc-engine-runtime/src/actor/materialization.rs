@@ -999,6 +999,11 @@ fn replay_materializations(
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             Ok(true)
         };
+        // Files where a note's write failed in this pass and is still owed.
+        // Each of a note's writes expects the file to hold the one before it,
+        // so a later one would conflict, and the owed one could then land
+        // after it, taking the file back to older text.
+        let mut stopped_files: HashSet<String> = HashSet::new();
         for job in jobs {
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
@@ -1006,6 +1011,15 @@ fn replay_materializations(
             }
             if holds.blocks(&job.target_path) {
                 summary.parked += 1;
+                continue;
+            }
+            let note_write = job.job_id.starts_with("ydoc-mat_");
+            if note_write
+                && stopped_files.contains(&dohc_engine_files::floor::path_collision_key(
+                    &job.target_path,
+                ))
+            {
+                summary.failed += 1;
                 continue;
             }
             let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
@@ -1290,6 +1304,16 @@ fn replay_materializations(
             ) && let Some(recorder) = scope.self_writes
             {
                 recorder.retract(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
+            if note_write
+                && matches!(
+                    outcome,
+                    Ok(JobOutcome::Blocked | JobOutcome::Crashed(_)) | Err(_)
+                )
+            {
+                stopped_files.insert(dohc_engine_files::floor::path_collision_key(
+                    &job.target_path,
+                ));
             }
             match outcome {
                 Ok(JobOutcome::Parked) => summary.parked += 1,

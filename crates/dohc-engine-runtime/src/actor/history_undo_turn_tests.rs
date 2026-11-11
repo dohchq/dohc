@@ -489,7 +489,7 @@ async fn history_undo_placement_stops_retrying_when_the_actor_closes() {
     placement_waits_for_writer(10, true).await;
 }
 
-type MaterializationFault = Arc<
+pub(in crate::actor) type MaterializationFault = Arc<
     dyn Fn(&dohc_engine_storage::MaterializationJob) -> Option<dohc_engine_files::MaterializeError>
         + Send
         + Sync,
@@ -507,8 +507,16 @@ pub(in crate::actor) fn materialization_error(
     let fault = materialization_faults().lock().unwrap().get(root).cloned();
     fault.and_then(|fault| fault(job))
 }
-struct PlacementFault(PathBuf);
+pub(in crate::actor) struct PlacementFault(PathBuf);
 impl PlacementFault {
+    /// Fails the jobs `fault` picks under `root` until the guard drops.
+    pub(in crate::actor) fn jobs(root: &Path, fault: MaterializationFault) -> Self {
+        materialization_faults()
+            .lock()
+            .unwrap()
+            .insert(root.to_path_buf(), fault);
+        Self(root.to_path_buf())
+    }
     fn install(root: &Path, path: &'static str, store_busy: bool) -> (Self, Arc<AtomicUsize>) {
         let attempts = Arc::new(AtomicUsize::new(0));
         let observed = attempts.clone();
