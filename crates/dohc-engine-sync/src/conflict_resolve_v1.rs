@@ -5191,7 +5191,7 @@ mod tests {
                 .lineage_claim_id,
             claim
         );
-        assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+        assert_eq!(projected_ydoc_text(&mut store, &key), "current text\n");
     }
 
     #[test]
@@ -10058,16 +10058,16 @@ mod tests {
         for (source, expected, held) in [
             (
                 "- Run:\n\n      npm i foo",
-                "- Run:\n\n  &#32;   npm i foo",
+                "- Run:\n\n  &#32;   npm i foo\n",
                 true,
             ),
             (
                 "Install:\n\n    npm i foo",
-                "Install:\n\n&#32;   npm i foo",
+                "Install:\n\n&#32;   npm i foo\n",
                 false,
             ),
-            ("- \n\n  - b\n - c", "- \n\n- b\n- c", false),
-            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c", false),
+            ("- \n\n  - b\n - c", "- \n\n- b\n- c\n", false),
+            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c\n", false),
         ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);

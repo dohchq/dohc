@@ -97,7 +97,7 @@ const settleSamples: Sample[] = [
     'empty-key': ': note\na: 1\nb: .nan',
     empty: '&root {}',
   }).map(([name, yaml]) => ({
-    name: `refuse-property-edit-${name}`, markdown: `---\n${yaml}\n---\n\nBody`,
+    name: `refuse-property-edit-${name}`, markdown: `---\n${yaml}\n---\n\nBody\n`,
     keeps: true, checkImport: true, editsRefused: true,
   })),
   ...Object.entries({
@@ -186,7 +186,7 @@ const settleSamples: Sample[] = [
 ]
 const samples: Sample[] = [
   { name: 'empty', markdown: '' },
-  { name: 'rich-unicode', markdown: '# Hello 世界\n\n**Bold** and 🦀.' },
+  { name: 'rich-unicode', markdown: '# Hello 世界\n\n**Bold** and 🦀.\n' },
   { name: 'ordinary-frontmatter-order', markdown: '---\nz: last\ntitle: First\na: next\n---\n\nBody' },
   { name: 'ordinary-frontmatter-array', markdown: '---\ntags:\n  - one\n  - two\n---\n\nBody' },
   { name: 'nested-order', markdown: '---\nnested:\n  z: last\n  a: first\n  10: ten\n  2: two\n---\n\nBody' },
@@ -195,7 +195,7 @@ const samples: Sample[] = [
   { name: 'string-quotes', markdown: '---\na: "true"\nb: "it\'s: here"\nc: " leading "\nd: ""\ne: "null"\n---\n\nBody' },
   { name: 'multiline', markdown: '---\na: |-\n  first\n  second\nb: |+\n  keeps\n\n---\n\nBody' },
   { name: 'numbers', markdown: '---\na: -0.0\nb: 1e20\nc: 9007199254740993\nd: 1.25\ne: 1e-7\n---\n\nBody' },
-  { name: 'negative-zero', markdown: '---\nvalue: -0.0\n---\n\nBody' },
+  { name: 'negative-zero', markdown: '---\nvalue: -0.0\n---\n\nBody\n' },
   { name: 'numeric-root-order', markdown: '---\ntitle: Title\n10: ten\n2: two\n---\n\nBody' },
   { name: 'tagged', markdown: '---\npriority: !custom high\n---\n\nBody' },
   { name: 'tagged-crlf', markdown: '---\r\npriority: !custom high\r\n---\r\n\r\nBody\r\n\r\nNext' },

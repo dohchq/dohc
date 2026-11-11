@@ -270,7 +270,7 @@ async fn successor_body_edit_canonicalizes_source_and_keeps_nested_list() {
         .expect("persist body edit");
     let edited = settle_document_successor(&actor, &scratch, &key, &claim, &sha, 24).await;
     supervisor.close(&db).unwrap();
-    let canonical = "- parent\n  - child\n\nOriginal paragraph\n\nAdded paragraph";
+    let canonical = "- parent\n  - child\n\nOriginal paragraph\n\nAdded paragraph\n";
     assert_eq!(edited.projection.content, canonical);
     assert_ne!(edited.moment_id, control.moment_id);
     assert!(edited.materialized);

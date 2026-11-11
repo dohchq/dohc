@@ -72,9 +72,9 @@ async function readSecret(
 }
 
 /**
- * Answers `files.replace`, the desktop's macOS disk write. The engine checks
- * the path and swaps a temp in, which a scratch disk needs no more than a
- * plain write for.
+ * Answers `files.replace`, the desktop's macOS and Windows disk write. The
+ * engine checks the path and swaps a temp in, which a scratch disk needs no
+ * more than a plain write for.
  */
 export async function replaceFileOnScratchDisk(rootPath: string, request: Request): Promise<Response> {
   const params = request.params as Record<string, JsonValue | undefined>;

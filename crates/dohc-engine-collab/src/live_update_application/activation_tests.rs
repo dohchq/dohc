@@ -711,7 +711,7 @@ fn retained_activation_checks_saved_bytes_before_loading_them() {
 fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
     let mut f = imported_fixture();
     f.local_edit_before_adoption();
-    let text = "edited before connecting".to_owned();
+    let text = "edited before connecting\n".to_owned();
     VersionedTextStore::new(&mut f.store)
         .write_text(
             &WriteText {
@@ -977,7 +977,7 @@ fn release_reclaims_only_an_unreferenced_captured_full_state() {
                     version_id: "main".into(),
                     object_id: "object".into(),
                     path: "owner.md".into(),
-                    text: "changed before capture".into(),
+                    text: "changed before capture\n".into(),
                     moment_id: "imported-edit".into(),
                     metadata_origin: "sync".into(),
                     metadata_summary: None,

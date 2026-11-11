@@ -281,7 +281,7 @@ describe("retained failures", () => {
       enqueue();
       expect(collectionWriteFailures()[0]?.message).toContain("without rewriting the others");
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
-      expect(yDocToMarkdown(doc)).toBe(markdown);
+      expect(yDocToMarkdown(doc)).toBe(`${markdown}\n`);
       host.unmount();
     } finally { doc.destroy(); }
   });

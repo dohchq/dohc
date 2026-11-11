@@ -236,7 +236,7 @@ async fn open_session_proof(mutate: bool, timing_file: &str) {
         .text;
     assert_eq!(
         text,
-        "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]"
+        "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]\n"
     );
     if !mutate {
         let key = lock(&f.service.sessions).get(&sid).unwrap().key.clone();

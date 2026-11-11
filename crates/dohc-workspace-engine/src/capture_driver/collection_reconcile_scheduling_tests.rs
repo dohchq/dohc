@@ -664,7 +664,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     let self_writes = SelfWriteSuppression::default();
     std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
         .expect("collection schema");
-    std::fs::write(&record_path, b"Alpha task").expect("collection record");
+    std::fs::write(&record_path, b"Alpha task\n").expect("collection record");
     let seed_actor = actor.clone();
     let seed_root = scratch.path().to_path_buf();
     let seed_leases = leases.clone();
@@ -695,7 +695,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     })
     .join()
     .expect("collection capture setup thread");
-    seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task").await;
+    seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
     let adopt_actor = actor.clone();
     let adopt_root = scratch.path().to_path_buf();
     let adopt_leases = leases.clone();
@@ -793,7 +793,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
         std::fs::write(&record_path, &changed).unwrap();
         changed
     } else {
-        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+        std::fs::write(&record_path, b"Alpha task\n").expect("strip adopted record id");
         adopted
     };
     wait_for_watcher_dirty(&handle).await;

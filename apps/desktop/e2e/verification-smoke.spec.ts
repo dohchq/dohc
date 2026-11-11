@@ -21,7 +21,8 @@ test("@verification-smoke an editor change reaches disk and survives restart", a
     await desktop.page.keyboard.press(DOCUMENT_END);
     await desktop.page.keyboard.type(" Durable verification edit.");
     await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
-    await expect.poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8")).toContain("Durable verification edit.");
+    // The saved note ends with exactly one line break after the edit.
+    await expect.poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8")).toMatch(/Durable verification edit\.\n$/);
     await desktop.close();
     desktop = null;
     desktop = await launchDesktopApp({ workspace });

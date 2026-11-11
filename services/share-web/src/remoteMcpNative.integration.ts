@@ -101,7 +101,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline)};
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({document, currentPath: "docs/a.md", checkpoint: baseline});
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const evidence = registration.evidence, markdown = Buffer.from("Hello **world**.");
+    const evidence = registration.evidence, markdown = Buffer.from("Hello **world**.\n");
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2});
     storage.appendLogBatch({workspaceId: "workspace", originId: "owner", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
@@ -156,21 +156,21 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     const edit = await openLink("edit"), view = await openLink("view");
     const call = (client: Client, name: string, args: Record<string, unknown> = {}) => client.callTool({name, arguments: args});
     expect(await call(edit.client, "dohc_list_files")).toMatchObject({structuredContent: {files: [{path: "a.md", blobSha256: hash(markdown)}]}});
-    expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});
+    expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**.\n"}});
     expect(await call(edit.client, "dohc_post_discussion", {body: "Agent reviewed the document.", idempotencyKey: "mcp-proof-comment"})).not.toMatchObject({isError: true});
     expect(JSON.stringify(await call(edit.client, "dohc_read_discussion"))).toContain("Agent reviewed the document.");
-    expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **world**."}});
+    expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **world**.\n"}});
     const edited = await call(edit.client, "dohc_edit_document", {path: "a.md", find: "world", replacement: "agent"});
     expect(edited).toMatchObject({structuredContent: {ok: true, outcome: "applied"}});
     const ack = (edited.structuredContent as {acknowledgement: {deliveryId: string; updateDigest: string}}).acknowledgement;
     const db = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {expect(db.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications").all()).toEqual([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]);}
     finally {db.close();}
-    expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **agent**."}});
+    expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **agent**.\n"}});
     expect(await active.settle(document)).toMatchObject({materialized: true});
-    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.");
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.\n");
     // Ordinary file replication is separate from live settlement in this fixture.
-    expect(await call(view.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});
+    expect(await call(view.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**.\n"}});
     const viewTools = (await view.client.listTools()).tools.map(tool => tool.name);
     expect(viewTools).not.toContain("dohc_edit_document"); expect(viewTools).not.toContain("dohc_post_discussion");
     await expect(call(view.client, "dohc_edit_document", {path: "a.md", find: "agent", replacement: "forbidden"})).rejects.toThrow("not found");
@@ -181,8 +181,8 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     await active.close(); active = undefined;
     expect(await call(edit.client, "dohc_edit_document", {path: "a.md", find: "agent", replacement: "offline"})).toMatchObject({isError: true, structuredContent: {ok: false, outcome: "not-applied"}});
     expect(await call(edit.client, "dohc_list_files")).not.toMatchObject({isError: true});
-    expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});
-    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.");
+    expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**.\n"}});
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.\n");
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     acknowledgement = ack;
   } finally {

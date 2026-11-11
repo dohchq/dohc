@@ -78,7 +78,7 @@ export function daemonCaptureLifecycleAnswer(
  * real sha256, so tests that read content back are not asserting against a
  * hand-written responder. Only the handful of methods the loopback has no
  * concept of — workspace open/close, capture flush and author, watcher status,
- * and the macOS disk write `files.replace` — are answered here.
+ * and the macOS and Windows disk write `files.replace` — are answered here.
  *
  * Extracted from `workspaceEngineCapture.test.ts`, where it was private, so the
  * remaining suites on the legacy fallback can migrate onto one harness instead

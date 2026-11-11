@@ -2099,7 +2099,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.open(new FakeSender(7), openPayload);
       await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
     });
 
     it("applies the edit through the editor that holds the document and shows it there", async () => {
@@ -2114,7 +2114,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
       expect(keepBlocksSeen).toEqual([true]);
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.\n");
       expect(session.applyDecidedLocalUpdate).toHaveBeenCalledWith(
         expect.any(Function), undefined, { ...agentOrigin, idempotencyKey: expect.any(String) },
       );
@@ -2125,7 +2125,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const payload = shown[0]!.payload as { sessionId: string; update: Uint8Array; lineageGeneration: number };
       expect(payload).toMatchObject({ sessionId: openPayload.sessionId, lineageGeneration: 1 });
       Y.applyUpdate(editor, payload.update);
-      expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe("# Plan\n\nBefore.\n\nAfter.\n");
       await h.ipc.shutdown();
     });
 
@@ -2151,7 +2151,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(lost).rejects.toThrow("some or all of its text is not in notes/a.md");
       // The edit reached the document, so a resent request must not apply it again.
       await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.\n");
 
       // Typing elsewhere at the same moment leaves the edit's text in place.
       const typed = new Y.Doc();
@@ -2167,7 +2167,7 @@ describe("engine Y.Doc IPC adapter", () => {
       });
       await expect(h.ipc.editDocument(edit({ find: "## Before.", replacement: "## Before noon." })))
         .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.\n");
       await h.ipc.shutdown();
     });
 
@@ -2190,7 +2190,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
       await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
         .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore and afte.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore and afte.\n");
       await h.ipc.shutdown();
     });
 
@@ -2241,7 +2241,7 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(keepBlocksSeen).toEqual([false]);
       expect(trace).toEqual(["apply", "settle", "close"]);
       expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.\n");
     });
 
     it("keeps blocks in a synced document no editor here holds, since another device may be typing", async () => {
@@ -2263,7 +2263,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const second = h.ipc.editDocument(edit({ find: "400", replacement: "500" }));
       await expect(first).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
       await expect(second).rejects.toThrow("not in the document");
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("Budget: 450 dollars");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("Budget: 450 dollars\n");
       await h.ipc.shutdown();
     });
 
@@ -2357,7 +2357,7 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(calls).toHaveLength(2);
       expect(calls[1]![2]).toEqual(calls[0]![2]);
       expect(session.settleNow).toHaveBeenNthCalledWith(1, { allowLossySourceSha256: source });
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.\n");
     });
 
     it("keeps a capacity-refused edit unapplied when the consent-only settlement holds", async () => {
@@ -2370,7 +2370,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(held);
       expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
     });
 
     it("leaves the edit unapplied when consent preparation is pending", async () => {
@@ -2386,7 +2386,7 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
       expect(session.close).toHaveBeenCalledOnce();
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
     });
 
     it("does not retry an edit after its lineage changes during consent settlement", async () => {
@@ -2410,7 +2410,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
       expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
       await h.ipc.shutdown();
     });
 
@@ -2437,7 +2437,7 @@ describe("engine Y.Doc IPC adapter", () => {
         .rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
       expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
       expect(session.settleNow).toHaveBeenCalledOnce();
-      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.\n");
     });
 
     it.each([[false, "active"], [true, "active"], [false, "sealed"], [true, "sealed"]] as const)("reports an admitted pending edit as success, held=%s state=%s", async (held, state) => {
@@ -2516,7 +2516,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
       await h.ipc.open(new FakeSender(7), openPayload);
       const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
-      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.");
+      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.\n");
       await h.ipc.shutdown();
     });
   });

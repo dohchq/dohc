@@ -100,7 +100,7 @@ describe("engine-mode export with no mounted serializer", () => {
     const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.')).toBeTruthy();
+    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file\'s exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.')).toBeTruthy();
     expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();

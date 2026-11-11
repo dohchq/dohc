@@ -161,7 +161,7 @@ fn note_and_title() -> Ydoc {
 /// removes every body block the head holds; the delete set alone holds it.
 #[test]
 fn a_desktop_fold_holds_on_its_deletions_alone() {
-    let markdown = "First paragraph.\n\nSecond paragraph.";
+    let markdown = "First paragraph.\n\nSecond paragraph.\n";
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
         .unwrap();
