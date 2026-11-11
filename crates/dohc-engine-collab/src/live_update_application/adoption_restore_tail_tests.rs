@@ -954,7 +954,8 @@ fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
     for changed in [true, false] {
         let mut f = Fixture::new();
         let before = f.doc.state_vector();
-        f.edit(true);
+        // A named local edit, so only the delivery can add the unknown author.
+        f.edit_by(true, 1_000_000, Some(&agent_run("owner-run".into(), None)));
         if changed {
             let mut first_seen: Vec<_> = f
                 .doc
@@ -979,9 +980,10 @@ fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
             .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
             .unwrap();
         assert_eq!(
-            authors.moment_json().as_deref(),
-            changed.then_some(r#"[{"kind":"unattributed"}]"#),
-            "changed: {changed}"
+            authors.has_unattributed(),
+            changed,
+            "changed: {changed}, authors: {}",
+            authors.json()
         );
     }
 }

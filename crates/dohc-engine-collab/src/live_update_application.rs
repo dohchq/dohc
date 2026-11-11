@@ -5585,6 +5585,7 @@ mod tests {
                 agent_run_id: None,
             },
         }]);
+        sees(&mut update, &Ydoc::wire());
         ack(apply(&mut store, &mut cache, &handle, update));
         assert_eq!(
             newest_field_author(&store),
