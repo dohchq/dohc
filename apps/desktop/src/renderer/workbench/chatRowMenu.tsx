@@ -12,7 +12,7 @@ export type ChatRowMenuTarget =
       unread: boolean;
       archived: boolean;
       // The agent's chat stays after its agent leaves Settings, archived, and
-      // only Settings can bring the agent back.
+      // only Settings can bring the agent back. Remove from list takes it off Archived.
       removed: boolean;
       // null for an agent you run yourself, which dohc never starts.
       enabled: boolean | null;
@@ -26,7 +26,9 @@ export type ChatRowMenuActions = {
   leave: () => void;
   openAgentSettings?: () => void;
   setAgentEnabled: (enabled: boolean) => void;
+  // Each asks first in a dialog.
   removeAgent: () => void;
+  hideChat: () => void;
 };
 
 const ICON = 14;
@@ -56,6 +58,7 @@ export function chatRowMenuItems(target: ChatRowMenuTarget, actions: ChatRowMenu
     if (actions.openAgentSettings) {
       top.push({ id: "open-agents", label: "Open Agents", icon: <Settings size={ICON} aria-hidden />, onSelect: actions.openAgentSettings, testId: "chat-row-menu-open-agents" });
     }
+    bottom.push({ id: "hide-chat", label: "Remove from list…", icon: <Trash2 size={ICON} aria-hidden />, danger: true, onSelect: actions.hideChat, testId: "chat-row-menu-hide-chat" });
   } else {
     if (actions.openAgentSettings) {
       top.push({ id: "agent-settings", label: "Agent settings", icon: <Settings size={ICON} aria-hidden />, onSelect: actions.openAgentSettings, testId: "chat-row-menu-agent-settings" });
@@ -72,7 +75,7 @@ export function chatRowMenuItems(target: ChatRowMenuTarget, actions: ChatRowMenu
     }
     bottom.push(archive);
     if (target.canRemove) {
-      bottom.push({ id: "remove-agent", label: "Remove agent", icon: <Trash2 size={ICON} aria-hidden />, danger: true, onSelect: actions.removeAgent, testId: "chat-row-menu-remove-agent" });
+      bottom.push({ id: "remove-agent", label: "Remove agent…", icon: <Trash2 size={ICON} aria-hidden />, danger: true, onSelect: actions.removeAgent, testId: "chat-row-menu-remove-agent" });
     }
   }
   if (top.length > 0 && bottom.length > 0) return [...top, MENU_SEPARATOR, ...bottom];

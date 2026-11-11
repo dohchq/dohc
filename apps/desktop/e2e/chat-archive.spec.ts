@@ -92,7 +92,7 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await agent.focus();
     await page.keyboard.press("Shift+F10");
     await expect(menu).toHaveCount(1);
-    await expect(menu.getByRole("menuitem")).toHaveText(["Agent settings", "Turn off", "Archive", "Remove agent"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Agent settings", "Turn off", "Archive", "Remove agent…"]);
     await expect(menu.getByRole("menuitem").first()).toBeFocused();
     await shoot(page, testInfo.outputPath("agent-menu-keyboard.png"));
     await page.keyboard.press("Escape");
