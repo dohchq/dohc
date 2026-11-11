@@ -5,6 +5,7 @@
 export const workspaceWords = {
   // ExplorerHome.tsx
   pages: "Pages",
+  sketches: "Sketches",
   otherFiles: "Other files",
   noPages: "No pages yet.",
 

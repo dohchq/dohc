@@ -1,8 +1,8 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Haptics from "expo-haptics";
 import { Stack, useRouter } from "expo-router";
-import { ChevronRight, File, FileText, Folder, FolderOpen } from "lucide-react-native";
-import { memo, useCallback, useMemo, useState } from "react";
+import { ChevronRight, File, FileText, Folder, FolderOpen, PenTool } from "lucide-react-native";
+import { Fragment, memo, useCallback, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
@@ -13,7 +13,7 @@ import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStat
 import { useFailureNotice, useView } from "../workspace/useView";
 import { homeRows, type HomeRow } from "./homeModel";
 
-// Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its other files, as the
+// Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its sketches and other files, as the
 // desktop's Home lists them. A page opens to read; a folder opens in place. The phone opens no other kind of file yet,
 // so those rows only name it. The list reads again when the feed reports a file change.
 export function ServerHome() {
@@ -58,34 +58,36 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
       {collapsed.has("pages") ? null : !rows ? pending
         : rows.pages.length === 0 ? <EmptyLine text={workspaceWords.noPages} />
         : rows.pages.map(row => <Row key={row.key} row={row} onPress={press} />)}
-      {rows && rows.otherCount > 0 ? (
-        <>
-          <SectionHeader title={workspaceWords.otherFiles} collapsed={collapsed.has("other")} unread={false} first={false} onToggle={() => toggle(setCollapsed, "other")} />
-          {collapsed.has("other") ? null : rows.others.map(row => <Row key={row.key} row={row} onPress={press} />)}
-        </>
-      ) : null}
+      {rows ? ([["sketches", workspaceWords.sketches, rows.sketches], ["other", workspaceWords.otherFiles, rows.others]] as const)
+        .map(([id, title, list]) => list.count > 0 ? (
+          <Fragment key={id}>
+            <SectionHeader title={title} collapsed={collapsed.has(id)} unread={false} first={false} onToggle={() => toggle(setCollapsed, id)} />
+            {collapsed.has(id) ? null : list.shown.map(row => <Row key={row.key} row={row} onPress={press} />)}
+          </Fragment>
+        ) : null) : null}
     </>
   );
 }
 
 const Row = memo(function Row({ row, onPress }: { row: HomeRow; onPress(row: HomeRow): void }) {
   const theme = useTheme();
-  const depth = row.kind === "other" ? 0 : row.depth;
-  const Icon = row.kind === "folder" ? row.open ? FolderOpen : Folder : row.kind === "page" ? FileText : File;
+  const listed = row.kind === "sketch" || row.kind === "other";
+  const depth = row.kind === "folder" || row.kind === "page" ? row.depth : 0;
+  const Icon = row.kind === "folder" ? row.open ? FolderOpen : Folder : row.kind === "page" ? FileText : row.kind === "sketch" ? PenTool : File;
   const content = (
     <>
       <View style={styles.chevron}>
         {row.kind === "folder" ? <ChevronRight size={14} color={theme.muted} strokeWidth={2}
           style={{ transform: [{ rotate: row.open ? "90deg" : "0deg" }] }} /> : null}
       </View>
-      <Icon size={18} color={row.kind === "other" ? theme.subtle : theme.ink} strokeWidth={1.9} />
-      <Text style={[styles.name, { color: row.kind === "other" ? theme.muted : theme.ink }]} numberOfLines={1}>{row.name}</Text>
-      {row.kind === "other" && row.folder ? <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>{row.folder}</Text> : null}
+      <Icon size={18} color={listed ? theme.subtle : theme.ink} strokeWidth={1.9} />
+      <Text style={[styles.name, { color: listed ? theme.muted : theme.ink }]} numberOfLines={1}>{row.name}</Text>
+      {listed && row.folder ? <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>{row.folder}</Text> : null}
     </>
   );
   const style = [styles.row, { paddingLeft: 8 + depth * 20 }];
   // A file the phone can't open is no button: it only says the file is there.
-  if (row.kind === "other") return <View style={style} accessible accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}>{content}</View>;
+  if (listed) return <View style={style} accessible accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}>{content}</View>;
   return (
     <Pressable onPress={() => onPress(row)} style={({ pressed }) => [style, pressed ? { backgroundColor: theme.panel2 } : null]}
       accessibilityRole="button" accessibilityLabel={row.name}

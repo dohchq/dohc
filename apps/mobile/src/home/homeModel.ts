@@ -1,16 +1,20 @@
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFile } from "../server/workspaceReads";
 
 // Home's rows from the workspace's files, by the desktop's rules (apps/desktop/src/renderer/workbench/explorerHomeModel.ts):
-// pages nested in the folders that hold them, folders first, each sorted by the name its row shows, and the other files
-// by name. A Collection's documents are its records, so neither list shows them. The phone has no Collections or Apps
+// pages nested in the folders that hold them, folders first, each sorted by the name its row shows, then the sketches
+// and the other files by name. A Collection's documents are its records, so neither list shows them. The phone has no Collections or Apps
 // sections yet, and doesn't know which folders hold an app.
 
 export type HomeRow =
   | { readonly kind: "folder"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number; readonly open: boolean }
   | { readonly kind: "page"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number }
-  | { readonly kind: "other"; readonly key: string; readonly path: string; readonly name: string; readonly folder: string };
+  | { readonly kind: "sketch" | "other"; readonly key: string; readonly path: string; readonly name: string; readonly folder: string };
 
-export const OTHER_FILES_SHOWN = 20;
+/** The first FILES_SHOWN of a kind by name, and how many there are in all. */
+export interface FirstFiles { readonly shown: HomeRow[]; readonly count: number }
+
+export const FILES_SHOWN = 20;
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
@@ -21,16 +25,17 @@ export const pageTitle = (path: string) => basename(path).replace(/\.(md|markdow
 
 type Folder = { readonly path: string; readonly folders: Map<string, Folder>; readonly pages: WorkspaceFile[] };
 
-export function homeRows(files: readonly WorkspaceFile[], expanded: ReadonlySet<string>): { pages: HomeRow[]; others: HomeRow[]; otherCount: number } {
+export function homeRows(files: readonly WorkspaceFile[], expanded: ReadonlySet<string>): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
   // A dataset's folder holds its dataset.json; everything under it belongs to the Collection.
   const owners = new Set(files.filter(file => basename(file.path) === "dataset.json").map(file => dirname(file.path)));
   const owned = (path: string) => [...owners].some(owner => path === owner || path.startsWith(`${owner}/`));
   const root: Folder = { path: "", folders: new Map(), pages: [] };
+  const sketches: WorkspaceFile[] = [];
   const others: WorkspaceFile[] = [];
   for (const file of files) {
     if (owned(file.path)) continue;
     if (!file.page) {
-      others.push(file);
+      (fileKindForPath(file.path).displayKind === "drawing" ? sketches : others).push(file);
       continue;
     }
     let folder = root;
@@ -60,9 +65,12 @@ export function homeRows(files: readonly WorkspaceFile[], expanded: ReadonlySet<
   };
   walk(root, 0);
 
-  const shown = others
-    .sort((a, b) => collator.compare(basename(a.path), basename(b.path)) || collator.compare(a.path, b.path))
-    .slice(0, OTHER_FILES_SHOWN)
-    .map((file): HomeRow => ({ kind: "other", key: `other:${file.path}`, path: file.path, name: basename(file.path), folder: dirname(file.path) }));
-  return { pages, others: shown, otherCount: others.length };
+  const first = (kind: "sketch" | "other", list: WorkspaceFile[]): FirstFiles => ({
+    shown: list
+      .sort((a, b) => collator.compare(basename(a.path), basename(b.path)) || collator.compare(a.path, b.path))
+      .slice(0, FILES_SHOWN)
+      .map((file): HomeRow => ({ kind, key: `${kind}:${file.path}`, path: file.path, name: basename(file.path), folder: dirname(file.path) })),
+    count: list.length,
+  });
+  return { pages, sketches: first("sketch", sketches), others: first("other", others) };
 }
