@@ -516,6 +516,36 @@ it("refuses a document's live binding once no Edit grant of its owner covers it,
   expect(owner()).toEqual(refused);
 });
 
+// Proves: a Stop or an enrollment says it changed live editing only when its
+// own transaction found the row in the other state, so of two calls exactly one does.
+it("credits only the Stop or enrollment whose transaction changed the row", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  const retire = () => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 20});
+  expect([retire()?.changed, retire()?.changed]).toEqual([true, false]);
+  const heard: boolean[] = [];
+  const resume = () => f.enroll({nowMs: 30, changed: (value: boolean) => heard.push(value)});
+  resume(); resume();
+  expect(heard).toEqual([true, false]);
+  // A Pause still waiting for its release is live editing a Resume gives back.
+  f.setEnabled(false);
+  resume();
+  expect(heard).toEqual([true, false, true]);
+  expect(f.storage.listServiceHostEnrollments()).toEqual([expect.objectContaining({objectId: enrolled.objectId, enabled: true, retired: false, ownerStop: null})]);
+});
+
+// Proves: a page that access ending already retired credits no Stop, and a
+// page a share already made live credits no Resume.
+it("credits no Stop or Resume for a change another producer made first", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  const heard: boolean[] = [];
+  f.enroll({nowMs: 30, changed: (value: boolean) => heard.push(value)});
+  expect(heard).toEqual([false]);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id=?").run(scope.shareId);
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId: enrolled.objectId, nowMs: 40}))
+    .toMatchObject({retired: true, ownerStop: null});
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 50})?.changed).toBe(false);
+});
+
 it("applies Pause after host release and fences Stop immediately", async () => {
   const f = await fixture(), enrolled = f.enroll();
   f.seed(scope.workspaceId, "stopped-object", "docs/stopped.md", "stopped-share");
