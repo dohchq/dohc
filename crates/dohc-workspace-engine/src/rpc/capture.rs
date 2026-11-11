@@ -535,7 +535,7 @@ impl EngineService {
                 // All flags come from one snapshot, so a transition cannot
                 // report running && terminal.
                 let snapshot = driver.status_snapshot();
-                json!({
+                let mut status = json!({
                     "running": snapshot.running,
                     "degraded": snapshot.degraded,
                     "terminal": snapshot.terminal,
@@ -547,7 +547,12 @@ impl EngineService {
                     "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
                     "retainedCopies": retained_copies,
-                })
+                });
+                // Present only while protected files wait on the key.
+                if let Some(code) = driver.status().secret_key_unavailable() {
+                    status["secretKeyUnavailable"] = json!(code);
+                }
+                status
             }
             // The driver is only absent mid-teardown; report an honest
             // "down" rather than erroring a racing status poll.
@@ -1207,6 +1212,55 @@ mod tests {
             [&json!(true), &json!(false), &json!(false)],
             "{status}"
         );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    /// Capture passes until the watcher status meets `done`.
+    async fn status_once(
+        service: &EngineService,
+        handle: &WorkspaceHandle,
+        done: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            service
+                .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+                .await
+                .unwrap();
+            let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+            if done(&status) {
+                return status;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{status}");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_status_says_why_the_secret_key_is_unavailable_until_it_loads() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_retry_workspace(&service, &scratch, "secret-key-reason").await;
+        flush_until_settled(&service, &handle).await;
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(status.get("secretKeyUnavailable"), None, "{status}");
+
+        let key = scratch.path().join(".dohc/engine/secret.key");
+        std::fs::write(&key, b"not a key").unwrap();
+        std::fs::write(scratch.path().join(".env"), b"TOKEN=alpha").unwrap();
+        let status = status_once(&service, &handle, |status| {
+            status.get("secretKeyUnavailable").is_some()
+        })
+        .await;
+        assert_eq!(status["secretKeyUnavailable"], json!("key-corrupt"));
+
+        // Without a key file or protected History, the next pass mints one.
+        std::fs::remove_file(&key).unwrap();
+        status_once(&service, &handle, |status| {
+            status.get("secretKeyUnavailable").is_none() && status["degraded"] == json!(false)
+        })
+        .await;
+        assert!(key.exists(), "the pass created the key");
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
