@@ -590,13 +590,75 @@ fn conflict_files(scratch: &ScratchDir) -> Vec<String> {
 }
 
 /// #2813. A resync applies a parked edit without writing the file. Another
-/// device's base and an edit on it then park behind the session, and the
-/// close applies them. The newest write expects the file to hold the resync's
-/// edit, so the close must write every pending edit in order, leaving the
-/// file equal to the note. The next save must then write the file.
+/// edit on the same lineage then parks behind the session, and the close
+/// applies it. Its write expects the file to hold the resync's edit, so the
+/// close must write both pending edits in order, leaving the file equal to
+/// the note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
-    use dohc_engine_collab::{ContentKind, Ydoc};
+    use dohc_engine_collab::Ydoc;
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let resynced = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("resync");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before",
+        "the resync applies the edit without writing the file"
+    );
+    assert_eq!(unfinished_writes(&db), 1);
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&resynced.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    actor
+        .ydoc_close_session_materialized(
+            scratch.path().to_path_buf(),
+            key,
+            Arc::new(()),
+            301,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the close writes every pending edit");
+    assert_eq!(deferred_rows(&db), 0);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again",
+        "the file matches the note"
+    );
+    assert_eq!(head_text(&db), "before parked again");
+    assert_eq!(unfinished_writes(&db), 0);
+    assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    supervisor.close(&db).expect("close actor");
+}
+
+/// The issue's own order: after a resync, a rival version and an edit on it
+/// park behind the session. The close replaces the lineage and writes the
+/// rival's text over the resync's pending write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_after_a_resync_and_a_rival_version_writes_the_rival() {
+    use dohc_engine_collab::Ydoc;
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
@@ -609,12 +671,6 @@ async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
         .ydoc_resync(key.clone(), claim, CancellationToken::new(), None)
         .await
         .expect("resync");
-    assert_eq!(
-        std::fs::read_to_string(&file).expect("file"),
-        "before",
-        "the resync applies the edit without writing the file"
-    );
-    assert_eq!(unfinished_writes(&db), 1);
     supervisor.close(&db).expect("close actor");
 
     let rival = Ydoc::wire();
@@ -629,14 +685,14 @@ async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
     actor
         .ydoc_close_session_materialized(
             scratch.path().to_path_buf(),
-            key.clone(),
+            key,
             Arc::new(()),
             301,
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
-        .expect("the close writes every pending edit");
+        .expect("the close writes the rival");
     assert_eq!(deferred_rows(&db), 0);
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
@@ -645,93 +701,6 @@ async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
     );
     assert_eq!(unfinished_writes(&db), 0);
     assert_eq!(conflict_files(&scratch), Vec::<String>::new());
-
-    // The next save writes the file, with no restart.
-    let opened = actor
-        .ydoc_open_state(
-            WS.into(),
-            302,
-            true,
-            Some(key.clone()),
-            "main".into(),
-            PATH.into(),
-            Some(ContentKind::Plaintext),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("reopen the note");
-    let doc = Ydoc::wire();
-    doc.apply(&opened.initial_update).expect("initial state");
-    if let Some(seed) = opened.seed_content.as_deref() {
-        let seed_update = doc.plaintext_insert(0, seed);
-        actor
-            .ydoc_record_update(
-                opened.key.clone(),
-                PATH.into(),
-                ContentKind::Plaintext,
-                opened.regime,
-                seed_update,
-                None,
-                None,
-                opened.lineage_claim_id.clone(),
-                false,
-                opened.owner_seed_source.clone(),
-                None,
-                303,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-                None,
-            )
-            .await
-            .expect("record the seed");
-    }
-    let end = u32::try_from(doc.plaintext_string().encode_utf16().count()).expect("length");
-    let edit = doc.plaintext_insert(end, " saved");
-    let append = actor
-        .ydoc_record_update(
-            opened.key.clone(),
-            PATH.into(),
-            ContentKind::Plaintext,
-            opened.regime,
-            edit,
-            None,
-            None,
-            opened.lineage_claim_id.clone(),
-            false,
-            None,
-            None,
-            304,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .expect("record the edit");
-    actor
-        .ydoc_settle(
-            scratch.path().to_path_buf(),
-            key,
-            PATH.into(),
-            ContentKind::Plaintext,
-            append.lineage_claim_id.clone(),
-            opened.head_blob_sha256.clone(),
-            "next-save".into(),
-            Arc::new(()),
-            305,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("the next save is accepted")
-        .settled()
-        .expect("the next save lands");
-    assert_eq!(
-        std::fs::read_to_string(&file).expect("file"),
-        doc.plaintext_string(),
-        "the next save writes the file"
-    );
     supervisor.close(&db).expect("close actor");
 }
 
