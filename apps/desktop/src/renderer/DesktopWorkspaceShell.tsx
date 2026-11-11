@@ -730,19 +730,26 @@ export function DesktopWorkspaceShell(props: {
     setWbState(next);
   }, []);
 
-  const openSettings = useCallback(
-    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => {
-      setSettingsFocus(null);
-      setSettingsAgent(null);
-      setSettingsSection(section);
-    },
-    [],
-  );
-  const customize = useCallback((part: CustomizePart) => {
-    setSettingsFocus(part);
+  // The Cloud and Live documents dialogs open above Settings. Settings asked
+  // for from anywhere else, such as the app menu, takes their place, so the
+  // dialog on top is always the one that holds the keyboard.
+  const showSettings = useCallback((section: SettingsSectionId, focus: CustomizePart | null) => {
+    setCloudOpen(false);
+    setCloudRetryServerUrl("");
+    setCloudRenew(false);
+    setLiveDocumentsWorkspaceId(null);
+    setSettingsFocus(focus);
     setSettingsAgent(null);
-    setSettingsSection(CUSTOMIZE_TARGETS[part].section);
+    setSettingsSection(section);
   }, []);
+  const openSettings = useCallback(
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => showSettings(section, null),
+    [showSettings],
+  );
+  const customize = useCallback(
+    (part: CustomizePart) => showSettings(CUSTOMIZE_TARGETS[part].section, part),
+    [showSettings],
+  );
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
   const workspaceId = props.workspace.workspaceId;
@@ -7734,7 +7741,12 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
         // places itself against the window. `!` outranks the unlayered class.
-        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
+        <Overlay
+          onClose={closeSettings}
+          // A dialog opened from Settings dims the window once, not twice.
+          scrim={!cloudOpen && !(liveDocumentsWorkspaceId === workspaceId && !shareView)}
+          panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}
+        >
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
@@ -7774,7 +7786,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {/* After Settings, so a dialog opened from Settings paints above it. */}
       {cloudOpen ? (
-        <Overlay onClose={closeCloud} closeOnBackdrop>
+        <Overlay onClose={closeCloud}>
           {/* Once signed in, what is left is settings: the account and the
               sync switch. A session the dialog finds goes there too. */}
           <CloudLogin

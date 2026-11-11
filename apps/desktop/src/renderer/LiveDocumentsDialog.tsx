@@ -616,7 +616,6 @@ export function LiveDocumentsDialog({
   return (
     <Overlay
       onClose={close}
-      closeOnBackdrop
       panelProps={{
         role: "dialog",
         "aria-modal": true,

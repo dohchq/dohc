@@ -418,6 +418,8 @@ export function CloudLogin(props: {
                 addressProblem !== null ? "cloud-connection-error" : undefined
               }
               data-testid="cloud-server-url"
+              // A typed address keeps the dialog open on a click outside it.
+              data-unsaved={serverUrl.trim() !== "" && !connecting ? "" : undefined}
               value={serverUrl}
               onChange={(event) => {
                 setServerUrl(event.currentTarget.value);

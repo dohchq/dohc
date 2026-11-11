@@ -4463,6 +4463,39 @@ describe("Connect server", () => {
     expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
   });
 
+  it("keeps a typed address when the click outside the dialog was a stray one", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+    const field = await screen.findByTestId("cloud-server-url");
+    await user.type(field, "https://cloud.dohc.test");
+    await user.click(screen.getByTestId("cloud-sync-panel").closest<HTMLElement>("[data-dohc-modal]")!);
+    expect(screen.getByTestId("cloud-sync-panel")).toBeTruthy();
+    expect(document.activeElement).toBe(field);
+  });
+
+  // The app menu's Settings replaces the dialog rather than opening under it,
+  // so Escape closes what is on top.
+  it("closes the Cloud dialog when the app menu opens Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+    await screen.findByTestId("cloud-sync-panel");
+    act(() => bridge.emitMenuCommand("settings"));
+    await screen.findByTestId("settings-dialog");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  });
+
   // The next step after signing in is the sync switch, so the dialog hands
   // over to the page that holds it.
   it("moves on to Settings' Sync and sharing page once sign-in completes", async () => {
