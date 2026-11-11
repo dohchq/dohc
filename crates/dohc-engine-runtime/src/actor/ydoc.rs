@@ -1344,7 +1344,7 @@ impl ActorHandle {
 
     /// Replay the writes `key` still owes its file, oldest first, and answer
     /// where the write of `moment_id` stands. A moment with no write of its
-    /// own owes the file nothing.
+    /// own stands where the newest write before it does.
     pub async fn ydoc_write_state(
         &self,
         key: DocKey,
@@ -4724,11 +4724,14 @@ fn ydoc_write_state_on_store(
         faults,
         &writes,
     )?;
-    for job_id in [
+    // A head with no write of its own needs the file to hold the newest
+    // write before it, so that write answers for it.
+    let own = [
         format!("ydoc-mat_{moment_id}"),
         format!("sync-mat_{moment_id}"),
-    ] {
-        if let Some(job) = store.load_materialization_job(&job_id)? {
+    ];
+    for job_id in own.iter().chain(writes.last()) {
+        if let Some(job) = store.load_materialization_job(job_id)? {
             return Ok(match job.status {
                 JobStatus::Complete | JobStatus::Cancelled => YdocWriteState::Landed,
                 JobStatus::Pending => YdocWriteState::Owed,
@@ -5789,6 +5792,46 @@ mod pending_write_order_tests {
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
             "second edit"
+        );
+    }
+
+    /// A retried close whose head made no write of its own still reports the
+    /// writes before it that did not land.
+    #[test]
+    fn a_head_without_a_write_answers_for_the_writes_it_was_owed() {
+        let (scratch, mut store, _) = two_writes_that_tie_in_time();
+        std::fs::write(scratch.path().join("note.md"), "outside edit").expect("outside edit");
+        let key = DocKey::new("workspace", "main", "object").expect("key");
+        let state = ydoc_write_state_on_store(
+            &mut store,
+            &key,
+            "moment-without-a-write",
+            &YdocCloseMaterialization {
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+            },
+            6,
+            &NoFaults,
+        )
+        .expect("write state");
+        let statuses: Vec<_> = ["ydoc-mat_moment-z", "ydoc-mat_moment-a"]
+            .iter()
+            .map(|id| {
+                store
+                    .load_materialization_job(id)
+                    .expect("load")
+                    .expect("job")
+                    .status
+            })
+            .collect();
+        assert_eq!(
+            state,
+            YdocWriteState::Owed,
+            "the writes stand at {statuses:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+            "outside edit"
         );
     }
 }
