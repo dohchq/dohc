@@ -82,8 +82,9 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await openPost();
     await expect(thread.getByRole("button", { name: "Open Flights", exact: true })).toBeVisible();
     await expect(thread.getByRole("button", { name: "Open trip.md", exact: true })).toBeVisible();
-    // The post's title, its first line, names its links too.
-    await expect(main.getByTestId("chats-thread-title-work-link")).toHaveCount(3);
+    // The post's title, its first line cut short, names a link it keeps and
+    // drops one it would cut.
+    await expect(main.getByTestId("chats-thread-title-work-link")).toHaveCount(1);
     await expect(main.getByTestId("chats-thread-title")).not.toContainText("@[work:");
     await shoot(page, "b-thread-chips");
     await thread.getByRole("button", { name: "Open Trip", exact: true }).click();

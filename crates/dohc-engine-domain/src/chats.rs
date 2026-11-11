@@ -1728,11 +1728,27 @@ pub fn chat_thread_display_title(stored_title: &str, first_body: Option<&str>) -
     if first_line.chars().count() <= THREAD_SNIPPET_TITLE_MAX_CHARS {
         return first_line.to_owned();
     }
-    let kept: String = first_line
-        .chars()
-        .take(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
-        .collect();
-    format!("{}\u{2026}", kept.trim_end())
+    let mut cut = first_line
+        .char_indices()
+        .nth(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
+        .map_or(first_line.len(), |(at, _)| at);
+    // A work link, `@[work:` + 43 base64url characters + `]`, is kept whole or
+    // dropped, so a title never shows half of one.
+    let bytes = first_line.as_bytes();
+    for (start, _) in first_line.match_indices("@[work:") {
+        if start >= cut {
+            break;
+        }
+        let is_link = bytes.get(start + 50) == Some(&b']')
+            && bytes[start + 7..start + 50]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
+        if is_link && cut < start + 51 {
+            cut = start;
+            break;
+        }
+    }
+    format!("{}\u{2026}", first_line[..cut].trim_end())
 }
 
 fn opening_message_body_snippet(body: &str) -> String {
@@ -8980,5 +8996,23 @@ mod replicated_origin_tests {
             .expect("an agent you run"),
             ReplicatedMessageAuthor::Device
         );
+    }
+}
+
+#[cfg(test)]
+mod display_title_tests {
+    use super::chat_thread_display_title;
+
+    #[test]
+    fn an_untitled_thread_title_drops_a_work_link_it_would_cut() {
+        let first = format!("@[work:{}]", "A".repeat(43));
+        let second = format!("@[work:{}]", "B".repeat(43));
+        let title = chat_thread_display_title(
+            "",
+            Some(&format!("Plans live in {first}. See {second} and more.")),
+        );
+        assert_eq!(title, format!("Plans live in {first}. See\u{2026}"));
+        let plain = chat_thread_display_title("", Some(&"x".repeat(100)));
+        assert_eq!(plain, format!("{}\u{2026}", "x".repeat(79)));
     }
 }
