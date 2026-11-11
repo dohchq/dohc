@@ -1,4 +1,5 @@
 import { isAgentIdTaken } from "../../ipc/errorWords";
+import { hiddenChatsFor } from "../../settings/archivedChats";
 import {
   automationAgent,
   listAgents,
@@ -58,6 +59,9 @@ export async function removeAgentWithUndo(input: {
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[] | undefined;
   agent: Pick<Agent, "id" | "name">;
+  // The agent's chat here, when known. One taken off Archived after an
+  // earlier Remove comes back to Archived now.
+  chatId?: string | undefined;
   // Answers with the settings main saved, or null when a failed save said why.
   save: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult | null>;
   // Moves these entries to the front of the file; answers whether it saved.
@@ -78,6 +82,10 @@ export async function removeAgentWithUndo(input: {
   if (Object.hasOwn(saved.settings.agents, agent.id) || saved.agentProblems?.some((problem) => problem.id === agent.id)) {
     onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
     return false;
+  }
+  if (input.chatId !== undefined && hiddenChatsFor(saved.settings, workspaceId).includes(input.chatId)) {
+    void bridge().setChatArchived({ workspaceId, channelId: input.chatId, state: "active" }).catch((cause: unknown) =>
+      onError?.(ipcErrorMessage(cause, `dohc could not put ${agent.name}'s chat back in Archived.`), cause));
   }
   const left = agentListRows(saved.settings, saved.agentProblems).map(rowId);
   // Its failed check goes with it, and Undo doesn't bring that back.

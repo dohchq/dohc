@@ -239,7 +239,7 @@ it("records a folder it could not remove, and the next start removes it before a
   void next.credentialsChanged(other.ownerKey);
   await next.get(other);
   expect(leftAtOpen).toBe(false);expect(next.leftover()).toEqual(nothing);
-  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag],account:tag});
 });
 it("tells the windows once the start has tried its record, though a read before it saw nothing left",async()=>{
   const f=await failedSignOut(),onLeftover=vi.fn(),next=restart(f.record,[],onLeftover);
@@ -286,7 +286,7 @@ it("keeps a folder an account left once it signs in again, and opens its copy th
   expect(mocks.open.mock.calls[1]![0].directory).toBe(f.directory);
   files.busy.clear();await f.registry.removeLeftover();
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
-  expect(f.registry.leftover()).toEqual(nothing);await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  expect(f.registry.leftover()).toEqual(nothing);expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],account:tag});
   await restart(f.record,[f.input.rootPath]).credentialsChanged(null);
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
 });
@@ -377,7 +377,7 @@ it("removes only the copies of accounts that left in a look still owed, never th
   await restart(f.record,[f.input.rootPath,earlier]).credentialsChanged(null);
   for(const copy of mine)expect(await readdir(copy)).toEqual(["owned.sqlite"]);
   for(const copy of [first,tagged,untagged,long])await expect(lstat(copy)).rejects.toThrow("ENOENT");
-  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag],account:tag});
 });
 it.skipIf(process.platform==="win32"||process.getuid?.()===0)("forgets the signed-in account's own folders in a record it reads late, and leaves its open copy",async()=>{
   const f=await failedSignOut();files.busy.clear();
@@ -391,7 +391,7 @@ it.skipIf(process.platform==="win32"||process.getuid?.()===0)("forgets the signe
   await chmod(f.record,0o600);
   await next.removeLeftover();
   expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);expect(next.leftover()).toEqual(nothing);
-  await expect(lstat(f.record)).rejects.toThrow("ENOENT");
+  expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],account:tag});
 });
 it("keeps the tags of accounts that left, so a later cleanup removes a copy no earlier one looked at",async()=>{
   const away=await mkdtemp(join(tmpdir(),"dohc-copy-registry-away-"));cleanups.push(()=>rm(away,{recursive:true,force:true}));
@@ -406,4 +406,34 @@ it("keeps the tags of accounts that left, so a later cleanup removes a copy no e
   await next.credentialsChanged(b);await next.credentialsChanged(null);
   await expect(lstat(stranded)).rejects.toThrow("ENOENT");
   expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag,tag]});
+});
+it("removes the copies of an account cleared outside dohc once another account signs in, and no other account's",async()=>{
+  const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  // Another installation on this computer keeps its own account's copy in the same workspace.
+  const theirs=join(dirname(directory),`${"c".repeat(16)}-${"1".repeat(16)}`);
+  await mkdir(theirs);await writeFile(join(theirs,"replica.sqlite"),"their data");
+  // A's sign-in is cleared outside dohc, so the next start has no account and keeps A's copy.
+  const next=restart(f.record,[f.input.rootPath]);
+  await next.credentialsChanged(null);
+  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
+  // B signs in: A's copy goes, though this run never opened it.
+  const b=datasetCopyOwnerKey({serverUrl:"https://account",userId:"b"});
+  await next.credentialsChanged(b);
+  await expect(lstat(directory)).rejects.toThrow("ENOENT");
+  expect(await readdir(theirs)).toEqual(["replica.sqlite"]);
+  await next.get({...f.input,ownerKey:b,lifetime:new AbortController().signal});
+  const {directory:mine}=mocks.open.mock.calls[1]![0] as {directory:string};
+  expect(await readdir(mine)).toEqual(["owned.sqlite"]);expect(next.leftover()).toEqual(nothing);
+  // B's sign-in is cleared too: a start that signs B in again removes nothing.
+  const third=restart(f.record,[f.input.rootPath]);await third.credentialsChanged(b);
+  expect(await readdir(mine)).toEqual(["owned.sqlite"]);expect(await readdir(theirs)).toEqual(["replica.sqlite"]);
+});
+it.skipIf(process.platform==="win32"||process.getuid?.()===0)("removes the copies of an account cleared outside dohc when its record is read after another account signed in",async()=>{
+  const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
+  await chmod(f.record,0o000);cleanups.push(()=>chmod(f.record,0o600).catch(()=>undefined));
+  const next=restart(f.record,[f.input.rootPath]),b=datasetCopyOwnerKey({serverUrl:"https://account",userId:"b"});
+  await expect(next.credentialsChanged(b)).rejects.toThrow("EACCES");
+  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
+  await chmod(f.record,0o600);await next.removeLeftover();
+  await expect(lstat(directory)).rejects.toThrow("ENOENT");expect(next.leftover()).toEqual(nothing);
 });

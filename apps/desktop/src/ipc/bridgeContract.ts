@@ -6221,11 +6221,12 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
-// Archives or unarchives one chat in this person's sidebar for one workspace.
+// Moves one chat in this person's sidebar for one workspace: back to its
+// list, to Archived, or, for a removed agent's chat, off Archived.
 export const SetChatArchivedPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
-  archived: z.boolean(),
+  state: z.enum(["active", "archived", "hidden"]),
 }).strict();
 export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
 

@@ -1,8 +1,15 @@
+import type { SetChatArchivedPayload } from "../ipc/bridgeContract";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   MAX_ARCHIVED_CHATS,
   type DesktopUserSettings,
 } from "./userSettings";
+
+/**
+ * Where one chat sits in this person's sidebar: in its list, in Archived, or
+ * off both, which only a removed agent's chat can be.
+ */
+export type ChatListState = SetChatArchivedPayload["state"];
 
 /** The chats this person archived in one workspace, by chat id. */
 export function archivedChatsFor(
@@ -12,26 +19,44 @@ export function archivedChatsFor(
   return (settings?.sidebar ?? DEFAULT_SIDEBAR_SETTINGS).archivedChats[workspaceId] ?? [];
 }
 
+/** The removed agents' chats this person took off Archived in one workspace, by chat id. */
+export function hiddenChatsFor(
+  settings: DesktopUserSettings | null | undefined,
+  workspaceId: string,
+): readonly string[] {
+  return (settings?.sidebar ?? DEFAULT_SIDEBAR_SETTINGS).hiddenChats[workspaceId] ?? [];
+}
+
 /**
- * The settings with one chat archived or unarchived in one workspace.
- * Archived chats for workspaces dohc no longer knows leave the file, and so
- * does a workspace whose last chat is unarchived.
+ * The settings with one chat moved to `state` in one workspace. A chat is in
+ * at most one of the two lists. Entries for workspaces dohc no longer knows
+ * leave the file, and so does a workspace whose list is empty.
  */
-export function withChatArchived(
+export function withChatState(
   settings: DesktopUserSettings,
-  change: { workspaceId: string; channelId: string; archived: boolean },
+  change: { workspaceId: string; channelId: string; state: ChatListState },
   knownWorkspaceIds: readonly string[],
 ): DesktopUserSettings {
-  const current = archivedChatsFor(settings, change.workspaceId);
-  if (change.archived && !current.includes(change.channelId) && current.length >= MAX_ARCHIVED_CHATS) {
-    throw new Error(`Archived holds ${MAX_ARCHIVED_CHATS} chats in a workspace. Unarchive one first.`);
+  const { workspaceId, channelId, state } = change;
+  const archived = archivedChatsFor(settings, workspaceId);
+  const hidden = hiddenChatsFor(settings, workspaceId);
+  const limit = state === "archived" ? archived : state === "hidden" ? hidden : null;
+  if (limit !== null && !limit.includes(channelId) && limit.length >= MAX_ARCHIVED_CHATS) {
+    throw new Error(state === "archived"
+      ? `Archived holds ${MAX_ARCHIVED_CHATS} chats in a workspace. Unarchive one first.`
+      : `dohc can take ${MAX_ARCHIVED_CHATS} chats off Archived in a workspace.`);
   }
-  const next = change.archived
-    ? current.includes(change.channelId) ? [...current] : [...current, change.channelId]
-    : current.filter((id) => id !== change.channelId);
-  const archivedChats = Object.fromEntries(
-    Object.entries({ ...settings.sidebar.archivedChats, [change.workspaceId]: next })
-      .filter(([workspaceId, ids]) => ids.length > 0 && knownWorkspaceIds.includes(workspaceId)),
+  const place = (current: readonly string[], keep: boolean) =>
+    keep ? current.includes(channelId) ? [...current] : [...current, channelId] : current.filter((id) => id !== channelId);
+  const prune = (lists: Record<string, string[]>) => Object.fromEntries(
+    Object.entries(lists).filter(([id, ids]) => ids.length > 0 && knownWorkspaceIds.includes(id)),
   );
-  return { ...settings, sidebar: { ...settings.sidebar, archivedChats } };
+  return {
+    ...settings,
+    sidebar: {
+      ...settings.sidebar,
+      archivedChats: prune({ ...settings.sidebar.archivedChats, [workspaceId]: place(archived, state === "archived") }),
+      hiddenChats: prune({ ...settings.sidebar.hiddenChats, [workspaceId]: place(hidden, state === "hidden") }),
+    },
+  };
 }

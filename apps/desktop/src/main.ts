@@ -7484,6 +7484,27 @@ function registerIpcHandlers(): void {
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     localPerson,
+    // Stop and restore removes the page next, so a release that left edits
+    // outside the file, deferred or with its Markdown write held, counts as kept.
+    stopLiveEditing: async (operation, path, objectId) => {
+      let outsideFile = false;
+      const actions = createOwnerLiveDocumentActions<DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+        ...ownerLiveDocumentDependencies,
+        ownerLiveStop: async (...args) => {
+          const stop = await ownerLiveDocumentDependencies.ownerLiveStop(...args);
+          if (args[1] === "release" && (stop?.deferred || stop?.settlementReason)) outsideFile = true;
+          return stop;
+        },
+      });
+      const workspaceId = operation.workspace.workspaceId;
+      const document = await ownerLiveDocumentDependencies.liveDocument(operation.workspace, {path});
+      operation.assertCurrent();
+      // Only the page Stop and restore found at this path.
+      if (document?.objectId !== objectId) throw new Error(`"${path}" changed. Open Live documents to check it.`);
+      const result = await actions.stop({workspaceId, path, objectId}, operation);
+      sendRendererActivity({workspaceId, liveDocumentStopped: objectId});
+      return outsideFile ? {keptEdits: "kept"} : result;
+    },
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
     syncNow: (workspaceId) => activity.syncNow(workspaceId),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),

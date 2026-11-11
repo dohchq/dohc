@@ -78,19 +78,9 @@ async function ownerRecordHistory(page: Page, path: string) {
     return details.flatMap(result => result.moment === null ? [] : [result.moment]);
   }, { workspaceId: OWNER_ID, moments });
 }
-// Stop and restore doesn't remove a page that has live editing on (#3130). It
-// lists the page for review with these words, and removes it after the owner
-// stops live editing for it and runs Stop and restore again.
-const liveRefusal = (path: string) =>
-  `dohc can't restore "${path}" while it has live editing on\nIn Live documents, stop live editing for this page, then restore it again.`;
 function stopAndRestoreRecipient(page: Page) {
   return page.evaluate(async workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({ workspaceId,
     target: { kind: "person", userId: "e2e-recipient" } }), OWNER_ID);
-}
-async function stopLiveEditing(page: Page, path: string) {
-  expect(await page.evaluate(async ({ workspaceId, path }) =>
-    (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopOwnerLiveDocument({ workspaceId, path }),
-  { workspaceId: OWNER_ID, path })).toEqual({ keptEdits: "none" });
 }
 // Stop and restore removes a recipient's record only when every version that
 // changed it names the relay-confirmed recipient.
@@ -242,7 +232,7 @@ async function withSharedCollection(
   }
 }
 
-test("@two-client an Edit recipient's new record opens immediately, becomes editable, and Stop and restore removes it once live editing stops", async () => {
+test("@two-client an Edit recipient's new record opens immediately, becomes editable, and Stop and restore removes it while it has live editing on", async () => {
   test.setTimeout(420_000);
   let release: (() => void) | undefined;
   const acknowledged = new Promise<void>(resolve => { release = resolve; });
@@ -308,11 +298,7 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       for (const moment of liveHistory) expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
       await test.info().attach("recipient-only restore state", {contentType: "application/json",
         body: JSON.stringify({live: fixture.ownerLiveState(created!.path), disk: await fixture.ownerText(created!.path)}, null, 2)});
-      const refused = await stopAndRestoreRecipient(fixture.owner.page);
-      expect(refused).toMatchObject({ status: "restored", restored: [],
-        review: [{ path: created!.path, reason: "restore-refused", detail: liveRefusal(created!.path) }], unfinished: null });
-      expect(await fixture.ownerText(created!.path)).toContain("Task: Book the ferry");
-      await stopLiveEditing(fixture.owner.page, created!.path);
+      // One run stops live editing for the page, then removes it.
       const restored = await stopAndRestoreRecipient(fixture.owner.page);
       await test.info().attach("recipient-only after restore state", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created!.path), null, 2)});
       expect(restored).toMatchObject({ status: "restored", restored: [{ path: created!.path, removed: true }], review: [], unfinished: null });
@@ -382,15 +368,8 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
       body: JSON.stringify(await Promise.all(created.map(record => readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))), null, 2) });
     // Owner settlement is held by the existing debounce seam. History still
     // attributes the file to the recipient when this destructive action runs.
-    const refused = await stopAndRestoreRecipient(fixture.owner.page);
-    expect(refused).toMatchObject({ status: "restored", restored: [], unfinished: null });
-    const review = refused.status === "restored" ? refused.review : [];
-    expect(review.map(file => file.path).sort()).toEqual(created.map(record => record.path).sort());
-    expect(review.find(file => file.path === created[1]!.path))
-      .toMatchObject({ reason: "restore-refused", detail: liveRefusal(created[1]!.path) });
-    expect(review.find(file => file.path === created[0]!.path)?.reason).toMatch(/^(changed-since|restore-refused)$/);
-    expect(await fixture.ownerText(created[1]!.path)).toContain("Task: Recipient only");
-    await stopLiveEditing(fixture.owner.page, created[1]!.path);
+    // One run stops live editing for the recipient-only page and removes it.
+    // The owner's typing keeps the other page.
     const result = await stopAndRestoreRecipient(fixture.owner.page);
     expect(result).toMatchObject({ status: "restored", restored: [{ path: created[1]!.path, removed: true }],
       review: [{ path: created[0]!.path }], unfinished: null });
