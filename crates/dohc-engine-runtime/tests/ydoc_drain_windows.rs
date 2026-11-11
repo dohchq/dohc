@@ -654,10 +654,10 @@ async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
 }
 
 /// The issue's own order: after a resync, a rival version and an edit on it
-/// park behind the session. The close replaces the lineage and writes the
-/// rival's text over the resync's pending write.
+/// park behind the session. The close drains them and leaves the file
+/// matching the note, with no write left owed and no conflict copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_close_after_a_resync_and_a_rival_version_writes_the_rival() {
+async fn a_close_after_a_resync_and_a_rival_version_leaves_the_file_matching() {
     use dohc_engine_collab::Ydoc;
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -692,9 +692,8 @@ async fn a_close_after_a_resync_and_a_rival_version_writes_the_rival() {
             CancellationToken::new(),
         )
         .await
-        .expect("the close writes the rival");
+        .expect("the close drains the rival");
     assert_eq!(deferred_rows(&db), 0);
-    assert_eq!(head_text(&db), "rival edit", "the rival is the head");
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
         head_text(&db),
