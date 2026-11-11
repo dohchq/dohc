@@ -61,7 +61,7 @@ export function AttachmentLocationControl(props: {
               {checked ? <span className="size-1.5 rounded-full bg-accent" /> : null}
             </span>
             {option.label}
-            <span id={`${id}-${option.value}`} title={path} className="col-start-2 min-w-0 text-[12px] text-muted">
+            <span id={`${id}-${option.value}`} title={path} className="col-start-2 min-w-0 overflow-hidden text-[12px] text-muted">
               <PathLine path={path} />
             </span>
           </button>
