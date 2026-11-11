@@ -55,9 +55,9 @@ pub use capture_write::{
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_retire_respelled_in_tx, derive_capture_moment_id, derive_capture_object_id,
-    derive_capture_retire_moment_id, ensure_capture_object_in_tx, validate_write_input,
-    write_history_text_in_tx, write_projected_text_in_tx, write_published_history_text_in_tx,
-    write_published_text_in_tx, write_text_in_tx,
+    derive_capture_retire_moment_id, ensure_capture_object_in_tx, switch_projection_job_id,
+    validate_write_input, write_history_text_in_tx, write_projected_text_in_tx,
+    write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
 };
 
 pub(crate) use capture_write::write_revived_text_in_tx;

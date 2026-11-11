@@ -1339,6 +1339,69 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
     );
 }
 
+// dohc#3622. Only this version's own unwritten switch write keeps its head out
+// of the seed. Another version's pending write of the same bytes doesn't.
+#[test]
+fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
+    use dohc_engine_domain::store::{CAPTURE_ORIGIN, text_blob_sha256};
+    use dohc_engine_domain::{capture_manifest_seed, switch_projection_job_id};
+    use dohc_engine_storage::{
+        MaterializationJobSpec, MaterializationOperation, Preimage, upsert_projection_job,
+    };
+
+    let (_scratch, mut store) = open_store();
+    let path = "notes/shared.md";
+    let text = "same bytes in both versions";
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(
+            &CaptureIngest {
+                metadata_origin: CAPTURE_ORIGIN.to_owned(),
+                ..ingest(path, text, 10)
+            },
+            &NO_FAULTS,
+        )
+        .expect("capture the head");
+    let sha256 = text_blob_sha256(text);
+    let pend = |store: &mut EngineStore, version: &str| {
+        let spec = MaterializationJobSpec {
+            job_id: switch_projection_job_id(
+                WS,
+                version,
+                path,
+                MaterializationOperation::Write,
+                &sha256,
+                false,
+            ),
+            workspace_id: WS.to_owned(),
+            target_path: path.to_owned(),
+            content_sha256: sha256.clone(),
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            now_ms: 20,
+        };
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                upsert_projection_job(tx, &spec, MaterializationOperation::Write)
+                    .map_err(DomainError::from)
+            })
+            .expect("pending switch write");
+    };
+    let seeded = |store: &EngineStore| {
+        capture_manifest_seed(store, WS, VERSION)
+            .expect("seed")
+            .iter()
+            .any(|entry| entry.path == path && entry.sha256 == sha256)
+    };
+
+    pend(&mut store, "feature");
+    assert!(seeded(&store), "another version's write leaves the head in");
+    pend(&mut store, VERSION);
+    assert!(
+        !seeded(&store),
+        "this version's unwritten write keeps it out"
+    );
+}
+
 #[test]
 fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
     // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
