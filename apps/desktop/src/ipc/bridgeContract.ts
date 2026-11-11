@@ -4,7 +4,6 @@ import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } fro
 import { linksOperations } from "./linksOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
-import { ChangeAuthorStatus } from "@dohc/workspace-contracts/change-author";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -508,9 +507,6 @@ export const OwnerLiveDocument = z.object({
   incident: OwnerLiveQuarantine.shape.incident.optional(),
   // The server's document at this path, whose kept edits the row shows and which its Stop and Try again name.
   objectId: OwnerLiveQuarantine.shape.objectId,
-  // Who last stopped or resumed live editing for it on this computer, when this computer recorded it.
-  lastChange: z.object({action: z.enum(["stopped", "resumed"]), atMs: z.number().int().nonnegative(),
-    author: ChangeAuthorStatus}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // Edits a restore set aside get a row each, apart from the server's document.

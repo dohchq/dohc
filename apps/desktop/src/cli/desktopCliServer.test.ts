@@ -2443,16 +2443,6 @@ describe.each(["cli", "mcp"] as const)("who stopped or resumed live editing, thr
     expect(changes.last.get("object-server")).toMatchObject({ action: "resumed", author: agent });
     expect(changes.last.has("object-plan")).toBe(false);
   });
-  it("shows who made the state each row shows, and no one for a state a record missed", async () => {
-    const changes = liveChangeRecord(), f = await liveDocumentsFixture({ record: changes.record });
-    changes.last.set("object-old", { action: "stopped", atMs: 5, author: { kind: "person", personId: "person-here" } });
-    changes.last.set("object-plan", { action: "stopped", atMs: 6, author: { kind: "agent", agentId: "agent-1", onBehalfOf: "person-here", depth: 0 } });
-    const listed = await f.doors[door].list() as { documents: { objectId: string; lastChange?: unknown }[] };
-    expect(listed.documents.find(row => row.objectId === "object-old")?.lastChange)
-      .toEqual({ action: "stopped", atMs: 5, author: { kind: "person", personId: "person-here", self: true } });
-    // object-plan is live now, so a Stop record doesn't name who made it live.
-    expect(listed.documents.find(row => row.objectId === "object-plan")).not.toHaveProperty("lastChange");
-  });
 });
 
 it("refuses Live documents on a retired desktop attachment before reaching the server", async () => {

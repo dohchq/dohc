@@ -383,8 +383,6 @@ function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { o
       ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
       ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
       ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
-      ...(row.lastChange ? [`by ${row.lastChange.author.kind === "agent" ? `agent ${lineSafe(row.lastChange.author.agentName ?? row.lastChange.author.agentId)}`
-        : row.lastChange.author.self ? "you" : "another person"}`] : []),
     ].join(" · ")),
     ...(page.nextCursor === null ? [] : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
   ].join("\n");

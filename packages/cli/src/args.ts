@@ -532,8 +532,6 @@ const DOCUMENT_VERBS = {
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
       "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
-      "lastChange names who stopped or resumed it into the state it shows: a person, with self true for you, or an agent.",
-      "Only this computer records it: on your other computers the row names no one. A change dohc could not record, for example one interrupted before the server's answer arrived, names no one either.",
       "Pass nextCursor as --cursor until it is null."],
     flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
     parse: input => {

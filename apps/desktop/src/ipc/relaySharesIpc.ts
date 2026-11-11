@@ -435,21 +435,17 @@ export function createOwnerLiveDocumentActions<
     });
   };
   /**
-   * Shows who stopped or resumed each row into its state on this computer, and settles a change an interrupted
-   * action left pending. Recovery never credits anyone: a Stop this computer still owes waits for Stop
-   * reconciliation, and every other change ends unrecorded. Changes this dohc is still making are left alone.
+   * Settles a change an interrupted action left pending. Recovery never credits anyone: a Stop this
+   * computer still owes waits for Stop reconciliation, and every other change ends unrecorded. Changes
+   * this dohc is still making are left alone. Rows name no author yet: a record of this computer's last
+   * change can't tell whether another computer changed the document since.
    */
-  const withLiveChanges = async (operation: Operation, rows: {objectId: string; status: string; lastChange?: unknown}[], localStops: readonly OwnerLiveStop[]) => {
-    const person = dependencies.person?.();
+  const settleLiveChanges = async (operation: Operation, objectIds: readonly string[], localStops: readonly OwnerLiveStop[]) => {
     const owed = new Set(localStops.filter(stop => stop.state === "requested" || stop.retirementOwed || stop.deferred).map(stop => stop.document.objectId));
     try {
-      const changes = await record!.list(operation.workspace, rows.slice(0, 200).map(row => row.objectId));
+      const changes = await record!.list(operation.workspace, objectIds.slice(0, 200));
       operation.assertCurrent();
       for (const change of changes) {
-        const row = rows.find(candidate => candidate.objectId === change.objectId), last = change.last;
-        // A record names who made the state the row shows, never an earlier one: a change it missed leaves no author.
-        if (row && last && (last.action === "stopped") === (row.status === "retired")) row.lastChange = {action: last.action, atMs: last.atMs, author: last.author.kind === "agent" ? last.author
-          : {...last.author, self: person?.kind === "person" && person.personId === last.author.personId}};
         const pending = change.pending;
         if (!pending || inFlight.has(pending.changeId) || liveChangeOutcome(pending, {stopOwed: owed.has(change.objectId)}) === null) continue;
         await record!.finish(operation.workspace, {objectId: change.objectId, changeId: pending.changeId, outcome: "unrecorded"});
@@ -457,8 +453,7 @@ export function createOwnerLiveDocumentActions<
       }
     } catch (error) {
       operation.assertCurrent();
-      // The rows stand without their authors when this computer's record can't be read.
-      console.error("[desktop] dohc could not read who changed live editing:", error);
+      console.error("[desktop] dohc could not settle its record of who changed live editing:", error);
     }
   };
   /** The Live documents list: the server's documents with this computer's Stops and kept edits, for the window and agents alike. */
@@ -500,7 +495,7 @@ export function createOwnerLiveDocumentActions<
         if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
           ...(quarantine.earlier ? {earlier: true} : {})});
       }
-      if (record) await withLiveChanges(operation, [...documents.values()], localStops);
+      if (record) await settleLiveChanges(operation, [...documents.values()].map(row => row.objectId), localStops);
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
         nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
