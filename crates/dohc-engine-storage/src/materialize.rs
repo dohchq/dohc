@@ -420,9 +420,16 @@ pub(crate) fn list_jobs(
     } else {
         ""
     };
+    // A note's writes can share a timestamp, and their ids sort by hash, so
+    // moment order breaks their ties. Every other id sorts before `ydoc-mat_`,
+    // as its NULL key does, so the order of other jobs is main's.
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM materialization_jobs j \
-         {filter} ORDER BY created_at_ms ASC, target_generation ASC, job_id ASC"
+         {filter} ORDER BY created_at_ms ASC, \
+         CASE WHEN job_id GLOB 'ydoc-mat_*' THEN \
+           (SELECT m.moment_order FROM moments m \
+            WHERE m.workspace_id = j.workspace_id AND m.moment_id = substr(j.job_id, 10)) \
+         END ASC, job_id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
     let rows = stmt

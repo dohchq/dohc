@@ -886,13 +886,7 @@ fn replay_materializations(
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        jobs.sort_by(|a, b| {
-            (a.created_at_ms, a.target_generation, &a.job_id).cmp(&(
-                b.created_at_ms,
-                b.target_generation,
-                &b.job_id,
-            ))
-        });
+        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
         jobs
     } else {
         store.list_pending_materialization_jobs()?
