@@ -283,7 +283,11 @@ export function createOwnerLiveDocumentActions<
         const refusal = refused && await stopAnswer(operation, local.document.objectId, refused);
         // An answer that means only "not yet" keeps the request, and Stop
         // reconciliation sends it again. One the person must act on ends it.
-        if (!refusal || liveStopWaits(refusal)) throw liveStopWaitingError(error);
+        if (!refusal || liveStopWaits(refusal)) {
+          // Electron drops the cause, so the log is where a timeout and a restore differ.
+          console.warn("[desktop] owner live Stop is waiting for the server:", error);
+          throw liveStopWaitingError(error);
+        }
         await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
         operation.assertCurrent();
         if (refusal.code !== "edits-pending") console.warn(`[desktop] ${liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path)}`);
