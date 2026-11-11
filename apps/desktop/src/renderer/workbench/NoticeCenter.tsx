@@ -11,13 +11,14 @@ import {
   ENGINE_STORE_UPDATE_NEXT_STEP,
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
+  type KeptTyping,
   type NoticeRow,
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
 import { RELAY_API_VERSION_CAUSE, type NoticeKind } from "@dohc/workspace-contracts/relay";
 import { SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
-import { RecoveryList } from "../RecoveryList";
+import { DismissDraftControls, RecoveryList } from "../RecoveryList";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { PathLine } from "../ui/PathLine";
@@ -1183,6 +1184,10 @@ export function NoticeCenter(props: {
   automationHoldsUnreadable?: boolean;
   onResetAutomationHolds?: () => void;
   onRevealAutomationHolds?: () => void;
+  // Typing kept for workspaces no longer in the list, such as one whose join
+  // failed. It stays until the person dismisses each file.
+  keptTyping?: readonly KeptTyping[];
+  onDismissKeptTyping?: (kept: KeptTyping) => Promise<void>;
   // Notices sent to this person, newest first. They follow this computer's
   // own rows under their own heading.
   sentNotices?: readonly SentNotice[];
@@ -1917,38 +1922,45 @@ export function NoticeCenter(props: {
       allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
-  const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0);
+  const keptTyping = props.keptTyping ?? [];
+  const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0) + (keptTyping.length > 0 ? 1 : 0);
   // This computer's rows read in this window. A row that goes and comes back
   // is unread again.
   const [localRead, setLocalRead] = useState<ReadonlySet<string>>(new Set());
   const setAsideKey = recoveryRows.length > 0
     ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.map((row) => [row.path, row.draft.id])])
     : null;
+  const keptTypingKey = keptTyping.length > 0
+    ? JSON.stringify(["kept-typing", keptTyping.map((row) => row.recordId)])
+    : null;
   useEffect(() => {
     const present = new Set(notices.map((notice) => localReadKey(props.workspaceId, notice)));
     if (setAsideKey !== null) present.add(setAsideKey);
+    if (keptTypingKey !== null) present.add(keptTypingKey);
     setLocalRead((current) => {
       const kept = [...current].filter((key) => present.has(key));
       return kept.length === current.size ? current : new Set(kept);
     });
-  }, [notices, props.workspaceId, setAsideKey]);
+  }, [notices, props.workspaceId, setAsideKey, keptTypingKey]);
   // Main saves whether the crash report is read, so its row follows main. A
   // read main could not save shows unread again, and reading it saves again.
   const savedRead = (notice: Notice) => notice.id === "crash-report" && notice.onRead !== undefined;
   const unreadNotices = notices.filter((notice) =>
     !notice.read && (savedRead(notice) || !localRead.has(localReadKey(props.workspaceId, notice))));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
-  const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
+  const keptTypingUnread = keptTypingKey !== null && !localRead.has(keptTypingKey);
+  const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0) + (keptTypingUnread ? 1 : 0);
   // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
   // Reading a row of this computer's keeps the row and closes its toast. A
   // read dohc could not save shows the row unread again.
-  const readLocal = (rows: readonly Notice[], setAside: boolean) => {
+  // `sections` are the keys of the list rows read with them.
+  const readLocal = (rows: readonly Notice[], sections: readonly (string | null)[]) => {
     setLocalRead((current) => {
       const next = new Set(current);
       for (const row of rows) next.add(localReadKey(props.workspaceId, row));
-      if (setAside && setAsideKey !== null) next.add(setAsideKey);
+      for (const key of sections) if (key !== null) next.add(key);
       return next;
     });
     for (const row of rows) {
@@ -1963,8 +1975,9 @@ export function NoticeCenter(props: {
   // How to read each unread row as it is now, by a name that stays with the
   // row while its words change.
   const readers = new Map<string, () => void>();
-  for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], false));
-  if (setAsideUnread) readers.set("set-aside", () => readLocal([], true));
+  for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], []));
+  if (setAsideUnread) readers.set("set-aside", () => readLocal([], [setAsideKey]));
+  if (keptTypingUnread) readers.set("kept-typing", () => readLocal([], [keptTypingKey]));
   for (const { notice } of sentNotices) {
     if (notice.readAtMs === null && props.onReadSentNotice) {
       readers.set(`sent:${sentKey(sentAccount, notice)}`, () => props.onReadSentNotice?.(notice));
@@ -2401,7 +2414,7 @@ export function NoticeCenter(props: {
                 data-testid="notice-center-read-all"
                 onClick={() => {
                   centerRef.current?.focus();
-                  readLocal(unreadNotices, true);
+                  readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
                   if (unreadSent > 0) props.onReadAllSentNotices?.();
                 }}
                 className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
@@ -2450,6 +2463,37 @@ export function NoticeCenter(props: {
                       Copy an edit to keep its text. Dismiss deletes it for good.
                     </p>
                     <RecoveryList rows={recoveryRows} />
+                  </div>
+                </section>
+              ) : null}
+              {keptTyping.length > 0 ? (
+                <section
+                  data-testid="notice-kept-typing"
+                  {...readOnReach("kept-typing")}
+                  className="flex gap-2 border-b border-line px-3 py-2"
+                >
+                  <UnreadMark unread={keptTypingUnread} testId="notice-kept-typing-unread" className="h-4" />
+                  <div className="min-w-0 flex-1">
+                    <p className={`m-0 text-[12px] ${keptTypingUnread ? "font-medium text-ink" : "text-muted"}`}>
+                      Typing kept from a workspace no longer in your list
+                    </p>
+                    <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                      Copy the typing to keep it. Dismiss deletes it for good.
+                    </p>
+                    <ul className="m-0 list-none p-0">
+                      {keptTyping.map((kept) => (
+                        <li
+                          key={kept.recordId}
+                          className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
+                        >
+                          <span className="min-w-0 flex-1 truncate font-mono text-muted">{kept.path}</span>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <CopyButton testId="kept-typing-copy" label="Copy typing" getText={() => kept.text} />
+                            <DismissDraftControls onDismiss={() => props.onDismissKeptTyping?.(kept)} />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 </section>
               ) : null}

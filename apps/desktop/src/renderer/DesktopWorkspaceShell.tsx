@@ -238,6 +238,7 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { useKeptTyping } from "./shell/useKeptTyping";
 import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
@@ -5685,6 +5686,7 @@ export function DesktopWorkspaceShell(props: {
       if (note !== null) reportShellError(note, new Error(note), null);
     });
   }, [openNoticeRowTarget, pendingOpen, reportShellError]);
+  const keptTyping = useKeptTyping();
   const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
@@ -6625,6 +6627,8 @@ export function DesktopWorkspaceShell(props: {
               onOpenHistory={openHistoryView}
               onOpenConflicts={() => setConflictReviewOpen(true)}
               onRefreshShareView={() => void refreshShareView()}
+              keptTyping={keptTyping.keptTyping}
+              onDismissKeptTyping={keptTyping.dismiss}
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}

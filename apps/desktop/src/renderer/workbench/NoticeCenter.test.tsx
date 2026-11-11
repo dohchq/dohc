@@ -92,6 +92,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onReviewShareChanges ? { onReviewShareChanges: props.onReviewShareChanges } : {})}
       {...(props.crashReport ? { crashReport: props.crashReport } : {})}
       {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
+      {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
+      {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
     />
   );
 }
@@ -391,6 +393,30 @@ describe("notice center", () => {
     notice = screen.getByTestId("notice-share-projection-held");
     expect(notice.textContent).toContain("This machine treats Plan.md and plan.md as the same name. Ask the person who shared the files to rename one of them.");
     expect(within(notice).queryByRole("button", { name: "Refresh" })).toBeNull();
+  });
+
+  it("offers typing kept from a workspace no longer listed until the person dismisses it", async () => {
+    const user = userEvent.setup();
+    const kept = { workspaceId: "joined-then-failed", recordId: "a".repeat(64), path: "notes/plan.md", text: "typed while joining" };
+    const onDismissKeptTyping = vi.fn(async () => undefined);
+    const view = renderNotices({ keptTyping: [kept], onDismissKeptTyping });
+    expect(screen.getByTestId("notice-center-toggle").textContent).toContain("1");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-kept-typing");
+    expect(row.textContent).toContain("Typing kept from a workspace no longer in your list");
+    expect(row.textContent).toContain("notes/plan.md");
+    await user.click(within(row).getByRole("button", { name: "Copy typing" }));
+    expect(await navigator.clipboard.readText()).toBe("typed while joining");
+    expect(onDismissKeptTyping).not.toHaveBeenCalled();
+
+    // Dismiss deletes the only copy, so it asks first.
+    await user.click(within(row).getByTestId("recovery-dismiss"));
+    expect(onDismissKeptTyping).not.toHaveBeenCalled();
+    await user.click(within(row).getByTestId("recovery-dismiss-confirm"));
+    expect(onDismissKeptTyping).toHaveBeenCalledWith(kept);
+
+    view.rerender(noticeElement({ keptTyping: [], onDismissKeptTyping }));
+    expect(screen.queryByTestId("notice-kept-typing")).toBeNull();
   });
 
   it("preserves focus assigned by a notice action", async () => {

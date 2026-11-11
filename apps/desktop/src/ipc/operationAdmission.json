@@ -124,6 +124,8 @@
   "desktop:read-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },
   "desktop:choose-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },
   "desktop:take-over-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "scheduleHostHandlers.currentRendererSession" } },
+  "desktop:list-kept-typing": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:dismiss-kept-typing": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "findWorkspace === null + removeKeptTyping" } },
   "desktop:list-notices": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:mark-notices": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:run-skipped-schedule-now": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
