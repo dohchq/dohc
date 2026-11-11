@@ -204,10 +204,10 @@ export function createOwnerLiveDocumentActions<
   const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
   // The server's live document list, as one owner request.
-  const liveHost = async (operation: Operation, method: "DELETE" | "POST" | "GET", body?: object) => {
+  const liveHost = async (operation: Operation, method: "DELETE" | "POST" | "GET", body?: object, query = "") => {
     const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
     if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
-    const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
+    const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host${query}`,{
       method,...(body === undefined ? {} : {body:JSON.stringify(body)}),
     });
     operation.assertCurrent();
@@ -223,10 +223,7 @@ export function createOwnerLiveDocumentActions<
   // its stopped one. Null when it lists none; "unread" when the server could not be asked.
   const serverRow = async (operation: Operation, match: {objectId: string} | {path: string}) => {
     try {
-      const [active, retired] = await Promise.all([liveHost(operation, "GET"),
-        relayShareJsonWithCredentials<unknown>((await remoteForWorkspace(operation.workspace)).credentials,
-          `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?retired=1`)]);
-      operation.assertCurrent();
+      const [active, retired] = await Promise.all([liveHost(operation, "GET"), liveHost(operation, "GET", undefined, "?retired=1")]);
       const rows = [...activeLiveDocuments.parse(active).documents, ...retiredLiveDocuments.parse(retired).documents];
       return rows.find(row => "objectId" in match ? row.objectId === match.objectId : row.path === match.path) ?? null;
     } catch {operation.assertCurrent(); return "unread" as const;}
@@ -249,9 +246,8 @@ export function createOwnerLiveDocumentActions<
   };
   // Settles a begun change, or with "pending" leaves it for Stop reconciliation and a later list.
   const finishChange = async (operation: Operation, begun: {changeId: string} | null, objectId: string, outcome: "applied" | "unrecorded" | "pending") => {
-    if (!begun || !record) return;
-    inFlight.delete(begun.changeId);
-    if (outcome === "pending") return;
+    // The caller's finally clears it from the changes still being made, once this finish has returned.
+    if (!begun || !record || outcome === "pending") return;
     try {await record.finish(operation.workspace, {objectId, changeId: begun.changeId, outcome});}
     catch (error) {console.error("[desktop] dohc could not finish its record of who changed live editing:", error);}
   };
