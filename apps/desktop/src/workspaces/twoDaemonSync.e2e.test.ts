@@ -4217,7 +4217,7 @@ it.skipIf(engine.missing)("renaming or deleting a captured owner-bound live page
 // dohc refuses to delete a page that native owner delivery has bound, so its workspace keeps
 // publishing. Each case removes A, then creates B and saves C; each observation prints as one `REPRO-OBS` line.
 type DeleteReproCase = "bound" | "unbound" | "restore" | "stop-then-delete" | "deferred-stop" | "file-manager" | "file-manager-capture"
-  | "file-manager-restore";
+  | "file-manager-restore" | "file-manager-stop" | "file-manager-capture-stop-early" | "file-manager-capture-stop";
 const ownedDeleteRefusal = (action: "delete" | "restore") => `LivePageOwnedError: dohc can't ${action} "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then ${action} it again.`;
 
@@ -4226,6 +4226,8 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
   const { oldPath, newPage, existing } = renameRepro;
   const workspaceId = `repro-delete-${kind}-${randomUUID().slice(0, 8)}`;
   const bound = kind !== "unbound";
+  // A starts as a file saved outside dohc, so capture writes its head.
+  const captured = kind === "file-manager-capture" || kind === "file-manager-capture-stop-early" || kind === "file-manager-capture-stop";
   const rootA = await createTestScratch("dohc-repro-delete-owner-");
   const rootB = await createTestScratch("dohc-repro-delete-peer-");
   const relayRoot = await createTestScratch("dohc-repro-delete-relay-");
@@ -4489,8 +4491,7 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
     // Step 1: A and C exist and reach the owner's second device. The owner
     // shares docs with Edit access and edits A once; native owner delivery binds it.
     step = "1-synced";
-    if (kind === "file-manager-capture") {
-      // A starts as a file saved outside dohc, so capture writes its head.
+    if (captured) {
       await mkdir(join(rootA, dirname(oldPath)), { recursive: true });
       await writeFile(join(rootA, oldPath), "# A\n");
       pages.observeFileEvents([{ path: oldPath, operation: "update" }]);
@@ -4518,7 +4519,7 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         .toEqual([oldPath]).catch(error => { throw new Error(diagnostics(), { cause: error }); });
       const document = (await ready())[0]!;
       expect(document.binding.objectId).toBe(objectIdA);
-      if (kind === "file-manager-capture") {
+      if (captured) {
         // Delivery binds A with no live edit, so capture still owns A's head.
         await expect.poll(async () => {
           await deliveryPass(document, [document]);
@@ -4655,6 +4656,31 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
       return;
     }
 
+    if (kind === "file-manager-stop" || kind === "file-manager-capture-stop-early" || kind === "file-manager-capture-stop") {
+      // Step 2: A's file goes from disk outside dohc while live editing is on (#3129).
+      // "file-manager-capture-stop-early" stops before capture can record the delete.
+      step = "2-file-manager-delete";
+      await unlink(join(rootA, oldPath));
+      if (kind !== "file-manager-capture-stop-early") {
+        pages.observeFileEvents([{ path: oldPath, operation: "delete" }]);
+        if (captured) await expect.poll(deletesOfA, { timeout: 30_000, interval: 250 }).toBeGreaterThan(0);
+        else await pages.flush();
+      }
+      const atStop = { head: headOfA(), deletesOfA: await deletesOfA(), ownerA: ownerRowsOfA(), liveRow: await liveRowOfA() };
+      observe({ atStop, onDisk: await onDisk() });
+
+      // Step 3: Stop live editing on A's row, as its Stop button does.
+      step = "3-stop";
+      const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA })
+        .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
+      const after = { ownerA: ownerRowsOfA(), serverA: await serverRowsOfA(), liveRow: await liveRowOfA(), owedStops: await owedStopsOfA() };
+      observe({ stopped, ...after });
+      // Live editing stops for A, and Stop says so.
+      expect({ stopped, atStop: { head: atStop.head, deletesOfA: atStop.deletesOfA, bound: atStop.ownerA.ownerBindings.length > 0 }, after },
+        `${kind}: Stop live editing says it stopped`).toMatchObject({ stopped: { ok: true } });
+      return;
+    }
+
     if (kind === "file-manager" || kind === "file-manager-capture") {
       // Step 2: A's file goes from disk outside dohc. The engine's own watcher
       // captures it; the desktop's watcher feeds the same event to capture
@@ -4767,3 +4793,5 @@ it.skipIf(engine.missing)("records an owner-bound live page that capture wrote a
   () => runDeleteRepros(["file-manager-capture"]), 300_000);
 it.skipIf(engine.missing)("refuses restoring an owner-bound live page deleted outside dohc (file-manager-restore)",
   () => runDeleteRepros(["file-manager-restore"]), 300_000);
+it.skipIf(engine.missing)("says Stop live editing stopped for an owner-bound live page deleted outside dohc (#3129)",
+  () => runDeleteRepros(["file-manager-stop", "file-manager-capture-stop-early", "file-manager-capture-stop"]), 300_000);

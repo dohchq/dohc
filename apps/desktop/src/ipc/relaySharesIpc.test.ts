@@ -771,14 +771,30 @@ describe("owner live document enrollment", () => {
       await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
     });
 
-    it("still fails a release for a document with no refused edits", async () => {
+    // Once the server stopped live editing, the Stop says so (#3129). The
+    // release still owed stays on the Stop's row, which Stop reconciliation sends again.
+    it("says live editing stopped when the release fails after the server stopped", async () => {
       const h = harness(); h.request.mockResolvedValue(retired);
       const ordinary = released();
       h.ownerLiveStop.mockImplementation(async (...args) => {
         if (args[1] === "release") throw new Error("owner-stop-conflict");
         return ordinary(...args);
       });
-      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow("owner-stop-conflict");
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    });
+
+    it("says live editing stopped when the page leaves its path after the server stopped", async () => {
+      const h = harness(); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      // Found for the Stop and its first check; gone once the server answered.
+      let lookups = 0;
+      h.liveDocument.mockImplementation(async () => ++lookups <= 2 ? {mainVersionId: "main", objectId: "object", currentPath: "live.md"} : null);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
+      // The release waits for Stop reconciliation, which finds the document wherever it is.
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
     });
 
     it("marks the refused document's row and passes Try again to main with the incident the owner saw", async () => {
