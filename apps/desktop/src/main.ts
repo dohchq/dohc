@@ -5048,6 +5048,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
+let ownerLiveDocumentsForCli: ((operation: DesktopWorkspaceOperation, input: { retiredAfter?: string }) => Promise<import("./ipc/bridgeContract").OwnerLiveDocumentsResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -5115,6 +5116,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
       if (!ownerLiveStopAgainForCli) throw new Error("Live editing is not ready. Try again.");
       return ownerLiveStopAgainForCli(operation, kept);
     },
+  },
+  // The Live documents list, as the dialog reads it.
+  ownerLiveDocuments: (operation, input) => {
+    if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
+    return ownerLiveDocumentsForCli(operation, input);
   },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
@@ -6901,6 +6907,7 @@ function registerIpcHandlers(): void {
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
   };
+  ownerLiveDocumentsForCli = (operation, input) => agentOwnerLiveDocuments.list(input, operation);
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,

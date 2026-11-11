@@ -50,6 +50,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document set-fields": ["board/launch.md", "--field", "Status=Blocked"],
   "document retry-kept-edits": ["Notes/a.md", "outbox:delivery:0"],
   "document stop-again": ["Notes/a.md", "release:a:0"],
+  "document live": [],
   "chat file-mentions": [],
   "chat links": ["general"],
   "chat groups": [], "chat create-group": ["needs-ice"], "chat threads": ["group"], "chat watch": [], "chat inbox": [], "chat show": ["thread"],

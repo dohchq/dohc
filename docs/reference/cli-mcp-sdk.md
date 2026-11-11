@@ -335,6 +335,16 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
 
+### `dohc_list_live_documents`
+
+List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.
+
+Live editing belongs to the owner's sharing. Shared profiles do not offer this read.
+
+- `cursor`: `string`
+
+Returns `{ ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor } | { ok: false, reason }`.
+
 ### `dohc_list_retained_copies`
 
 List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.
@@ -972,7 +982,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -1124,6 +1134,20 @@ Stop live editing again for a document whose Stop kept its edits.
 Take the incident from kept-edits. Accepts a recovery of not-written or stopping. For not-written, dohc writes the kept edits into the file. For stopping, it asks the server again to stop live editing. keptEdits is recovered once the file holds the edits, kept while dohc still keeps them, and none when it kept none. dohc refuses while the document is open in an editor. Run kept-edits again to follow it.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, keptEdits }`.
+
+#### `dohc document live`
+
+```sh
+dohc document live [options]
+```
+
+List this workspace's live documents, with each one's state and why.
+
+status is ready, preparing, paused, unavailable, or retired once live editing stopped. reason says why a document is not live. canResume is true when Resume in Live documents can start it again. document-unavailable: The file moved or was removed on this computer. Review it in Live documents. workspace-changed: The workspace changed while live editing ran. Review it in Live documents. session-host-refused: The server stopped live editing. The file and its history are unchanged. Resume tries again. session-host-diverged: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. live-document-without-lineage: Live editing can't start until the document is opened once in dohc. Open it, then Resume. live-edit-unadmitted: The server hasn't applied an edit. Resume tries again. conflict-parent-withheld: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits. quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server. Pass nextCursor as --cursor until it is null.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor }`.
 
 ### `dohc chat`
 

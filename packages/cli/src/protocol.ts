@@ -359,6 +359,22 @@ const retryKeptEditsArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
   .strict();
 const stopAgainArgsSchema = retryKeptEditsArgsSchema;
+// Why a live document is not live, and the next step for each, as Live
+// documents and Notices give it. Agents read these codes, so each one carries
+// its step in the help and the reference.
+export const LIVE_DOCUMENT_REASON_STEPS = {
+  "document-unavailable": "The file moved or was removed on this computer. Review it in Live documents.",
+  "workspace-changed": "The workspace changed while live editing ran. Review it in Live documents.",
+  "session-host-refused": "The server stopped live editing. The file and its history are unchanged. Resume tries again.",
+  "session-host-diverged": "The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator.",
+  "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
+  "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
+  "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+} as const;
+const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
+
+// The owner's Live documents list. The cursor is the list's own nextCursor.
+const liveDocumentsArgsSchema = z.object({ ...argsBase, cursor: documentPathArg.optional() }).strict();
 
 const documentEditArgsSchema = z
   .object({
@@ -653,6 +669,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -749,6 +766,7 @@ export const CLI_CAPABILITIES = {
   saveRecoveryCopy: ["share.live.document.recovery.save"],
   retryKeptEdits: ["share.live.document.retry"],
   stopAgain: ["share.live.document.stop"],
+  liveDocuments: ["share.live.documents.list"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1636,6 +1654,32 @@ const stopAgainResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// The Live documents dialog's rows. status is the server's; reason says why a
+// document is not live; canResume says whether Resume can start it again.
+// deferredStop is a Stop that waits for unsent edits. quarantine and the
+// fields after it describe edits the server refused, as kept-edits does.
+const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    documents: z.array(z.object({
+      path: z.string().min(1),
+      objectId: z.string().min(1).max(512),
+      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+      reason: liveDocumentReasonSchema.optional(),
+      canResume: z.boolean(),
+      deferredStop: z.object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() }).strict().optional(),
+      quarantine: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]).optional(),
+      earlier: z.literal(true).optional(),
+      saveOnly: z.literal(true).optional(),
+      sessionEnded: z.literal(true).optional(),
+      storedOn: keptEditsStoredOnSchema.optional(),
+      incident: keptEditsIncidentSchema.optional(),
+    }).strict()),
+    nextCursor: z.string().min(1).nullable(),
+  }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1971,6 +2015,7 @@ export const cliResultSchemas = {
   saveRecoveryCopy: saveRecoveryCopyResultSchema,
   retryKeptEdits: retryKeptEditsResultSchema,
   stopAgain: stopAgainResultSchema,
+  liveDocuments: liveDocumentsResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,
