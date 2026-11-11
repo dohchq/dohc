@@ -758,6 +758,43 @@ pub(super) fn replay_pending_materializations(
     )
 }
 
+/// Replay `ordered` one job at a time, in that order, for writes where each
+/// expects the file to hold the one before it. Returns how many did not land.
+/// It stops at the first that does not, since every later one would find the
+/// file wrong too. A held placement stops it without counting, like a parked
+/// job in any replay. A job a newer write superseded counts as landed.
+pub(super) fn replay_materializations_in_order(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    scope: MaterializationReplayScope<'_>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    ordered: &[String],
+) -> Result<usize, RuntimeError> {
+    for (index, job_id) in ordered.iter().enumerate() {
+        let replay = replay_materializations(
+            store,
+            root_dir,
+            scope,
+            now_ms,
+            faults,
+            Some(&HashSet::from([job_id.clone()])),
+            false,
+            index == 0,
+        )?;
+        if replay.parked > 0 {
+            return Ok(0);
+        }
+        let landed = store
+            .load_materialization_job(job_id)?
+            .is_some_and(|job| matches!(job.status, JobStatus::Complete | JobStatus::Cancelled));
+        if !landed {
+            return Ok(ordered.len() - index);
+        }
+    }
+    Ok(0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn replay_publication_materializations(
     store: &mut EngineStore,
@@ -849,7 +886,13 @@ fn replay_materializations(
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
+        jobs.sort_by(|a, b| {
+            (a.created_at_ms, a.target_generation, &a.job_id).cmp(&(
+                b.created_at_ms,
+                b.target_generation,
+                &b.job_id,
+            ))
+        });
         jobs
     } else {
         store.list_pending_materialization_jobs()?

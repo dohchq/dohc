@@ -422,7 +422,7 @@ pub(crate) fn list_jobs(
     };
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM materialization_jobs j \
-         {filter} ORDER BY created_at_ms ASC, job_id ASC"
+         {filter} ORDER BY created_at_ms ASC, target_generation ASC, job_id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
     let rows = stmt
