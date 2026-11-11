@@ -2400,6 +2400,49 @@ describe.each(["cli", "mcp"] as const)("who stopped or resumed live editing, thr
     expect(changes.last.has("object-held")).toBe(false);
     expect(changes.pending.size).toBe(0);
   });
+  it("shares the changes still being made with the window's own actions", async () => {
+    const changes = liveChangeRecord(), f = await liveDocumentsFixture({ record: changes.record }); f.kept.workspace = [];
+    f.answer.changed = true;
+    // The window builds its own actions on the same record, and lists while the agent's Stop runs.
+    const window = pendingStopHarness("workspace", "notes/plan.md", "object-plan", { liveChanges: changes.record });
+    window.relay.mockImplementation(async (_credentials, path) => path.includes("retired=1") ? { ok: true, documents: [], nextCursor: null }
+      : { ok: true, documents: [{ path: "notes/plan.md", objectId: "object-plan", status: "ready" }] });
+    const request = f.h.ownerLiveStop.getMockImplementation()!;
+    f.h.ownerLiveStop.mockImplementationOnce(async (...args) => {
+      await window.actions.list({}, { workspace: { workspaceId: "workspace" }, assertCurrent() {} });
+      return request(...args);
+    });
+    expect(await f.doors[door].stop("notes/plan.md")).toMatchObject({ ok: true });
+    expect(changes.last.get("object-plan")).toMatchObject({ action: "stopped", author: agent });
+  });
+  it("lets a list settle a Stop that failed part way, without credit", async () => {
+    const changes = liveChangeRecord(), f = await liveDocumentsFixture({ record: changes.record }); f.kept.workspace = [];
+    f.h.relay.mockImplementation(async (_credentials, path, init) => {
+      if (init?.method === "DELETE") return { ok: true, objectId: "object-plan", path: "notes/plan.md", status: "garbled" };
+      return path.includes("retired=1") ? { ok: true, documents: [], nextCursor: null } : { ok: true, documents: [{ path: "notes/plan.md", objectId: "object-plan", status: "ready" }] };
+    });
+    expect(await f.doors[door].stop("notes/plan.md")).toMatchObject({ ok: false });
+    expect(changes.pending.get("object-plan")?.action).toBe("stopped");
+    // This computer still owes that Stop, so the record waits; once it doesn't, a list ends it unrecorded.
+    await f.doors[door].list();
+    expect(changes.pending.size).toBe(1);
+    await f.h.ownerLiveStop({ workspaceId: "workspace" }, "clear", "notes/plan.md");
+    await f.doors[door].list();
+    expect(changes.pending.size).toBe(0);
+    expect(changes.last.size).toBe(0);
+  });
+  it("records a Resume for the document the server resumes at the path, from its state before", async () => {
+    const changes = liveChangeRecord(), f = await liveDocumentsFixture({ record: changes.record });
+    f.h.relay.mockImplementation(async (_credentials, path, init) => {
+      if (init?.method === "POST") return { ok: true, objectId: "object-server", path: "notes/plan.md", status: "preparing", changed: true };
+      return path.includes("retired=1") ? { ok: true, documents: [{ path: "notes/plan.md", objectId: "object-server", status: "retired" }], nextCursor: null }
+        : { ok: true, documents: [] };
+    });
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({ ok: true, path: "notes/plan.md" });
+    expect(changes.record.begin).toHaveBeenLastCalledWith(expect.anything(), { objectId: "object-server", path: "notes/plan.md", action: "resumed", author: agent, before: "retired" });
+    expect(changes.last.get("object-server")).toMatchObject({ action: "resumed", author: agent });
+    expect(changes.last.has("object-plan")).toBe(false);
+  });
   it("shows who made the state each row shows, and no one for a state a record missed", async () => {
     const changes = liveChangeRecord(), f = await liveDocumentsFixture({ record: changes.record });
     changes.last.set("object-old", { action: "stopped", atMs: 5, author: { kind: "person", personId: "person-here" } });

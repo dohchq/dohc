@@ -217,19 +217,35 @@ export function createOwnerLiveDocumentActions<
   // Who asked for each Stop and Resume. A change is credited only when the server's own answer says
   // this request made it. The record never holds the action back: when it records nothing, the action goes on.
   const record = dependencies.liveChanges;
-  // Changes this dohc has begun and not finished. A list never settles them.
-  const inFlight = new Set<string>();
-  const beginChange = async (operation: Operation, author: ChangeAuthor | undefined, change: {objectId: string; path: string; action: "stopped" | "resumed"}) => {
+  // Changes this dohc has begun and not finished, shared by every caller of the same record. A list never settles them.
+  const inFlight = record ? inFlightChanges(record) : new Set<string>();
+  // The server's row for a document, by its object or by its path, from its live list and the first page of
+  // its stopped one. Null when it lists none; "unread" when the server could not be asked.
+  const serverRow = async (operation: Operation, match: {objectId: string} | {path: string}) => {
+    try {
+      const [active, retired] = await Promise.all([liveHost(operation, "GET"),
+        relayShareJsonWithCredentials<unknown>((await remoteForWorkspace(operation.workspace)).credentials,
+          `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?retired=1`)]);
+      operation.assertCurrent();
+      const rows = [...activeLiveDocuments.parse(active).documents, ...retiredLiveDocuments.parse(retired).documents];
+      return rows.find(row => "objectId" in match ? row.objectId === match.objectId : row.path === match.path) ?? null;
+    } catch {operation.assertCurrent(); return "unread" as const;}
+  };
+  const beginChange = async (operation: Operation, author: ChangeAuthor | undefined, change: {objectId: string; path: string; action: "stopped" | "resumed"},
+    before: LiveChangeBefore) => {
     if (!record || !author) return null;
-    let before: LiveChangeBefore = "unavailable";
-    try {before = activeLiveDocuments.parse(await liveHost(operation, "GET")).documents.find(row => row.objectId === change.objectId)?.status ?? "absent";}
-    catch {operation.assertCurrent();}
     let begun: {changeId: string} | null = null;
     try {begun = await record.begin(operation.workspace, {...change, author, before});}
     catch (error) {console.error("[desktop] dohc could not record who changed live editing:", error);}
     operation.assertCurrent();
     if (begun) inFlight.add(begun.changeId);
     return begun;
+  };
+  // A Stop's record, for the document it names. Its state before comes from the server when it can be read.
+  const beginStop = async (operation: Operation, author: ChangeAuthor | undefined, objectId: string, path: string) => {
+    if (!record || !author) return null;
+    const row = await serverRow(operation, {objectId});
+    return beginChange(operation, author, {objectId, path, action: "stopped"}, row === "unread" ? "unavailable" : row?.status ?? "absent");
   };
   // Settles a begun change, or with "pending" leaves it for Stop reconciliation and a later list.
   const finishChange = async (operation: Operation, begun: {changeId: string} | null, objectId: string, outcome: "applied" | "unrecorded" | "pending") => {
@@ -263,7 +279,8 @@ export function createOwnerLiveDocumentActions<
     withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
       if (await dependencies.liveDocument(operation.workspace,{objectId:input.objectId})) throw changed();
       operation.assertCurrent();
-      const begun=await beginChange(operation,input.author,{objectId:input.objectId,path:input.path,action:"stopped"});
+      const begun=await beginStop(operation,input.author,input.objectId,input.path);
+      try {
       let result: unknown;
       try {result=await liveHost(operation,"DELETE",{path:input.path,objectId:input.objectId,retire:true});}
       catch (error) {
@@ -286,6 +303,7 @@ export function createOwnerLiveDocumentActions<
       await finishChange(operation,begun,input.objectId,answer==="applied" ? "applied" : "unrecorded");
       return {keptEdits:dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===input.objectId) ? "kept" : "none",
         ...(answer==="already" ? {already:true as const} : {})};
+      } finally {if (begun) inFlight.delete(begun.changeId);}
     });
   /**
    * A Stop names its document before it changes anything: the document at the
@@ -322,7 +340,9 @@ export function createOwnerLiveDocumentActions<
         if (released!=="requested") return {keptEdits:released ? keptEditsOf(released) : "kept"};
       }
       // Who asked is recorded before anything changes: then the local request, the server's Stop, and the release.
-      const begun=await beginChange(operation,input.author,{objectId:document.objectId,path:document.currentPath,action:"stopped"});
+      const begun=await beginStop(operation,input.author,document.objectId,document.currentPath);
+      // A change that ends without a finish stays pending for a list, which settles it without credit.
+      try {
       let result: unknown, local: OwnerLiveStop | undefined, quarantined=false, onServer=false;
       try {
         local=await dependencies.ownerLiveStop(operation.workspace,"request",document.currentPath,document);
@@ -378,6 +398,7 @@ export function createOwnerLiveDocumentActions<
       }
       operation.assertCurrent();
       return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released),...already};
+      } finally {if (begun) inFlight.delete(begun.changeId);}
     }));
   };
   /**
@@ -391,10 +412,11 @@ export function createOwnerLiveDocumentActions<
     await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
     operation.assertCurrent();
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<ResumeOwnerLiveDocumentResult> => {
-      // A Resume names its document by path; the one at the path now is the one the server resumes.
-      const named=record && input.author ? await dependencies.liveDocument(operation.workspace,{path:input.path}) : null;
-      operation.assertCurrent();
-      const begun=named ? await beginChange(operation,input.author,{objectId:named.objectId,path:input.path,action:"resumed"}) : null;
+      // A Resume names its document by path, and the server resumes its own document there: the record names that one.
+      const row=record && input.author ? await serverRow(operation,{path:input.path}) : null;
+      const named=row && row!=="unread" ? row : null;
+      const begun=named ? await beginChange(operation,input.author,{objectId:named.objectId,path:input.path,action:"resumed"},named.status) : null;
+      try {
       let result: unknown;
       try {result=await liveHost(operation,"POST",{path:input.path});}
       catch (error) {
@@ -414,6 +436,7 @@ export function createOwnerLiveDocumentActions<
       if (document) await dependencies.ownerLiveStop(operation.workspace,"clear",document.currentPath,document);
       operation.assertCurrent();
       return answer==="already" ? {already:true} : {};
+      } finally {if (begun) inFlight.delete(begun.changeId);}
     });
   };
   /**
@@ -493,6 +516,14 @@ export function createOwnerLiveDocumentActions<
     stop,
     resume,
   };
+}
+
+// One set per record, so the window's actions and an agent's share which changes are still being made.
+const changesInFlight = new WeakMap<object, Set<string>>();
+function inFlightChanges(record: object): Set<string> {
+  let changes = changesInFlight.get(record);
+  if (!changes) changesInFlight.set(record, changes = new Set());
+  return changes;
 }
 
 /**
