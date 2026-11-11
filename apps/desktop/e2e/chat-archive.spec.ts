@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
@@ -97,6 +98,83 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await shoot(page, testInfo.outputPath("agent-menu-keyboard.png"));
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// Remove asks first from the sidebar and from Settings, Settings › Agents
+// lists archived agents and removed agents' chats, and Remove from list takes
+// a removed agent's chat off Archived.
+test("asks before removing an agent, and manages archived agents in Settings", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-archive");
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await trustOpenWorkspace(desktop);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const panel = await openChatsView(page);
+
+    const agents = panel.getByTestId("chats-my-agent");
+    for (const [name, count] of [["Nova", 1], ["Scout", 2]] as const) {
+      await panel.getByTestId("chats-add-agent-open").click();
+      await page.getByTestId("chats-add-agent-agent-name").fill(name);
+      await page.getByText("Advanced", { exact: true }).click();
+      await page.getByTestId("chats-add-agent-command").fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
+      await page.getByTestId("chats-add-agent-submit").click();
+      await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
+      await expect(agents).toHaveCount(count);
+    }
+    const menu = page.getByTestId("chat-row-menu");
+    const nova = agents.filter({ hasText: "Nova" });
+    const scout = agents.filter({ hasText: "Scout" });
+
+    // Remove agent asks first; Cancel keeps it.
+    await nova.click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "Remove agent…" }).click();
+    const confirm = page.getByTestId("remove-agent-dialog");
+    await expect(confirm).toContainText("Remove Nova?");
+    await expect(confirm).toContainText("Its chat stays in Archived.");
+    await shoot(page, testInfo.outputPath("remove-agent-dialog.png"));
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect(nova).toHaveCount(1);
+
+    // Scout archived shows under Archived in Settings › Agents, not in the main list.
+    await scout.click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "Archive" }).click();
+    await expect(scout).toHaveCount(0);
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("agents")).click();
+    const section = page.getByTestId(settingsSectionPin("agents"));
+    const archived = section.getByTestId("agents-archived");
+    await expect(archived.getByTestId("agent-row-archived")).toHaveText(/Scout/u);
+    await expect(section.getByTestId("agents").getByTestId("agent-row")).toHaveText([/Nova/u]);
+    await shoot(page, testInfo.outputPath("settings-archived-agent.png"));
+
+    // Remove there asks too. Its chat stays, listed as removed.
+    await archived.getByRole("button", { name: "Remove Scout…" }).click();
+    await page.getByTestId("remove-agent-dialog").getByRole("button", { name: "Remove agent" }).click();
+    await expect(page.getByTestId("notice-toasts")).toContainText("Removed Scout.");
+    const removed = archived.getByTestId("agent-row-removed");
+    await expect(removed).toHaveText(/Scout/u);
+    await expect(archived.getByTestId("agent-row-archived")).toHaveCount(0);
+    await shoot(page, testInfo.outputPath("settings-removed-agent.png"));
+
+    // Remove from list asks, then takes the chat off Archived in Settings and Chats.
+    await removed.getByRole("button", { name: "Remove Scout's chat from the list…" }).click();
+    const hide = page.getByTestId("hide-agent-chat-dialog");
+    await expect(hide).toContainText("Its messages stay in this workspace.");
+    await shoot(page, testInfo.outputPath("hide-agent-chat-dialog.png"));
+    await hide.getByRole("button", { name: "Remove from list" }).click();
+    await expect(archived).toHaveCount(0);
+    await page.getByTestId(desktopPins.settingsDialog).getByRole("button", { name: "Close settings" }).click();
+    await expect(panel.getByTestId("chats-archived-toggle")).toHaveCount(0);
+    await expect(agents).toHaveCount(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
