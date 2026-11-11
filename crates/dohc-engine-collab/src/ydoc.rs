@@ -5061,42 +5061,58 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     body: &yrs::XmlFragmentRef,
     blocks: &[MdBlock<'_>],
 ) -> (u32, u32) {
-    let old: Vec<Value> = body
-        .children(txn)
-        .map(|child| xml_json(txn, child))
-        .collect();
-    if old.is_empty() || blocks.is_empty() {
+    let len = body.len(txn);
+    // `children` stops at a value that is not XML, so a body holding one keeps nothing.
+    if len == 0 || blocks.is_empty() || body.children(txn).count() as u32 != len {
         return (0, 0);
     }
     let scratch = yrs::Doc::new();
-    let scratch_body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
-    {
-        let mut scratch_txn = scratch.transact_mut();
-        for block in blocks.iter().rev() {
-            insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &scratch_body, 0, block);
+    let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut scratch_txn = scratch.transact_mut();
+    // Whether the body's block at `index` is exactly the one `block` inserts.
+    // Each block is built alone, and only until the first that differs.
+    let mut kept = |index: u32, block: &MdBlock<'_>| {
+        let at = fresh.len(&scratch_txn);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, at, block);
+        if fresh.len(&scratch_txn) != at + 1 {
+            return false;
         }
+        match (body.get(txn, index), fresh.get(&scratch_txn, at)) {
+            (Some(old), Some(new)) => {
+                plain_xml(txn, &old) && xml_json(txn, old) == xml_json(&scratch_txn, new)
+            }
+            _ => false,
+        }
+    };
+    let most = len.min(blocks.len() as u32);
+    let mut start = 0;
+    while start < most && kept(start, &blocks[start as usize]) {
+        start += 1;
     }
-    let scratch_txn = scratch.transact();
-    let new: Vec<Value> = scratch_body
-        .children(&scratch_txn)
-        .map(|child| xml_json(&scratch_txn, child))
-        .collect();
-    if new.len() != blocks.len() {
-        return (0, 0);
+    let mut end = 0;
+    while start + end < most && kept(len - 1 - end, &blocks[blocks.len() - 1 - end as usize]) {
+        end += 1;
     }
-    let start = old
-        .iter()
-        .zip(&new)
-        .take_while(|(old, new)| old == new)
-        .count();
-    let end = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(old.len().min(new.len()) - start)
-        .take_while(|(old, new)| old == new)
-        .count();
-    (start as u32, end as u32)
+    (start, end)
+}
+
+/// Whether `node` holds only XML and plain values, which [`xml_json`] spells
+/// without loss. It spells an embedded shared type by its debug name.
+fn plain_xml<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
+    match node {
+        XmlOut::Element(element) => {
+            element
+                .attributes(txn)
+                .all(|(_, value)| matches!(value, Out::Any(_)))
+                && element.children(txn).count() as u32 == element.len(txn)
+                && element.children(txn).all(|child| plain_xml(txn, &child))
+        }
+        XmlOut::Text(text) => text
+            .diff(txn, YChange::identity)
+            .iter()
+            .all(|chunk| matches!(chunk.insert, Out::Any(_))),
+        XmlOut::Fragment(_) => false,
+    }
 }
 
 fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {

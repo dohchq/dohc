@@ -9221,15 +9221,17 @@ mod tests {
     #[test]
     fn a_fold_source_full_state_size_failure_maps_to_blob_too_large() {
         let doc = dohc_engine_collab::Ydoc::wire();
-        // Both individual edits fit. Tombstones retained under skip_gc make
-        // their combined full state exceed the wire cap before source staging.
+        // Both individual edits fit. The fold changes the paragraph, and the
+        // tombstone retained under skip_gc makes their combined full state
+        // exceed the wire cap before source staging.
         let text = "x".repeat(8_500_000);
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
             .unwrap();
-        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &text)
+        let edited = format!("{text}y");
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &edited)
             .unwrap();
         let error = doc
-            .preserve_folded_markdown_source(&format!("{text}\n"))
+            .preserve_folded_markdown_source(&format!("{edited}\n"))
             .unwrap_err();
         assert!(matches!(error, CollabError::UpdateTooLarge { .. }));
         assert!(matches!(

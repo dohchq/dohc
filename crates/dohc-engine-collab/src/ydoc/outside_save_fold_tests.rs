@@ -72,6 +72,55 @@ fn a_one_line_outside_save_costs_the_same_in_a_short_and_a_long_note() {
     assert!(long.len() < 200, "long {}", long.len());
 }
 
+/// How much a note has grown: every insert it ever held, deleted ones too.
+fn clock(doc: &Ydoc) -> u64 {
+    let txn = doc.doc.transact();
+    txn.state_vector()
+        .iter()
+        .map(|(_, clock)| u64::from(*clock))
+        .sum()
+}
+
+#[test]
+fn a_hundred_block_note_saved_often_grows_by_what_changed() {
+    let doc = folded(&note(100, ""));
+    let fresh = clock(&doc);
+    for save in 1..=20 {
+        let markdown = note(100, &format!(" Save {save}."));
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
+            .expect(&markdown);
+    }
+    let grown = clock(&doc) - fresh;
+    // Replacing the body grew the note by all of it on every save (#3741).
+    assert!(grown < fresh / 5, "fresh {fresh}, 20 saves added {grown}");
+}
+
+#[test]
+fn a_block_holding_an_embedded_type_is_replaced() {
+    let doc = folded("Placeholder.\n\nKept.\n");
+    let text = doc.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = doc.doc.transact_mut();
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        text.insert_embed(&mut txn, 0, yrs::ArrayPrelim::from([1, 2]));
+    }
+    // The block's structure spells the embed by its debug name, so a file
+    // holding that name as text must still replace the block.
+    let spelled = {
+        let txn = doc.doc.transact();
+        let delta = diffs_json(text.diff(&txn, YChange::identity));
+        delta[0]["insert"].as_str().unwrap().to_owned()
+    };
+    let markdown = format!("{spelled}\n\nKept.\n");
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
+        .expect(&markdown);
+    assert_eq!(
+        doc.project_richdoc().unwrap(),
+        folded(&markdown).project_richdoc().unwrap()
+    );
+}
+
 #[test]
 fn a_block_added_in_the_middle_costs_only_that_block() {
     let before = note(500, "");
