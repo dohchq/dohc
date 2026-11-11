@@ -149,6 +149,9 @@ impl ObservationWalker {
             if token.is_cancelled() {
                 return Ok(false);
             }
+            if !relative.is_empty() {
+                before_open(&relative);
+            }
             let children = match std::fs::read_dir(&dir) {
                 Ok(children) => children,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound && dir != root => {
@@ -343,6 +346,7 @@ fn observe_visibility_policy(
     let metadata = (|| {
         let parent = std::fs::symlink_metadata(root.join(".dohc"))?;
         if parent.is_dir() && !parent.file_type().is_symlink() {
+            before_open(".dohc");
             std::fs::symlink_metadata(root.join(path))
         } else {
             // A refused parent still changes the policy verdict. Never follow it.
@@ -782,6 +786,31 @@ pub(crate) fn sidecar_base(path: &str) -> Option<&str> {
         .then_some(base)
     })
 }
+
+/// A test's swap, and the path that runs it.
+#[cfg(test)]
+type Swap = (String, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_OPEN: std::cell::RefCell<Option<Swap>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a test's swap after the walk has seen `relative` and before it opens
+/// it. Builds other than tests do nothing here.
+#[cfg(test)]
+fn before_open(relative: &str) {
+    let hook = BEFORE_OPEN.with_borrow_mut(|hook| {
+        hook.take_if(|(at, _)| at == relative)
+            .map(|(_, run)| run)
+    });
+    if let Some(run) = hook {
+        run();
+    }
+}
+
+#[cfg(not(test))]
+fn before_open(_: &str) {}
 
 /// Matches editor noise on the normalized leaf only. Ancestors use the floor.
 fn editor_noise(name: &str) -> bool {
@@ -1425,6 +1454,96 @@ mod tests {
         );
     }
 
+    /// Runs `swap` once, when the walk has seen `relative` and is about to
+    /// open it.
+    #[cfg(unix)]
+    fn swap_before_open(relative: &str, swap: impl FnOnce() + 'static) {
+        BEFORE_OPEN.set(Some((relative.to_owned(), Box::new(swap))));
+    }
+
+    /// Moves `folder` to `aside` and puts a link to `target` in its place.
+    #[cfg(unix)]
+    fn link_in_place_of(
+        folder: std::path::PathBuf,
+        aside: std::path::PathBuf,
+        target: std::path::PathBuf,
+    ) -> impl FnOnce() {
+        move || {
+            std::fs::rename(&folder, aside).unwrap();
+            std::os::unix::fs::symlink(target, &folder).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-swap-outside").unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside").unwrap();
+        f.write("notes/inside.md", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        swap_before_open(
+            "notes",
+            link_in_place_of(
+                f.root.path().join("notes"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        let facts = f.scan(&cursor);
+        assert!(
+            facts.iter().all(|fact| !fact.path.contains("secret")),
+            "{facts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-parent-outside").unwrap();
+        std::fs::create_dir(outside.path().join("deeper")).unwrap();
+        std::fs::write(outside.path().join("deeper/secret.md"), "outside").unwrap();
+        f.write("notes/deeper/inside.md", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        // `notes` was listed already, and `notes/deeper` is opened next.
+        swap_before_open(
+            "notes/deeper",
+            link_in_place_of(
+                f.root.path().join("notes"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        let facts = f.scan(&cursor);
+        assert!(
+            facts.iter().all(|fact| !fact.path.contains("secret")),
+            "{facts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_folder_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-policy-swap").unwrap();
+        std::fs::write(outside.path().join("visibility.toml"), "outside and longer").unwrap();
+        f.write(".dohc/visibility.toml", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        swap_before_open(
+            ".dohc",
+            link_in_place_of(
+                f.root.path().join(".dohc"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        assert_eq!(f.scan(&cursor), vec![]);
+    }
+
     #[test]
     fn observation_indeterminate_paths_retain_last_known_presence() {
         let feed = ObservationFeed::new();
@@ -1610,6 +1729,35 @@ mod tests {
             start.elapsed().as_secs_f64() * 10.0,
             memory,
             memory as f64 / 10000.0
+        );
+    }
+
+    #[test]
+    #[ignore = "manual deep, narrow tree cost measurement"]
+    fn observation_deep_workspace_cost() {
+        const DEPTH: usize = 400;
+        let f = Fixture::new();
+        let mut folder = String::new();
+        for depth in 0..DEPTH {
+            folder.push_str("d/");
+            f.write(&format!("{folder}file-{depth}.md"), "abc");
+        }
+        let cursor = f.cursor();
+        f.scan(&cursor);
+        f.scan(&cursor);
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let start = std::time::Instant::now();
+            f.scanner
+                .observe(f.root.path(), &CancellationToken::new())
+                .unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        assert_eq!(f.feed.state.lock().unwrap().listing.len(), DEPTH);
+        eprintln!(
+            "OBSERVATION_DEEP_COST folders={DEPTH} files={DEPTH} observed_scan_median_ms={:.3}",
+            times[10].as_secs_f64() * 1000.0,
         );
     }
 }
