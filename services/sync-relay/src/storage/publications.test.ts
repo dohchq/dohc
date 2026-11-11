@@ -599,7 +599,8 @@ it("operator takedown stops serving and cached launch authority without disclosi
   try {
     expect(operator.address()).toBe(socketPath);
     const disabled = await requestPublicationTakedown(socketPath, {type: "disable-publication", publicationId: f.published.publicationId, reason: "Confirmed phishing"}, readFileSync(join(f.directory, "operator.secret"), "utf8"));
-    expect(disabled).toMatchObject({code: 0, authorityRevision: 2, operatorTakedown: {actor: "operator", reason: "Confirmed phishing"}});
+    expect(disabled).toMatchObject({code: 0, authorityRevision: 2, operatorTakedown: {actor: "operator", reason: "Confirmed phishing"},
+      otherActiveCopies: {publicationIds: [], total: 0}, message: expect.stringContaining("no other active publication of this app")});
   } finally {await operator.close();}
   expect(() => guard(22)).toThrow();
   await expect(reader.read()).rejects.toThrow();
@@ -615,7 +616,9 @@ it("persists the first operator record, prevents owner reactivation and publish 
   const f = httpFixture(); await f.upload();
   const original = await (await f.http("w/app-publications", f.body)).json();
   const other = f.storage.publishAppPublication({...request(), candidate: {...request().candidate, sourceRevision: digest("another revision")}});
-  const disabled = f.storage.disableAppPublication({publicationId: original.publicationId, reason: "  Confirmed malware  ", nowMs: 30});
+  const takedown = f.storage.disableAppPublication({publicationId: original.publicationId, reason: "  Confirmed malware  ", nowMs: 30});
+  const {otherActiveCopies, ...disabled} = takedown;
+  expect(otherActiveCopies).toEqual({publicationIds: [], total: 0});
   const path = `w/app-publications/${original.publicationId}`;
   expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2})).status).toBe(409);
   expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2}, "reader")).status).toBe(404);
@@ -624,7 +627,7 @@ it("persists the first operator record, prevents owner reactivation and publish 
   expect((await (await f.http("w/app-publications")).json()).publications.find((row: {publicationId: string}) => row.publicationId === original.publicationId))
     .toMatchObject({active: false, operatorTakedown: disabled.operatorTakedown});
   f.restart();
-  expect(f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Retry", nowMs: 40})).toEqual(disabled);
+  expect(f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Retry", nowMs: 40})).toEqual(takedown);
   expect(f.storage.readAppPublication({...owner, publicationId: other.publicationId, limits}).active).toBe(true);
   expect(() => f.storage.reactivateAppPublication({...owner, publicationId: original.publicationId, expectedAuthorityRevision: 2, limits})).toThrow(/operator disabled/);
 });
@@ -663,6 +666,23 @@ it("holds the owner's app publishing after a takedown until the operator lifts t
   expect(f.storage.publishAppPublication(moved).active).toBe(true);
   expect(f.storage.reactivateAppPublication({...owner, publicationId: withdrawn.publicationId, expectedAuthorityRevision: 2, limits}).active).toBe(true);
   expect(f.storage.readAppPublication({...owner, publicationId: original.publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Malware"}});
+});
+
+// #3658: the operator sees the owner's other copies of the app to take down.
+it("lists the owner's other active publications of the same app in the takedown result", () => {
+  const f = fixture(), original = f.storage.publishAppPublication(request());
+  const copy = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "w", "copy")});
+  f.storage.claimWorkspace({workspaceId: "moved", ownerUserId: "owner", createdAtMs: 1});
+  const moved = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "moved", "moved")});
+  const withdrawn = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "w", "withdrawn")});
+  f.storage.withdrawAppPublication({...owner, publicationId: withdrawn.publicationId, expectedAuthorityRevision: 1});
+  f.storage.publishAppPublication({...request(), candidate: edited()});
+  f.storage.publishAppPublication({...request(), ...addShare(f.storage, "other", "elsewhere", "other-owner")});
+  const disabled = f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Malware", nowMs: 30});
+  expect(disabled.otherActiveCopies).toEqual({publicationIds: [copy.publicationId, moved.publicationId].sort(), total: 2});
+  f.storage.disableAppPublication({publicationId: copy.publicationId, reason: "Malware", nowMs: 31});
+  expect(f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Retry", nowMs: 40}).otherActiveCopies)
+    .toEqual({publicationIds: [moved.publicationId], total: 1});
 });
 
 it("keeps the hold after the taken-down apps' workspaces are deleted, and lifts it by any of them", () => {
