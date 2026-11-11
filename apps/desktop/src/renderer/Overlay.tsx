@@ -9,7 +9,7 @@ import {
 } from "react";
 import { useFocusReturn } from "./ui/focusReturn";
 import { focusedElementIn } from "./ui/focusedElement";
-import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
+import { isTopOverlay, pressTopBackdrop, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
 import { isComposingKey } from "./ui/keys";
@@ -104,7 +104,11 @@ export function Overlay(props: {
 
   useEffect(() => {
     const id = idRef.current;
-    pushOverlay(id);
+    pushOverlay(id, () => {
+      const held = panelRef.current?.querySelector<HTMLElement>(HELD_FIELD);
+      if (held) held.focus();
+      else onCloseRef.current?.();
+    });
     return () => removeOverlay(id);
   }, []);
 
@@ -143,18 +147,12 @@ export function Overlay(props: {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, []);
 
-  const closeFromBackdrop = () => {
-    const held = panelRef.current?.querySelector<HTMLElement>(HELD_FIELD);
-    if (held) held.focus();
-    else onCloseRef.current?.();
-  };
-
   return (
     <OverlayFrame
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
-      onBackdropClick={closeFromBackdrop}
+      onBackdropClick={pressTopBackdrop}
     >
       {props.children}
     </OverlayFrame>

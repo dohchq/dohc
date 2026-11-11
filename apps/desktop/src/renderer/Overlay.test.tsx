@@ -227,17 +227,21 @@ describe("Overlay", () => {
     expect(backdrop()).toBeTruthy();
   });
 
+  // The inner dialog opens after the outer one, as it does in the app.
+  function Nested(props: { onCloseOuter: () => void; inner?: { onClose?: () => void } }) {
+    return (
+      <Overlay onClose={props.onCloseOuter}>
+        <button type="button">Outer</button>
+        {props.inner ? <Overlay onClose={props.inner.onClose}><button type="button">Inner</button></Overlay> : null}
+      </Overlay>
+    );
+  }
+
   it("closes only the topmost of two nested overlays on a press outside", () => {
     const onCloseOuter = vi.fn();
     const onCloseInner = vi.fn();
-    render(
-      <Overlay onClose={onCloseOuter}>
-        <button type="button">Outer</button>
-        <Overlay onClose={onCloseInner}>
-          <button type="button">Inner</button>
-        </Overlay>
-      </Overlay>,
-    );
+    const { rerender } = render(<Nested onCloseOuter={onCloseOuter} />);
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{ onClose: onCloseInner }} />);
     const [outer, inner] = document.querySelectorAll<HTMLElement>('[data-dohc-modal="true"]');
 
     fireEvent.pointerDown(inner!);
@@ -245,9 +249,31 @@ describe("Overlay", () => {
 
     expect(onCloseInner).toHaveBeenCalledTimes(1);
     expect(onCloseOuter).not.toHaveBeenCalled();
+    rerender(<Nested onCloseOuter={onCloseOuter} />);
     fireEvent.pointerDown(outer!);
     fireEvent.click(outer!);
     expect(onCloseOuter).toHaveBeenCalledTimes(1);
+  });
+
+  // A finished pop-in keeps a transform on the outer panel, so the inner
+  // backdrop covers only that panel and a press beside it lands on the outer
+  // backdrop. It still closes only the inner dialog, and not while it is busy.
+  it("gives a press on the outer backdrop to the nested overlay on top", () => {
+    const onCloseOuter = vi.fn();
+    const onCloseInner = vi.fn();
+    const { rerender } = render(<Nested onCloseOuter={onCloseOuter} />);
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{}} />);
+    const outer = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+
+    fireEvent.pointerDown(outer());
+    fireEvent.click(outer());
+    expect(onCloseOuter).not.toHaveBeenCalled();
+
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{ onClose: onCloseInner }} />);
+    fireEvent.pointerDown(outer());
+    fireEvent.click(outer());
+    expect(onCloseInner).toHaveBeenCalledTimes(1);
+    expect(onCloseOuter).not.toHaveBeenCalled();
   });
 
   it("frees the titlebar for a press outside while any overlay is open", () => {

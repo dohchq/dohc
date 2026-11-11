@@ -718,7 +718,7 @@ describe("SettingsDialog", () => {
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
-    pushOverlay(higherOverlay);
+    pushOverlay(higherOverlay, () => undefined);
     try {
       const tab = new KeyboardEvent("keydown", {
         key: "Tab",
