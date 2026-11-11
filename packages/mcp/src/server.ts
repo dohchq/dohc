@@ -19,7 +19,7 @@ import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/works
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { chatWorkReportSchema, chatWatchInputSchema, cliAgentIdSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWorkReportSchema, chatWatchInputSchema, cliAgentIdSchema, LIVE_DOCUMENT_REASON_STEPS, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -75,6 +75,7 @@ import {
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
+  listLiveDocuments,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -354,6 +355,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
     },
     async (args) => text(await stopAgain(ctx, args)),
+  );
+
+  register(
+    "dohc_list_live_documents",
+    {
+      description:
+        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
+        Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `\`${reason}\`: ${step}`).join(" ") +
+        " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
+      inputSchema: { cursor: z.string().min(1).max(4096).optional() },
+    },
+    async (args) => text(await listLiveDocuments(ctx, args)),
   );
 
   register(

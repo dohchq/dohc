@@ -85,6 +85,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
+  dohc_list_live_documents: ["share.live.documents.list"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -2393,6 +2394,13 @@ export async function stopAgain(ctx: ToolContext, args: { path: string; incident
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "stopAgain", { path: resolved.normalized, incident: args.incident });
+}
+
+// The Live documents list. The desktop names the workspace and refuses a
+// shared view.
+export async function listLiveDocuments(ctx: ToolContext, args: { cursor?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
+  return requestCli(ctx, "liveDocuments", args.cursor === undefined ? {} : { cursor: args.cursor });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
