@@ -52,6 +52,7 @@ pub enum RelayOperation {
         workspace_id: String,
         now_ms: i64,
         max_read_bytes: usize,
+        owner_gate: Option<dohc_engine_sync::OwnerGate>,
     },
     FetchPull {
         workspace_id: String,
@@ -813,6 +814,7 @@ mod deferred_relay_tests {
                 workspace_id: "ws".into(),
                 now_ms: 1_200,
                 max_read_bytes: 0,
+                owner_gate: None,
             },
             LeaseRegistry::default(),
             token.clone(),
@@ -988,6 +990,7 @@ mod deferred_relay_tests {
             workspace_id: "ws".into(),
             now_ms: 20,
             max_read_bytes: 0,
+            owner_gate: None,
         };
         let mut cache = WriterDocCache::new();
         let run = |store: &mut EngineStore, cache: &mut WriterDocCache| {
@@ -1074,6 +1077,7 @@ mod deferred_relay_tests {
             workspace_id: "ws".into(),
             now_ms: 40,
             max_read_bytes: 0,
+            owner_gate: None,
         };
         let next = execute_relay_operation(
             &mut store,
@@ -1273,6 +1277,7 @@ mod deferred_relay_tests {
                                     workspace_id: "ws".into(),
                                     now_ms: 1201,
                                     max_read_bytes: 0,
+                                    owner_gate: None,
                                 },
                                 &LeaseRegistry::default(),
                                 &ClaimAnnouncer::default(),
@@ -3060,6 +3065,7 @@ fn run_relay_operation(
             workspace_id,
             now_ms,
             max_read_bytes,
+            owner_gate,
         } => {
             let mut progress = client
                 .transport()
@@ -3073,6 +3079,7 @@ fn run_relay_operation(
                 leases,
                 now_ms,
                 max_read_bytes,
+                owner_gate.as_ref(),
                 &mut progress,
             );
             // Enrollment can claim bases before I/O yields or an error.
@@ -3785,6 +3792,7 @@ mod share_view_identity_tests {
                 workspace_id: "ws".to_owned(),
                 now_ms: 2_000,
                 max_read_bytes: 0,
+                owner_gate: None,
             };
             assert!(matches!(
                 execute_relay_operation(

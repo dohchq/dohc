@@ -95,6 +95,7 @@ fn push_operation() -> RelayOperation {
         workspace_id: WORKSPACE.to_owned(),
         now_ms: 2_000,
         max_read_bytes: 8 * 1024 * 1024,
+        owner_gate: None,
     }
 }
 

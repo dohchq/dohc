@@ -135,6 +135,15 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PushParams {
+    workspace_id: String,
+    /// Sent only by a desktop that delivers this workspace's live edits.
+    #[serde(default)]
+    owner_gate: Option<dohc_engine_sync::OwnerGate>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PullHostedParams {
     workspace_id: String,
     /// The answer lists the documents the pass holds after this object ID;
@@ -1155,7 +1164,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: RelayWorkspaceParams = parse(params)?;
+        let params: PushParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let push = || -> Result<RelayOperation, WireError> {
             Ok(RelayOperation::Push {
@@ -1164,6 +1173,7 @@ impl EngineService {
                 max_read_bytes: self
                     .relay_sync_admission()
                     .map_or(0, |(policy, _)| policy.max_read_bytes),
+                owner_gate: params.owner_gate.clone(),
             })
         };
         let mut outcome = self

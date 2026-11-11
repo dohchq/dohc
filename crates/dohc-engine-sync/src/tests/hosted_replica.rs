@@ -2654,6 +2654,7 @@ fn live_writes_journal_and_push_under_the_service_host_origin() {
             &NoLiveLeases,
             3_000,
             1_000_000,
+            None,
             &mut progress,
         )
         .unwrap();

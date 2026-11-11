@@ -29,7 +29,8 @@ mod outbound;
 mod owner_publication;
 mod settlement_publication;
 pub use owner_publication::{
-    OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
+    OrdinaryPublication, OwnerAdmissionPending, OwnerAdmissionReason, OwnerGate,
+    OwnerPublicationPrefix, owner_publication_prefix,
 };
 pub use settlement_publication::rollback_waits_for_publication_in_tx;
 mod path_policy;

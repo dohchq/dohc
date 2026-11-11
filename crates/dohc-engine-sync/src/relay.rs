@@ -1980,6 +1980,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(unadmitted)
     }
 
+    /// One push with no gate, as from a desktop that delivers no live edits
+    /// for this workspace.
     pub fn push_workspace(
         &self,
         store: &mut EngineStore,
@@ -1996,6 +1998,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             leases,
             now_ms,
             max_read_bytes,
+            None,
             &mut PushWorkspaceProgress::default(),
         )
     }
@@ -2010,6 +2013,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
         max_read_bytes: usize,
+        owner_gate: Option<&crate::OwnerGate>,
         progress: &mut PushWorkspaceProgress,
     ) -> Result<SyncPassOutcome, RelayError> {
         if store.is_passive() {
@@ -2202,9 +2206,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         TxnOutcome::Committed(()) => {}
                         TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
                     }
-                    let prefix =
-                        crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
-                            .map_err(local)?;
+                    let prefix = crate::owner_publication_prefix(
+                        store,
+                        workspace_id,
+                        &ops,
+                        max_read_bytes,
+                        Some(crate::OrdinaryPublication {
+                            gate: owner_gate,
+                            now_ms,
+                        }),
+                    )
+                    .map_err(local)?;
                     let revision = store
                         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
@@ -7199,6 +7211,7 @@ fn collect_share_proposal_changes(
                         workspace_id,
                         std::slice::from_ref(&op),
                         max_read_bytes,
+                        None,
                     )
                     .map_err(local)?;
                     if let Some(pending) = proof.pending {

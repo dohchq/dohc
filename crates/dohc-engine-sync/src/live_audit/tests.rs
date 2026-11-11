@@ -3952,7 +3952,8 @@ fn imported_activation_publication(
     if preserve_baseline {
         let queued =
             crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap();
-        let prefix = crate::owner_publication_prefix(&f.store, "ws", &queued, 1_000_000).unwrap();
+        let prefix =
+            crate::owner_publication_prefix(&f.store, "ws", &queued, 1_000_000, None).unwrap();
         assert_eq!(
             prefix.allowed_ops,
             queued.len(),
@@ -3962,7 +3963,7 @@ fn imported_activation_publication(
         let mut private = first.clone();
         private.payload["payloadBeforeBlobSha256"] = json!(hex_sha256(b"Unaccepted private file."));
         assert_eq!(
-            crate::owner_publication_prefix(&f.store, "ws", &[private], 1_000_000)
+            crate::owner_publication_prefix(&f.store, "ws", &[private], 1_000_000, None)
                 .unwrap()
                 .allowed_ops,
             0
@@ -3970,13 +3971,13 @@ fn imported_activation_publication(
         let mut foreign_path = first.clone();
         foreign_path.payload["payloadBeforePath"] = json!("foreign.md");
         assert_eq!(
-            crate::owner_publication_prefix(&f.store, "ws", &[foreign_path], 1_000_000)
+            crate::owner_publication_prefix(&f.store, "ws", &[foreign_path], 1_000_000, None)
                 .unwrap()
                 .allowed_ops,
             0
         );
         assert!(
-            crate::owner_publication_prefix(&f.store, "ws", std::slice::from_ref(&first), 0)
+            crate::owner_publication_prefix(&f.store, "ws", std::slice::from_ref(&first), 0, None)
                 .is_err()
         );
     }

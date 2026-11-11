@@ -5,7 +5,8 @@ use dohc_engine_collab::{
     owner_outbox::publication::{PublicationContentKind, PublicationProof, PublicationReader},
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +17,35 @@ pub struct OwnerAdmissionPending {
     pub version_id: String,
     pub object_id: String,
     pub path: String,
+    /// Absent while the host has yet to accept the op's bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OwnerAdmissionReason>,
+}
+
+/// Why an op waits for something other than the host accepting its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum OwnerAdmissionReason {
+    /// The relay's first open based the note, and this device hasn't joined
+    /// its live session yet.
+    #[serde(rename = "first-enrollment")]
+    FirstEnrollment,
+}
+
+/// A desktop that delivers this workspace's live edits holds its edits to a
+/// note the relay's first open based until it joins that note's live
+/// session, except for the objects it lists in `released`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerGate {
+    pub released: BTreeSet<String>,
+}
+
+/// What an ordinary push adds to its proof: the desktop's gate, if it sent
+/// one, and the push's clock.
+#[derive(Debug, Clone, Copy)]
+pub struct OrdinaryPublication<'a> {
+    pub gate: Option<&'a OwnerGate>,
+    pub now_ms: i64,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerPublicationPrefix {
@@ -169,11 +199,13 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
 }
 
 /// Stop before the first private owner payload. Never rewrite the origin log.
+/// A share proposal proves Markdown digests only and passes no `ordinary`.
 pub fn owner_publication_prefix(
     store: &EngineStore,
     workspace: &str,
     ops: &[ReplicationEnvelope],
     max_read_bytes: usize,
+    _ordinary: Option<OrdinaryPublication<'_>>,
 ) -> Result<OwnerPublicationPrefix, SyncError> {
     store.read_with(|conn| {
         // One snapshot lets consecutive references to a document reuse its accepted read.
@@ -227,6 +259,7 @@ pub fn owner_publication_prefix(
                             version_id: reference.version,
                             object_id: reference.object,
                             path: reference.path,
+                            reason: None,
                         }),
                     });
                 }

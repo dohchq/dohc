@@ -93,6 +93,7 @@ fn resume(
         &crate::NoLiveLeases,
         20,
         8 * 1024 * 1024,
+        None,
         progress,
     )
 }

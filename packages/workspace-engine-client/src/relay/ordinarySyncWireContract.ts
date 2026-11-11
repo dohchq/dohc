@@ -29,6 +29,9 @@ const OwnerAdmissionPending = mutableStruct({
   versionId: Text,
   objectId: Text,
   path: Text,
+  // Present when the op waits for this device to join the note's live session,
+  // which only a push that sent `ownerGate` can report.
+  reason: Schema.optionalKey(Schema.Literal("first-enrollment")),
 });
 const ChangedPath = mutableStruct({
   versionId: Text,

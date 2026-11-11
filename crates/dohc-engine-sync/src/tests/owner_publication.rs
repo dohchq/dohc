@@ -201,7 +201,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
         ),
         envelope("local", 2, "chat.message.append", json!({})),
     ];
-    let prefix = owner_publication_prefix(&store, "ws", &ops, 1_000_000).unwrap();
+    let prefix = owner_publication_prefix(&store, "ws", &ops, 1_000_000, None).unwrap();
     assert_eq!(prefix.allowed_ops, ops.len());
     assert!(prefix.pending.is_none());
     assert_eq!(
@@ -220,7 +220,7 @@ fn prefix_stops_before_private_bytes_then_releases_exact_contained_state() {
     let safe = envelope("local", 0, "chat.message.append", json!({}));
     let tail = envelope("local", 2, "chat.message.append", json!({}));
     let ops = vec![safe, op.clone(), tail];
-    let prefix = owner_publication_prefix(&store, "ws", &ops, 1_000_000).unwrap();
+    let prefix = owner_publication_prefix(&store, "ws", &ops, 1_000_000, None).unwrap();
     assert_eq!(prefix.allowed_ops, 1);
     assert_eq!(prefix.pending.unwrap().origin_seq, 1);
     store
@@ -242,13 +242,13 @@ fn prefix_stops_before_private_bytes_then_releases_exact_contained_state() {
         })
         .unwrap();
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &ops, 1_000_000)
+        owner_publication_prefix(&store, "ws", &ops, 1_000_000, None)
             .unwrap()
             .allowed_ops,
         3
     );
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &ops, 0)
+        owner_publication_prefix(&store, "ws", &ops, 0, None)
             .unwrap()
             .allowed_ops,
         1
@@ -256,7 +256,7 @@ fn prefix_stops_before_private_bytes_then_releases_exact_contained_state() {
     let mut named = op;
     named.payload["versionId"] = json!("independent-version");
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[named], 0)
+        owner_publication_prefix(&store, "ws", &[named], 0, None)
             .unwrap()
             .allowed_ops,
         1
@@ -366,7 +366,7 @@ fn moment_before_and_fork_snapshots_need_exact_projection_proof() {
         json!({"versionId":"main","objectId":"owner","path":"owner.md","payloadAfterBlobSha256":accepted,"payloadBeforeBlobSha256":private}),
     );
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[moment], 1_000_000)
+        owner_publication_prefix(&store, "ws", &[moment], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0
@@ -381,7 +381,7 @@ fn moment_before_and_fork_snapshots_need_exact_projection_proof() {
         )],
     );
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[fork], 1_000_000)
+        owner_publication_prefix(&store, "ws", &[fork], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0
@@ -401,7 +401,7 @@ fn delete_sets_require_acceptance_even_when_struct_clocks_already_match() {
     assert_eq!(before.encode_state_vector(), vector);
     let op = candidate(&mut store, &observed, &deletion, 1);
     assert_eq!(
-        owner_publication_prefix(&store, "ws", std::slice::from_ref(&op), 1_000_000)
+        owner_publication_prefix(&store, "ws", std::slice::from_ref(&op), 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0
@@ -425,7 +425,7 @@ fn delete_sets_require_acceptance_even_when_struct_clocks_already_match() {
         })
         .unwrap();
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[op], 1_000_000)
+        owner_publication_prefix(&store, "ws", &[op], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         1
@@ -501,11 +501,12 @@ fn accepted_page_budget_exhaustion_is_resumable_without_pending_share() {
     let first = candidate(&mut store, &observed, &checkpoint, 0);
     let second = candidate(&mut store, &observed, &checkpoint, 1);
     let budget = checkpoint.len() * 2;
-    let prefix = owner_publication_prefix(&store, "ws", &[first, second.clone()], budget).unwrap();
+    let prefix =
+        owner_publication_prefix(&store, "ws", &[first, second.clone()], budget, None).unwrap();
     assert_eq!(prefix.allowed_ops, 1);
     assert!(prefix.pending.is_none());
     assert!(prefix.budget_exhausted);
-    let resumed = owner_publication_prefix(&store, "ws", &[second], budget).unwrap();
+    let resumed = owner_publication_prefix(&store, "ws", &[second], budget, None).unwrap();
     assert_eq!(resumed.allowed_ops, 1);
     assert!(resumed.pending.is_none());
     assert!(!resumed.budget_exhausted);
@@ -806,7 +807,7 @@ fn first_accepted_operation_over_budget_returns_configuration_error() {
     let (_dir, mut store, observed, checkpoint) = fixture();
     let op = candidate(&mut store, &observed, &checkpoint, 0);
     assert!(matches!(
-        owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2 - 1),
+        owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2 - 1, None),
         Err(SyncError::InvalidInput {
             reason: "owner publication proof exceeds configured read budget"
         })
@@ -869,7 +870,7 @@ fn kept_current_resolution_checks_each_heads_own_content() {
     let mut op = envelope("local", 1, "conflict.resolve", built.value);
     op.recorded_at_ms = 3;
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[op], 1_000_000)
+        owner_publication_prefix(&store, "ws", &[op], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         1
@@ -888,7 +889,7 @@ fn kept_current_resolution_checks_each_heads_own_content() {
     );
     op.recorded_at_ms = 3;
     assert_eq!(
-        owner_publication_prefix(&store, "ws", &[op], 1_000_000)
+        owner_publication_prefix(&store, "ws", &[op], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0
@@ -938,7 +939,8 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
             &store,
             "ws",
             std::slice::from_ref(&op),
-            checkpoint.len() * 2
+            checkpoint.len() * 2,
+            None
         )
         .unwrap()
         .allowed_ops,
@@ -972,7 +974,8 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
             Ok::<_, SyncError>(())
         })
         .unwrap();
-    let refused = owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2).unwrap();
+    let refused =
+        owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2, None).unwrap();
     assert_eq!(refused.allowed_ops, 0);
     assert!(refused.pending.is_some());
     assert!(!refused.budget_exhausted);

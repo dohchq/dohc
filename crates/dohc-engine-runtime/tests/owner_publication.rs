@@ -1584,7 +1584,7 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
         .unwrap();
     assert_eq!(local_before, head.blob_sha256);
     let allowed = |op: &ReplicationEnvelope| {
-        owner_publication_prefix(&store, "workspace", std::slice::from_ref(op), 1_000_000)
+        owner_publication_prefix(&store, "workspace", std::slice::from_ref(op), 1_000_000, None)
             .unwrap()
             .allowed_ops
     };
@@ -1823,7 +1823,7 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     let source = hex_sha256(f.text.as_bytes());
     let projection = |doc: &Ydoc| doc.project(ContentKind::Richdoc).unwrap().content;
     let allowed = |store: &EngineStore, op: &ReplicationEnvelope| {
-        owner_publication_prefix(store, "workspace", std::slice::from_ref(op), 1_000_000)
+        owner_publication_prefix(store, "workspace", std::slice::from_ref(op), 1_000_000, None)
             .unwrap()
             .allowed_ops
     };
@@ -2210,7 +2210,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
         hex_sha256(f.text.as_bytes())
     );
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000, None)
             .unwrap()
             .allowed_ops,
         1
@@ -2219,7 +2219,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     unaccepted.payload["payloadBeforeBlobSha256"] =
         serde_json::json!(hex_sha256(b"Unaccepted content"));
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0
@@ -2314,7 +2314,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     let mut later_op = op.clone();
     later_op.payload = later;
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", &[op, later_op], 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", &[op, later_op], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         2
@@ -2917,7 +2917,7 @@ async fn unavailable_publication_after_handover(
         .unwrap();
     assert_eq!(op.payload["payloadBeforeBlobSha256"], empty.markdown_digest);
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000, None)
             .unwrap()
             .allowed_ops,
         1
@@ -3471,7 +3471,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         serde_json::json!(empty.markdown_digest)
     );
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000, None)
             .unwrap()
             .allowed_ops,
         1
@@ -3486,7 +3486,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         canonical_before.payload["beforeBlobSha256"] =
             canonical_before.payload["payloadBeforeBlobSha256"].clone();
         assert_eq!(
-            owner_publication_prefix(&f.store, "workspace", &[canonical_before], 1_000_000)
+            owner_publication_prefix(&f.store, "workspace", &[canonical_before], 1_000_000, None)
                 .unwrap()
                 .allowed_ops,
             usize::from(html)
@@ -3497,7 +3497,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         serde_json::json!(hex_sha256(b"Unaccepted predecessor"));
     unaccepted.payload["beforeBlobSha256"] = unaccepted.payload["payloadBeforeBlobSha256"].clone();
     assert_eq!(
-        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000, None)
             .unwrap()
             .allowed_ops,
         0

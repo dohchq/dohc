@@ -27,6 +27,12 @@ describe("ordinary native sync contract", () => {
       ownerAdmissionPending: [admission], sharingDeclined: [decline] });
   });
 
+  it("keeps the reason a pending op waits for a first live session", () => {
+    const waiting = { ...admission, reason: "first-enrollment" };
+    expect(decodeOrdinarySyncResult("sync.push", { ...push, ownerAdmissionPending: [waiting, admission] }).ownerAdmissionPending)
+      .toEqual([waiting, admission]);
+  });
+
   it("preserves producing versions, full refusal evidence and the issued token", () => {
     expect(decodeOrdinarySyncResult("sync.applyPull", { ...pull, ignored: true,
       pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", fetched: 2, applied: 1,
@@ -71,6 +77,8 @@ describe("ordinary native sync contract", () => {
     { ownerAdmissionPending: [{ ...admission, originSeq: -1 }] },
     { ownerAdmissionPending: [{ ...admission, objectId: null }] },
     { ownerAdmissionPending: [{ ...admission, versionId: "" }] },
+    { ownerAdmissionPending: [{ ...admission, reason: "later" }] },
+    { ownerAdmissionPending: [{ ...admission, reason: null }] },
   ])("rejects incomplete publication evidence: %j", patch => {
     expect(() => decodeOrdinarySyncResult("sync.push", { ...push, ...patch })).toThrow(ProtocolShapeError);
   });

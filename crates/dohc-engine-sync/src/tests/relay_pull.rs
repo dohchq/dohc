@@ -2028,9 +2028,14 @@ fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base
         tx.execute("UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','private/owner.md','$.selectorPaths',json('[\"private/owner.md\"]'))",[]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
-    let prefix =
-        crate::owner_publication_prefix(&engine, "ws", &[owner.clone(), local.clone()], 1_000_000)
-            .unwrap();
+    let prefix = crate::owner_publication_prefix(
+        &engine,
+        "ws",
+        &[owner.clone(), local.clone()],
+        1_000_000,
+        None,
+    )
+    .unwrap();
     assert_eq!(prefix.allowed_ops, 0);
     assert!(prefix.pending.is_some());
     // Use sparse relay sequences to expose the minimum-ordering failure.

@@ -3959,6 +3959,7 @@ async fn live_history_publication_and_settlement_benchmark() {
                 "workspace",
                 std::slice::from_ref(&published),
                 HISTORY_PUBLICATION_BUDGET,
+                None,
             );
             let elapsed = elapsed_ms(started);
             let prefix = prefix.unwrap();

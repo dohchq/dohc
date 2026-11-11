@@ -56,6 +56,8 @@ export interface OwnerAdmissionPending {
   versionId: string;
   objectId: string;
   path: string;
+  /** The op waits for this device to join the note's live session, not for the host to accept its bytes. */
+  reason?: "first-enrollment";
 }
 
 export interface PushWorkspaceToRelayResult {
