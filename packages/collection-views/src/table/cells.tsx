@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { CircleAlert } from "lucide-react";
 import type {
   CollectionIndexedValue,
@@ -161,13 +161,27 @@ interface CellInputProps {
   caretAtEnd?: boolean;
   emit: (value: CollectionValue) => void;
   close: CellClose;
+  /** Receives what was typed when the input leaves the page with it neither saved nor cancelled. */
+  abandon?: (text: string) => void;
 }
 
-function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, close }: CellInputProps) {
+function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, close, abandon }: CellInputProps) {
   const [refused, setRefused] = useState(false);
   const errorId = useId();
   // Enter and Tab close the editor, which can blur the input. One edit saves once.
   const done = useRef(false);
+  const input = useRef<HTMLInputElement>(null);
+  // A character that opened the edit was typed too.
+  const typedInto = useRef(caretAtEnd);
+  const abandoned = useRef(abandon);
+  abandoned.current = abandon;
+  useEffect(() => {
+    const node = input.current;
+    // The input is off the page only once its cell or its table is gone.
+    return () => {
+      if (node && !node.isConnected && typedInto.current && !done.current) abandoned.current?.(node.value);
+    };
+  }, []);
   const save = (raw: string, move?: CellMove) => {
     if (done.current) return;
     const value = parse(raw);
@@ -179,9 +193,13 @@ function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, clo
   return (
     <>
       <input
+        ref={input}
         autoFocus
         type="text"
         defaultValue={defaultValue}
+        onChange={() => {
+          typedInto.current = true;
+        }}
         aria-invalid={refused || undefined}
         aria-describedby={refused ? errorId : undefined}
         // The table keeps this editor open while it holds a value it cannot save.
@@ -242,6 +260,8 @@ export interface CellEditorProps {
    */
   emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: CellClose;
+  /** Receives the text of a typed edit that goes with its cell, neither saved nor cancelled. */
+  abandon?: (text: string) => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
    * options do not have yet. The host must add `option` to the schema first
@@ -272,6 +292,7 @@ export function CellEditor({
   carried,
   emit,
   close,
+  abandon,
   onCreateOption,
   onOptionColorChange,
   people,
@@ -281,7 +302,7 @@ export function CellEditor({
   // The people list can arrive mid-edit. An edit keeps the editor it opened
   // with, so a typed id is not lost to the picker.
   const [listed] = useState(people);
-  const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close };
+  const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close, abandon };
   const picker = { label, typed, emit, close };
   switch (field.type) {
     case "number":

@@ -23,6 +23,7 @@ export {
   TableView,
   type CollectionCellChange,
   type CollectionOptionCreate,
+  type TableAbandonedDraft,
   type TableCellStatus,
   type TableCellStatuses,
   type TableFieldMark,

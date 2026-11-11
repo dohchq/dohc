@@ -76,11 +76,12 @@ export interface TableFieldMark {
  * What the person did to one cell that the host has not confirmed. `value`
  * shows in place of the stored one, and the editor opens on it. The host
  * gives the words: the table cannot know why a change waits or was refused.
+ * `discard` gives the change up for good. Absent, the cell offers only Try again.
  */
 export type TableCellStatus = { value: CollectionValue } & (
   | { state: "pending" }
   | { state: "waiting"; reason: string }
-  | { state: "unconfirmed"; reason: string; retry(): void }
+  | { state: "unconfirmed"; reason: string; retry(): void; discard?(): void }
   | { state: "refused"; reason: string; dismiss(): void }
 );
 
@@ -105,6 +106,13 @@ export interface TableHostCell {
   editor?(record: CollectionRecord, close: () => void): ReactNode;
 }
 
+/** Text typed into a cell's editor that was neither saved nor cancelled when the editor left the page. */
+export interface TableAbandonedDraft {
+  recordId: string;
+  field: string;
+  text: string;
+}
+
 export interface TableViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -114,6 +122,12 @@ export interface TableViewProps {
   visibleFields?: readonly string[] | null;
   onSortChange?: (sort: CollectionQuerySort[]) => void;
   onCellChange?: (change: CollectionCellChange) => number;
+  /**
+   * Receives what was typed into a text, number, url, or typed person cell
+   * when its editor goes with its cell or with the table: the record or the
+   * field left the table, or the table closed. The table never saves it.
+   */
+  onDraftAbandoned?: (draft: TableAbandonedDraft) => void;
   /** Pause controls while keeping the open editor and its draft mounted. */
   editingDisabled?: boolean;
   /**
@@ -238,6 +252,8 @@ const NO_STATUSES: TableCellStatuses = { subscribe: () => () => undefined, get: 
 const MARK_ICON = { size: 12, strokeWidth: 1.9, "aria-hidden": true } as const;
 /** A 16px control inside a cell's line. */
 const MARK_BUTTON = "grid size-4 shrink-0 place-items-center rounded text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+/** What Discard does, since nothing brings the change back. A host that lists the change elsewhere says the same there. */
+export const DISCARD_HINT = "Stop trying to save this change. It may already be saved.";
 
 /** Rows and columns each arrow key moves the selection by. */
 const ARROWS: Readonly<Record<string, readonly [number, number]>> = {
@@ -306,6 +322,21 @@ function StatusMark({ status }: { status: TableCellStatus }) {
           }}
         >
           {status.state === "unconfirmed" ? <RotateCw {...MARK_ICON} /> : <X {...MARK_ICON} />}
+        </button>
+      ) : null}
+      {status.state === "unconfirmed" && status.discard ? (
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label="Discard"
+          title={DISCARD_HINT}
+          className={MARK_BUTTON}
+          onClick={(event) => {
+            event.stopPropagation();
+            status.discard?.();
+          }}
+        >
+          <X {...MARK_ICON} />
         </button>
       ) : null}
     </span>
@@ -465,6 +496,7 @@ export function TableView({
   visibleFields,
   onSortChange,
   onCellChange,
+  onDraftAbandoned,
   editingDisabled = false,
   canEditCell,
   canSortField,
@@ -620,6 +652,8 @@ export function TableView({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFieldSetElement>(null);
+  // Escape on the grid cancelled the open edit, so what it held is not kept.
+  const cancelled = useRef(false);
   const gutter = onOpenRecord ? OPEN_COLUMN_WIDTH : 0;
 
   // A key that moves the selection or closes the editor sets this, always
@@ -684,6 +718,7 @@ export function TableView({
       const room = grid.scrollLeft + grid.clientWidth - Math.max(width, columnWidth(column)) - PICKER_EDGE;
       left = Math.min(left, Math.max(grid.scrollLeft, room));
     }
+    cancelled.current = false;
     setEditing({ recordId, field: field.name, typed, left });
   };
 
@@ -721,7 +756,10 @@ export function TableView({
     if (event.altKey || ((event.ctrlKey || event.metaKey) && !opens)) return;
     if (editorRef.current) {
       // An editor left open without focus takes the first Escape.
-      if (key === "Escape" && !editingDisabled) setEditing(null);
+      if (key === "Escape" && !editingDisabled) {
+        cancelled.current = true;
+        setEditing(null);
+      }
       return;
     }
     if (!at) {
@@ -993,6 +1031,13 @@ export function TableView({
                     })
                   }
                   close={closeEditor}
+                  abandon={
+                    onDraftAbandoned
+                      ? (text) => {
+                          if (!cancelled.current) onDraftAbandoned({ recordId: editing.recordId, field: editing.field, text });
+                        }
+                      : undefined
+                  }
                   onCreateOption={
                     onCreateOption
                       ? (option, value, previousValues) =>
@@ -1029,6 +1074,10 @@ export function TableView({
                   // Tab goes on to the next cell. Shift+Tab and Escape go back to this one.
                   event.preventDefault();
                   event.stopPropagation();
+                  // Tab goes through the note's actions before it leaves.
+                  const actions = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
+                  const action = event.key === "Tab" ? actions[actions.indexOf(event.target as HTMLElement) + (event.shiftKey ? -1 : 1)] : undefined;
+                  if (action) return action.focus();
                   const to = event.key === "Tab" && !event.shiftKey ? beside(at.row, at.column, false) : null;
                   if (to) select(...to);
                   else leaveNote();
@@ -1037,6 +1086,7 @@ export function TableView({
                 <p className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}>
                   {note.reason}
                 </p>
+                <div className="flex gap-1 empty:hidden">
                 {note.state === "unconfirmed" || note.state === "refused" ? (
                   <button
                     type="button"
@@ -1053,6 +1103,21 @@ export function TableView({
                     {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
                   </button>
                 ) : null}
+                {note.state === "unconfirmed" && note.discard ? (
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    title={DISCARD_HINT}
+                    className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                    onClick={() => {
+                      leaveNote();
+                      note.discard?.();
+                    }}
+                  >
+                    Discard
+                  </button>
+                ) : null}
+                </div>
               </div>
             ) : null}
           </div>

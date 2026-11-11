@@ -181,6 +181,77 @@ describe("what the host allows and has not confirmed", () => {
     expect(screen.queryByRole("note")).toBeNull();
   });
 
+  it("offers Discard beside Try again when the host gives it, on the cell and under the selected cell, with Tab through both", () => {
+    const retry = vi.fn(), discard = vi.fn();
+    const reason = "dohc could not confirm this change.";
+    const { store } = statusStore({ "rec-a:title": { state: "unconfirmed", value: "Renamed", reason, retry, discard } });
+    const { grid, cell, press, editor } = setup({ cellStatuses: store });
+    const onCell = within(cell(0, 0)).getByRole("button", { name: "Discard" });
+    // Nothing brings the change back, so the control says what it does.
+    expect(onCell.title).toBe("Stop trying to save this change. It may already be saved.");
+    fireEvent.click(onCell);
+    expect(discard).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+    expect(editor()).toBeNull();
+
+    grid.focus();
+    press("ArrowDown");
+    const note = screen.getByRole("note");
+    expect(note.textContent).toBe(`${reason}Try againDiscard`);
+    press("Tab");
+    expect(document.activeElement).toBe(within(note).getByRole("button", { name: "Try again" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    const inNote = within(note).getByRole("button", { name: "Discard" });
+    expect(document.activeElement).toBe(inNote);
+    fireEvent.keyDown(inNote, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(within(note).getByRole("button", { name: "Try again" }));
+    fireEvent.click(inNote);
+    expect(discard).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(grid);
+    // After the last action, Tab goes on to the next cell.
+    press("Tab");
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    expect(cell(0, 1).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("tells its host the text of an edit that goes with its record, its field, or the table, and nothing of one saved, cancelled, or not typed in", () => {
+    const onDraftAbandoned = vi.fn();
+    const { view, cell, editor, onCellChange } = setup({ onDraftAbandoned });
+    const rerender = (props: Partial<TableViewProps>) => view.rerender(<TableView schema={schema} records={records()} onCellChange={onCellChange} onDraftAbandoned={onDraftAbandoned} {...props} />);
+    const typeInto = (row: number, column: number, text: string) => {
+      fireEvent.click(cell(row, column));
+      fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
+    };
+
+    // Saved and cancelled edits, and an editor nobody typed in, leave nothing.
+    typeInto(0, 0, "Saved");
+    fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Enter" });
+    typeInto(0, 0, "Cancelled");
+    fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
+    fireEvent.click(cell(0, 0));
+    rerender({ records: records().slice(1) });
+    expect(onDraftAbandoned).not.toHaveBeenCalled();
+
+    // The record leaves the table under an edit.
+    rerender({});
+    typeInto(0, 0, "Typed");
+    rerender({ records: records().slice(1) });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed" });
+    // The field leaves it.
+    typeInto(0, 1, "12");
+    rerender({ records: records().slice(1), schema: makeSchema([{ name: "title", type: "text" }]) });
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "estimate", text: "12" });
+    // The table closes. A character that opened the edit was typed too.
+    fireEvent.click(cell(0, 0));
+    fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("grid"), { key: "x" });
+    view.unmount();
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "title", text: "x" });
+    expect(onDraftAbandoned).toHaveBeenCalledTimes(3);
+    expect(onCellChange).toHaveBeenCalledOnce();
+  });
+
   it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
     const { grid } = setup();
     expect(grid.classList.contains("isolate")).toBe(true);
