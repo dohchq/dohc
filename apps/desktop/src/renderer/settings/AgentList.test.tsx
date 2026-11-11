@@ -1780,7 +1780,7 @@ it("lists a removed agent's chat that arrived after Settings opened, once the ag
   expect(archived.getAllByTestId("agent-row-removed").map((element) => element.dataset.agentId)).toEqual(["codex"]);
 });
 
-it("focuses the Agents heading after Remove from an Archived row, even when the new settings show first", async () => {
+it("focuses the Agents heading after Remove from an Archived row, even when the new settings show first and the panel holds focus", async () => {
   bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
   const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, archivedChats: { "ws-1": ["chat-codex"] } } };
   let finish: (result: DesktopUserSettingsResult) => void = () => undefined;
@@ -1794,6 +1794,10 @@ it("focuses the Agents heading after Remove from an Archived row, even when the 
   await userEvent.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
   const saved = onSave.mock.lastCall![0];
   rerender({ settings: saved, onSave });
+  // The dialog's focus return lands on the panel around the list, as in Settings.
+  const panel = screen.getByTestId("agent-list").parentElement!;
+  panel.tabIndex = -1;
+  panel.focus();
   await act(async () => finish({ settings: saved, source: "stored" }));
   expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
 });

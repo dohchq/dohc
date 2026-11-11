@@ -527,7 +527,7 @@ export function AgentList(props: {
   // Agents whose chat is archived here list under Archived, as in Chats,
   // with removed agents' chats that are still there. The chats are read again
   // when an agent leaves or a chat is archived, which can add to Archived.
-  const agentChats = useAgentChats(workspaceId, JSON.stringify([Object.keys(settings.agents), archivedChatsFor(settings, workspaceId)]), onError);
+  const agentChats = useAgentChats(workspaceId, JSON.stringify([Object.keys(settings.agents).sort(), archivedChatsFor(settings, workspaceId)]), onError);
   const archivedChats = archivedAgentChats(workspaceId, settings, agentChats, (agentId) =>
     isPersonalAgentId(agentId)
       ? personalKnown ? entries.some((entry) => entry.agent.agentId === agentId) : null
@@ -748,8 +748,10 @@ export function AgentList(props: {
       focusAfter.current = "heading";
       return null;
     });
-    // From an Archived row the list may already show without it, with focus on nothing.
-    if (document.activeElement === null || document.activeElement === document.body) heading.current?.focus();
+    // From an Archived row the list may already show without it, with focus
+    // returned to nothing or to the panel around the list.
+    const active = document.activeElement;
+    if (active === null || active.contains(card.current)) heading.current?.focus();
   };
 
   const changePersonal = async (entry: PersonalEntry, next: PersonalAgentChange, failure: string): Promise<boolean> => {
