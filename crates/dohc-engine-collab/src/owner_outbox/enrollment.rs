@@ -328,6 +328,12 @@ pub fn enroll_in_tx(
     if pending && local_bytes.len() as i64 > limits.max_pending_bytes {
         return Err(OwnerOutboxError::Frozen);
     }
+    // Installing the checkpoint replaces the native updates these rows name.
+    let rows = if pending {
+        unsent_rows_in(tx, &input.binding)?
+    } else {
+        None
+    };
     if pending {
         put_binary_blob_with_sha(tx, &local_bytes, &input.captured.local_state_digest)?;
     }
@@ -355,7 +361,13 @@ pub fn enroll_in_tx(
         limits: limits.clone(),
     };
     super::draft::install_observed_binding_in_tx(tx, workspace, &observed, &checkpoint)?;
-    if pending {
+    let exact = match rows {
+        Some(rows) if !rows.is_empty() => {
+            append_rows_in_tx(tx, workspace, input, &rows, &local_bytes, &merged, now_ms)?
+        }
+        _ => false,
+    };
+    if pending && !exact {
         super::draft::append_draft_in_tx(
             tx,
             workspace,
@@ -367,6 +379,160 @@ pub fn enroll_in_tx(
         )?;
     }
     super::draft::descriptor_for_key_in(tx, &key)?.ok_or(OwnerOutboxError::Corrupt)
+}
+
+/// More unsent rows than this go out as one entry holding the whole local
+/// state. Each entry costs its delivery one connection.
+const MAX_EXACT_ROWS: usize = 32;
+
+/// A Ydoc update this desktop queued for the relay and hasn't sent yet, with
+/// the author it declared.
+struct UnsentRow {
+    origin_seq: i64,
+    update: Vec<u8>,
+    actor_origin_id: Option<String>,
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnsentPayload {
+    update_blob_sha256: String,
+    #[serde(default)]
+    actor_origin_id: Option<String>,
+    #[serde(default)]
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
+}
+
+/// The lineage's unsent rows in the order they were queued, or none when
+/// there are more than [`MAX_EXACT_ROWS`] or one can't be read whole.
+fn unsent_rows_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<Vec<UnsentRow>>, OwnerOutboxError> {
+    let mut stmt = conn.prepare(
+        "SELECT r.origin_seq,r.payload_json FROM sync_identity i JOIN replication_log r ON r.workspace_id=i.workspace_id AND r.origin_id=i.origin_id WHERE i.workspace_id=?1 AND r.imported=0 AND r.op_kind='ydoc.update' AND r.origin_seq>COALESCE((SELECT pushed_seq FROM sync_relay_push_state p WHERE p.workspace_id=?1 AND p.origin_id=i.origin_id),-1) AND json_extract(r.payload_json,'$.versionId')=?2 AND json_extract(r.payload_json,'$.objectId')=?3 AND json_extract(r.payload_json,'$.lineageClaimId')=?4 ORDER BY r.origin_seq LIMIT ?5",
+    ).map_err(read_sql)?;
+    let rows = stmt
+        .query_map(
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id,
+                MAX_EXACT_ROWS as i64 + 1
+            ],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(read_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_sql)?;
+    if rows.len() > MAX_EXACT_ROWS {
+        return Ok(None);
+    }
+    let mut unsent = Vec::with_capacity(rows.len());
+    for (origin_seq, payload) in rows {
+        let Ok(payload) = serde_json::from_str::<UnsentPayload>(&payload) else {
+            return Ok(None);
+        };
+        let update = match bounded_blob(conn, &payload.update_blob_sha256) {
+            Ok(update) => update,
+            Err(error @ OwnerOutboxError::Storage(_)) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        unsent.push(UnsentRow {
+            origin_seq,
+            update,
+            actor_origin_id: payload.actor_origin_id,
+            attribution: payload.attribution,
+        });
+    }
+    Ok(Some(unsent))
+}
+
+/// Queues each unsent row's exact bytes as its own entry, in order and with
+/// its own author, and then the whole local state if the rows don't reach
+/// `merged`. The host can then accept each row's digest. Answers false with
+/// nothing queued when a row can't be appended; only a storage failure is
+/// an error.
+fn append_rows_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    input: &OwnerEnrollmentInput,
+    rows: &[UnsentRow],
+    local_bytes: &[u8],
+    merged: &[u8],
+    now_ms: i64,
+) -> Result<bool, OwnerOutboxError> {
+    use super::draft::{queue_prepared_draft_in_tx, PreparedDraftAppend};
+    use dohc_engine_domain::ChangeActorKind;
+    tx.execute_batch("SAVEPOINT dohc_enrollment_rows")
+        .map_err(write_sql)?;
+    let digest = &input.captured.local_state_digest;
+    let appended = (|| {
+        let draft = super::draft::open_draft_in(tx, &input.binding, 1)?;
+        for row in rows {
+            let agent = AgentDeclaration::from_change(
+                row.actor_origin_id.as_deref(),
+                row.attribution.as_ref(),
+            );
+            let automation = AutomationDeclaration::from_change(
+                row.actor_origin_id.as_deref(),
+                row.attribution.as_ref(),
+            );
+            queue_prepared_draft_in_tx(
+                tx,
+                workspace,
+                &draft,
+                PreparedDraftAppend {
+                    person_edit: row
+                        .attribution
+                        .as_ref()
+                        .is_some_and(|a| a.actor_kind == ChangeActorKind::Human),
+                    append_key: format!("owner-enrollment:{digest}:{}", row.origin_seq),
+                    update: row.update.clone(),
+                    now_ms,
+                    agent_declaration: agent.as_ref(),
+                    // The run stays beside the declaration, never in it.
+                    agent_run_id: agent
+                        .as_ref()
+                        .and(row.attribution.as_ref())
+                        .and_then(|a| a.agent_run_id.as_deref()),
+                    automation_declaration: automation.as_ref(),
+                },
+            )?;
+        }
+        if bounded(&draft.doc)? != merged {
+            queue_prepared_draft_in_tx(
+                tx,
+                workspace,
+                &draft,
+                PreparedDraftAppend {
+                    person_edit: false,
+                    append_key: format!("owner-enrollment:{digest}"),
+                    update: local_bytes.to_vec(),
+                    now_ms,
+                    agent_declaration: None,
+                    agent_run_id: None,
+                    automation_declaration: None,
+                },
+            )?;
+        }
+        Ok::<_, OwnerOutboxError>(())
+    })();
+    match appended {
+        Ok(()) => {
+            tx.execute_batch("RELEASE dohc_enrollment_rows")
+                .map_err(write_sql)?;
+            Ok(true)
+        }
+        Err(error @ OwnerOutboxError::Storage(_)) => Err(error),
+        Err(_) => {
+            tx.execute_batch("ROLLBACK TO dohc_enrollment_rows; RELEASE dohc_enrollment_rows")
+                .map_err(write_sql)?;
+            Ok(false)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

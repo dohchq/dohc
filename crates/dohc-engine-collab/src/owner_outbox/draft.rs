@@ -755,17 +755,56 @@ pub fn append_draft_in_tx(
     .map(|(result, _)| result)
 }
 
-struct PreparedDraftAppend<'a> {
-    person_edit: bool,
-    append_key: String,
-    update: Vec<u8>,
-    now_ms: i64,
-    agent_declaration: Option<&'a dohc_engine_domain::AgentDeclaration>,
-    agent_run_id: Option<&'a str>,
-    automation_declaration: Option<&'a dohc_engine_domain::AutomationDeclaration>,
+pub(super) struct PreparedDraftAppend<'a> {
+    pub(super) person_edit: bool,
+    pub(super) append_key: String,
+    pub(super) update: Vec<u8>,
+    pub(super) now_ms: i64,
+    pub(super) agent_declaration: Option<&'a dohc_engine_domain::AgentDeclaration>,
+    pub(super) agent_run_id: Option<&'a str>,
+    pub(super) automation_declaration: Option<&'a dohc_engine_domain::AutomationDeclaration>,
 }
 
 fn append_prepared_draft_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    draft: &OwnerDraft,
+    input: PreparedDraftAppend<'_>,
+) -> Result<(OwnerOutboxAppendResult, usize), OwnerOutboxError> {
+    let PreparedDraftAppend {
+        now_ms,
+        agent_declaration,
+        agent_run_id,
+        automation_declaration,
+        ..
+    } = input;
+    let appended = queue_prepared_draft_in_tx(tx, workspace_id, draft, input)?;
+    let attribution = automation_declaration
+        .map(|declaration| declaration.attribution.clone())
+        .or_else(|| {
+            agent_declaration.map(|declaration| dohc_engine_domain::ChangeAttribution {
+                agent_run_id: agent_run_id.map(str::to_owned),
+                ..declaration.attribution()
+            })
+        });
+    let actor = automation_declaration
+        .map(|declaration| declaration.automation_id.as_str())
+        .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
+    index_frontmatter_in_tx(
+        tx,
+        &draft.observed.binding,
+        &draft.doc,
+        actor,
+        attribution.as_ref(),
+        now_ms,
+    )?;
+    Ok(appended)
+}
+
+/// Applies `input` to the draft and queues it, leaving the draft's fields as
+/// indexed. Enrollment indexes the state its appends end at once, so the
+/// states between its entries never reach field history.
+pub(super) fn queue_prepared_draft_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     draft: &OwnerDraft,
@@ -813,18 +852,6 @@ fn append_prepared_draft_in_tx(
         automation_declaration,
         person_edit,
     )?;
-    let attribution = automation_declaration
-        .map(|declaration| declaration.attribution.clone())
-        .or_else(|| {
-            agent_declaration.map(|declaration| dohc_engine_domain::ChangeAttribution {
-                agent_run_id: agent_run_id.map(str::to_owned),
-                ..declaration.attribution()
-            })
-        });
-    let actor = automation_declaration
-        .map(|declaration| declaration.automation_id.as_str())
-        .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
-    index_frontmatter_in_tx(tx, binding, &draft.doc, actor, attribution.as_ref(), now_ms)?;
     Ok((result, encoded_len))
 }
 
