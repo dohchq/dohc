@@ -733,7 +733,7 @@ describe("desktop user settings store", () => {
     const path = join(root, USER_SETTINGS_FILE);
     const pinned: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
-      sidebar: { order: ["history", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] }, archivedChats: { "ws-a": ["channel-1"] } },
+      sidebar: { order: ["history", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] }, archivedChats: { "ws-a": ["channel-1"] }, hiddenChats: {} },
     };
     await writeUserSettingsFile(root, pinned, DEFAULT_USER_SETTINGS);
     expect((await readUserSettingsFile(root)).settings.sidebar).toEqual(pinned.sidebar);
@@ -767,7 +767,7 @@ describe("desktop user settings store", () => {
     const root = await createTestScratch("dohc-user-settings-");
     const withChats: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
-      sidebar: { order: ["chats", "explorer", "search", "graph", "history"], hidden: ["chats"], pinnedApps: {}, archivedChats: {} },
+      sidebar: { order: ["chats", "explorer", "search", "graph", "history"], hidden: ["chats"], pinnedApps: {}, archivedChats: {}, hiddenChats: {} },
     };
     await writeUserSettingsFile(root, withChats, DEFAULT_USER_SETTINGS);
     const read = await readUserSettingsFile(root);

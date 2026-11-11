@@ -14,7 +14,7 @@ import {
   type ZoomStep,
 } from "../settings/userSettings";
 import { withAppPinned } from "../settings/pinnedApps";
-import { withChatArchived } from "../settings/archivedChats";
+import { withChatState } from "../settings/archivedChats";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
   ensureUserSettingsFile, orderUserSettingsAgents, readCachedUserSettingsFile, reloadUserSettingsFile,
@@ -214,7 +214,7 @@ export function createSettingsIpc<
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) => {
           operation.assertCurrent();
-          return withChatArchived(current, input, knownWorkspaceIds());
+          return withChatState(current, input, knownWorkspaceIds());
         }));
     },
 
