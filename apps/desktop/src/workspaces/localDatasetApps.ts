@@ -62,12 +62,12 @@ export function createLocalDatasetApps(options: {
       appId: context.publicationId, authorityToken: String(context.authorityRevision), person: options.localPersonId(),
       ...(context.agent === null ? {} : { agent: { depth: context.agent.depth } }) };
   }
-  async function inContext<T>(id: string, expected: number, signal: AbortSignal | undefined, work: (context: LocalDatasetAppContext) => Promise<T>): Promise<T> {
+  async function inContext<T>(id: string, expected: number, signal: AbortSignal | undefined, activated: boolean, work: (context: LocalDatasetAppContext) => Promise<T>): Promise<T> {
     signal?.throwIfAborted(); current(id, expected);
-    // The app cannot tell a person's click from an agent's request, so while
-    // an agent run is active every invocation is the run's, which keeps its
-    // chain depth. The invocation keeps it after the run ends.
-    const run = options.agentRun(), agent = run === null ? null : Object.freeze({ depth: run.depth });
+    // While an agent run is active, an invocation is the run's and keeps its chain
+    // depth, unless a person's click or key press in the app started it, as dohc's
+    // bootstrap reports. The invocation keeps its attribution after the run ends.
+    const run = options.agentRun(), agent = run === null || activated ? null : Object.freeze({ depth: run.depth });
     const context = Object.freeze({ publicationId: id, authorityRevision: expected, agent }); contexts.add(context);
     try { const result = await work(context); signal?.throwIfAborted(); current(id, expected); return result; }
     finally { contexts.delete(context); }
@@ -101,14 +101,14 @@ export function createLocalDatasetApps(options: {
       return { publicationId: value.publicationId, authorityRevision: value.authorityRevision, appRoot: value.appRoot,
         sourceRevision: value.candidate.sourceRevision, datasetCapability: shown(value, declared), approved: options.store.held(value), active };
     },
-    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal, activated = false): Promise<unknown> {
       if (action === "list" || action === "create") throw new Error("This app is not approved for document Collection access.");
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid pending submission request.");
         const { authorityRevision, operation: operationName, ...request } = raw as Record<string, unknown>;
         const parsed = parseDatasetAttemptRequest(request);
         const identity = parseAppBackendInvokeRequest({ authorityRevision, operation: operationName, input: {}, idempotencyKey: "attempt" });
-        return inContext(publicationId, identity.authorityRevision, signal, async context => {
+        return inContext(publicationId, identity.authorityRevision, signal, activated, async context => {
           const { capability: cap } = current(publicationId, identity.authorityRevision);
           const operation = cap.operations.find(operation => operation.name === identity.operation && !operation.readOnly);
           if (!operation) throw new Error("This action is not approved for the app.");
@@ -118,14 +118,14 @@ export function createLocalDatasetApps(options: {
       }
       if (action === "upload") {
         const input = parseAppBackendUploadRequest(raw);
-        return inContext(publicationId, input.authorityRevision, signal, async context => {
+        return inContext(publicationId, input.authorityRevision, signal, activated, async context => {
           const { capability: cap } = current(publicationId, input.authorityRevision);
           if (!cap.operations.some(operation => !operation.readOnly)) throw new Error("This app cannot upload files.");
           return options.upload(context, { datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256, ...input, signal });
         });
       }
       const input = parseAppBackendInvokeRequest(raw);
-      return inContext(publicationId, input.authorityRevision, signal, async context => {
+      return inContext(publicationId, input.authorityRevision, signal, activated, async context => {
         const { capability: cap } = current(publicationId, input.authorityRevision);
         const operation = cap.operations.find(operation => operation.name === input.operation);
         if (!operation) throw new Error("This action is not approved for the app.");
@@ -135,7 +135,7 @@ export function createLocalDatasetApps(options: {
     },
     readBrowserFile(publicationId: string, raw: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown> {
       const input = parseAppBackendInvokeRequest({ authorityRevision: raw.authorityRevision, operation: raw.operation, input: raw.input, idempotencyKey: "file-read" });
-      return inContext(publicationId, input.authorityRevision, signal, async context => {
+      return inContext(publicationId, input.authorityRevision, signal, false, async context => {
         const { capability: cap } = current(publicationId, input.authorityRevision);
         const operation = cap.operations.find(operation => operation.name === input.operation && operation.readOnly);
         if (!operation || typeof raw.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(raw.fileId)) throw new Error("Choose an approved read action for this file.");

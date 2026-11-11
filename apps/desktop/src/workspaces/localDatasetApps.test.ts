@@ -555,7 +555,7 @@ describe("local app write attribution", () => {
     let run: LocalDatasetAgent | null = null;
     const f = await fixture(() => run);
     f.host.automations.subscribe(id(1), { automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: hash(watcher) });
-    const invoke = (key: string) => f.host.apps.request(f.published.publicationId, "invoke", f.invocation(key, key));
+    const invoke = (key: string, activated?: boolean) => f.host.apps.request(f.published.publicationId, "invoke", f.invocation(key, key), undefined, activated);
     return { ...f, invoke, setRun(value: LocalDatasetAgent | null) { run = value; } };
   }
 
@@ -591,15 +591,15 @@ describe("local app write attribution", () => {
     expect(f.host.automations.next()).toMatchObject({ depth: 1, actor: { kind: "agent", depth: 1 } });
   });
 
-  it("counts a person's click during a run as the run's, and leaves the owner's own edits the owner's", async () => {
-    const f = await attributed();
+  it("credits a write a person's click started during a run to the person, and any other write to the run", async () => {
+    const f = await attributed(), appId = f.published.publicationId;
     f.setRun({ depth: 2 });
-    // The app cannot tell a click from the agent's request, so both are the run's.
-    await Promise.all([f.invoke("person"), f.invoke("agent")]);
-    expect([f.host.automations.next(), f.host.automations.next()]).toEqual([
-      expect.objectContaining({ depth: 2, actor: expect.objectContaining({ kind: "agent" }) }),
-      expect.objectContaining({ depth: 2, actor: expect.objectContaining({ kind: "agent" }) }),
-    ]);
+    await f.invoke("person", true);
+    expect(f.host.automations.next()).toMatchObject({ depth: 0, actor: { kind: "owner", appId, userId: "person-local" } });
+    await f.invoke("agent", false);
+    expect(f.host.automations.next()).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId } });
+    await f.invoke("unstated");
+    expect(f.host.automations.next()).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId } });
     // An edit the person makes in the Collection itself is not an app's.
     await f.host.action({ datasetId: id(1), revision: 1, revisionSha256: f.revision.revisionSha256, operationId: id(6), idempotencyKey: "owner",
       input: { values: { [id(4)]: "Owner" } } });
@@ -622,7 +622,7 @@ describe("local app write attribution", () => {
     const f = await attributed();
     f.setRun({ depth: 1 });
     await expect(f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "listed"), operation: "list" })).rejects.toThrow(/not approved/);
-    for (const forged of [{ agent: { depth: 0 } }, { depth: 0 }, { actor: { kind: "owner" } }]) {
+    for (const forged of [{ agent: { depth: 0 } }, { depth: 0 }, { actor: { kind: "owner" } }, { activated: true }]) {
       await expect(f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "forged"), ...forged })).rejects.toThrow(/Unexpected app backend fields/);
     }
     await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);

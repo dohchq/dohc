@@ -1,10 +1,18 @@
-/** Runs only in the trusted bootstrap. The app receives this one frame-bound port. */
-export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body: unknown, signal: AbortSignal) => Promise<Response>, lifetime: AbortSignal): void {
+/**
+ * Runs only in the trusted bootstrap. The app receives this one frame-bound port.
+ * `activated` is this window's transient user activation when the request arrived: a real click or key
+ * press in the app frame grants it to this window for about 5 seconds. The app's message never sets it.
+ * A browser can open this page already activated, so activation counts only after this window has been without it.
+ */
+export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body: unknown, signal: AbortSignal, request: { activated: boolean }) => Promise<Response>, lifetime: AbortSignal): void {
   let closed = false, loaded = false, pending = 0, backendTokens = 30, collectionTokens = 12, updated = Date.now();
   const channel = new MessageChannel(), controller = new AbortController(), ids = new Set<string>();
   const close = () => {closed = true;controller.abort();channel.port1.close();channel.port2.close();ids.clear();};
-  lifetime.addEventListener("abort", close, {once: true});
-  if (lifetime.aborted) close();
+  const active = () => navigator.userActivation?.isActive === true;
+  let armed = !active();
+  const arm = armed ? undefined : setInterval(() => {if (!active()) {armed = true;clearInterval(arm);}}, 250);
+  lifetime.addEventListener("abort", () => {clearInterval(arm);close();}, {once: true});
+  if (lifetime.aborted) {clearInterval(arm);close();}
   frame.addEventListener("load", () => {
     if (closed) return;
     if (loaded) {close();return;}
@@ -14,6 +22,8 @@ export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body:
   const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
   channel.port1.onmessage = async event => {
     if (closed || !loaded) return;
+    const inputActive = active();if (!inputActive) armed = true;
+    const activated = inputActive && armed;
     const body: unknown = event.data;
     if (!record(body) || typeof body.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.id)) return;
     const id = body.id, reject = (status: number) => {if (!closed) channel.port1.postMessage({id, ok: false, status});};
@@ -35,7 +45,7 @@ export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body:
     if (pending >= 4 || (backend ? backendTokens : collectionTokens) < 1) {reject(429);return;}
     if (backend) backendTokens--; else collectionTokens--;pending++;ids.add(id);
     try {
-      const response = await send(body, controller.signal);
+      const response = await send(body, controller.signal, {activated});
       if (closed || controller.signal.aborted) {await response.body?.cancel().catch(() => {});return;}
       const refusal = backend && response.status === 409 && response.headers.get("content-type")?.split(";", 1)[0] === "application/json";
       if (!response.ok && !refusal) {await response.body?.cancel().catch(() => {});reject([400, 404, 409, 413, 429].includes(response.status) ? response.status : 503);return;}

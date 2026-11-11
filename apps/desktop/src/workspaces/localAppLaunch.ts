@@ -17,7 +17,8 @@ export interface LocalAppLaunchBackend {
   browserPublication(publicationId: string): { authorityRevision: number; files: Parameters<typeof createAppDocument>[0] };
   assertBrowserPublication(publicationId: string, authorityRevision: number): void;
   checkBrowserPublication?(publicationId: string, authorityRevision: number, signal: AbortSignal): Promise<void>;
-  request(publicationId: string, action: LocalAppAction, input: unknown, signal?: AbortSignal): Promise<unknown>;
+  /** activated: a person's click or key press in the app frame started this request, as the bootstrap saw it. */
+  request(publicationId: string, action: LocalAppAction, input: unknown, signal?: AbortSignal, activated?: boolean): Promise<unknown>;
   readBrowserFile(publicationId: string, input: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown>;
 }
 export interface LocalAppLaunchHost {
@@ -130,7 +131,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            (${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify(body),signal}),lifetime.signal);
+            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal);
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${browserLifetime}
@@ -183,6 +184,8 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
               return reply(response, 200, { proof, html: resumed.html });
             }
             const body = await readJson(request, APP_BACKEND_UPLOAD_REQUEST_BYTES, activeSignal);
+            // Only the bootstrap sends this header; the app frame has neither the proof nor this origin.
+            const activated = request.headers["x-dohc-app-activated"] === "1";
             if (!body || typeof body !== "object" || Array.isArray(body)) return reply(response, 400);
             const row = body as Record<string, unknown>;
             if (typeof row.id !== "string" || row.id.length > 64 || !/^[A-Za-z0-9_-]+$/.test(row.id)) return reply(response, 400);
@@ -191,19 +194,19 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
             let result: unknown;
             if (row.op === "collection.list" && (exact(row, ["id", "op", "limit"]) || exact(row, ["id", "op", "limit", "afterPath"]))) {
               if (!isAppCollectionPageRequest(row.limit, row.afterPath)) return reply(response, 400);
-              result = await options.backend.request(publicationId, "list", { authorityRevision, limit: row.limit, ...(row.afterPath === undefined ? {} : { afterPath: row.afterPath }) }, activeSignal);
+              result = await options.backend.request(publicationId, "list", { authorityRevision, limit: row.limit, ...(row.afterPath === undefined ? {} : { afterPath: row.afterPath }) }, activeSignal, activated);
             } else if (row.op === "collection.create" && exact(row, ["id", "op", "idempotencyKey", "fields"])) {
               const input = parseAppCollectionCreateRequest({ authorityRevision, idempotencyKey: row.idempotencyKey, fields: row.fields });
-              result = await options.backend.request(publicationId, "create", input, activeSignal);
+              result = await options.backend.request(publicationId, "create", input, activeSignal, activated);
             } else if (row.op === "backend.attempt" && exact(row, ["id", "op", "operation", "request"])) {
               const operation = parseAppBackendInvokeRequest({ authorityRevision, operation: row.operation, idempotencyKey: "attempt", input: {} }).operation;
-              result = await options.backend.request(publicationId, "attempt", { authorityRevision, operation, ...parseDatasetAttemptRequest(row.request) }, activeSignal);
+              result = await options.backend.request(publicationId, "attempt", { authorityRevision, operation, ...parseDatasetAttemptRequest(row.request) }, activeSignal, activated);
             } else if (row.op === "backend.invoke" && exact(row, ["id", "op", "operation", "idempotencyKey", "input"])) {
               const input = parseAppBackendInvokeRequest({ authorityRevision: authorityRevision, operation: row.operation, idempotencyKey: row.idempotencyKey, input: row.input });
-              result = await options.backend.request(publicationId, "invoke", input, activeSignal);
+              result = await options.backend.request(publicationId, "invoke", input, activeSignal, activated);
             } else if (row.op === "backend.upload" && exact(row, ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"])) {
               const input = parseAppBackendUploadRequest({ authorityRevision: authorityRevision, idempotencyKey: row.idempotencyKey, name: row.name, contentType: row.contentType, bytesBase64: row.bytesBase64 });
-              result = await options.backend.request(publicationId, "upload", input, activeSignal);
+              result = await options.backend.request(publicationId, "upload", input, activeSignal, activated);
             } else if (row.op === "backend.file" && exact(row, ["id", "op", "fileId", "operation", "input"])) {
               if (typeof row.fileId !== "string" || row.fileId.length > 128 || !/^[A-Za-z0-9_-]{16,128}$/.test(row.fileId)) return reply(response, 400);
               const input = parseAppBackendInvokeRequest({ authorityRevision: authorityRevision, idempotencyKey: "file-read", operation: row.operation, input: row.input });

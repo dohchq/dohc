@@ -20,7 +20,7 @@ async function fixture(keepAlive = false) {
       if (id !== publicationId || shared) throw Error("Unavailable publication");
       return { publicationId, authorityRevision: revision, appRoot: "app", files: [{ path: "bundle.js", contentType: "text/javascript; charset=utf-8", sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, bytes }] };
     }),
-    request: vi.fn(async (_publication: string, _action: string, body: unknown, _signal?: AbortSignal) => ({ result: body, revision: 1, replayed: false })),
+    request: vi.fn(async (_publication: string, _action: string, body: unknown, _signal?: AbortSignal, _activated?: boolean) => ({ result: body, revision: 1, replayed: false })),
     readBrowserFile: vi.fn(async (_publication: string, _body: unknown, _signal?: AbortSignal) => ({ file: { fileId: "file_0123456789abcdef", name: "receipt.pdf", contentType: "application/pdf", byteLength: 4, sha256: "a".repeat(64) }, bytesBase64: "JVBERg==" })),
   };
   const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal }); hosts.push(host);
@@ -95,7 +95,7 @@ it("routes a scoped pending submission request without accepting renderer author
   const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
   const attempt = { id: "attempt", op: "backend.attempt", operation: "submit", request: { action: "save", idempotencyKey: "retry", input: { name: "Mom" } } };
   expect((await f.post("/backend", attempt, headers)).status).toBe(200);
-  expect(f.backend.request).toHaveBeenCalledWith(publicationId, "attempt", { authorityRevision: 1, operation: "submit", ...attempt.request }, expect.any(AbortSignal));
+  expect(f.backend.request).toHaveBeenCalledWith(publicationId, "attempt", { authorityRevision: 1, operation: "submit", ...attempt.request }, expect.any(AbortSignal), false);
   expect((await f.post("/backend", { ...attempt, request: { ...attempt.request, principal: "other" } }, headers)).status).toBe(404);
 });
 
@@ -116,7 +116,26 @@ it("requires exact origin, host, handoff, and proof and strips caller authority"
   }
   expect(f.backend.request).not.toHaveBeenCalled();
   expect((await f.post("/backend", invoke, headers)).status).toBe(200);
-  expect(f.backend.request).toHaveBeenCalledWith(publicationId, "invoke", { authorityRevision: 1, operation: "register", idempotencyKey: "attempt-1", input: { count: 1 } }, expect.any(AbortSignal));
+  expect(f.backend.request).toHaveBeenCalledWith(publicationId, "invoke", { authorityRevision: 1, operation: "register", idempotencyKey: "attempt-1", input: { count: 1 } }, expect.any(AbortSignal), false);
+});
+
+it("takes a click from the bootstrap's header and never from the app's request", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const create = { id: "create", op: "collection.create", idempotencyKey: "response-1", fields: { destination: "Tokyo" } };
+  for (const [value, activated] of [["1", true], ["0", false], ["true", false], ["", false]] as const) {
+    expect((await f.post("/backend", invoke, { ...headers, "x-dohc-app-activated": value })).status).toBe(200);
+    expect(f.backend.request.mock.calls.at(-1)?.[4]).toBe(activated);
+    expect((await f.post("/backend", create, { ...headers, "x-dohc-app-activated": value })).status).toBe(200);
+    expect(f.backend.request.mock.calls.at(-1)?.[4]).toBe(activated);
+  }
+  const calls = f.backend.request.mock.calls.length;
+  for (const body of [{ ...invoke, activated: true }, { ...create, activated: true }])
+    expect((await f.post("/backend", body, { ...headers, "x-dohc-app-activated": "0" })).status).toBe(400);
+  expect(f.backend.request).toHaveBeenCalledTimes(calls);
+  // The script sends the header only from the broker's own reading.
+  const html = await (await fetch(f.origin + "/bootstrap")).text();
+  expect(html).toContain("'x-dohc-app-activated':request.activated?'1':'0'");
+  expect(html).toContain("navigator.userActivation?.isActive");
 });
 
 it("carries exact Collection list and create requests and answers an unavailable engine with 503", async () => {
@@ -124,9 +143,9 @@ it("carries exact Collection list and create requests and answers an unavailable
   const list = { id: "list", op: "collection.list", limit: 10, afterPath: "trip/responses/a.md" };
   const create = { id: "create", op: "collection.create", idempotencyKey: "response-1", fields: { destination: "Tokyo" } };
   expect((await f.post("/backend", list, headers)).status).toBe(200);
-  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "list", { authorityRevision: 1, limit: 10, afterPath: list.afterPath }, expect.any(AbortSignal));
+  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "list", { authorityRevision: 1, limit: 10, afterPath: list.afterPath }, expect.any(AbortSignal), false);
   expect((await f.post("/backend", create, headers)).status).toBe(200);
-  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "create", { authorityRevision: 1, idempotencyKey: "response-1", fields: { destination: "Tokyo" } }, expect.any(AbortSignal));
+  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "create", { authorityRevision: 1, idempotencyKey: "response-1", fields: { destination: "Tokyo" } }, expect.any(AbortSignal), false);
   for (const body of [{ ...list, limit: 0 }, { ...list, authorityRevision: 9 }, { ...create, path: "elsewhere.md" }, { ...create, authorityRevision: 9 }])
     expect((await f.post("/backend", body, headers)).status).toBe(400);
   expect((await f.post("/backend", { ...create, idempotencyKey: "bad key" }, headers)).status).toBe(404);
