@@ -457,6 +457,7 @@ import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
+import { readOwnerDraftState } from "./workspaces/ownerDraftRead";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -5251,6 +5252,12 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
   },
   isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
+  ownerDraftState: (workspace, path) => requireEngineSessions().run(workspace, async session => {
+    const client = desktopEngine.daemon?.currentClient();
+    if (!(client instanceof EngineClient)) throw new Error("dohc could not read this note. Restart dohc and try again.");
+    return readOwnerDraftState(client, session.workspace, path, async () =>
+      (await withEngineAdapter(workspace, adapter => adapter.getActiveVersion({ workspaceId: workspace.workspaceId })))?.id ?? "main");
+  }),
   sharedCaptureFor: async (workspace) => {
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
