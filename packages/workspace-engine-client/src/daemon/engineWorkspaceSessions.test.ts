@@ -4023,3 +4023,94 @@ describe("store busy total budget", () => {
   );
 
 });
+
+// Issue 3027: the engine refuses a live open at once while other live work
+// holds its settlement capacity, and says to try again after a backoff.
+describe("live settlement capacity", () => {
+  const capacityRefusal = () => daemonRefusal("OVERLOADED", "live-settlement-capacity", "afterBackoff");
+  // The desktop opens a document inside a bounded region of this size.
+  const OPEN_BUDGET_MS = 6_000;
+
+  it("opens live once the capacity clears, on the store-busy schedule", async () => {
+    const workspace = await tempWorkspace("live-capacity-clears");
+    const client = new MockClient("live-capacity-clears");
+    let now = 0, attempts = 0;
+    const delays: number[] = [];
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+      now: () => now, sleep: async ms => { delays.push(ms); now += ms; },
+    });
+    const opened = await sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, async () => {
+      attempts++;
+      if (now < 1_500) throw capacityRefusal();
+      return "live";
+    }, { retryTransportErrors: true, retryInitialCapture: true }));
+    expect(opened).toBe("live");
+    expect(attempts).toBe(5);
+    expect(delays).toEqual([100, 200, 400, 800]);
+  });
+
+  it.each([
+    ["the capacity budget", 60_000, 10_000],
+    ["the open's budget", OPEN_BUDGET_MS, 6_500],
+  ] as const)("answers with the refusal itself once %s is spent", async (_budget, regionMs, spentAt) => {
+    const workspace = await tempWorkspace("live-capacity-spent");
+    const client = new MockClient("live-capacity-spent");
+    let now = 0;
+    const attemptedAt: number[] = [];
+    const refusal = capacityRefusal();
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+      now: () => now, sleep: async ms => { now += ms; },
+    });
+    await expect(sessions.withRetryBudget(regionMs, () => sessions.run(workspace, async () => {
+      attemptedAt.push(now);
+      throw refusal;
+    }, { retryTransportErrors: true }))).rejects.toBe(refusal);
+    expect(now).toBe(spentAt);
+    expect(attemptedAt.length).toBeGreaterThan(1);
+    expect(attemptedAt.every(at => at < spentAt)).toBe(true);
+  });
+
+  it.each(["aborted", "closed"] as const)("stops waiting for capacity at once when the open is %s", async ending => {
+    const workspace = await tempWorkspace(`live-capacity-${ending}`);
+    const client = new MockClient(`live-capacity-${ending}`);
+    const sleeping = deferred<number>();
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+      sleep: ms => { sleeping.resolve(ms); return new Promise<void>(() => {}); },
+    });
+    const controller = new AbortController();
+    const refusal = capacityRefusal();
+    const operation = vi.fn(async () => { throw refusal; });
+    const settled = sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, operation), controller.signal)
+      .then(() => "opened", (error: unknown) => error);
+    expect(await Promise.race([settled, sleeping.promise.then(() => "waiting")])).toBe("waiting");
+    if (ending === "aborted") controller.abort();
+    const closed = ending === "closed" ? sessions.closeWorkspace(workspace) : Promise.resolve();
+    expect(await settled).toBe(refusal);
+    await closed;
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries no other refusal that asks for a backoff", async () => {
+    const workspace = await tempWorkspace("live-capacity-other");
+    const client = new MockClient("live-capacity-other");
+    const sleep = vi.fn(async () => undefined);
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
+    const refusal = daemonRefusal("OVERLOADED", "blob-egress-capacity", "afterBackoff");
+    const operation = vi.fn(async () => { throw refusal; });
+    await expect(sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, operation))).rejects.toBe(refusal);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("leaves a capacity refusal outside a bounded open to its caller", async () => {
+    const workspace = await tempWorkspace("live-capacity-unbounded");
+    const client = new MockClient("live-capacity-unbounded");
+    const sleep = vi.fn(async () => undefined);
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
+    const refusal = capacityRefusal();
+    const operation = vi.fn(async () => { throw refusal; });
+    await expect(sessions.run(workspace, operation)).rejects.toBe(refusal);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+});

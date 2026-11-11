@@ -3,6 +3,7 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
+  isLiveSettlementCapacityRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocFileNotReadRefusal,
   isYdocOpenOperationCrashedRefusal,
@@ -676,6 +677,10 @@ export class EngineWorkspaceSessions {
             await this.waitForStoreBusy(workspace.workspaceId, error, storeBusy);
             continue;
           }
+          if (this.activeBudget() !== undefined && isLiveSettlementCapacityRefusal(error)) {
+            await this.waitForLiveCapacity(workspace.workspaceId, entry, error, storeBusy);
+            continue;
+          }
           this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
@@ -895,10 +900,11 @@ export class EngineWorkspaceSessions {
     workspaceId: string,
     error: unknown,
     retry: StoreBusyRetryState,
+    stop?: AbortSignal,
   ): Promise<void> {
     retry.deadline ??= this.now() + STORE_BUSY_RETRY_BUDGET_MS;
     const remaining = retry.deadline - this.now();
-    if (remaining <= 0) throw error;
+    if (remaining <= 0 || stop?.aborted) throw error;
     this.noteBudgetAttempt(error);
     const next = await this.settleAttempt({
       workspaceId,
@@ -907,8 +913,29 @@ export class EngineWorkspaceSessions {
       backoff: true,
       delayMs: Math.min(storeBusyBackoffMs(retry.attempts), remaining),
       cause: error,
+      ...(stop ? { stop } : {}),
     });
-    if (next === "stop" || this.now() >= retry.deadline) throw error;
+    if (next === "stop" || stop?.aborted || this.now() >= retry.deadline) throw error;
+  }
+
+  // The engine refuses a live operation before it reads any state while other
+  // live work holds the settlement capacity, so a bounded open waits for it on
+  // the store-busy schedule. Its abort or a close ends the wait at once. Spent
+  // or ended, the open answers with the refusal, as it did before waiting.
+  private async waitForLiveCapacity(
+    workspaceId: string,
+    entry: SessionEntry,
+    error: unknown,
+    retry: StoreBusyRetryState,
+  ): Promise<void> {
+    const signal = this.activeBudget()?.signal;
+    const stop = AbortSignal.any([entry.captureWaitController.signal, ...(signal ? [signal] : [])]);
+    if (entry.closing) throw error;
+    try {
+      await this.waitForStoreBusy(workspaceId, error, retry, stop);
+    } catch (waitError) {
+      throw waitError instanceof EngineWorkspaceRetryDeadlineError ? error : waitError;
+    }
   }
 
   /**
@@ -940,6 +967,8 @@ export class EngineWorkspaceSessions {
     // all, and used to skip these gates entirely because of it.
     backoff: boolean;
     delayMs?: number;
+    // Ends the backoff early; the caller decides what that means.
+    stop?: AbortSignal;
     cause: unknown;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
@@ -985,6 +1014,7 @@ export class EngineWorkspaceSessions {
     await this.interruptibleSleep(
       gate.delayMs ?? transportBackoffMs(gate.attempt),
       abandonable,
+      gate.stop,
     );
     // Same scope as before the wait: quit ends a bounded region's retries, and
     // only a bounded region's.
@@ -998,11 +1028,13 @@ export class EngineWorkspaceSessions {
   // `cancellable` marks a wait that quit may end: an abandonable region's.
   // A wait for work that must not be abandoned runs its full backoff, because
   // the daemon it is waiting for is the one that has to answer.
+  // `stop` ends any wait early.
   private async interruptibleSleep(
     delayMs: number,
     cancellable: boolean,
+    stop?: AbortSignal,
   ): Promise<void> {
-    if (!cancellable) {
+    if (!cancellable && !stop) {
       await this.sleep(delayMs);
       return;
     }
@@ -1010,7 +1042,10 @@ export class EngineWorkspaceSessions {
       ? Effect.sleep(delayMs)
       : Effect.promise(() => this.sleep(delayMs));
     const exit = await Effect.runPromiseExit(sleep, {
-      signal: this.shutdownController.signal,
+      signal: AbortSignal.any([
+        ...(cancellable ? [this.shutdownController.signal] : []),
+        ...(stop ? [stop] : []),
+      ]),
     });
     if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) {
       throw Cause.squash(exit.cause);

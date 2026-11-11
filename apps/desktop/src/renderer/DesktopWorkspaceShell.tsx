@@ -194,7 +194,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -705,6 +705,8 @@ export function DesktopWorkspaceShell(props: {
   >(null);
   // The document a notice opened the list for, so the list shows that row.
   const [liveDocumentsReveal, setLiveDocumentsReveal] = useState<string | null>(null);
+  // The list's Stop until it answers, so the list shows it again after a reopen.
+  const liveStopRunning = useRef<LiveDocumentStopRunning | null>(null);
   const openLiveDocuments = useCallback((id: string, reveal: string | null = null) => {
     setLiveDocumentsReveal(reveal);
     setLiveDocumentsWorkspaceId(id);
@@ -7828,6 +7830,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
           onStopPending={reportPendingLiveStop}
+          stopRunning={liveStopRunning}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
           setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}
