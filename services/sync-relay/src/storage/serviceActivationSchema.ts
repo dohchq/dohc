@@ -10,7 +10,7 @@ const SAFE = 9_007_199_254_740_991;
 const optionalInteger = (name: string) => `${name} INTEGER CHECK (${name} IS NULL OR ${name} BETWEEN 0 AND ${SAFE})`;
 // A retirement obligation (`retire_*`) is recorded by Stop and stays as it was
 // until the activation retires. Only a retired activation drops its state.
-// `binding_json` is the lineage's owner binding. Its first activation recorded
+// `binding_json` is the lineage's binding, every editor's. Its first activation recorded
 // it, and each successor keeps it at the restore generation it activated at.
 const sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
   relay_database_namespace TEXT NOT NULL,
