@@ -106,7 +106,8 @@ When their passing evidence covers the head, it replaces running the gates local
 PR checks distribute the complete selected JavaScript inventory across workers.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
 Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
-Both restore and check the prepared engine and desktop artifacts. The relay job builds its runtime bundles. Only the compiler job installs Rust and nextest.
+Both install Rust to check the prepared engine fingerprint. Relay checks only that engine and builds its runtime bundles.
+Compiler also checks the prepared desktop artifacts and installs nextest for its test archive.
 Workers and aggregates do not wait for confinement. Only the final verdict waits for it.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.

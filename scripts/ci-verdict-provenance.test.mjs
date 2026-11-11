@@ -538,7 +538,10 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
     assert.deepEqual(workflowExpression(job["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
     for (const [name, other] of Object.entries(jobs)) if (name !== "verification") assert.ok(![other.needs].flat().includes(id));
     const restore = job.steps.find(step => step.name === "Restore prepared artifacts").run;
-    assert.match(restore, /assertPrepared\(\)/u);
+    assert.match(restore, kind === "relay" ? /assertPrepared\(\{ engineOnly: true \}\)/u : /assertPrepared\(\)/u);
+    const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
+    assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === "Restore prepared artifacts"));
+    assert.equal(job.steps[toolchain].run, "rustup show active-toolchain || rustup toolchain install");
     assert.equal(job.steps.some(step => step.run?.includes("app-backend-runtime build")), kind === "relay");
   }
   const compiler = jobs["confinement-compiler"].steps.find(step => step.name === "Compiler confinement").run;
@@ -546,7 +549,7 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
   assert.match(compiler, /scripts\/compiler-process\.test\.mjs scripts\/stage-app-compiler\.test\.mjs/);
   for (const pattern of [/grep -qx '# skipped 0'/, /grep -qx '# todo 0'/, /! grep -qx '# pass 0'/]) assert.match(compiler, pattern);
   const relay = jobs["confinement-relay"];
-  assert.ok(!relay.steps.some(step => /Rust toolchain/.test(step.name) || step.uses?.startsWith("taiki-e/install-action@")));
+  assert.ok(!relay.steps.some(step => step.uses?.startsWith("taiki-e/install-action@")), "relay needs Rust identity, not nextest");
   const proof = relay.steps.find(step => step.name === "Relay confinement").run;
   assert.match(proof, /numPendingTests \|\| r\.numTodoTests/);
   assert.match(proof, /--security-opt no-new-privileges:true --cap-drop ALL/);

@@ -362,6 +362,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -371,7 +373,7 @@ jobs:
       - name: Restore prepared artifacts
         run: |
           tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
-          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared();"
+          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared({ engineOnly: true });"
       - name: Relay confinement
         run: |
           set -euo pipefail
