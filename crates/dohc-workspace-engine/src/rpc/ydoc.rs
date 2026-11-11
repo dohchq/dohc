@@ -2415,23 +2415,25 @@ impl EngineService {
         let events = self.events.clone();
         // The drain can replace the note's lineage, so it runs only under the
         // note's lease. A session that reopened the note drains at its own
-        // close; until then the retry only replays the writes owed.
-        let lease = match self
-            .leases
-            .scoped(&open.root)
-            .acquire_internal(&unfinished.key)
-        {
+        // close; until then the retry only replays the writes owed. Another
+        // engine attempt holds the note only briefly, so the caller retries.
+        let leases = self.leases.scoped(&open.root);
+        let lease = match leases.acquire_internal(&unfinished.key) {
             Ok(lease) => Some(lease),
-            Err(CollabError::LeaseHeld) => None,
+            Err(CollabError::LeaseHeld) if leases.is_held_by_session(&unfinished.key) => None,
+            Err(CollabError::LeaseHeld) => return Err(unfinished.failure),
             Err(other) => return Err(map_runtime(RuntimeError::Collab(other))),
         };
         let retry = tokio::spawn(async move {
             let _serial = serial;
+            // Dropped before `_serial`, so an open waiting on it finds the
+            // note free.
+            let note_lease = lease;
             let materialization = || YdocCloseMaterialization {
                 root_dir: open.root.clone(),
                 self_writes: self_writes.clone(),
             };
-            if lease.is_some() {
+            if note_lease.is_some() {
                 let record_facts = open
                     .actor
                     .ydoc_close_drain(
