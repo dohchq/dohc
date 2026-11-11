@@ -1,23 +1,12 @@
 import { chromium, type Browser, type Frame } from "@playwright/test";
 import https from "node:https";
-import { createHash, X509Certificate } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { testCertificate } from "./testCertificate";
 import type { actualFundraiserFixture } from "./actualFundraiserFixture";
 
 export async function publicLoadBrowser(fixture: Awaited<ReturnType<typeof actualFundraiserFixture>>) {
   const failures: string[] = [];
-  const script = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
-$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-load-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net');$req.CertificateExtensions.Add($san.Build())
-$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
-[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
-[Convert]::ToBase64String($cert.RawData)
-$cert.Dispose();$rsa.Dispose()`;
-  const [pfx, certificate] = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {encoding: "utf8", windowsHide: true}).trim().split(/\r?\n/);
-  const cert = new X509Certificate(Buffer.from(certificate!, "base64"));
-  const spki = createHash("sha256").update(cert.publicKey.export({type: "spki", format: "der"})).digest("base64");
-  const server = https.createServer({pfx: Buffer.from(pfx!, "base64"), passphrase: ""}, async (request, response) => {
+  const {tls, spki} = testCertificate("dohc-load-test", ["viewer.example.com", "*.example.net"]);
+  const server = https.createServer(tls, async (request, response) => {
     try {
       if (request.headers.host === "viewer.example.com" && request.url === "/fixture-open") {
         response.writeHead(200, {"content-type": "text/html", "cache-control": "no-store"});

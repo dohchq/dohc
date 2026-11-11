@@ -1,7 +1,6 @@
 import { test, expect, chromium } from "@playwright/test";
 import https from "node:https";
-import { createHash, X509Certificate } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { testCertificate } from "./testCertificate";
 import { actualAppLaunchFixture } from "./actualAppLaunchFixture";
 
 test("real relay and HTTPS top-level handoff keep app authority outside its opaque child", async () => {
@@ -11,19 +10,8 @@ test("real relay and HTTPS top-level handoff keep app authority outside its opaq
   const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);
   addEventListener('message',async event=>{if(event.source!==parent||event.data?.kind!=='dohc-app-channel'||event.data?.version!==1||event.ports.length!==1)return;const port=event.ports[0],pending=new Map();let serial=0;port.onmessage=e=>{const done=pending.get(e.data.id);if(done){pending.delete(e.data.id);done(e.data);}};port.start();window.collectionCall=body=>new Promise(resolve=>{const id='q'+(++serial);pending.set(id,resolve);port.postMessage({id,...body});});const before=await window.collectionCall({op:'collection.list',limit:10});const receipt=await window.collectionCall({op:'collection.create',idempotencyKey:'browser-vote',fields:{destination:'Tokyo'}});const after=await window.collectionCall({op:'collection.list',limit:10});document.body.dataset.collection=JSON.stringify({before,receipt,after});});`);
   const fixture = actualAppLaunchFixture(bytes,{collection:true}), publicationId = fixture.publicationId, app = fixture.application;
-  const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
-$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-app-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net');$san.AddDnsName('external.example.org')
-$req.CertificateExtensions.Add($san.Build())
-$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
-[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
-[Convert]::ToBase64String($cert.RawData)
-$cert.Dispose();$rsa.Dispose()`;
-  const [pfxText,certText] = execFileSync("pwsh.exe",["-NoProfile","-NonInteractive","-Command",certificateScript],{encoding:"utf8",windowsHide:true}).trim().split(/\r?\n/);
-  const cert = new X509Certificate(Buffer.from(certText!,"base64"));
-  const spki = createHash("sha256").update(cert.publicKey.export({type:"spki",format:"der"})).digest("base64");
-  const server = https.createServer({pfx:Buffer.from(pfxText!,"base64"),passphrase:""},async(req,res)=>{
+  const {tls, spki} = testCertificate("dohc-app-test", ["viewer.example.com", "*.example.net", "external.example.org"]);
+  const server = https.createServer(tls,async(req,res)=>{
     const host=req.headers.host!,path=req.url!;
     if(host==="external.example.org"){res.writeHead(200,{"access-control-allow-origin":"*"});res.end("received");return;}
     if(host==="viewer.example.com"&&path==="/"){
