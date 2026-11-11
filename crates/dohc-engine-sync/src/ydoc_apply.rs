@@ -8995,6 +8995,7 @@ pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
         CollabError::MarkdownReaderRetryable => SyncError::RetryableState {
             reason: "markdown-reader-retryable",
         },
+        CollabError::MarkdownReaderCapacity => SyncError::MarkdownReaderCapacity,
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",

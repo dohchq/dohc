@@ -510,6 +510,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         | SyncError::ReleasedLineageUnsettled(_)
         | SyncError::ValidationPending(_)
         | SyncError::ProjectionTooLarge { .. }
+        | SyncError::MarkdownReaderCapacity
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }
         | SyncError::ShareVersionUnusable { .. }

@@ -1289,9 +1289,10 @@ async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
 }
 
 /// A workspace in which each object owes a save that only the Markdown reader
-/// can make, with a reader that crashes on every request. Capture is shut
-/// down, so only recovery works on the saves.
-struct CrashingReaderSaves {
+/// can make, with a reader that fails every request the same way: it crashes
+/// or times out as it starts. Capture is shut down, so only recovery works on
+/// the saves.
+struct FailingReaderSaves {
     scratch: ScratchDir,
     service: EngineService,
     handle: WorkspaceHandle,
@@ -1301,8 +1302,8 @@ struct CrashingReaderSaves {
     saves: Vec<(DocKey, Option<String>)>,
 }
 
-impl CrashingReaderSaves {
-    async fn new(objects: &[&str]) -> Self {
+impl FailingReaderSaves {
+    async fn new(mode: &str, objects: &[&str]) -> Self {
         let scratch = ScratchDir::new().unwrap();
         let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
@@ -1415,8 +1416,7 @@ impl CrashingReaderSaves {
         let open = service.open(Some(&handle)).unwrap();
         open.shutdown_capture().await;
         let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(
-            &scratch,
-            "startup-crash",
+            &scratch, mode,
         ))));
         open.actor
             .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
@@ -1436,9 +1436,9 @@ impl CrashingReaderSaves {
     }
 
     /// The session of the save at `index` closes with the save owed: the
-    /// reader crashed on its first request and on the immediate retry, and
-    /// the proof asks for a backoff.
-    async fn close_session(&self, index: usize) {
+    /// reader failed its first request and the immediate retry. A proof that
+    /// timed out asks for a backoff; one that crashed twice is unavailable.
+    async fn close_session(&self, index: usize) -> RuntimeError {
         let (key, lineage) = &self.saves[index];
         let result = self
             .open
@@ -1459,7 +1459,10 @@ impl CrashingReaderSaves {
                 None,
             )
             .await;
-        assert!(matches!(&result, Err(error) if super::super::error::reader_retryable(error)));
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("the save settled without the reader"),
+        }
     }
 
     /// Starts recovery and wakes it. Each pass sends the saves it attempted.
@@ -1523,27 +1526,25 @@ async fn next_pass(passes: &mut UnboundedReceiver<Vec<DocKey>>) -> Vec<DocKey> {
         .unwrap()
 }
 
+/// A note that fills the reader's heap crashes it on every request, and each
+/// crash restarts the reader for every other note. Its second crash ends the
+/// proof, where a timeout's six retries would make seven requests (#3575).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn markdown_recovery_asks_a_crashing_reader_again_until_the_resolver_gives_up() {
-    let fixture = CrashingReaderSaves::new(&["note"]).await;
+async fn markdown_recovery_does_not_ask_a_reader_that_crashed_twice_again() {
+    let fixture = FailingReaderSaves::new("startup-crash", &["note"]).await;
     let key = fixture.saves[0].0.clone();
-    fixture.close_session(0).await;
+    let error = fixture.close_session(0).await;
+    assert!(!super::super::error::reader_retryable(&error), "{error}");
     assert_eq!(fixture.reader.dispatch_count(), 2);
     let (cancel, mut passes, task) = fixture.recover();
-    // Without an edit, recovery asks the reader once per attempt until the
-    // resolver's six retries are spent: five more requests.
-    let mut attempted = 0;
-    while attempted < 5 {
-        let attempts = next_pass(&mut passes).await;
-        assert!(
-            attempts.iter().all(|attempt| attempt == &key),
-            "{attempts:?}"
-        );
-        attempted += attempts.len();
+    // Recovery tries the owed save once more, and the resolver answers from
+    // the crashed proof without asking the reader.
+    let mut attempted = Vec::new();
+    while attempted.is_empty() {
+        attempted = next_pass(&mut passes).await;
     }
-    assert_eq!(attempted, 5);
-    assert_eq!(fixture.reader.dispatch_count(), 7);
-    // The last answer is unavailable, so no backoff asks again.
+    assert_eq!(attempted, [key]);
+    assert_eq!(fixture.reader.dispatch_count(), 2);
     fixture.assert_recovery_stopped(&mut passes).await;
     cancel.cancel();
     task.await.unwrap();
@@ -1552,7 +1553,7 @@ async fn markdown_recovery_asks_a_crashing_reader_again_until_the_resolver_gives
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_retrying_one_save_does_not_restart_a_save_the_reader_gave_up_on() {
-    let fixture = CrashingReaderSaves::new(&["first", "second"]).await;
+    let fixture = FailingReaderSaves::new("startup-hang", &["first", "second"]).await;
     let keys = [&fixture.saves[0].0, &fixture.saves[1].0];
     // After the two requests of its session's settle, each proof has five
     // recovery attempts before the resolver gives up on it.
@@ -1568,13 +1569,15 @@ async fn markdown_recovery_retrying_one_save_does_not_restart_a_save_the_reader_
         }
         attempted
     };
-    fixture.close_session(0).await;
+    let error = fixture.close_session(0).await;
+    assert!(super::super::error::reader_retryable(&error), "{error}");
     let (cancel, mut passes, task) = fixture.recover();
     while count(next_pass(&mut passes).await)[0] == 0 {}
     // The second session closes between passes, so the first save runs out
     // of retries while the second still has some.
     let between_passes = fixture.open.session_ops.clone().lock_owned().await;
-    fixture.close_session(1).await;
+    let error = fixture.close_session(1).await;
+    assert!(super::super::error::reader_retryable(&error), "{error}");
     drop(between_passes);
     while count(next_pass(&mut passes).await) != [5, 5] {}
     assert_eq!(fixture.reader.dispatch_count(), 14);

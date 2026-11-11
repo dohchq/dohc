@@ -82,6 +82,12 @@ pub enum SyncError {
         actual_bytes: usize,
         limit_bytes: usize,
     },
+    /// The Markdown reader refused the note as larger than it can check
+    /// (#3575). Asking again gives the same answer until the note changes.
+    #[error(
+        "This note is too large or too dense for dohc to check. Split it, or make its tables smaller."
+    )]
+    MarkdownReaderCapacity,
     #[error("operation kind is not owned by this apply surface")]
     UnsupportedOperation,
     #[error("replicated operation is outside the share boundary")]
@@ -188,7 +194,11 @@ impl SyncError {
             | SyncError::ShareBoundaryViolation
             | SyncError::ShareVersionMismatch { .. }
             | SyncError::ShareVersionUnusable { .. }
-            | SyncError::ProjectionTooLarge { .. } => ShareDisposition::Skip,
+            | SyncError::ProjectionTooLarge { .. }
+            // Only the owner's settle and close projection ask the reader to
+            // prove; a share pull uses it for witness checks alone, which
+            // never answer capacity, so it is classed with the size refusal.
+            | SyncError::MarkdownReaderCapacity => ShareDisposition::Skip,
             // Failures of the pull itself. Skipping past a missing blob or a
             // storage fault would report the op as refused when nothing about
             // it was wrong, and would commit the cursor past content that is
@@ -225,6 +235,7 @@ impl SyncError {
             | SyncError::ReleasedLineageUnsettled(_)
             | SyncError::ValidationPending(_) => "retryable-state",
             SyncError::ProjectionTooLarge { .. } => "projection-too-large",
+            SyncError::MarkdownReaderCapacity => "document-too-dense",
             SyncError::UnsupportedOperation => "invalid-input",
             // The boundary class is "the share does not cover this op". The
             // recipient's copy says so and names the granter, who is the one

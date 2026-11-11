@@ -171,6 +171,21 @@ pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
     )
 }
 
+/// The reader refused the note as larger than it can check (#3575). Asking
+/// again gives the same answer. It keeps the INTERNAL code of the reader's
+/// other final answers: clients read a LIMIT_EXCEEDED refusal as an update the
+/// engine never admitted, and this one can come after the update landed.
+fn reader_capacity(error: &RuntimeError) -> bool {
+    match error {
+        RuntimeError::Collab(CollabError::MarkdownReaderCapacity)
+        | RuntimeError::LiveApplication(ApplicationError::Collab(
+            CollabError::MarkdownReaderCapacity,
+        )) => true,
+        RuntimeError::Sync(sync) => matches!(sync.original(), SyncError::MarkdownReaderCapacity),
+        _ => false,
+    }
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // The volume keeps ACL entries on the engine's folder or store, or what is
     // at one of their paths can't be kept private.
@@ -239,6 +254,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     }
     if reader_retryable(error) {
         return WireError::new(ErrorCode::Overloaded, "markdown-reader-retryable");
+    }
+    if reader_capacity(error) {
+        return WireError::new(ErrorCode::Internal, "document-too-dense");
     }
     if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = error {
         return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
@@ -677,6 +695,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
         CollabError::MarkdownReaderPending(_)
         | CollabError::MarkdownReaderUnavailable
+        | CollabError::MarkdownReaderCapacity
         | CollabError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
         CollabError::MarkdownReaderRetryable => ErrorCode::Overloaded,
         CollabError::ConfiguredByteBudgetExceeded
@@ -733,6 +752,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         | SyncError::RetryableState { .. }
         | SyncError::ReleasedLineageUnsettled(_)
         | SyncError::ValidationPending(_)
+        | SyncError::MarkdownReaderCapacity
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::MarkdownWriteHeld { .. }
@@ -1340,6 +1360,20 @@ mod tests {
         ] {
             let wire = map_runtime(error);
             assert_eq!(wire.code, ErrorCode::Internal);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
+        }
+        // A note over the reader's capacity is told apart from a reader that
+        // stopped, and is not asked again.
+        for error in [
+            RuntimeError::Collab(CollabError::MarkdownReaderCapacity),
+            RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderCapacity,
+            )),
+            RuntimeError::Sync(SyncError::MarkdownReaderCapacity),
+        ] {
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Internal);
+            assert_eq!(wire.message, "document-too-dense");
             assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
         }
     }
