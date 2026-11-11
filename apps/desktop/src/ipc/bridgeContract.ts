@@ -2354,6 +2354,25 @@ export const SendChatMessageResult = z.union([
 ]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
+// Marks a question or poll answered with a reply that already saved, after
+// the answer failed. It posts nothing. The reply must be one this person
+// wrote from a window on this device, in the question's thread.
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: OPAQUE_ID,
+  // The question or poll.
+  messageId: OPAQUE_ID,
+  // The reply that answers it.
+  resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
+}).strict();
+export type ResolveChatDecisionPayload = z.infer<typeof ResolveChatDecisionPayload>;
+
+export const ResolveChatDecisionResult = z.object({
+  resolved: ChatDecisionRecord,
+}).strict();
+export type ResolveChatDecisionResult = z.infer<typeof ResolveChatDecisionResult>;
+
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: OPAQUE_ID,
@@ -6213,11 +6232,12 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
-// Archives or unarchives one chat in this person's sidebar for one workspace.
+// Moves one chat in this person's sidebar for one workspace: back to its
+// list, to Archived, or, for a removed agent's chat, off Archived.
 export const SetChatArchivedPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
-  archived: z.boolean(),
+  state: z.enum(["active", "archived", "hidden"]),
 }).strict();
 export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
 

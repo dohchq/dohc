@@ -112,6 +112,19 @@ describe("CLI help", () => {
       [["chat", "channels"], "dohc: unknown chat verb 'channels'; run dohc chat --help\n"],
       [["chat", "constructor"], "dohc: unknown chat verb 'constructor'; run dohc chat --help\n"],
       [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
+      [["chta", "post"], "dohc: unknown command 'chta'; did you mean 'chat'? Run dohc --help\n"],
+      // Two edits from share: too far for a five-letter name, close enough for an eight-letter one.
+      [["state"], "dohc: unknown command 'state'; run dohc --help\n"],
+      [["autmaton", "list"], "dohc: unknown command 'autmaton'; did you mean 'automation'? Run dohc --help\n"],
+      [["chat", "psot", "general", "hi"], "dohc: unknown chat verb 'psot'; did you mean 'post'? Run dohc chat --help\n"],
+      [["chat", "createGroup", "Design"], "dohc: unknown chat verb 'createGroup'; did you mean 'create-group'? Run dohc chat --help\n"],
+      [["dataset", "delete-preview"], "dohc: unknown dataset verb 'delete-preview'; did you mean 'deletePreview'? Run dohc dataset --help\n"],
+      [["chat", "show", "th_1", "--peak"], "dohc: unknown chat show option '--peak'; did you mean '--peek'?\n"],
+      [["chat", "show", "th_1", "--jsno"], "dohc: unknown chat show option '--jsno'; did you mean '--json'?\n"],
+      [
+        ["chat", "post", "general", "--titel", "Plan", "hi"],
+        "dohc: unknown chat post option '--titel'; did you mean '--title'? Otherwise put options first, then --, then text that starts with a dash\n",
+      ],
       [
         ["chat", "post", "general", "--help", "me"],
         "dohc: unknown chat post option '--help'; put options first, then --, then text that starts with a dash\n",

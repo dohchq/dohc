@@ -5558,7 +5558,7 @@ mod temp_mode_tests {
 #[cfg(target_os = "linux")]
 fn has_posix_acl(file: impl rustix::fd::AsFd) -> bool {
     !matches!(
-        rustix::fs::fgetxattr(file, "system.posix_acl_access", &mut [0u8; 0]),
+        rustix::fs::fgetxattr_query(file, "system.posix_acl_access"),
         Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP)
     )
 }

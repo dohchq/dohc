@@ -685,7 +685,8 @@ async function stopChild(child: ChildProcess, exited: Promise<void>) {
 
 // The OS browser dispatcher is the only substituted boundary. Desktop discovery,
 // IPC validation, device-code polling, browser approval, and credential storage run normally.
-export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPage: Page, origin: string) {
+// Without a browser page, it only returns the approval URL.
+export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPage: Page | null, origin: string) {
   await desktop.app.evaluate(({ shell }) => {
     const state = globalThis as typeof globalThis & { onboardingBrowserUrl?: string; onboardingOpenExternal?: typeof shell.openExternal };
     state.onboardingBrowserUrl = undefined;
@@ -706,7 +707,7 @@ export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPa
     await expect.poll(captured).toBeTruthy();
     const url = (await captured())!;
     expect(new URL(url).origin).toBe(origin);
-    await browserPage.goto(url);
+    await browserPage?.goto(url);
     return url;
   } finally {
     await desktop.app.evaluate(({ shell }) => {

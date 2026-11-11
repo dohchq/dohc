@@ -64,6 +64,7 @@ import {
   ThemeControl,
 } from "./SettingRow";
 import { SettingsNav } from "./SettingsNav";
+import { AttachmentLocationControl } from "./AttachmentLocationControl";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
@@ -885,75 +886,71 @@ export function SettingsDialog(props: {
                   })
                 }
                 testId="settings-row-attachment-location"
-              >
-                <select
-                  aria-label="Attachment location"
-                  data-testid="attachment-location-select"
-                  value={workspaceSettings.files.attachmentLocation}
-                  onChange={(event) =>
-                    void saveWorkspaceSettings({
-                      files: {
-                        attachmentLocation: event.target
-                          .value as WorkspaceSettings["files"]["attachmentLocation"],
-                      },
-                    })
-                  }
-                  // As wide as its longest option, which names the folder.
-                  className="h-8 max-w-full rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
-                >
-                  <option value="per-document">
-                    {`In a folder next to the document (${
-                      workspaceSettings.files.attachmentFolderName || "assets"
-                    }/)`}
-                  </option>
-                  <option value="global-folder">
-                    In one folder at the workspace root
-                  </option>
-                  <option value="same-folder">Next to the document</option>
-                </select>
-              </SettingRow>
-              {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
-                <SettingRow
-                  title="Attachment folder name"
-                  modified={isModified(
-                    workspaceSettings.files.attachmentFolderName,
-                    DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
-                  )}
-                  onReset={() =>
-                    void saveWorkspaceSettings({
-                      files: {
-                        attachmentFolderName:
-                          DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
-                      },
-                    })
-                  }
-                  testId="settings-row-attachment-folder"
-                >
-                  <TextControl
-                    label="Attachment folder name"
-                    value={workspaceSettings.files.attachmentFolderName}
-                    placeholder="assets"
-                    testId="attachment-folder-input"
-                    maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
-                    onChange={(attachmentFolderName) =>
-                      void saveWorkspaceSettings({
-                        files: {
-                          // mergeWorkspaceSettings re-parses and throws past the
-                          // schema bound, and this is a plain change handler — an
-                          // over-long value must be clamped, not thrown. `maxLength`
-                          // already stops typing and pasting; this is the belt to
-                          // its braces (a longer value can only arrive if the two
-                          // ever drift).
-                          attachmentFolderName: attachmentFolderName.slice(
-                            0,
-                            ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-                          ),
-                        },
-                      })
+                description="Where dohc saves an image you paste, drop, or insert into a document."
+                top
+                aside={
+                  <AttachmentLocationControl
+                    value={workspaceSettings.files.attachmentLocation}
+                    folderName={workspaceSettings.files.attachmentFolderName}
+                    onChange={(attachmentLocation) =>
+                      void saveWorkspaceSettings({ files: { attachmentLocation } })
                     }
                   />
-                </SettingRow>
-              ) : null}
+                }
+              />
+              <SettingRow
+                title="Folder name"
+                description={
+                  workspaceSettings.files.attachmentLocation === "same-folder" ? (
+                    <span id="attachment-folder-unused">
+                      Not used when images go beside the document.
+                    </span>
+                  ) : undefined
+                }
+                modified={isModified(
+                  workspaceSettings.files.attachmentFolderName,
+                  DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                )}
+                onReset={() =>
+                  void saveWorkspaceSettings({
+                    files: {
+                      attachmentFolderName:
+                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                    },
+                  })
+                }
+                testId="settings-row-attachment-folder"
+              >
+                <TextControl
+                  label="Attachment folder name"
+                  value={workspaceSettings.files.attachmentFolderName}
+                  placeholder="assets"
+                  testId="attachment-folder-input"
+                  disabled={workspaceSettings.files.attachmentLocation === "same-folder"}
+                  describedBy={
+                    workspaceSettings.files.attachmentLocation === "same-folder"
+                      ? "attachment-folder-unused"
+                      : undefined
+                  }
+                  maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
+                  onChange={(attachmentFolderName) =>
+                    void saveWorkspaceSettings({
+                      files: {
+                        // mergeWorkspaceSettings re-parses and throws past the
+                        // schema bound, and this is a plain change handler — an
+                        // over-long value must be clamped, not thrown. `maxLength`
+                        // already stops typing and pasting; this is the belt to
+                        // its braces (a longer value can only arrive if the two
+                        // ever drift).
+                        attachmentFolderName: attachmentFolderName.slice(
+                          0,
+                          ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+                        ),
+                      },
+                    })
+                  }
+                />
+              </SettingRow>
             </SettingsSection>
           </div>
         );

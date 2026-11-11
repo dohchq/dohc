@@ -47,8 +47,8 @@ export default function RootLayout() {
               sheetGrabberVisible: true, headerShown: false, contentStyle: { backgroundColor: "transparent" } }} />
           </Stack>
           {/* Design review only: page-fonts-missing opens a page whose font files are gone, so no warm web view may have
-              loaded them first. */}
-          {demoMode === "page-fonts-missing" ? null : <WarmEditor />}
+              loaded them first. launch-plain-cold times a launch without the warm web view. */}
+          {demoMode === "page-fonts-missing" || demoMode === "launch-plain-cold" ? null : <WarmEditor />}
         </KeyboardProvider>
       </ThemeProvider>
     </GestureHandlerRootView>

@@ -582,6 +582,14 @@ export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
 export function isDatasetServerNotFound(error: unknown): boolean {
   return parse(error).code === DATASET_SERVER_NOT_FOUND;
 }
+/** Main's code for an owner's action on a Collection asked from a shared view, which only its owner can take. */
+export const DATASET_OWNER_ONLY = "dataset_owner_only";
+export function datasetOwnerOnlyError(): Error {
+  return Object.assign(new Error("Open the original workspace to manage this Collection."), { code: DATASET_OWNER_ONLY });
+}
+export function isDatasetOwnerOnly(error: unknown): boolean {
+  return parse(error).code === DATASET_OWNER_ONLY;
+}
 /** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
 export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
   return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
