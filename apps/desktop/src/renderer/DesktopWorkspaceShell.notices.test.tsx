@@ -2482,18 +2482,25 @@ describe("notices sent to you", () => {
         getRelayReceivedShare: vi.fn(async (): Promise<{ found: true; chats: true }> => ({ found: true, chats: true })),
       });
     }
-    // DesktopRoot's part: the handoff ends once the shell says it opened.
-    function renderHandoff(bridge: ReturnType<typeof handoffBridge>, workspace: Workspace, workspaces: Workspace[], onSwitchWorkspace = vi.fn()) {
+    // DesktopRoot's part: a switch remounts the shell for the other
+    // workspace, and the handoff ends once a shell says it opened.
+    function renderHandoff(bridge: ReturnType<typeof handoffBridge>, workspace: Workspace, workspaces: Workspace[]) {
       vi.stubGlobal("dohcDesktop", bridge);
       const onOpened = vi.fn();
+      const onSwitchWorkspace = vi.fn();
       function Host() {
         const [status, setStatus] = useState<ShareHandoffStatus>(DONE);
+        const [current, setCurrent] = useState(workspace);
         return (
           <DesktopWorkspaceShell
-            workspace={workspace}
+            key={current.workspaceId}
+            workspace={current}
             workspaces={workspaces}
             {...shellBootstrapProps(bridge)}
-            onSwitchWorkspace={onSwitchWorkspace}
+            onSwitchWorkspace={(next: Workspace) => {
+              onSwitchWorkspace(next);
+              setCurrent(next);
+            }}
             handoffStatus={status}
             onShareHandoffOpened={() => {
               onOpened();
@@ -2534,21 +2541,27 @@ describe("notices sent to you", () => {
       const bridge = handoffBridge();
       let found!: (answer: { found: true; chats: true }) => void;
       bridge.getRelayReceivedShare.mockImplementation(() => new Promise((resolve) => { found = resolve; }));
-      const latest: Workspace = { ...WORKSPACE, workspaceId: "ws-latest", lastOpenedAt: 2 };
-      const before = inputCount();
-      const { onSwitchWorkspace } = renderHandoff(bridge, VIEW, [VIEW, latest]);
+      const { onOpened } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
       await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
       fireEvent.pointerDown(window);
       act(() => found({ found: true, chats: true }));
-      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { to: "chats-invitation", shareId: "share-1", inputs: before }));
-      expect(inputCount()).toBeGreaterThan(before);
+      const join = await screen.findByTestId("chats-join-shared");
+      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      expect(document.activeElement).not.toBe(join);
     });
 
-    it("opens it from a shared view in the workspace of their own they opened last", async () => {
+    it("opens it from a shared view in the workspace of their own they opened last, which ends the handoff", async () => {
       const older: Workspace = { ...WORKSPACE, workspaceId: "ws-older", lastOpenedAt: 1 };
       const latest: Workspace = { ...WORKSPACE, workspaceId: "ws-latest", lastOpenedAt: 2 };
-      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [older, VIEW, latest]);
-      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { to: "chats-invitation", shareId: "share-1", inputs: expect.any(Number) }));
+      let restore!: (state: WorkspaceUiState) => void;
+      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(new Promise((resolve) => { restore = resolve; })), VIEW, [older, VIEW, latest]);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest));
+      // The switch alone doesn't end it: a window that closes, or a workspace
+      // that fails to open, before Chats shows it leaves it for the next.
+      expect(onOpened).not.toHaveBeenCalled();
+      act(() => restore(STORED_STATE));
+      await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+      expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
       expect(onSwitchWorkspace).toHaveBeenCalledOnce();
       expect(onOpened).toHaveBeenCalledOnce();
     });

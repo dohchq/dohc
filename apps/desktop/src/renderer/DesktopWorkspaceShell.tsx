@@ -3288,19 +3288,18 @@ export function DesktopWorkspaceShell(props: {
   // Here it waits for the saved layout, as a work link does, so the layout
   // cannot replace Chats.
   const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
-  // Here the handoff ends once Chats shows the invitation, so a window that
-  // closes before then leaves it for the next window.
+  // The handoff ends once Chats shows the invitation, so a window that closes
+  // before then, or a workspace that fails to open, leaves it for the next.
+  // From a shared view it stays while the other workspace opens and shows it.
   const handoffInChats = useRef<{ shareId: string; opened: (() => void) | undefined } | null>(null);
   const openHandoffInChats = (invitation: ChatsInvitation) => {
     if (ownWorkspaceForChats === null) return;
-    const target = { to: "chats-invitation", ...invitation } as const;
-    if (ownWorkspaceForChats.workspaceId === workspaceId) {
-      handoffInChats.current = { shareId: invitation.shareId, opened: props.onShareHandoffOpened };
-      setOpenedFromLink(target);
+    if (ownWorkspaceForChats.workspaceId !== workspaceId) {
+      props.onSwitchWorkspace(ownWorkspaceForChats);
       return;
     }
-    props.onSwitchWorkspace(ownWorkspaceForChats, target);
-    props.onShareHandoffOpened?.();
+    handoffInChats.current = { shareId: invitation.shareId, opened: props.onShareHandoffOpened };
+    setOpenedFromLink({ to: "chats-invitation", ...invitation });
   };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link clicked in a chat or a document opens its message here, or
