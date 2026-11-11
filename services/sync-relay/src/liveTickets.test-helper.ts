@@ -110,7 +110,7 @@ export function holderLinkAuthority(storage: Parameters<typeof createLinkAuthori
     requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
 }
 export const table = "sync_relay_live_session_tickets";
-export const marker = "live-session-tickets-v2";
+export const marker = "live-session-tickets-v3";
 const defaultScope = scope, defaultBinding = binding;
 export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}, population?: {people: number; documents: number}) {
   const scope = {...defaultScope, ...(identity ? {shareId: identity.shareId ?? defaultScope.shareId, userId: identity.userId, grantId: identity.grantId, workspaceId: identity.workspaceId ?? defaultScope.workspaceId} : {})};

@@ -88,6 +88,22 @@
       }
     },
     {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "personal authority",
+      "input": {
+        "principalKind": "personal",
+        "principalId": "p-agent-1",
+        "grantId": null,
+        "grantGeneration": null
+      },
+      "expected": {
+        "principalKind": "personal",
+        "principalId": "p-agent-1",
+        "grantId": null,
+        "grantGeneration": null
+      }
+    },
+    {
       "parser": "parseLiveUpdateSubmissionMetadata",
       "case": "canonical submission metadata",
       "input": {
@@ -1230,6 +1246,26 @@
         "principalKind": "named",
         "principalId": "person-1",
         "grantId": "grant-1",
+        "grantGeneration": null
+      }
+    },
+    {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "personal with a grant",
+      "input": {
+        "principalKind": "personal",
+        "principalId": "p-agent-1",
+        "grantId": "grant-1",
+        "grantGeneration": 1
+      }
+    },
+    {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "personal naming an agent that is not personal",
+      "input": {
+        "principalKind": "personal",
+        "principalId": "agent-1",
+        "grantId": null,
         "grantGeneration": null
       }
     },

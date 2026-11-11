@@ -15,8 +15,8 @@ export function canonicalAcceptedMetadata(metadata: AdmittedLiveUpdateMetadata):
     receipt: {deliveryId: r.deliveryId, updateDigest: r.updateDigest, journalCursor: r.journalCursor, acceptingHostEpoch: r.acceptingHostEpoch},
     binding: {workspaceId: b.workspaceId, mainVersionId: b.mainVersionId, objectId: b.objectId, lineageClaimId: b.lineageClaimId,
       currentPath: b.currentPath, selectorPaths: [...b.selectorPaths], restoreFenceGeneration: b.restoreFenceGeneration},
-    authority: a.principalKind === "owner"
-      ? {grantGeneration: null, grantId: null, principalId: a.principalId, principalKind: "owner"}
+    authority: a.principalKind === "owner" || a.principalKind === "personal"
+      ? {grantGeneration: null, grantId: null, principalId: a.principalId, principalKind: a.principalKind}
       : {grantGeneration: a.grantGeneration, grantId: a.grantId, principalId: a.principalId, principalKind: a.principalKind},
     receivedAtMs,
   }, firstSeen: metadata.firstSeen.map(r => ({clientId: r.clientId, startClock: r.startClock, endClock: r.endClock}))};

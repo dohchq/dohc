@@ -44,6 +44,13 @@ export type ServerDerivedLiveUpdateAuthority =
       readonly grantGeneration: null;
     }
   | {
+      /** The relay authenticated this personal agent; its ID starts with `p-`. */
+      readonly principalKind: "personal";
+      readonly principalId: string;
+      readonly grantId: null;
+      readonly grantGeneration: null;
+    }
+  | {
       readonly principalKind: "named" | "link";
       readonly principalId: string;
       readonly grantId: string;
@@ -307,19 +314,22 @@ export function parseServerDerivedLiveUpdateAuthority(
   );
   const principalKind = record.principalKind;
   const principalId = parseLiveUpdateIdentifier(record.principalId, "principalId");
-  if (principalKind === "owner") {
+  if (principalKind === "owner" || principalKind === "personal") {
     if (record.grantId !== null || record.grantGeneration !== null) {
-      throw new TypeError("owner authority must not contain a grant.");
+      throw new TypeError(`${principalKind} authority must not contain a grant.`);
+    }
+    if (principalKind === "personal" && !principalId.startsWith("p-")) {
+      throw new TypeError("personal authority must name a personal agent.");
     }
     return {
-      principalKind: "owner",
+      principalKind,
       principalId,
       grantId: null,
       grantGeneration: null,
     };
   }
   if (principalKind !== "named" && principalKind !== "link") {
-    throw new TypeError("principalKind must be owner, named, or link.");
+    throw new TypeError("principalKind must be owner, personal, named, or link.");
   }
   return {
     principalKind,
@@ -327,6 +337,19 @@ export function parseServerDerivedLiveUpdateAuthority(
     grantId: parseLiveUpdateIdentifier(record.grantId, "grantId"),
     grantGeneration: positiveSafeInteger(record.grantGeneration, "grantGeneration"),
   };
+}
+
+/**
+ * Whether a new live update may credit `authors` under `authority`. A personal
+ * agent's update credits only that agent, on behalf of its owner. Any other
+ * authority credits no personal agent. Stored history is read without this
+ * check, because the relay stored updates naming a personal agent before it
+ * refused them.
+ */
+export function admitsLiveAuthorship(authority: ServerDerivedLiveUpdateAuthority, authors: LiveAuthorSnapshot): boolean {
+  if (authority.principalKind !== "personal") return !authors.some(author => author.kind === "agent" && author.agentId.startsWith("p-"));
+  const [author, ...others] = authors;
+  return others.length === 0 && author?.kind === "agent" && author.agentId === authority.principalId && author.onBehalfOf !== undefined;
 }
 
 /** The engine's bounds: an identifier with no Unicode control character. */
