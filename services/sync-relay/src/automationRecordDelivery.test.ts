@@ -128,7 +128,7 @@ it("returns a refused refresh and lets a queued delivery proceed before retrying
   f.capture.mockImplementation(async () => {captured(); return f.host;});
   const tracker = createAutomationAcceptedRecords({replica: f.replica, namespace: "relay",
     synchronize: f.delivery.synchronize, onError: vi.fn(),
-    storage: {automationRecordBinding: () => ({binding, shareId: "share"}), automationRecordJournalCursor: () => 0,
+    storage: {automationRecordBinding: () => ({binding}), automationRecordJournalCursor: () => 0,
       readLiveUpdateJournalCut: vi.fn()}});
   const refresh = tracker.refresh(binding.currentPath);
   // Attach the rejection handler before another operation enters the lane.

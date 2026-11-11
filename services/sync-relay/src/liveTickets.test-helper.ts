@@ -26,9 +26,9 @@ export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, 
     baseOriginId: "origin", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1", sourceDigest: "b".repeat(64), sourceByteLength: 1,
     nativeHeadSequence: 0, fullStateDigest: binding.lineageClaimId, fullStateByteLength: 2};
   raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,?,1)`)
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,1)`)
     .run(namespace, activationId, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
-      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId, completed ? "{}" : null);
+      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, completed ? "{}" : null);
   return activationId;
 }
 /**
@@ -47,7 +47,7 @@ export function keptByOwnerRestore(raw: InstanceType<typeof DatabaseSync>, names
   const document = {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const intent = {deliveryKind: "owner", operationId: "restore", ownerUserId: "owner-1", document, shareId: scope.shareId, grantId: scope.grantId,
     expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 7, restorePointCursor: 0, restorePointReceiptDigest: binding.lineageClaimId,
-    keptRun: {runToken: Number(run.created_at_ms), ownerUserId: "owner-1", shareId: scope.shareId, activationId}};
+    keptRun: {runToken: Number(run.created_at_ms), ownerUserId: "owner-1", activationId}};
   const basis = {binding, ownerBinding: binding, baselineSequence: 1, namespace, ownerOrigin: JSON.stringify({adoptionId: activationId})};
   raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
       lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,

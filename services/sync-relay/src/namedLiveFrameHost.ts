@@ -73,7 +73,6 @@ export function captureNamedLiveFrameHost(options: {
 export function captureOwnerLiveFrameHost(options: {
   authenticatedUserId: string;
   trustedAccount?: TrustedLiveAccount;
-  shareId: string;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
@@ -85,7 +84,7 @@ export function captureOwnerLiveFrameHost(options: {
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const request = snapshotCurrentBindingRequest({document,
-    actor: {kind: "owner", userId: options.authenticatedUserId, shareId: options.shareId}});
+    actor: {kind: "owner", userId: options.authenticatedUserId}});
   const current = options.storage.resolveCurrentLiveDocumentBinding(request);
   if (current.kind !== "current") throw new Error("Owner live authority is unavailable.");
   return captureLiveFrameHost({...options, actor: request.actor, binding: current.binding,

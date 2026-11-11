@@ -99,7 +99,7 @@ function registered(options: { workspaceQuotaBytes?: number; deployment?: boolea
       VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`)
   })
   const doc = new Y.Doc(); Y.applyUpdate(doc, input.baselineBytes)
-  const actor = { kind: 'owner', userId: 'owner', shareId: 'share' } as const
+  const actor = { kind: 'owner', userId: 'owner' } as const
   const update = (key = 'title', value = 'Changed') => {
     const before = Y.encodeStateVector(doc); doc.getMap('frontmatter').set(key, value)
     return Y.encodeStateAsUpdate(doc, before)

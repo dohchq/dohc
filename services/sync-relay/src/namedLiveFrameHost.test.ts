@@ -308,7 +308,7 @@ function journal(f: Awaited<ReturnType<typeof setup>>) {
 }
 
 function ownerCapture(f: Awaited<ReturnType<typeof setup>>, authenticatedUserId = "owner-1") {
-  const capture = captureOwnerLiveFrameHost({authenticatedUserId, shareId: scope.shareId,
+  const capture = captureOwnerLiveFrameHost({authenticatedUserId,
     storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate});
   cleanup.push(async () => {capture.close();});
   return capture;
@@ -322,7 +322,7 @@ it("opens the owner on the same native feed without a recipient ticket or grant"
   expect(capture.hostEpoch).toBe(host.hostEpoch);
   expect(capture).not.toHaveProperty("ticket");
   const sync = await capture.openSync(Uint8Array.of(0), new AbortController().signal);
-  expect(sync.binding).toEqual(binding);
+  expect(sync.binding).toEqual({...binding, selectorPaths: [binding.currentPath]});
   expect([...sync.missingStateUpdate]).toEqual([0, 0]);
   expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
   sync.close(); capture.close();
@@ -342,9 +342,10 @@ it.each(["applied", "missing", "ambiguous"])("requires exact native evidence for
   expect(await capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
     .toEqual(mode === "missing" ? {result: "retry", reason: "application-pending"} : {result: "success", ack});
   expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId},
+    actor: {kind: "owner", userId: "owner-1"},
     expectedAuthority: {principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null},
-    metadata: {deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding}, updateBytes: bytes,
+    // The owner holds the document without a share, at the baseline's own path.
+    metadata: {deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding: {...binding, selectorPaths: [binding.currentPath]}}, updateBytes: bytes,
   }));
 });
 
@@ -363,11 +364,16 @@ it("passes only an internal owner automation's durable press binding into journa
   expect(commit).not.toHaveBeenCalled();
 });
 
-it.each(["owner", "selector", "restore"])("invalidates owner capture when %s changes", async kind => {
+it("keeps an owner capture when a share's selector changes", async () => {
+  const f = await setup(), capture = ownerCapture(f);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({paths: ["other"], versionId: null}), scope.shareId);
+  f.changes.notify(); await Promise.resolve();
+  expect(capture.invalidated.aborted).toBe(false);
+});
+
+it.each(["owner", "restore"])("invalidates owner capture when %s changes", async kind => {
   const f = await setup(), capture = ownerCapture(f);
   if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='different-owner'").run();
-  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
-    .run(JSON.stringify({paths: ["other"], versionId: null}), scope.shareId);
   if (kind === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
   f.changes.notify(); await Promise.resolve();
   expect(capture.invalidated.aborted).toBe(true);

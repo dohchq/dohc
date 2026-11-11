@@ -273,9 +273,9 @@ describe("owner restore options", () => {
   ])("answers that live editing is still %s", async (_state, retirement, message) => {
     const f = await fixture();
     f.raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,
-      lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,accounted_bytes,
-      retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor) VALUES (?,'activation',?,'main',?,?,'{}',?,?,x'0000',?,?,1,${retirement})`)
-      .run(namespace, scope.workspaceId, binding.objectId, binding.lineageClaimId, JSON.stringify(binding), "a".repeat(64), ownerUserId, scope.shareId);
+      lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,accounted_bytes,
+      retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor) VALUES (?,'activation',?,'main',?,?,'{}',?,?,x'0000',?,1,${retirement})`)
+      .run(namespace, scope.workspaceId, binding.objectId, binding.lineageClaimId, JSON.stringify(binding), "a".repeat(64), ownerUserId);
     expect(() => f.read()).toThrowError(expect.objectContaining({code: "conflict", message}));
     expect(() => f.begin()).toThrowError(expect.objectContaining({code: "conflict", message}));
   });

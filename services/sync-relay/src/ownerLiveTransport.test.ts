@@ -18,7 +18,7 @@ async function fixture(refused = false) {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No test address");
   cleanups.push(() => {controller.abort(); for (const client of sockets.clients) client.terminate(); sockets.close(); server.close();});
-  return {url: new URL(`ws://127.0.0.1:${address.port}/sync/workspaces/workspace/live/owner?shareId=share`), controller, requests, peer: () => peer};
+  return {url: new URL(`ws://127.0.0.1:${address.port}/sync/workspaces/workspace/live/owner?objectId=object`), controller, requests, peer: () => peer};
 }
 
 it("sends the owner bearer only as a header and exchanges ordered binary frames", async () => {

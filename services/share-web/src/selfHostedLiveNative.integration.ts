@@ -413,7 +413,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const acceptedDoc = new Y.Doc(); Y.applyUpdate(acceptedDoc, acceptedDraft.initialUpdate);
     expect(yDocToMarkdown(acceptedDoc)).toBe(yDocToMarkdown(provider.doc)); acceptedDoc.destroy();
     results.ownerDelivery = {restartPreservedDraft: true, concurrentOwnerAndNamedEditsMerged: true, idleOwnerPulledRecipientEdit: true, finalCursor: finalAck.journalCursor};
-    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
+    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
     if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
     const capture = await active!.captureNative(binding.binding);
     expect(await capture.client.readLiveApplicationAck({id: capture.nextRequestId(), workspace: capture.workspace, registrationId: capture.registrationId, deadlineMs: capture.deadlineMs},
@@ -814,7 +814,7 @@ async function openSelfHostProof(name: string) {
         host = captureNamedLiveFrameHost({ticket, actor: liveBrowserActor(viewer), storage, native: await live().captureNative(ticket.binding),
           bounds: profile.namedLive.host, validate});
       } else {
-        const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
+        const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
         if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
         host = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
           native: await live().captureNative(binding.binding), bounds: profile.namedLive.host, validate});
@@ -885,7 +885,7 @@ async function openSelfHostProof(name: string) {
         FROM sync_relay_service_activations WHERE workspace_id='workspace' AND object_id=? ORDER BY rowid`).all(object)
         .map(row => ({...row, boundary: row.boundary === null ? null : JSON.parse(String(row.boundary))})),
       /** How the host lists a ready document: its current binding, through the activation that holds it. */
-      ready: (path: string) => ({path, objectId: activation(path)!.source.objectId, status: "ready", document: {binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace, shareId: "share"}}),
+      ready: (path: string) => ({path, objectId: activation(path)!.source.objectId, status: "ready", document: {binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace}}),
       /** A document's rows in the relay's live journal. */
       journal: (object = objectId) => relayRead.prepare(`SELECT journal_cursor,delivery_id,update_digest,principal_kind,grant_id
         FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? ORDER BY journal_cursor`).all(object),

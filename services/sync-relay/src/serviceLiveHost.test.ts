@@ -564,8 +564,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   // Complete the activation under the earlier connection: adoption, seed, native application. Without `adopted` it is only prepared.
   const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
-  const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
-  await store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
+  const actor = {kind: "owner" as const, userId: "owner"}, store = f.storage.createServiceActivationStore(f.history);
+  await store.prepare({capture, host: earlier, registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
   if (adopted) {
@@ -1158,7 +1158,7 @@ it("continues an applied stop cut and reviews its proposal after a restart while
 // refused, and otherwise registers native with the stop's binding alone.
 it("reloads the retained activation after a restart only for a stop that registers", async () => {
   const o = await completedServiceOwner();
-  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}});
   if (current.kind !== "current") throw new Error("Missing live binding.");
   o.refuseCapture(conflictOpen());
   const host = await o.restart(), captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.ownerCalls().length;
@@ -1515,7 +1515,7 @@ async function enrolledServiceHost({freshRegistrations = false, frameChanges = f
     cleanup.push(() => supervisor!.close());
   } else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
-  const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+  const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}});
   if (binding.kind !== "current") throw new Error("Missing live binding.");
   const calls = (from: number) => o.ownerCalls().slice(from).map(([method]) => method as string);
   return {...o, binding: binding.binding, calls, supervisor, errors,
@@ -2369,7 +2369,7 @@ it("records a departed application only as the next accepted row, for its adopti
 // rows alone, so a store rebuilt on a later connection reads the same answer.
 // It counts only while the activation is pending.
 it("finds a pending activation's admitted seed from relay rows alone, on any store", async () => {
-  const o = await enrolledServiceHost(), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const o = await enrolledServiceHost(), actor = {kind: "owner" as const, userId: "owner"};
   await o.host.close();
   const host = {...o.host.coordinate, connectionId: "rebuilt"};
   expect(o.f.storage.registerLiveHost({...host, updatedAtMs: Date.now(), guard: o.f.storage.captureStanding()}).ok).toBe(true);
@@ -2631,7 +2631,7 @@ it("keeps a stopped activation retiring, and out of activation, when its owner r
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await o.nextPull();
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 20});
-  expect(o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}}))
+  expect(o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}}))
     .toEqual({kind: "refused", reason: "host-unavailable"});
   await expect(o.host.drain(o.document)).rejects.toThrow("incomplete");
   expect(o.host.isDocumentReady(o.document)).toBe(false);
@@ -2648,7 +2648,7 @@ it("keeps a stopped activation retiring, and out of activation, when its owner r
 it("activates a retired activation's successor after Resume, which admits edits only once it completed", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
-  const tip = o.tip(), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const tip = o.tip(), actor = {kind: "owner" as const, userId: "owner"};
   o.stop();
   await o.depart();
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
@@ -3114,7 +3114,7 @@ it("completes a moved document's retirement after a restart that follows its adm
 const ownerCovers = (o: Enrolled) => o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: "object", ownerUserId: "owner",
   shareId: "share", path: o.sibling.path});
 const activations = (o: Enrolled) => o.raw.prepare("SELECT activation_id FROM sync_relay_service_activations ORDER BY rowid").all().map(row => row.activation_id);
-const ownerBinding = (o: Enrolled) => o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+const ownerBinding = (o: Enrolled) => o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}});
 // The owner's restore request, as `beginRestore` sends it.
 const restoreRequest = (o: Enrolled) => o.f.storage.readStopRestorePlan({document: o.document, ownerUserId: "owner", operationId: "restore", shareId: "share",
   grantId: "grant", restorePointCursor: 0, restorePointReceiptDigest: o.document.lineageClaimId, maxOutputBytes: 1_000_000}).intent;
@@ -3200,7 +3200,7 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   expect(o.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_restore_operations").get()!.count).toBe(1);
   expect(marked.split('"keptRun"')).toHaveLength(2);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  expect(JSON.parse(marked)).toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+  expect(JSON.parse(marked)).toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", activationId: ACTIVATION}});
   expect(ownerCovers(o)).toBe(true);
   expect(ownerBinding(o).kind).toBe("refused");
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
@@ -3339,16 +3339,71 @@ it("retires a restored note's kept session through its host once the note is ren
   expect(o.errors).toEqual([]);
 });
 
+// The kind of the owner's binding through the pending successor's access,
+// while its stored binding names `generation`. The row is put back before this returns.
+const successorAccessAt = (o: Enrolled, store: ServiceActivationStore, host: LiveHostConnectionCoordinate, generation: number) => {
+  const update = o.raw.prepare("UPDATE sync_relay_service_activations SET binding_json=? WHERE activation_id=?");
+  const stored = String(o.raw.prepare("SELECT binding_json FROM sync_relay_service_activations WHERE activation_id=?").get(SUCCESSOR)!.binding_json);
+  update.run(JSON.stringify({...JSON.parse(stored), restoreFenceGeneration: generation}), SUCCESSOR);
+  try {
+    return o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}}, store.pending(o.document, host)).kind;
+  } finally {update.run(stored, SUCCESSOR);}
+};
+
+// Proves: a restore, then Stop, then Resume. The successor copies its retired
+// predecessor's identity and selector paths and takes the restored
+// generation, so its pending access is current and it activates. Had it
+// copied its predecessor's generation, the relay would refuse that access.
+it("activates a restored note's successor at the restored generation after Stop and Resume", async () => {
+  const o = await enrolledServiceHost({supervised: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const fence = o.binding.restoreFenceGeneration + 1;
+  o.beginRestore();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const proposalDigest = await admitRestore(o), {publish} = restoreEngine(o, o.host);
+  await expect(o.host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  await publish();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {restoreFenceGeneration: fence}});
+  expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 300, guard() {}}))
+    .toMatchObject({enabled: false, retired: true});
+  o.supervisor!.reconcile();
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true), {timeout: 10_000});
+  expect(ownerBinding(o).kind).toBe("refused");
+  // Once the successor is prepared, its access is tried at the predecessor's generation and at the restored one.
+  const prepare = ServiceActivationStore.prototype.prepare, access: string[][] = [];
+  vi.spyOn(ServiceActivationStore.prototype, "prepare").mockImplementation(async function (this: ServiceActivationStore, input) {
+    const prepared = await prepare.call(this, input);
+    if (input.capture.activationId === SUCCESSOR && !prepared.replayed) {
+      access.push([o.binding.restoreFenceGeneration, fence].map(generation => successorAccessAt(o, this, input.host, generation)));
+    }
+    return prepared;
+  });
+  // Resume, with an Edit grant again since the restore revoked the only one.
+  o.engine.capture = pushRestoredNote(o);
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  anotherEditGrant(o);
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
+  o.supervisor!.reconcile();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(access).toEqual([["refused", "current"]]);
+  const bindings = o.raw.prepare("SELECT binding_json FROM sync_relay_service_activations ORDER BY rowid").all().map(row => JSON.parse(String(row.binding_json)));
+  expect(bindings).toEqual([o.binding, {...o.binding, restoreFenceGeneration: fence}]);
+  expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {...o.binding, restoreFenceGeneration: fence}});
+  expect(o.errors).toEqual([]);
+});
+
 // Proves: a restore request cannot name a live session for the relay to keep.
 // The relay records only the session its revocation kept, under the current
-// run, owner and share, and none when another Edit grant still covers the note.
+// run and owner, and none when another Edit grant still covers the note.
 it.each([false, true])("records only the live session the restore kept, never one its request names, another Edit grant: %s", async covered => {
   const o = await enrolledServiceHost();
   if (covered) anotherEditGrant(o);
-  const request = restoreRequest(o), named = {runToken: 99, ownerUserId: "owner", shareId: "named-share", activationId: "named-activation"};
+  const request = restoreRequest(o), named = {runToken: 99, ownerUserId: "owner", activationId: "named-activation"};
   o.f.storage.beginStopRestore({...request, keptRun: named} as typeof request, 40);
   const stored: {keptRun?: unknown} = JSON.parse(String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations").get()!.intent_json));
-  expect(stored.keptRun).toEqual(covered ? undefined : {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION});
+  expect(stored.keptRun).toEqual(covered ? undefined : {runToken: 10, ownerUserId: "owner", activationId: ACTIVATION});
   expect(o.f.storage.readStopRestore(stopLookup)?.intent).toEqual(request);
 });
 
@@ -3382,7 +3437,7 @@ it("charges the owner's restore for the record it stores, and no more", async ()
   const row = o.raw.prepare("SELECT intent_json,accounted_bytes FROM sync_relay_live_restore_operations").get()!, stored = String(row.intent_json);
   expect(row.accounted_bytes).toBe(plain);
   expect(JSON.parse(stored)).not.toHaveProperty("keptRun");
-  const marked = JSON.stringify({...JSON.parse(stored), keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+  const marked = JSON.stringify({...JSON.parse(stored), keptRun: {runToken: 10, ownerUserId: "owner", activationId: ACTIVATION}});
   expect(kept - plain).toBe(Buffer.byteLength(JSON.stringify(marked)) - Buffer.byteLength(JSON.stringify(stored)));
 });
 
@@ -3551,7 +3606,7 @@ it("keeps a moved document's route for a restore that opened no retirement until
 it("keeps a moved note's route through the unfinished restore that kept the owner's live session", async () => {
   const {o, host} = await movedDuringRestore({live: true});
   expect(JSON.parse(String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations").get()!.intent_json)))
-    .toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+    .toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", activationId: ACTIVATION}});
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
@@ -3836,9 +3891,9 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
       sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", document.objectId, path, origin, "2"].join("\0")))}`,
       sourceDigest: validated.evidence.projectedMarkdownSha256, sourceByteLength: validated.evidence.projectedMarkdownByteLength,
       nativeHeadSequence: 2, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
-  const host = o.host.coordinate, actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const host = o.host.coordinate, actor = {kind: "owner" as const, userId: "owner"};
   const store = o.f.storage.createServiceActivationStore(o.f.history);
-  await store.prepare({capture, host, shareId: "share", registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
+  await store.prepare({capture, host, registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, host), delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
   const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: activationId,
@@ -3925,7 +3980,7 @@ for (const c of [
     await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(row))).toBe(false));
     await o.nextPull();
   }
-  const remaining = documents.at(-1)!, document = documentFor(remaining), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const remaining = documents.at(-1)!, document = documentFor(remaining), actor = {kind: "owner" as const, userId: "owner"};
   const current = o.f.storage.resolveCurrentLiveDocumentBinding({document, actor}), read = o.f.storage.readLiveUpdateJournalCut({document});
   if (current.kind !== "current" || read.kind !== "cut") throw new Error("Missing sibling authority.");
   const doc = new Y.Doc(), suffix = read.cut.suffix.map(row => row.bytes);
@@ -5637,7 +5692,7 @@ async function idleHost(options: {alone?: boolean} = {}) {
     unloaded: () => o.membership.filter(row => row.method === "liveApplication.unloadDocument" && (row.params as {objectId: string}).objectId === "object").length,
     settles: () => requests().filter(request => request.method === "liveApplication.settle").map(request => request.params.terminalReceipt),
     binding() {
-      const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+      const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}});
       if (current.kind !== "current") throw new Error("Missing live binding.");
       return current.binding;
     }};

@@ -31,7 +31,7 @@ function fixture() {
   const onError = vi.fn();
   const tracker = createAutomationAcceptedRecords({replica, namespace: "relay", synchronize, onError,
     storage: {automationRecordBinding: (_workspace, _owner, path) => {
-      const current = bindings.get(path); return current ? {binding: current, shareId: "share"} : null;
+      const current = bindings.get(path); return current ? {binding: current} : null;
     }, automationRecordJournalCursor: target => cursors.get(target.objectId)!, readLiveUpdateJournalCut: readCut}});
   return {tracker, replica, cursors, accepted, bindings, list, read, readCut, apply, synchronize, onError};
 }

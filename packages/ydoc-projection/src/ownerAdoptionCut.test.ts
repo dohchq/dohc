@@ -28,7 +28,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
     };
     const delivery = new OwnerCommittedDelivery(f.storage,createLiveJournalHistoryAuthority({namespace: "owner-history",reconciled: true}),{
       client: client as unknown as EngineClient,workspace: "workspace-handle",host,deadlineMs: 30_000,nextRequestId: () => ++sequence,bounds: {maxBytes: 1_000_000,maxEvents: 10},
-      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
+      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), workspaceIds: new Set(["workspace"]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)},
     });
     expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: false});
@@ -44,7 +44,7 @@ it("transfers owner metadata quota for all100 maximum-length selectors and detec
     const selectors = ["docs",...Array.from({length: 99},(_,index) => `${index}`.padEnd(1024,"x"))];
     f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths: selectors,versionId: null}));
     const history = createLiveJournalHistoryAuthority({namespace: "owner-history",reconciled: true}), store = f.storage.createLiveCommittedDeliveryStore(history);
-    const capture = store.captureOwnerCut({host,document: f.input.evidence.document,actor: {kind: "owner",userId: "owner",shareId: "share"},adoptionId: "origin",expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
+    const capture = store.captureOwnerCut({host,document: f.input.evidence.document,actor: {kind: "owner",userId: "owner"},adoptionId: "origin",expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
     expect(capture.binding.selectorPaths).toHaveLength(100);
     const before = Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw);
     store.acknowledgeOwnerAdoption(capture,{adoptionId: "origin",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false});
@@ -77,7 +77,7 @@ it("records owner origin and ACK progress with exact quota transfer and restart 
     const replay = store.captureOwnerCut({...input,throughCursor: cursor});
     expect(replay.cut.events).toHaveLength(1);
     store.acknowledgeOwnerAdoption(replay,{...ack,adoptionReplayed: true});
-    const actor = {kind: "owner" as const,userId: "owner",shareId: "share"};
+    const actor = {kind: "owner" as const,userId: "owner"};
     const latest = store.openOwnerDelivery({host,document: input.document,actor}), receipt = store.nextOwnerApplication(latest)!.metadata.accepted.receipt;
     const before = Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw);
     const updateAck = {...receipt,localYDocSequence: 2,applicationReplayed: false};

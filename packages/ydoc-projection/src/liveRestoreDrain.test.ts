@@ -1672,7 +1672,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     expect(f.journalRows()).toEqual(after);
     const read=f.storage.readLiveUpdateJournalCut({document:f.document});expect(read.kind).toBe("cut");
     if (kind==="owner") {
-      const owner=f.store.openOwnerDelivery({host:f.input.host,document:f.document,actor:{kind:"owner",userId:"owner",shareId:"share"}});
+      const owner=f.store.openOwnerDelivery({host:f.input.host,document:f.document,actor:{kind:"owner",userId:"owner"}});
       expect(f.store.ownerDeliveryProgress(owner).terminal).toEqual(resume.applicationReceipt);
     } else {
       const drain=f.store.open({host:f.input.host,document:f.document});
@@ -1703,9 +1703,9 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
     fullStateDigest: hash(state), fullStateByteLength: state.byteLength};
   const binding = {...f.document, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 1};
   f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('restore-test',?,?,'main',?,?,?,?,?,?,'owner',?,'{}',1)`)
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('restore-test',?,?,'main',?,?,?,?,?,?,'owner','{}',1)`)
     .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, JSON.stringify(source),
-      JSON.stringify(binding), source.fullStateDigest, state, shareId));
+      JSON.stringify(binding), source.fullStateDigest, state));
 }
 // The owner revokes the Edit grant of the share "other" outside any restore.
 const revokeOtherGrant = (f: Pick<ReturnType<typeof fixture>, "storage">, at: number) =>

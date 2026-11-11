@@ -136,7 +136,7 @@ function publication(
     createdAtMs: 1,
   });
   const accountId = owner ? "owner" : "reader";
-  const captured = f.capture(update ?? f.update("title", id), id, automation || owner ? {kind: "owner", userId: "owner", shareId: "share"} : {
+  const captured = f.capture(update ?? f.update("title", id), id, automation || owner ? {kind: "owner", userId: "owner"} : {
     kind: "named",
     userId: "reader",
     grantId: "grant",
@@ -453,7 +453,7 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
     const consumer = () => new OwnerCommittedDelivery(f.storage,history,{
       client,workspace: "handle",host: f.input.host,deadlineMs: 1000,nextRequestId: () => ++requestId,
       bounds: {maxBytes: 1_000_000,maxEvents: 100},
-      ownerAdmission: {trustedAccount: () => ({accountId: "owner",name: "Owner"}),shares: new Map([["workspace","share"]]),
+      ownerAdmission: {trustedAccount: () => ({accountId: "owner",name: "Owner"}),workspaceIds: new Set(["workspace"]),
         maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),validate: () => {throw new Error("Empty outbox");}},
     });
     let delivery = consumer();

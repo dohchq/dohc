@@ -229,7 +229,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(readFileSync(join(first.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
     expect(readFileSync(join(peer.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
     expect(ordinaryCaptureCalls).toBe(0);
-    const actor = {kind: "owner", userId: ownerUser.id, shareId: "share-0"} as const;
+    const actor = {kind: "owner", userId: ownerUser.id} as const;
     const binding = storage.resolveCurrentLiveDocumentBinding({document, actor});
     if (binding.kind !== "current") throw new Error("Missing current binding.");
     const native = await active.captureNative(binding.binding);

@@ -40,7 +40,7 @@ if (!existsSync(configPath)) initializeRelayDeployment({configPath, relayPath: j
 const deployment = openRelayDeployment(configPath), storage = deployment.storage;
 storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1});
 storage.provisionLiveHostControl({mode, hostId: mode, updatedAtMs: 1, guard: storage.captureStanding()});
-const actor = {kind: "owner", userId: "owner", shareId: "share"} as const;
+const actor = {kind: "owner", userId: "owner"} as const;
 let id = 1, originSeq = 0, seedOrigin = "seed", main = "main";
 let client: EngineClient, hostProcess: ReturnType<typeof spawn>, handle: string, coordinate: LiveHostConnectionCoordinate;
 let bridge: Awaited<ReturnType<typeof ownerBridge>> | undefined;
@@ -173,7 +173,7 @@ async function openHost(configured = true) {
     });
     consumer = new OwnerCommittedDelivery(storage, deployment.history, {client: bridge.client, workspace: handle, host: coordinate,
       deadlineMs: 120_000, nextRequestId: () => id++, bounds: {maxBytes: 4 * 1024 * 1024, maxEvents: 64},
-      ownerAdmission: {shares: new Map([["workspace", "share"]]), trustedAccount: () => undefined,
+      ownerAdmission: {workspaceIds: new Set(["workspace"]), trustedAccount: () => undefined,
         maxEntriesPerDrain: 64, maxBytesPerDrain: 16 * 1024 * 1024, refusals: new OwnerKnownRefusals(), validate: createLiveMarkdownJournalValidator(policy)}});
   }
   return {pid: hostProcess.pid, main};

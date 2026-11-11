@@ -25,15 +25,11 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
   try {while (length < buffer.length) {const read = readSync(fd,buffer,length,buffer.length-length,null); if (!read) break; length += read;}}
   finally {closeSync(fd);}
   if (length === buffer.length) throw new Error("Private owner admission configuration is too large.");
-  const row = configRecord(JSON.parse(buffer.subarray(0,length).toString("utf8")),["version","shares","validation","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs"]);
-  if (row.version !== 1 || !Array.isArray(row.shares) || !row.shares.length || row.shares.length > 64) throw new Error("Invalid private owner shares.");
-  const shares = new Map<string,string>();
-  for (const value of row.shares) {
-    const item = configRecord(value,["workspaceId","shareId"]), workspaceId = parseLiveUpdateIdentifier(item.workspaceId,"workspace ID");
-    if (!workspaceIds.includes(workspaceId) || shares.has(workspaceId)) throw new Error("Private owner workspace is not configured.");
-    shares.set(workspaceId,parseLiveUpdateIdentifier(item.shareId,"share ID"));
-  }
-  if (shares.size !== workspaceIds.length) throw new Error("Private owner workspace is not configured.");
+  const row = configRecord(JSON.parse(buffer.subarray(0,length).toString("utf8")),["version","validation","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs"]);
+  if (row.version !== 1) throw new Error("Invalid private owner admission version.");
+  // The owner's queues of every delivered workspace deliver as that workspace's owner.
+  const admitted = new Set(workspaceIds.map(workspaceId => parseLiveUpdateIdentifier(workspaceId,"workspace ID")));
+  if (!admitted.size) throw new Error("Private owner workspace is not configured.");
   const validation = configRecord(row.validation,policyFields);
   const policy: OrderedLiveUpdateCutPolicy = {
     maxStructVisits: positive(validation.maxStructVisits),maxValueNodeVisits: positive(validation.maxValueNodeVisits),
@@ -42,7 +38,7 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
     maxIndexOperations: positive(validation.maxIndexOperations),
   };
   const validate = liveValidation.validator(policy);
-  const admission: OwnerOutboxAdmission = {trustedAccount,shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),
+  const admission: OwnerOutboxAdmission = {trustedAccount,workspaceIds: admitted,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),
     refusals: new OwnerKnownRefusals(),validate};
   return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
 }
@@ -53,7 +49,7 @@ export function startOwnerAdmission(options: {
   control: Pick<ReturnType<typeof createDeviceControl>,"settle">; onError(error: unknown): void;
 }) {
   let workspaceIndex = 0, afterObject = "", lastError: string | undefined;
-  const stop = new AbortController(), workspaces = [...options.config.admission.shares.keys()];
+  const stop = new AbortController(), workspaces = [...options.config.admission.workspaceIds];
   const lifetime = AbortSignal.any([stop.signal,options.storage.unavailable]);
   const store = options.storage.createLiveCommittedDeliveryStore(options.history);
   const pass = async () => {

@@ -506,7 +506,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentCovered(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean) {
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string}, restoring?: boolean) {
     return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner, restoring);
   }
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
@@ -717,6 +717,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return !accountIsFenced(this, ownerUserId) && workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+  }
+  workspaceOwner(workspaceId: string): string | null {
+    return workspacesStorage.workspaceOwner(this, workspaceId);
   }
 
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }

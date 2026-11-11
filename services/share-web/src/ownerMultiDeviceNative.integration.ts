@@ -154,7 +154,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const signedIn = await auth.api.signInEmail({body: {email: ownerUser.email, password}});
     const bearer = signedIn.token;
     expect(typeof bearer).toBe("string");
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share-0"}});
+    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
     if (current.kind !== "current") throw new Error("Owner binding unavailable.");
     const binding = current.binding;
     const nativeConfigPath = join(root, "ordinary-owner.json");
@@ -166,9 +166,8 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       sync: {policy: {maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000}, workingReserveBytes: 4000000},
     }));
     const target = {binding, relayDatabaseNamespace: JSON.parse(readFileSync(configPath, "utf8")).namespace as string};
-    const selected = {...target, shareId: "share-0"};
     const deliveryConfig = {nativeConfigPath, nativeClient: {aggregateBytes: 200000000, maxUploads: 4}, relayUrl,
-      frames, attemptTimeoutMs: 30000, retryDelayMs: 1000, documents: [selected]};
+      frames, attemptTimeoutMs: 30000, retryDelayMs: 1000, documents: [target]};
     let id = 10;
     async function startOwner(name: string) {
       const dir = join(root, name); mkdirSync(dir, {recursive: true});
@@ -288,7 +287,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     results.stage = "refuse foreign owner account";
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
     const refused = await runNativeOwnerDeliveryPass({client: first.client, workspaceHandle: first.workspaceHandle,
-      document: selected, config: deliveryConfig, refusals: new OwnerKnownRefusals(), signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
+      document: target, config: deliveryConfig, refusals: new OwnerKnownRefusals(), signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
     expect(refused).toBe("retry");
     expect(await first.client.ownerYDocPrepareEnrollment(first.request(), target)).toEqual(firstDraft);
     // Hold the second authenticated capture: enrollment committed, submission has not started.

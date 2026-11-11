@@ -111,7 +111,7 @@ export async function startSelfHostedLiveHost(options: {
     return {targets, departing, obsolete, nextCursor: page.nextCursor};
   };
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
-    rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}))));
+    rows.map(({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}))));
   // A store keeps its parked documents' activations, so only account deletion removes one.
   const storeName = (row: WorkspaceIdentity) => hostedStoreName(history.namespace, row);
   // The stores, by name, whose hosted replica diverged from the relay. Each
@@ -177,7 +177,7 @@ export async function startSelfHostedLiveHost(options: {
         hostedReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
           identity: {replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
     }
-    const document = ({workspaceId, objectId, path, shareId}: ServiceHostEnrollment) => ({workspaceId, objectId, path, shareId});
+    const document = ({workspaceId, objectId, path}: ServiceHostEnrollment) => ({workspaceId, objectId, path});
     return {workspaces, documents: targets.map(document), departing: departing.map(document)};
   }
   async function start(): Promise<Host> {

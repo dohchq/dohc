@@ -108,7 +108,7 @@ export async function runPublicAutomaticView(options: Options) {
       adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path, shareId: link.shareId}]}});
     const fixture: PublicTransitionFixture = {document: {workspaceId, mainVersionId, objectId, lineageClaimId: hash(selected.baseline.checkpoint)}, path, link};
     await browserExpect.poll(() => h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-      actor: {kind: "owner", userId: h.ownerUserId, shareId: link.shareId}}).kind, {timeout: h.timeoutMs}).toBe("current");
+      actor: {kind: "owner", userId: h.ownerUserId}}).kind, {timeout: h.timeoutMs}).toBe("current");
     for (let index = 0; index < admission.readContexts; index++) {
       const view = await options.newView(viewLink.url); views.push(view);
       await browserExpect.poll(async () => hash(Buffer.from(await view.page.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.viewText));

@@ -46,7 +46,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0, adoptionCu
     hasPendingActivationSeed: vi.fn((_value: ReturnType<typeof capture>) => false),
   };
   const storage = {createLiveCommittedDeliveryStore: () => store,
-    getShare: () => ({workspaceId: document.workspaceId,shareId: "share",granterUserId: "owner"})};
+    workspaceOwner: () => "owner"};
   const persist = (value: LiveUpdateReceipt) => {
     if (value.journalCursor > (nativeTerminal?.journalCursor ?? 0)) nativeTerminal = value;
     const ack = ackFor(value); durable.set(value.deliveryId,ack); return ack;
@@ -86,7 +86,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0, adoptionCu
     client: client as unknown as EngineClient,workspace: "handle",deadlineMs: 1_000,nextRequestId: () => ++requestId,
     host: {mode: "device",hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"} as never,
     bounds: {maxBytes: 10_000,maxEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,refusals: new OwnerKnownRefusals(),validate: () => ({} as never)},
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([document.workspaceId]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,refusals: new OwnerKnownRefusals(),validate: () => ({} as never)},
   });
   return {consumer: reconnect(),reconnect,client,store,storage,journal,retained,outboxAcks,ownerEntries,persist,nativeTerminal: () => nativeTerminal,
     invalidate: () => {current = false;}};

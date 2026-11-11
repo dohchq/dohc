@@ -404,7 +404,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
   function connect(token: string, cookie = defaultCookie, extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
-    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
+    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
       headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
@@ -958,15 +958,23 @@ it("refuses additional identity and duplicate selector fields on owner upgrades"
   expect(f.actor).not.toHaveBeenCalled();
 });
 
-it.each(["owner", "fence", "selector"])("rechecks owner %s standing after native capture awaits", async changed => {
+it.each(["owner", "fence"])("rechecks owner %s standing after native capture awaits", async changed => {
   const f = await fixture(limits, false, undefined, true);
   f.captureNative.mockImplementationOnce(async () => {
-    f.raw.exec(changed === "owner" ? "UPDATE sync_relay_workspaces SET owner_user_id='other'" : changed === "selector" ?
-      `UPDATE sync_relay_shares SET selector_json='{"paths":["elsewhere"],"versionId":null}'` :
+    f.raw.exec(changed === "owner" ? "UPDATE sync_relay_workspaces SET owner_user_id='other'" :
       "UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
     return f.native;
   });
   expect(await f.connect("").status).toBe(404);
+});
+
+it("opens the owner route while a share's selector changes during native capture", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  f.captureNative.mockImplementationOnce(async () => {
+    f.raw.exec(`UPDATE sync_relay_shares SET selector_json='{"paths":["elsewhere"],"versionId":null}'`);
+    return f.native;
+  });
+  expect(await f.connect("").status).toBe(101);
 });
 
 it("applies owner connection limits and closes captured owners on host invalidation", async () => {
@@ -1436,7 +1444,7 @@ it("opens an owner 4 MiB sync while the non-owner workspace byte portion is full
   const syncBinding = {...owner.binding, selectorPaths: [owner.binding.currentPath]}, hostVector = Buffer.from([0]);
   const current = owner.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: owner.binding.workspaceId,
     mainVersionId: owner.binding.mainVersionId, objectId: owner.binding.objectId, lineageClaimId: owner.binding.lineageClaimId},
-    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}});
+    actor: {kind: "owner", userId: "owner-1"}});
   if (current.kind !== "current") throw new Error("Expected current owner binding");
   const overhead = encodeLiveFrameSync({binding: current.binding, hostVector, missingStateUpdate: Uint8Array.of(0)}, owner.frames.receive).length - 1;
   const missingStateUpdate = Buffer.alloc(4 * MiB - overhead);

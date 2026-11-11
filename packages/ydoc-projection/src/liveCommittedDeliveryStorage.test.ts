@@ -55,7 +55,7 @@ it("funds the stored document binding independently of a large share selector", 
     const paths = ["docs", ...Array.from({ length: 99 }, (_, index) => `other-${index}/${"x".repeat(200)}`)];
     f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
       .run(JSON.stringify({ paths, versionId: null }));
-    const current = f.storage.resolveCurrentLiveDocumentBinding({ document: f.input.evidence.document, actor: f.actor });
+    const current = f.storage.resolveCurrentLiveDocumentBinding({ document: f.input.evidence.document, actor: { kind: "named", userId: "reader", grantId: "grant" } });
     expect(current.kind).toBe("current");
     if (current.kind !== "current") throw Error("current binding");
     expect(current.binding.selectorPaths).toHaveLength(100);

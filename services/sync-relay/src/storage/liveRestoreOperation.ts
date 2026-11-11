@@ -19,7 +19,7 @@ import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_OPERATIONS as table, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson } from "../shareFilter";
-import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure } from "./liveDocumentAuthority";
+import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure, recordedOwnerBinding } from "./liveDocumentAuthority";
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
 import type { StoredLiveDocumentAuthority } from "./types";
 import { decodeJournalRow, verifyJournalRow } from "./liveUpdateJournal";
@@ -169,14 +169,16 @@ function basis(storage: StorageContext, intent: StopRestoreIntent, authority: St
   const share = storage.getShare(intent.shareId), control = storage.getLiveHostControl();
   const storedSelector = share && parseStoredAnyShareSelectorJson(share.selectorJson);
   const selector = storedSelector && effectiveShareSelector(storedSelector,"edit");
-  if (!share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
+  // The share is the one whose access stops. The owner keeps the lineage's own binding.
+  const ownerBinding = recordedOwnerBinding(storage, intent.document, authority.binding);
+  if (!ownerBinding || !share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
     !selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share,selector) || !control ||
     !currentLiveDocumentMoment(storage, intent.document, authority.binding.currentPath) ||
     authority.baselineSequence <= storage.getEpochLogFloor(intent.document.workspaceId)) refuse();
   const namespace = liveJournalHistoryNamespace(storage);
   const origin = ownerOrigin(storage, namespace, intent.document, control.configuredHostId);
   if (origin !== undefined && typeof origin !== "string") refuse();
-  return { binding: authority.binding, ownerBinding: parseLiveObjectBinding({...authority.binding, selectorPaths: selector.paths}),
+  return { binding: authority.binding, ownerBinding,
     baselineDigest: authority.baselineDigest, baselineByteLength: authority.baselineBytes.byteLength,
     projectedDigest: authority.projectedDigest, projectedLength: authority.projectedLength,
     baselineSequence: authority.baselineSequence, registeredAtMs: authority.registeredAtMs,
@@ -416,10 +418,10 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     // The owner's restore keeps the live session it continues instead of retiring it, so the restored note stays live for the owner.
     // The stored intent records that run. `snapshot()` drops it, so a request never carries it.
     const activationId = intent.deliveryKind === "owner" ? restoredActivation(basisJson) : undefined;
-    const enrollment = typeof activationId === "string" ? storage.db.prepare(`SELECT share_id,owner_user_id,created_at_ms FROM ${SERVICE_HOST_ENROLLMENTS}
+    const enrollment = typeof activationId === "string" ? storage.db.prepare(`SELECT owner_user_id,created_at_ms FROM ${SERVICE_HOST_ENROLLMENTS}
       WHERE workspace_id=? AND object_id=? AND retired=0`).get(intent.document.workspaceId, intent.document.objectId) : undefined;
     const keptRun: KeptServiceRun | null = enrollment && typeof activationId === "string" ? {runToken: Number(enrollment.created_at_ms),
-      ownerUserId: String(enrollment.owner_user_id), shareId: String(enrollment.share_id), activationId} : null;
+      ownerUserId: String(enrollment.owner_user_id), activationId} : null;
     const marker = {kept: false};
     const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
       revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds },
