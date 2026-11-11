@@ -1,12 +1,14 @@
 export const QUEUED_STATUSES = ["queued", "waiting", "pending", "requested"];
+export const CLOUD_POLL_MS = 2_500;
+export const GATE_POLL_MS = { js: 3_000, rust: 10_000 };
 
 export function cloudApi({ env = process.env, request = fetch } = {}) {
   const base = `${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
   const cache = new Map();
   let last, counted = 0, unchanged = 0;
   return {
-    async read(path) {
-      const previous = cache.get(path);
+    async read(path, { conditional = false } = {}) {
+      const previous = conditional ? cache.get(path) : undefined;
       const response = await request(base + path, {
         headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json",
           ...(previous?.etag ? { "If-None-Match": previous.etag } : {}) },
@@ -21,7 +23,7 @@ export function cloudApi({ env = process.env, request = fetch } = {}) {
       counted++;
       if (!response.ok) throw new Error(`Cannot read workflow ${path}: HTTP ${response.status}.`);
       const data = await response.json();
-      cache.set(path, { etag: last?.get("etag"), data });
+      if (conditional) cache.set(path, { etag: last?.get("etag"), data });
       return data;
     },
     async jobs() {

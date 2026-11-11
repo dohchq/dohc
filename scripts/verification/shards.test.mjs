@@ -161,7 +161,8 @@ function passingCloudJobs() {
   // Split the saved combined job at its artifact publication and proof start.
   const prepared = jobs.find(job => job.name === "shared preparation + confinement");
   prepared.name = "shared preparation";
-  jobs.push({ ...prepared, name: "compiler and relay confinement", created_at: "2026-11-11T13:06:40Z", started_at: "2026-11-11T13:06:40Z" });
+  jobs.push({ ...prepared, name: "compiler confinement", created_at: "2026-11-11T13:06:40Z", started_at: "2026-11-11T13:06:40Z" });
+  jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
   prepared.completed_at = "2026-11-11T13:06:40Z";
   return jobs;
 }
@@ -183,6 +184,9 @@ test("the saved passing run measures gate spans and confinement execution separa
     assert.equal(result.timing, "within budget");
     assert.ok(result.jobs.every(job => Number.isFinite(job.runnerWaitSeconds)));
   }
+  const relay = jobs.find(job => job.name === "relay confinement");
+  relay.completed_at = new Date(Date.parse(relay.started_at) + 90_000).toISOString();
+  assert.equal(completedGateTiming("js", jobs, jobs[0].head_sha).confinementSeconds, 242, "the longer proof job sets the path");
 });
 
 test("uncontended overruns fail; contended overruns warn without estimating workload", t => {
@@ -214,7 +218,7 @@ test("uncontended overruns fail; contended overruns warn without estimating work
 });
 
 test("confinement's runner queue is removed exactly, but its execution must fit", () => {
-  const jobs = withoutWaits(), proof = jobs.find(job => job.name === "compiler and relay confinement");
+  const jobs = withoutWaits(), proof = jobs.find(job => job.name === "compiler confinement");
   proof.started_at = new Date(Date.parse(proof.started_at) + 7_200_000).toISOString();
   proof.completed_at = new Date(Date.parse(proof.completed_at) + 7_200_000).toISOString();
   for (const scope of ["js", "rust"]) {
@@ -246,10 +250,15 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
   jobs.forEach(job => { job.created_at = job.completed_at; });
   assert.ok(completedGateTiming("js", jobs, jobs[0].head_sha).jobs.every(job => job.runnerWaitSeconds === 0));
   for (const scope of ["js", "rust"]) for (const mutate of [
-    rows => rows.splice(rows.findIndex(job => job.name === "compiler and relay confinement"), 1),
+    ...["compiler confinement", "relay confinement"].flatMap(name => [
+      rows => rows.splice(rows.findIndex(job => job.name === name), 1),
+      rows => rows.push(rows.find(job => job.name === name)),
+      ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === name).conclusion = conclusion; }),
+      rows => { rows.find(job => job.name === name).head_sha = "other"; },
+    ]),
     rows => rows.splice(rows.findIndex(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1")), 1),
     rows => rows.push(rows.find(job => job.name === "shared preparation")),
-    ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler and relay confinement").conclusion = conclusion; }),
+    ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler confinement").conclusion = conclusion; }),
     rows => { rows[0].head_sha = "other-head"; },
     rows => { rows[0].created_at = "invalid"; },
     rows => { rows[0].completed_at = rows[0].created_at; rows[0].started_at = "invalid"; },
@@ -281,21 +290,21 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
       },
     });
     assert.equal(result.artifact.id, 42);
-    assert.equal(clock, 80_000);
+    assert.equal(clock, 65_000);
     assert.equal(jobReads, 2);
     assert.match(log.mock.calls.at(-1).arguments[0], /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=4 304=1/u);
   });
 
   test(`${scope} preparation stops after 15 minutes with the final build state`, async () => {
-    for (const state of ["queued", "in_progress"]) {
+    for (const state of ["queued", "in_progress", "missing", "completed"]) {
       let clock = 0, lastJobRead = -1;
       await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
         request: async url => {
-          if (url.includes("/jobs?")) { lastJobRead = clock; return apiResponse({ jobs: [{ name: jobName, status: state }] }); }
-          assert.equal(state, "in_progress");
+          if (url.includes("/jobs?")) { lastJobRead = clock; return apiResponse({ jobs: state === "missing" ? [] : [{ name: jobName, status: state, conclusion: state === "completed" ? "success" : null }] }); }
+          assert.ok(["in_progress", "completed"].includes(state));
           return apiResponse({ artifacts: [] });
         },
-      }), new RegExp(`15-minute wait cap.*${state === "queued" ? "queued for a runner" : "running"}`, "u"));
+      }), new RegExp(`15-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`, "u"));
       assert.equal(clock, 900_000);
       assert.equal(lastJobRead, 900_000);
     }
@@ -324,30 +333,29 @@ test("reporting joins its own successful group and caps queued or running siblin
       await assert.rejects(waitForGate(scope, { readJobs: async () => jobs }), /did not finish successfully/u);
     }
     Object.assign(sibling, { conclusion: "success" });
-    const proof = jobs.find(job => job.name === "compiler and relay confinement");
+    const proof = jobs.find(job => job.name === "compiler confinement");
     Object.assign(proof, { status: "queued", conclusion: null });
     await waitForGate(scope, { readJobs: async () => jobs });
     await assert.rejects(waitForGate(scope, { readJobs: async () => [...jobs, sibling] }), /Duplicate/u);
   }
 });
 
-test("aggregate job polling reuses ETags, waits 10 seconds, and logs rate usage", async t => {
-  const jobs = passingCloudJobs(), sibling = jobs.find(job => job.name === "JS worker 1");
-  Object.assign(sibling, { status: "in_progress", conclusion: null });
-  let clock = 0, reads = 0;
+test("aggregate polling bounds latency by scope and counts each jobs request", async t => {
   const log = t.mock.method(console, "log", () => {});
-  await waitForGate("js", { env: apiEnv, now: () => clock, pause: async ms => { assert.equal(ms, 10_000); clock += ms; },
-    request: async (url, { headers }) => {
-      reads++;
-      if (reads === 1) return apiResponse({ jobs }, 200, '"pending"');
-      assert.equal(headers["If-None-Match"], '"pending"');
-      if (reads === 2) return apiResponse(null, 304);
-      Object.assign(sibling, { status: "completed", conclusion: "success" });
-      return apiResponse({ jobs });
-    },
-  });
-  assert.equal(clock, 20_000);
-  assert.match(log.mock.calls.at(-1).arguments[0], /counted=2 304=1/u);
+  for (const [scope, interval, name] of [["js", 3_000, "JS worker 1"], ["rust", 10_000, "Rust tests 1"]]) {
+    const jobs = passingCloudJobs(), sibling = jobs.find(job => job.name === name);
+    Object.assign(sibling, { status: "in_progress", conclusion: null });
+    let clock = 0, reads = 0;
+    await waitForGate(scope, { env: apiEnv, now: () => clock, pause: async ms => { assert.equal(ms, interval); clock += ms; },
+      request: async (url, { headers }) => {
+        assert.equal(headers["If-None-Match"], undefined);
+        if (++reads === 3) Object.assign(sibling, { status: "completed", conclusion: "success" });
+        return apiResponse({ jobs });
+      },
+    });
+    assert.equal(clock, interval * 2);
+    assert.match(log.mock.calls.at(-1).arguments[0], /counted=3 304=0/u);
+  }
 });
 
 test("aggregate receipts use the same timing rule and remain incomplete", async t => {
@@ -368,7 +376,7 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   const final = jobs.find(job => job.name === "typecheck + tests");
   const now = Date.parse(final.completed_at);
   Object.assign(final, { status: "in_progress", conclusion: null, completed_at: null });
-  const confinement = jobs.find(job => job.name === "compiler and relay confinement");
+  const confinement = jobs.find(job => job.name === "compiler confinement");
   Object.assign(confinement, { status: "in_progress", conclusion: null, completed_at: null });
   const run = (rows, finish, env = { GITHUB_SHA: commit }) => aggregateCloud("js", root.replaceAll("\\", "/"), { readJobs: async () => rows, now: () => finish, env, outputDirectory });
   const passed = await run(jobs, now);
@@ -379,7 +387,7 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   assert.equal(passed.timing, "within budget");
   const contended = structuredClone(jobs);
   for (const job of contended) if (job.name !== "what changed") {
-    if (job.name === "compiler and relay confinement") job.created_at = new Date(Date.parse(job.created_at) + 900_000).toISOString();
+    if (job.name === "compiler confinement") job.created_at = new Date(Date.parse(job.created_at) + 900_000).toISOString();
     job.started_at = new Date(Date.parse(job.started_at) + 900_000).toISOString();
     if (job.completed_at) job.completed_at = new Date(Date.parse(job.completed_at) + 900_000).toISOString();
   }
@@ -388,7 +396,7 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   assert.equal(adjusted.timing, "unmeasured");
   assert.equal(adjusted.contended, true);
   const queuedProof = structuredClone(jobs);
-  Object.assign(queuedProof.find(job => job.name === "compiler and relay confinement"), { status: "queued", started_at: null });
+  Object.assign(queuedProof.find(job => job.name === "compiler confinement"), { status: "queued", started_at: null });
   const pending = await run(queuedProof, now);
   assert.equal(pending.seconds, 241, "queued confinement cannot change provisional timing");
   const zeroWait = structuredClone(jobs);

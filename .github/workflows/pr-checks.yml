@@ -247,29 +247,6 @@ jobs:
           shared-key: js-daemon
       - name: Build the native engine and desktop once
         run: node scripts/verification/cloud.mjs prepare
-      - name: Pack prepared artifacts
-        run: >-
-          tar -I "zstd -T0 -1" -cf /tmp/javascript-prepared.tar.zst .dohc-dev/verification/build.json target/debug/dohc-workspace-engine
-          apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
-          apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: javascript-prepared-${{ github.run_attempt }}
-          path: /tmp/javascript-prepared.tar.zst
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-js-prepare-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
@@ -282,9 +259,32 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-js-prepare-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/cloud/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Pack prepared artifacts
+        run: >-
+          tar -I "zstd -T0 -1" -cf /tmp/javascript-prepared.tar.zst .dohc-dev/verification/build.json target/debug/dohc-workspace-engine
+          apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
+          apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist packages/app-backend-runtime/dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: javascript-prepared-${{ github.run_attempt }}
+          path: /tmp/javascript-prepared.tar.zst
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
-  confinement:
-    name: compiler and relay confinement
+  confinement-compiler:
+    name: compiler confinement
     needs: [changes, javascript-prepare]
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
@@ -305,7 +305,7 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+        run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: javascript-prepared-${{ github.run_attempt }}
@@ -313,7 +313,7 @@ jobs:
       - name: Restore prepared artifacts
         run: |
           tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
-          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared({ engineOnly: true });"
+          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared();"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: compiler-tests-${{ github.run_attempt }}
@@ -321,7 +321,7 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
-      - name: Compiler and relay confinement
+      - name: Compiler confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
@@ -334,6 +334,48 @@ jobs:
             grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
               { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; return 1; }
           }
+          compiler
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-confinement-compiler-${{ github.run_attempt }}
+          path: .agent-artifacts/confinement/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  confinement-relay:
+    name: relay confinement
+    needs: [changes, javascript-prepare]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: javascript-prepared-${{ github.run_attempt }}
+          path: /tmp/prepared
+      - name: Restore prepared artifacts
+        run: |
+          tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
+          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared();"
+      - name: Relay confinement
+        run: |
+          set -euo pipefail
+          mkdir -p .agent-artifacts/confinement
           relay() {
             node_root="$(dirname "$(dirname "$(command -v node)")")"
             report="$PWD/.agent-artifacts/confinement/relay.json"
@@ -350,16 +392,11 @@ jobs:
               if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error((r.numPendingTests + r.numTodoTests) + " of " + r.numTotalTests + " replica tests did not run.");
               console.log(r.numPassedTests + " replica tests passed under the default seccomp profile.");' "$report"
           }
-          compiler & compiler_pid=$!
-          relay & relay_pid=$!
-          status=0
-          wait "$compiler_pid" || status=1
-          wait "$relay_pid" || status=1
-          exit "$status"
+          relay
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: verification-confinement-${{ github.run_attempt }}
+          name: verification-confinement-relay-${{ github.run_attempt }}
           path: .agent-artifacts/confinement/**
           include-hidden-files: true
           if-no-files-found: error
@@ -700,7 +737,7 @@ jobs:
 
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare, confinement]
+    needs: [changes, javascript, rust, javascript-prepare, confinement-compiler, confinement-relay]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -739,7 +776,7 @@ jobs:
             if (selected) await verifyCompletedCloud(gate);
           }));
           const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
-          for (const name of ['javascript-prepare', 'confinement']) {
+          for (const name of ['javascript-prepare', 'confinement-compiler', 'confinement-relay']) {
             assert.equal(jobs[name].result, confined ? 'success' : 'skipped', `${name} job did not complete as selected`);
           }
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);

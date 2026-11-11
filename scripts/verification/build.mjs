@@ -262,7 +262,7 @@ const readerTargets = ["win32-x64", "darwin-arm64", "linux-x64"];
 export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist", "packages/app-backend-runtime/dist",
     ...(compilerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/app-compiler"] : []),
     ...(readerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/engine-reader"] : []),
     ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/agent-probe"] : []),

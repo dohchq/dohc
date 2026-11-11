@@ -1,6 +1,6 @@
 import { setTimeout } from "node:timers/promises";
 import { resolve } from "node:path";
-import { cloudApi, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { cloudApi, CLOUD_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 
 export async function waitForPreparation(scope, { env = process.env, request = fetch, pause = setTimeout, now = Date.now } = {}) {
   const preparation = scope === "js" ? { job: "shared preparation", artifact: "javascript-prepared" }
@@ -24,15 +24,15 @@ export async function waitForPreparation(scope, { env = process.env, request = f
         if (build?.status === "completed" && build.conclusion !== "success") throw new Error(`${preparation.job} ended with ${build.conclusion}.`);
       }
       const queued = build && QUEUED_STATUSES.includes(build.status);
-      if (now() >= deadline) throw new Error(`Shared ${scope} preparation exceeded its 15-minute wait cap; ${preparation.job} ${queued ? "still queued for a runner" : build?.status === "in_progress" ? "still running" : "has no published artifact"}.`);
+      if (now() >= deadline) throw new Error(`Shared ${scope} preparation exceeded its 15-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`);
       if (build && ["in_progress", "completed"].includes(build.status)) {
-        const { artifacts } = await api.read(`/artifacts?name=${encodeURIComponent(name)}&per_page=100`);
+        const { artifacts } = await api.read(`/artifacts?name=${encodeURIComponent(name)}&per_page=100`, { conditional: true });
         if (!Array.isArray(artifacts)) throw new Error("The preparation artifact inventory is missing.");
         const matching = artifacts.filter(artifact => artifact.name === name && !artifact.expired);
         if (matching.length > 1) throw new Error(`Duplicate preparation artifact ${name}.`);
         if (matching.length === 1 && now() < deadline) return { artifact: matching[0] };
       }
-      await pause(Math.max(0, Math.min(10_000, deadline - now())));
+      await pause(Math.max(0, Math.min(CLOUD_POLL_MS, deadline - now())));
     }
   } finally { api.log(`${scope} preparation wait`); }
 }

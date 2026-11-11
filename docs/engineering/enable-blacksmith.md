@@ -109,15 +109,15 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `compiler and relay confinement` job always uses GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
-Its engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
-It downloads those artifacts, checks the engine's identity, and runs the compiler and replica proofs concurrently.
-Workers and aggregates do not wait for confinement. The final verdict requires it and includes its execution time in both gates.
+The `compiler confinement` and `relay confinement` jobs always use GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
+Their engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
+Both download and check the prepared artifacts. They run compiler and replica proofs on separate runners; only the compiler job needs Rust.
+Workers and aggregates do not wait for confinement. The final verdict requires both jobs and includes their longer execution time in both gates.
 If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
-It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
-It fails if an app compiler or replica test skips.
+The relay job runs the replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
+Both jobs fail if any required test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
-The local gate runs no Linux JavaScript, so the replica suites run only in this job.
+The local gate runs no Linux JavaScript, so the replica suites run only in the relay confinement job.
 
 The Bash profile fixtures use `--noprofile` and explicitly load their temporary profile. This isolates their assertions from the runner's system profile. They do not test automatic login-profile loading.
 

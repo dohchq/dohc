@@ -105,8 +105,8 @@ PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for rea
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
 PR checks distribute the complete selected JavaScript inventory across workers.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
-Confinement always runs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
-It restores and checks the prepared engine, then runs compiler and relay proofs concurrently.
+Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
+Both restore and check the prepared engine, desktop artifacts, and runtime bundles. Only the compiler job installs Rust and nextest.
 Workers and aggregates do not wait for confinement. Only the final verdict waits for it.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
@@ -119,8 +119,8 @@ Cloud timing budgets are 300 s for JavaScript and 600 s for Rust.
 Each gate includes selection, shared preparation, and its own workers, build, policy, and reporting jobs.
 Rust's job list excludes JavaScript jobs.
 `spanSeconds` runs from the start of `what changed` through the last gate job's finish.
-`confinementSeconds` is preparation's finish relative to selection's start, plus confinement's execution time.
-This measures confinement as if its runner started when preparation finished; confinement has no runtime dependencies.
+`confinementSeconds` is preparation's finish relative to selection's start, plus the longer of the two confinement jobs' execution times.
+This measures confinement as if both runners started when preparation finished; neither job has runtime dependencies.
 `seconds` is the larger of these two numbers. No runner-wait discount estimates the workload.
 Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
 A gate is `contended` when any gate job waited more than 30 s for a runner. Confinement's queue does not count.
@@ -132,19 +132,23 @@ Final receipts have `complete: true` and require successful confinement at the h
 
 Preparation waits stop after 15 minutes from the wait's start. Group waits stop after 20 minutes.
 A timeout names whether an awaited job is queued or running. Native artifact transfer has a 60 s timeout.
-Preparation checks build state every 60 s and once at the cap. It polls artifacts every 10 s once the build is running or complete.
-Both artifact and job polls send the last ETag in `If-None-Match` when available.
+Preparation checks build state every 60 s and once at the cap. It polls artifacts every 2.5 s once the build is running or complete.
+Artifact polls send the last ETag in `If-None-Match` when available.
 [Authenticated 304 responses do not consume GitHub's primary rate limit](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests).
-Group polls run every 10 s, adding up to 10 s of detection latency, versus the previous 5 s interval.
+JavaScript group polls run every 3 s; Rust group polls run every 10 s. These add at most 3 s and 10 s of detection latency.
+Job-list responses change with step status, so every group poll is budgeted as a counted request.
 Each wait logs its last rate-limit headers, non-304 request count, and 304 count, including on failure.
-With about 2 minutes of JavaScript preparation wait, a ready Rust archive, and up to 15 group polls per aggregate,
-a combined run should use roughly 90 to 130 custom REST requests, including native downloads.
+With about 2 minutes of JavaScript preparation wait, a ready Rust archive, a 40 s JavaScript group wait, and a 3-minute Rust group wait,
+a combined run should use roughly 120 custom REST requests, including native downloads.
+A recent run observed a 5,000-request hourly token limit and roughly 100 requests used with the prior polling intervals.
 This estimate assumes unchanged artifact polls return 304. Confirm it from the next run's headers and counters.
 Standard action upload, download, and cache requests are additional.
 Job timeouts are 10 minutes for selection and final verification, 20 for preparation and confinement,
 25 for Rust archive and policy jobs and ordinary workers, and 40 for aggregate jobs.
 Workers have 10 minutes beyond their preparation wait cap. Aggregates have 5 minutes beyond both sequential wait caps for setup and execution.
-The compiler archive adds one package's test compilation, packing, and transfer to preparation.
+The compiler archive adds one package's test compilation, packing, and transfer to preparation, before the prepared artifact is published.
+The prepared artifact also carries the runtime bundles; confinement checks them through the existing build receipt instead of rebuilding them.
+Only post-job cleanup remains after publication.
 Confinement runs those test binaries without compilation or retries. Its Node staging tests still build the release compiler owner.
 For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
 Read the cache logs before describing a hit or miss. A requested cache condition alone does not establish one.

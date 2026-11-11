@@ -1,7 +1,7 @@
 import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { cloudApi, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
@@ -51,7 +51,8 @@ export function aggregateRust(records) {
 export const CLOUD_JOB_GRAPH = {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
-  confinement: { names: ["compiler and relay confinement"], needs: ["changes", "javascript-prepare"] },
+  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes", "javascript-prepare"] },
+  "confinement-relay": { names: ["relay confinement"], needs: ["changes", "javascript-prepare"] },
   "javascript-workers": { names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
   "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
@@ -66,17 +67,19 @@ function gateJobNames(scope) {
     || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
-function gateTiming(scope, required, confinement) {
-  const all = [...required, ...(confinement ? [confinement] : [])];
+const confinementNames = Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id.startsWith("confinement-")).flatMap(([, job]) => job.names);
+
+function gateTiming(scope, required, confinement = []) {
+  const all = [...required, ...confinement];
   if (all.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
   const start = Date.parse(required.find(job => job.name === "what changed").started_at);
   const spanSeconds = (Math.max(...required.map(job => Date.parse(job.completed_at))) - start) / 1000;
-  const confinementSeconds = confinement ? (Date.parse(required.find(job => job.name === "shared preparation").completed_at) - start
-    + Date.parse(confinement.completed_at) - Date.parse(confinement.started_at)) / 1000 : null;
+  const confinementSeconds = confinement.length ? (Date.parse(required.find(job => job.name === "shared preparation").completed_at) - start
+    + Math.max(...confinement.map(job => Date.parse(job.completed_at) - Date.parse(job.started_at)))) / 1000 : null;
   const jobs = all.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
     startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
-  const longest = jobs.filter(job => job.name !== "compiler and relay confinement").reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
+  const longest = jobs.filter(job => !confinementNames.includes(job.name)).reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
   const contended = longest.runnerWaitSeconds > 30, seconds = Math.max(spanSeconds, confinementSeconds ?? 0);
   const budgetSeconds = scope === "js" ? 300 : 600;
   const timing = seconds <= budgetSeconds ? "within budget" : contended ? "unmeasured" : "over budget";
@@ -91,14 +94,14 @@ function requireBudget(scope, timing) {
 }
 
 export function completedGateTiming(scope, jobs, commit) {
-  const expected = [...gateJobNames(scope), "compiler and relay confinement"];
+  const expected = [...gateJobNames(scope), ...confinementNames];
   const required = jobs.filter(job => expected.includes(job.name));
   if (!commit || required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  return requireBudget(scope, gateTiming(scope, required.filter(job => job.name !== "compiler and relay confinement"),
-    required.find(job => job.name === "compiler and relay confinement")));
+  return requireBudget(scope, gateTiming(scope, required.filter(job => !confinementNames.includes(job.name)),
+    required.filter(job => confinementNames.includes(job.name))));
 }
 
 export async function verifyCompletedCloud(scope) {
@@ -127,7 +130,7 @@ export async function waitForGate(scope, { readJobs, pause = setTimeout, now = D
       if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
       if (now() >= deadline) throw new Error(`The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${required.some(job => QUEUED_STATUSES.includes(job.status)) ? "still queued for a runner" : required.some(job => job.status === "in_progress") ? "still running" : "missing"}.`);
       if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
-      await pause(Math.min(10_000, deadline - now()));
+      await pause(Math.min(GATE_POLL_MS[scope], deadline - now()));
     }
   } finally { api.log(`${scope} group wait`); }
 }

@@ -19,7 +19,7 @@ function scratch(t, prefix) {
 
 function artifacts(t) {
   const fixture = scratch(t, "dohc-artifacts-");
-  for (const directory of ["apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist"]) {
+  for (const directory of ["apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist", "packages/app-backend-runtime/dist"]) {
     mkdirSync(join(fixture.root, directory), { recursive: true });
   }
   fixture.write(node, "node");
@@ -33,15 +33,16 @@ test("the prepared relay process rejects changed or missing runtime files", t =>
   const { root, write } = artifacts(t);
   write("services/sync-relay/dist/main.js", "relay");
   write("services/sync-relay/dist/liveValidationWorker.js", "worker");
+  write("packages/app-backend-runtime/dist/replica.mjs", "replica");
   const fingerprint = () => artifactFingerprint("desktop", root, "linux", "x64");
   const prepared = fingerprint();
-  for (const name of ["main.js", "liveValidationWorker.js"]) {
-    const path = `services/sync-relay/dist/${name}`;
+  for (const [path, original] of [["services/sync-relay/dist/main.js", "relay"], ["services/sync-relay/dist/liveValidationWorker.js", "worker"],
+    ["packages/app-backend-runtime/dist/replica.mjs", "replica"]]) {
     write(path, "drift");
-    assert.notEqual(fingerprint(), prepared, `${name} changed`);
+    assert.notEqual(fingerprint(), prepared, `${path} changed`);
     rmSync(join(root, path));
-    assert.notEqual(fingerprint(), prepared, `${name} deleted`);
-    write(path, name === "main.js" ? "relay" : "worker");
+    assert.notEqual(fingerprint(), prepared, `${path} deleted`);
+    write(path, original);
     assert.equal(fingerprint(), prepared);
   }
   rmSync(join(root, "services/sync-relay/dist"), { recursive: true });
