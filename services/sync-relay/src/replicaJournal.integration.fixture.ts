@@ -236,7 +236,8 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       await openHost(false);
       for (const [index, size] of (input.sizes as number[]).entries()) {
         const label = `doc-${index}`, path = `docs/${label}.md`;
-        const bytes = Buffer.from("a".repeat(mode === "device" ? Math.min(size, 1024) : size));
+        // The relay registers the service seed only if the file matches the seed's Markdown, which ends with a newline.
+        const bytes = Buffer.from(mode === "device" ? "a".repeat(Math.min(size, 1024)) : `${"a".repeat(size)}\n`);
         const written = await rpc("versionedText.writeBlob", {versionId: main, path, bytesBase64: bytes.toString("base64"), sha256: sha(bytes), origin: "api", publish: true});
         let textPush; do {textPush = await rpc("sync.push", {workspaceId: "workspace"});} while (textPush.hasMore);
         let doc: Y.Doc, baseline: Uint8Array;

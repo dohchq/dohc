@@ -19,7 +19,7 @@ it.each(corpus.cases.filter(item => item.markedStart))('serializes marked leadin
   let paragraph: JSONContent = root
   while (paragraph.type !== 'paragraph') paragraph = paragraph.content![0]
   paragraph.content = [{ type: 'text', text: item.markedText!, marks: [item.markedStart!] }]
-  expect(serializeRichdocBody(root)).toBe(item.canonical)
+  expect(`${serializeRichdocBody(root)}\n`).toBe(item.canonical)
   expect(parseRichdocMarkdown(serializeRichdocBody(root), 'projection')).toEqual(parseRichdocMarkdown(item.source, 'projection'))
 })
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
@@ -119,7 +119,7 @@ it.each(corpus.cases.filter(item => !item.refuse && !item.rereadCanonical))('fix
   try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
 })
 
-it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {
+it.each(['- Mr. Smith arrived.\n', '- I. Overview\n', '- a. child\n'])('accepts projected item prose unchanged: %s', source => {
   const doc = markdownToYDoc(source, { reading: 'projection' })
   try { expect(yDocToMarkdown(doc)).toBe(source) } finally { doc.destroy() }
 })

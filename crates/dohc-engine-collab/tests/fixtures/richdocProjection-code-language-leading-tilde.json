@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-code-language-leading-tilde",
  "updates": [
-  "AQfixrnsBQAHAQRib2R5Awljb2RlQmxvY2sHAOLGuewFAAYEAOLGuewFARRiZWZvcmUKfn5+CmBgYAphZnRlcigA4sa57AUACGxhbmd1YWdlAXcKfmxhbmdgdGlja4fixrnsBQADCXBhcmFncmFwaAcA4sa57AUXBgQA4sa57AUYCkFmdGVyIGNvZGUA",
-  "AQHixrnsBSMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbY29kZS1sYW5ndWFnZS1sZWFkaW5nLXRpbGRlAA=="
+  "AQetucP7AQAHAQRib2R5Awljb2RlQmxvY2sHAK25w/sBAAYEAK25w/sBARRiZWZvcmUKfn5+CmBgYAphZnRlcigArbnD+wEACGxhbmd1YWdlAXcKfmxhbmdgdGlja4etucP7AQADCXBhcmFncmFwaAcArbnD+wEXBgQArbnD+wEYCkFmdGVyIGNvZGUA",
+  "AQGtucP7ASMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbY29kZS1sYW5ndWFnZS1sZWFkaW5nLXRpbGRlAA=="
  ],
- "mergedUpdateB64": "AQjixrnsBQAHAQRib2R5Awljb2RlQmxvY2sHAOLGuewFAAYEAOLGuewFARRiZWZvcmUKfn5+CmBgYAphZnRlcigA4sa57AUACGxhbmd1YWdlAXcKfmxhbmdgdGlja4fixrnsBQADCXBhcmFncmFwaAcA4sa57AUXBgQA4sa57AUYCkFmdGVyIGNvZGUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbY29kZS1sYW5ndWFnZS1sZWFkaW5nLXRpbGRlAA==",
- "stateVectorB64": "AeLGuewFJA==",
+ "mergedUpdateB64": "AQitucP7AQAHAQRib2R5Awljb2RlQmxvY2sHAK25w/sBAAYEAK25w/sBARRiZWZvcmUKfn5+CmBgYAphZnRlcigArbnD+wEACGxhbmd1YWdlAXcKfmxhbmdgdGlja4etucP7AQADCXBhcmFncmFwaAcArbnD+wEXBgQArbnD+wEYCkFmdGVyIGNvZGUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbY29kZS1sYW5ndWFnZS1sZWFkaW5nLXRpbGRlAA==",
+ "stateVectorB64": "Aa25w/sBJA==",
  "coverage": {
   "nodes": [
    "codeBlock",
@@ -18,6 +18,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "~~~~ ~lang`tick\nbefore\n~~~\n```\nafter\n~~~~\n\nAfter code"
+  "markdown": "~~~~ ~lang`tick\nbefore\n~~~\n```\nafter\n~~~~\n\nAfter code\n"
  }
 }

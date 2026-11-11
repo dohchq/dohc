@@ -213,7 +213,7 @@ describe("an account's reads through the server's copy", () => {
     expect(await answer(await h(op("trip", "show", { target: "th_stay", peek: true }))))
       .toMatchObject({ thread: { title: "Where do we stay?" }, dispatch: { paused: null, lastRun: null } });
     expect(await answer(await h(op("trip", "documentRead", { path: "docs/plan.md" }))))
-      .toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama." });
+      .toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" });
 
     expect(syncs).toHaveLength(9);
     expect(engine.methods()).not.toContain("chats.channels.ensureGeneral");
@@ -580,11 +580,11 @@ describe("pages the relay hosts live", () => {
     const edit = () => expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Lisbon"))).result.kind).toBe("accepted");
     return { f, engine, read, edit };
   }
-  const edited = { ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello" };
+  const edited = { ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello\n" };
 
   it("reads an edit the relay accepted before it settles, and writes nothing", async () => {
     const { f, engine, read, edit } = await livePage();
-    expect(await answer(await read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Hello" });
+    expect(await answer(await read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Hello\n" });
     edit();
     const journal = f.journalRows().journal.length;
     expect(await answer(await read())).toEqual(edited);
@@ -626,7 +626,7 @@ describe("pages the relay hosts live", () => {
     named.engine.files.seedTextFile({ workspace: "workspace", versionId: draft.id, path: "docs/a.md", text: "Draft\n", objectId: "object" });
     await files.setActiveVersion({ workspaceId: "workspace", versionId: draft.id });
     named.edit();
-    expect(await answer(await named.read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Draft" });
+    expect(await answer(await named.read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Draft\n" });
 
     const absent = await livePage(() => undefined);
     absent.edit();

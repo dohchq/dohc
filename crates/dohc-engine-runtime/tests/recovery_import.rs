@@ -1357,8 +1357,8 @@ async fn rich_formats_keep_the_typing_after_dohc_settles_the_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checkpoint_from_another_serializer_is_refused_and_kept() {
-    // Text from a serializer that adds a final newline can't be replayed to
-    // exactly that text, so main keeps the checkpoint.
+    // Text from a serializer that adds a second final newline can't be
+    // replayed to exactly that text, so main keeps the checkpoint.
     let mut rich = rich("# Note\n\nAnchor.\n", Warm::Append).await;
     rich.input.as_mut().unwrap().text.push('\n');
     let input = rich.input.take().unwrap();

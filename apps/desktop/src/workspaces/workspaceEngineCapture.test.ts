@@ -67,6 +67,7 @@ import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
+import { syncFailureNotice } from "../renderer/shell/useSyncFailureNotice";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
@@ -3896,6 +3897,48 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  // A temp Node creates takes its folder's inherited ACL entries on macOS and
+  // Windows, so there the engine writes a pulled file and keeps the file's own
+  // ACL (#3570).
+  it("hands a pulled write to the engine on macOS and Windows", async () => {
+    const root = await createTestScratch("relay-engine-replace-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "earlier recorded text", origin: "local-file" });
+    await write(root, "n.md", "earlier recorded text");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "new collaborator text", origin: "sync" });
+    const requests: Request[] = [];
+    const engine = liveCapture(root, loopback, { requests });
+    try {
+      await engine.runRelaySync(page => page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]));
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("new collaborator text");
+      const replaced = requests.filter(request => request.method === "files.replace").map(request => (request.params as { path: string }).path);
+      expect(replaced).toEqual(process.platform === "darwin" || process.platform === "win32" ? ["n.md"] : []);
+    } finally { await engine.stop(); }
+  });
+
+  // The engine refuses to replace a Windows file whose permissions it can't
+  // read. The pass stops there, and the sync failure names the file.
+  it.runIf(process.platform === "darwin" || process.platform === "win32")("names the file whose permissions the engine could not keep", async () => {
+    const root = await createTestScratch("relay-engine-refused-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "earlier recorded text", origin: "local-file" });
+    await write(root, "n.md", "earlier recorded text");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", objectId: "note-object", path: "n.md", text: "new collaborator text", origin: "sync" });
+    const engine = capture(root, { rustEngineSessions: mockLiveSessions(loopback, undefined, undefined, request => {
+      if (request.method === "files.replace") throw new DaemonRefusalError({ code: "INTERNAL", message: "permissions-not-kept", retry: "no" }, undefined);
+    }) });
+    try {
+      const failed = await engine.runRelaySync(page => page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]))
+        .then(() => null, (error: unknown) => error as Error);
+      // relaySyncEngine records a failed pass as `${name}: ${message}`.
+      expect(syncFailureNotice({ cause: "unknown", detail: `${failed?.name}: ${failed?.message}`, sinceMs: 1, attempts: 1 }).message)
+        .toMatch(/^dohc could not read the permissions of n\.md, so it left the file as it was\./u);
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("earlier recorded text");
+    } finally { await engine.stop(); }
+  });
+
   it.each(["resolveFiles", "listMoments", "getActiveVersion", "ensureMainVersion"])("stops a relay write with its ordinary History cause when %s fails", async method => {
     const root = await createTestScratch("relay-history-failure-");
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
@@ -4922,8 +4965,9 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     expect(await readdir(root)).toEqual(left);
   });
 
-  // On macOS a temp Node creates takes the folder's inherited ACL entries, so
-  // the engine writes it there. The checks before the write stay here.
+  // On macOS and Windows a temp Node creates takes the folder's inherited ACL
+  // entries, so the engine writes it there. The checks before the write stay
+  // here.
   it("hands a checked write and its temp name to the engine's writer", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "notes/a.md", "old");

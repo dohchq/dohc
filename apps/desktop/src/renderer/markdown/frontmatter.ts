@@ -53,11 +53,13 @@ export function markdownEditorBody(markdown: string): string {
   return splitRawFrontmatter(markdown).body;
 }
 
+// The editor body leaves out the note's final line break. A saved note that
+// isn't empty ends with one, as the engine writes it.
 export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
   const split = splitRawFrontmatter(sourceMarkdown);
-  if (!split.frontmatter) return body;
-  const separator = split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
-  return `${split.frontmatter}${separator}${body}`;
+  const separator = split.frontmatter && split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
+  const merged = `${split.frontmatter ?? ""}${separator}${body}`;
+  return merged === "" || merged.endsWith("\n") ? merged : `${merged}\n`;
 }
 
 export function displayFrontmatterValue(value: unknown): string {

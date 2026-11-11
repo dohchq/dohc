@@ -117,7 +117,7 @@ it.skipIf(binary.missing || process.platform !== "linux")("restore while an old-
     await f.call("restore"); await f.call("release"); await f.call("settled");
     // Audit records travel through ordinary echo, after journal content has converged.
     const compared = await f.call("state"); expect(compared.passive).toEqual(compared.owner);
-    expect(compared.passive[0].text).toBe("a".repeat(1024)); expect(compared.passive[0].eventCount).toBe(3);
+    expect(compared.passive[0].text).toBe(`${"a".repeat(1024)}\n`); expect(compared.passive[0].eventCount).toBe(3);
     const cut = await f.call("state"); expect(cut.errors).toEqual([]);
     await f.call("settle"); await f.call("echo"); await f.call("compare");
     await f.call("hold"); await f.call("edit", {deliveryId: "after-restore"}); await f.call("held");
