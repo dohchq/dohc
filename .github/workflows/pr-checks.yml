@@ -217,10 +217,10 @@ jobs:
               - 'apps/desktop/e2e/helpers/systemClipboard.ts'
 
   javascript-prepare:
-    name: shared preparation + confinement
+    name: shared preparation
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     env:
       DOHC_CONFINEMENT_SUITES: exclude
@@ -273,14 +273,56 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
-      # Publish the closed prepared artifact before the independent sandbox proofs.
-      # Both complete gate spans still require this job's successful completion.
+      - name: Archive compiler confinement test binaries
+        run: cargo nextest archive --locked --package dohc-compiler-owner --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --zstd-level=-1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compiler-tests-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/compiler-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  confinement:
+    name: compiler and relay confinement
+    needs: [changes, javascript-prepare]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: javascript-prepared-${{ github.run_attempt }}
+          path: /tmp/prepared
+      - name: Restore prepared artifacts
+        run: tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiler-tests-${{ github.run_attempt }}
+          path: .agent-artifacts/verification
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-nextest@0.9.143
       - name: Compiler and relay confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
           compiler() {
-            cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail
+            cargo nextest run --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --workspace-remap "$PWD" --package dohc-compiler-owner --retries=0 --no-tests=fail
             report="$PWD/.agent-artifacts/confinement/compiler.tap"
             DOHC_CONFINEMENT_SUITES=only pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
               --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \
@@ -319,6 +361,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
   javascript-workers:
     name: JS worker ${{ matrix.shard }}
     needs: changes
@@ -653,7 +696,7 @@ jobs:
 
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare]
+    needs: [changes, javascript, rust, javascript-prepare, confinement]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
@@ -692,7 +735,9 @@ jobs:
             if (selected) await verifyCompletedCloud(gate);
           }));
           const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
-          assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'confinement job did not complete as selected');
+          for (const name of ['javascript-prepare', 'confinement']) {
+            assert.equal(jobs[name].result, confined ? 'success' : 'skipped', `${name} job did not complete as selected`);
+          }
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');
           NODE

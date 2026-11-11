@@ -48,7 +48,7 @@ export function aggregateRust(records) {
 
 function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  return ["what changed", "shared preparation + confinement", ...(scope === "js"
+  return ["what changed", "shared preparation", "compiler and relay confinement", ...(scope === "js"
     ? ["typecheck + tests", ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`)]
     : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`)])];
 }
@@ -93,7 +93,7 @@ async function jobs() {
 // The reporting job runs partition zero before waiting for the other workers.
 export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, now = Date.now } = {}) {
   const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-  const expected = gateJobNames(scope).filter(name => name !== finalJob);
+  const expected = gateJobNames(scope).filter(name => name !== finalJob && name !== "compiler and relay confinement");
   const budget = scope === "js" ? 300 : 600;
   for (let reads = 0; reads < 125; reads++) {
     const all = await readJobs();
@@ -119,7 +119,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     report.commit = process.env.GITHUB_SHA;
     Object.assign(report, scope === "js" ? aggregateJavascript(records) : aggregateRust(records));
     const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-    const expected = gateJobNames(scope);
+    const expected = gateJobNames(scope).filter(name => name !== "compiler and relay confinement");
     const required = (await jobs()).filter(job => expected.includes(job.name));
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && job.conclusion !== "success")) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);

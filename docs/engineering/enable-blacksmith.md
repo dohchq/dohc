@@ -9,7 +9,7 @@ Track the remaining public-contributor setup in [issue #1193](https://github.com
 The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
 An absent variable or `false` runs PR checks and default manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
-Shared preparation and confinement default to GitHub's `ubuntu-24.04` image.
+Shared preparation uses the workers' runner pool. Confinement always uses GitHub's `ubuntu-24.04` image.
 
 Inspect the switch:
 
@@ -107,8 +107,9 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `shared preparation + confinement` job runs those suites on Linux with Landlock whenever either gate runs.
-It reuses the prepared engine and runs the compiler and replica proofs concurrently after publishing the artifact.
+The `compiler and relay confinement` job runs those suites on Linux with Landlock whenever either gate runs.
+It downloads the prepared engine and compiler test archive, then runs the compiler and replica proofs concurrently.
+Workers and aggregates do not wait for confinement. The final verdict requires it for both gate spans.
 It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
 It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.

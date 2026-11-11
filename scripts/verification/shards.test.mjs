@@ -13,7 +13,7 @@ import { runVitestGroup } from "./vitest-group.mjs";
 
 test("early reporting waits for every successful job and preserves the complete group deadline", async () => {
   const started_at = "2026-11-10T00:00:00Z", start = Date.parse(started_at);
-  const names = ["what changed", "shared preparation + confinement", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
+  const names = ["what changed", "shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
   const complete = names.map(name => ({ name, started_at, status: "completed", conclusion: "success" }));
   let reads = 0, pauses = 0;
   await waitForGate("js", { now: () => start + 1000, pause: async () => { pauses++; }, readJobs: async () => {
@@ -176,7 +176,7 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
 });
 
 for (const [scope, jobName, artifact, seconds] of [
-  ["js", "shared preparation + confinement", "javascript-prepared", 300],
+  ["js", "shared preparation", "javascript-prepared", 300],
   ["rust", "Rust build once", "rust-tests", 600],
 ]) test(`${scope} preparation waits for this attempt and keeps the original group deadline`, async () => {
   const env = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };

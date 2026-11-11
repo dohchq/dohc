@@ -466,7 +466,7 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
     const automatic = {...workflowContext({enabled}), inputs: {runner_provider: "blacksmith", runner_size: size}};
     const unknown = workflowContext({enabled, size, event: "workflow_dispatch", provider: "unknown"});
     for (const [name, job] of Object.entries(document.jobs)) {
-      if (name === "javascript-prepare") {
+      if (name === "confinement") {
         assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
         continue;
       }
@@ -498,7 +498,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     }
   }
   // Confinement needs Landlock, including when the other jobs use Blacksmith.
-  assert.deepEqual(workflowExpression(jobs["javascript-prepare"]["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
+  assert.deepEqual(workflowExpression(jobs.confinement["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
   for (const name of ["javascript-prepare", "javascript-workers"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
   for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
@@ -520,6 +520,30 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
       }
     }
   }
+});
+
+test("confinement reuses build artifacts without occupying worker or aggregate runners", () => {
+  const {jobs} = load(workflow);
+  assert.equal(jobs["javascript-prepare"]["runs-on"], jobs["javascript-workers"]["runs-on"]);
+  assert.deepEqual(jobs.confinement.needs, ["changes", "javascript-prepare"]);
+  assert.deepEqual(workflowExpression(jobs.confinement["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name !== "verification") assert.ok(![job.needs].flat().includes("confinement"));
+  }
+  const build = jobs["javascript-prepare"].steps.map(step => step.run ?? "").join("\n");
+  assert.match(build, /cargo nextest archive --locked --package dohc-compiler-owner/);
+  assert.doesNotMatch(build, /cargo nextest run|compiler\(\)|relay\(\)/);
+  const proof = jobs.confinement.steps.find(step => step.name === "Compiler and relay confinement").run;
+  assert.match(proof, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --package dohc-compiler-owner --retries=0 --no-tests=fail/);
+  assert.match(proof, /scripts\/compiler-process\.test\.mjs scripts\/stage-app-compiler\.test\.mjs/);
+  assert.match(proof, /grep -qx '# skipped 0'/);
+  assert.match(proof, /grep -qx '# todo 0'/);
+  assert.match(proof, /! grep -qx '# pass 0'/);
+  assert.match(proof, /numPendingTests \|\| r\.numTodoTests/);
+  assert.match(proof, /--security-opt no-new-privileges:true --cap-drop ALL/);
+  assert.match(proof, /Seccomp:/);
+  assert.match(proof, /wait "\$compiler_pid" \|\| status=1/);
+  assert.match(proof, /wait "\$relay_pid" \|\| status=1/);
 });
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
@@ -563,7 +587,7 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
 
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
   const job = load(workflow).jobs.verification;
-  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare"]);
+  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare", "confinement"]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
@@ -574,7 +598,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
-  const jobNames = ["what changed", "shared preparation + confinement", "typecheck + tests", "engine gate", "Rust build once", "Rust policy checks",
+  const jobNames = ["what changed", "shared preparation", "compiler and relay confinement", "typecheck + tests", "engine gate", "Rust build once", "Rust policy checks",
     ...Array.from({length: JS_SHARDS - 1}, (_, index) => `JS worker ${index + 1}`),
     ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
@@ -585,14 +609,14 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       GITHUB_API_URL: "https://api.invalid", GITHUB_REPOSITORY: "owner/repo", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_SHA: checkout, DOHC_WORKFLOW_HEAD_SHA: "head", GITHUB_TOKEN: "fixture"}, encoding: "utf8", timeout: 10_000,
   });
   const jobs = (js, rust, jsResult, rustResult, confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped") =>
-    ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, "javascript-prepare": {result: confinementResult}});
+    ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, "javascript-prepare": {result: confinementResult}, confinement: {result: confinementResult}});
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const valid = jobs(js, rust, js === "true" ? "success" : "skipped", rust === "true" ? "success" : "skipped");
     assert.equal(run(valid).status, 0);
-    for (const name of ["javascript", "rust", "javascript-prepare"]) for (const result of ["failure", "cancelled", undefined]) {
+    for (const name of ["javascript", "rust", "javascript-prepare", "confinement"]) for (const result of ["failure", "cancelled", undefined]) {
       assert.equal(run({...valid, [name]: {result}}).status, 1);
     }
-    for (const name of ["javascript", "rust", "javascript-prepare"]) {
+    for (const name of ["javascript", "rust", "javascript-prepare", "confinement"]) {
       const opposite = valid[name].result === "success" ? "skipped" : "success";
       assert.equal(run({...valid, [name]: {result: opposite}}).status, 1);
     }
