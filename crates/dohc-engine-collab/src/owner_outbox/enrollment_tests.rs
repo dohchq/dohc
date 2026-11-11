@@ -2907,3 +2907,286 @@ fn collection_owner_checkpoint_progress(with_drafts: bool, recovery: bool) {
     ));
     assert_eq!(&history[before.len()..], &expected);
 }
+
+/// Writes `update` to the fixture's note as `actor` and queues it for the
+/// relay at `seq`, as this desktop's sync does with a Ydoc edit.
+fn queue_unsent(
+    store: &mut EngineStore,
+    observed: &ObservedOwnerBinding,
+    seq: i64,
+    update: &[u8],
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+) {
+    let binding = &observed.binding;
+    let mut payload = serde_json::json!({
+        "versionId": binding.main_version_id, "objectId": binding.object_id,
+        "path": binding.current_path, "contentKind": "richdoc",
+        "updateBlobSha256": hex_sha256(update), "lineageClaimId": binding.lineage_claim_id,
+        "isBaseState": false,
+    });
+    if let Some(actor) = actor {
+        payload["actorOriginId"] = actor.into();
+    }
+    if let Some(attribution) = attribution {
+        payload["attribution"] = serde_json::to_value(attribution).unwrap();
+    }
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::record_update_in_tx(tx, &key(binding)?, update, actor, attribution, 3)
+                .map_err(collab)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('workspace','local','epoch','stream',1)",
+                [],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES('workspace','local',?1,'ydoc.update',?2,3,0)",
+                rusqlite::params![seq, payload.to_string()],
+            )
+            .unwrap();
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+/// One queued entry: its digest, agent declaration, person flag and agent run.
+type QueuedEntry = (String, Option<String>, Option<bool>, Option<String>);
+
+fn queued_entries(store: &EngineStore) -> Vec<QueuedEntry> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT update_digest,agent_declaration_json,person_edit,agent_run_id \
+                 FROM owner_ydoc_outbox_entries ORDER BY sequence",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>();
+            rows
+        })
+        .unwrap()
+}
+
+fn queued_digests(store: &EngineStore) -> Vec<String> {
+    queued_entries(store)
+        .into_iter()
+        .map(|entry| entry.0)
+        .collect()
+}
+
+/// The note as its draft shows it: the checkpoint with every queued entry.
+fn draft_state(store: &EngineStore, observed: &ObservedOwnerBinding) -> Vec<u8> {
+    store
+        .read_with(|conn| bounded(&open_draft_in(conn, &observed.binding, 1)?.doc))
+        .unwrap()
+}
+
+/// Each unsent row goes out as its own entry, with its own digest and author,
+/// whether or not the host's checkpoint holds a newer edit from a link holder.
+/// The rows reach the local state, so nothing else is queued.
+#[test]
+fn each_unsent_row_is_queued_as_its_own_entry_with_its_digest() {
+    use dohc_engine_domain::{AgentDeclaration, ChangeActorKind, ChangeAttribution};
+    let person = ChangeAttribution {
+        actor_kind: ChangeActorKind::Human,
+        on_behalf_of: None,
+        depth: 0,
+        run: None,
+        agent_run_id: None,
+    };
+    let agent = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: Some("person".into()),
+        depth: 1,
+        run: None,
+        agent_run_id: Some("run-1".into()),
+    };
+    let declared = serde_json::to_string(&AgentDeclaration {
+        agent_id: "trip-agent".into(),
+        on_behalf_of: Some("person".into()),
+        depth: 1,
+    })
+    .unwrap();
+    for newer_host_edit in [false, true] {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        let local = Ydoc::wire();
+        local.apply(&checkpoint).unwrap();
+        let typed = local.richdoc_append_paragraph("typed while it prepared");
+        queue_unsent(
+            &mut store,
+            &observed,
+            0,
+            &typed,
+            Some("person"),
+            Some(&person),
+        );
+        let drafted = local.richdoc_append_paragraph("an agent's line");
+        queue_unsent(
+            &mut store,
+            &observed,
+            1,
+            &drafted,
+            Some("trip-agent"),
+            Some(&agent),
+        );
+        let host = Ydoc::wire();
+        host.apply(&checkpoint).unwrap();
+        if newer_host_edit {
+            host.richdoc_append_paragraph("a link holder's edit");
+        }
+        let enrollment = input(&store, &observed, bounded(&host).unwrap());
+        enroll(&mut store, &enrollment, &observed.limits).unwrap();
+        let expected: Vec<QueuedEntry> = vec![
+            (hex_sha256(&typed), None, Some(true), None),
+            (
+                hex_sha256(&drafted),
+                Some(declared.clone()),
+                None,
+                Some("run-1".into()),
+            ),
+        ];
+        assert_eq!(queued_entries(&store), expected, "{newer_host_edit}");
+        host.apply(&bounded(&local).unwrap()).unwrap();
+        assert_eq!(draft_state(&store, &observed), bounded(&host).unwrap());
+    }
+}
+
+/// A row that builds on the one before it is queued after it: the second row
+/// alone doesn't apply to the checkpoint.
+#[test]
+fn unsent_rows_that_build_on_each_other_are_queued_in_order() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let local = Ydoc::wire();
+    local.apply(&checkpoint).unwrap();
+    let inserted = local.richdoc_append_paragraph("inserted");
+    queue_unsent(&mut store, &observed, 0, &inserted, None, None);
+    let after = local.richdoc_append_paragraph("an agent's line after it");
+    let agent = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: None,
+        depth: 0,
+        run: None,
+        agent_run_id: None,
+    };
+    queue_unsent(
+        &mut store,
+        &observed,
+        1,
+        &after,
+        Some("trip-agent"),
+        Some(&agent),
+    );
+    let alone = Ydoc::wire();
+    alone.apply(&checkpoint).unwrap();
+    alone.apply(&after).unwrap();
+    assert!(alone.has_pending_dependencies());
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert_eq!(
+        queued_digests(&store),
+        [hex_sha256(&inserted), hex_sha256(&after)]
+    );
+    assert_eq!(draft_state(&store, &observed), bounded(&local).unwrap());
+}
+
+/// Up to 32 unsent rows go out one entry each. More go out as one entry that
+/// holds the whole local state.
+#[test]
+fn more_than_32_unsent_rows_are_queued_as_one_entry() {
+    for (rows, entries) in [(32, 32), (33, 1)] {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        let local = Ydoc::wire();
+        local.apply(&checkpoint).unwrap();
+        for seq in 0..rows {
+            let line = local.richdoc_append_paragraph(&format!("line {seq}"));
+            queue_unsent(&mut store, &observed, seq, &line, None, None);
+        }
+        let enrollment = input(&store, &observed, checkpoint.clone());
+        enroll(&mut store, &enrollment, &observed.limits).unwrap();
+        let queued = queued_digests(&store);
+        assert_eq!(queued.len(), entries, "{rows} rows");
+        if entries == 1 {
+            assert_eq!(queued, [hex_sha256(&bounded(&local).unwrap())]);
+        }
+        assert_eq!(draft_state(&store, &observed), bounded(&local).unwrap());
+    }
+}
+
+/// A row that doesn't apply to the draft leaves only the single entry, and
+/// the row queued before it is rolled back. Here the failing row builds on a
+/// row the relay already has and the host's checkpoint lacks.
+#[test]
+fn a_row_that_cannot_be_queued_leaves_only_the_single_entry() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let local = Ydoc::wire();
+    local.apply(&checkpoint).unwrap();
+    let sent = local.richdoc_append_paragraph("sent before it prepared");
+    queue_unsent(&mut store, &observed, 0, &sent, None, None);
+    let other = Ydoc::with_client_id(1);
+    other.apply(&checkpoint).unwrap();
+    let independent = other.richdoc_append_paragraph("from another tab");
+    local.apply(&independent).unwrap();
+    queue_unsent(&mut store, &observed, 1, &independent, None, None);
+    let after = local.richdoc_append_paragraph("after the sent line");
+    queue_unsent(&mut store, &observed, 2, &after, None, None);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('workspace','local',0)",
+                [],
+            )
+            .unwrap();
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let premise = Ydoc::wire();
+    premise.apply(&checkpoint).unwrap();
+    premise.apply(&independent).unwrap();
+    premise.apply(&after).unwrap();
+    assert!(
+        premise.has_pending_dependencies(),
+        "the last row builds on the sent one"
+    );
+    let enrollment = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert_eq!(
+        queued_digests(&store),
+        [hex_sha256(&bounded(&local).unwrap())]
+    );
+    assert_eq!(draft_state(&store, &observed), bounded(&local).unwrap());
+}
+
+/// Field edits queued one entry each, with the rest of the local state after
+/// them, leave field history as the edits wrote it: the states between the
+/// entries are never indexed.
+#[test]
+fn unsent_field_edits_queued_one_entry_each_keep_field_history() {
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    // A field the checkpoint lacks, so neither row builds on the fixture's
+    // title and status edit, which no row holds.
+    let high = local.frontmatter_set("priority", "high").unwrap();
+    queue_unsent(&mut store, &observed, 0, &high, Some("person"), None);
+    let urgent = local.frontmatter_set("priority", "urgent").unwrap();
+    queue_unsent(&mut store, &observed, 1, &urgent, Some("person"), None);
+    let history = field_history(&store);
+    let enrollment = input(&store, &observed, checkpoint);
+    enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    assert_eq!(
+        queued_digests(&store),
+        [
+            hex_sha256(&high),
+            hex_sha256(&urgent),
+            hex_sha256(&bounded(&local).unwrap()),
+        ]
+    );
+    assert_eq!(field_history(&store), history);
+    assert_visible_fields(
+        &store,
+        &observed.binding,
+        serde_json::json!({"title":"Edited title", "status":"done", "priority":"urgent"}),
+    );
+}
