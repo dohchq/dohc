@@ -26,7 +26,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, datasetOwnerOnlyError, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
 import { collectionChangeDeletes, type CollectionChangeProposal, type CollectionChangeRow } from "../../workspaces/collectionChange";
 import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
 import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
@@ -3123,6 +3123,9 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="w-[672px]">
             <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
           </div>
+        </Specimen>
+        <Specimen label="from a shared view, which only the owner can apply: lock, no Try again">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(datasetOwnerOnlyError()) }} /></div>
         </Specimen>
         <Specimen label="Not now">
           <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>

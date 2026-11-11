@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
-import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
+import { DATASET_SERVER_NOT_FOUND, DATASET_OWNER_ONLY, ipcWireError } from "../../ipc/errorWords";
 import type { CollectionChangeRow } from "../../workspaces/collectionChange";
 import { COLLECTION_CHANGE_FILE, loadCollectionChange, undoCollectionChange } from "../collections/collectionChangeFlow";
 import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
@@ -281,6 +281,23 @@ it("names the server when it refuses the change, with no Try again", async () =>
   fireEvent.click(await screen.findByTestId("lane-change-apply"));
   const failed = await screen.findByTestId("lane-change-failed");
   expect(failed.textContent).toBe("The server that keeps Volunteers refused this change. Nothing changed. Ask its owner to apply it.");
+  expect(screen.queryByTestId("lane-change-owner-only")).toBeNull();
+  expect(screen.queryByTestId("lane-change-apply")).toBeNull();
+  expect(screen.getByTestId("lane-change-not-now-button")).toBeTruthy();
+  expect(screen.getByTestId("lane-change-review")).toBeTruthy();
+  expect(onReply).not.toHaveBeenCalled();
+});
+
+it("tells a reader who can't change the Collection to ask its owner, with the lock and no Try again", async () => {
+  ask(place);
+  const refused = Object.assign(new Error("Open the original workspace to manage this Collection."), { code: DATASET_OWNER_ONLY });
+  place.control.refuse = new Error(`Error invoking remote method 'desktop:dataset': ${String(ipcWireError(refused))}`);
+  card();
+  fireEvent.click(await screen.findByTestId("lane-change-apply"));
+  const failed = await screen.findByTestId("lane-change-failed");
+  expect(failed.textContent).toBe("You can't apply changes to Volunteers. Ask its owner to apply it.");
+  expect(within(failed).getByTestId("lane-change-owner-only")).toBeTruthy();
+  expect(within(failed).getByRole("button", { name: "Copy" })).toBeTruthy();
   expect(screen.queryByTestId("lane-change-apply")).toBeNull();
   expect(screen.getByTestId("lane-change-not-now-button")).toBeTruthy();
   expect(screen.getByTestId("lane-change-review")).toBeTruthy();
