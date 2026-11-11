@@ -1022,6 +1022,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       await oweRunNotice(workspace, runId);
       await options.dispatchStoreFor(workspace).failRun({ runId, reason: failure.reason });
       failure.failed = true;
+      // A launch that failed can leave its log or MCP config behind.
+      await markRunLogEnded(actualLogPath(runId, failure.claim.run.logPath), nowMs()).catch(reportError);
       notifyRunUpdated(workspace, failure.claim.run.threadId);
     }
     const requeued = failure.requeue && (await options.requeueFailedTrigger?.({
@@ -1422,7 +1424,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
-      // Its recorded end is now, so its log's age counts from now too.
+      // Its recorded end is now, so cleanup counts its log's age from now.
       await markRunLogEnded(actualLogPath(claim.run.runId, claim.run.logPath), nowMs()).catch(reportError);
       notifyRunUpdated(workspace, claim.run.threadId);
       await settleRunNotice(workspace, claim.run.runId);
@@ -1577,8 +1579,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pumpTimer = setInterval(() => {
       schedulePump();
     }, CHAT_DISPATCH_PUMP_MS);
-    // Recovery stamps an interrupted run's end on its log first, so cleanup
-    // doesn't count that log's age from before dohc stopped.
+    // Cleanup keeps any log whose run has no recorded end, so this order is
+    // only tidiness: recovery records interrupted runs' ends first, and this
+    // pass already counts them.
     void Promise.all(scans).then(() => sweepRunLogs());
     runLogSweepTimer = setInterval(() => void sweepRunLogs(), RUN_LOG_SWEEP_MS);
   }
@@ -2035,6 +2038,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             // so its exit is what lets held requests start.
             const forget = () => {
               if (selfTests.get(workspaceId) !== test) return;
+              void markRunLogEnded(logPath, nowMs()).catch(reportError);
               selfTests.delete(workspaceId);
               if (!selfTestReservations.has(workspaceId) && !stopped) {
                 void scanWorkspace(workspaceId).catch(reportError);
@@ -2157,6 +2161,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           // The self-test already failed; the caller reads that failure, not this one.
         }
         reportError(error);
+        // A launch that failed can leave its log behind.
+        await markRunLogEnded(logPath, nowMs()).catch(reportError);
         // A restrict that landed while the self-test was starting stops it here.
         if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
@@ -2187,10 +2193,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const appQuitRuns: LiveRun[] = [];
     const runWorkspacesToRelease: LiveRun[] = [];
     const quitProcesses: RunnerProcess[] = [];
+    const selfTestLogs: string[] = [];
     for (const test of selfTests.values()) {
       if (test.killEscalation) clearTimeout(test.killEscalation);
       test.killEscalation = null;
       quitProcesses.push(test.child);
+      selfTestLogs.push(actualLogPath(test.runId));
     }
     for (const live of liveRuns.values()) {
       if (live.killEscalation) clearTimeout(live.killEscalation);
@@ -2247,6 +2255,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
     await Promise.all(quitTerminations);
+    await Promise.all(selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)));
     await Promise.all(
       [
         ...runWorkspacesToRelease.map(async (live) => {
