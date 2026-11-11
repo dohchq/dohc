@@ -79,6 +79,51 @@ it("says History paused with Try again, restarts capture from the row, and keeps
   expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
 });
 
+// Protected files wait on the secret key: Try again brings the row back
+// while the key is still unavailable, but a failure that answers after a
+// healthy status must not.
+it("brings the secret key row back after a failed Try again, but not after the key works again", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  let status: SyncStatusResult = { ...SYNC_STATUS, secretKeyUnavailable: "key-missing" };
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  const failed = deferred<void>();
+  const late = deferred<void>();
+  bridge.retrySecretKey.mockReturnValueOnce(failed.promise).mockReturnValueOnce(late.promise);
+  renderShell(bridge);
+  const user = userEvent.setup();
+  const title = "History could not save protected files";
+  // The panel closes once Try again empties it, so each row read reopens it.
+  const row = async () => {
+    await screen.findByText(title);
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    return (await within(screen.getByTestId("notice-center")).findByText(title)).closest("li")!;
+  };
+
+  await user.click(within(await row()).getByRole("button", { name: "Try again" }));
+  expect(bridge.retrySecretKey).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+  await act(async () => {
+    failed.reject(new Error("dohc still cannot use the workspace secret key."));
+    await failed.promise.catch(() => undefined);
+  });
+  expect(within(await row()).getByRole("button", { name: "Try again" })).toBeTruthy();
+
+  await user.click(within(await row()).getByRole("button", { name: "Try again" }));
+  // The key works again: a healthy status arrives before the retry answers.
+  status = SYNC_STATUS;
+  const reads = bridge.getSyncStatus.mock.calls.length;
+  act(() => bridge.emitWorkspaceActivity());
+  await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
+  await act(async () => { await bridge.getSyncStatus.mock.results.at(-1)!.value; });
+  expect(screen.queryByText(title)).toBeNull();
+  await act(async () => {
+    late.reject(new Error("dohc still cannot use the workspace secret key."));
+    await late.promise.catch(() => undefined);
+  });
+  expect(screen.queryByText(title)).toBeNull();
+  expect(screen.queryByText(/secret key/u)).toBeNull();
+});
+
 // An open report keeps its text while other notices arrive: its Time is when
 // the notice was raised, not when the list last drew.
 it("keeps an open Details report's text when another notice arrives later", async () => {

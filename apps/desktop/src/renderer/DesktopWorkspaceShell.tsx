@@ -6281,13 +6281,13 @@ export function DesktopWorkspaceShell(props: {
     void bridge().retrySecretKey({ workspaceId: askedFor }).then(() => {
       if (workspaceIdRef.current !== askedFor) return;
       reportSecretKeyUnavailable(null, retrySecretKey);
-    }, (error: unknown) => {
-      if (workspaceIdRef.current !== askedFor) return;
+    }, () => {
+      // A healthy status that arrived first already cleared the row.
       const reason = secretKeyUnavailableRef.current;
-      if (reason !== null) reportSecretKeyUnavailable(reason, retrySecretKey);
-      else reportShellError("dohc could not use the workspace secret key.", error, retrySecretKey, "secret-key-unavailable");
+      if (workspaceIdRef.current !== askedFor || reason === null) return;
+      reportSecretKeyUnavailable(reason, retrySecretKey);
     });
-  }, [workspaceId, reportSecretKeyUnavailable, reportShellError]);
+  }, [workspaceId, reportSecretKeyUnavailable]);
   useEffect(() => {
     reportSecretKeyUnavailable(secretKeyUnavailable, retrySecretKey);
   }, [secretKeyUnavailable, reportSecretKeyUnavailable, retrySecretKey]);
