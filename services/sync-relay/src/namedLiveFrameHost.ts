@@ -16,7 +16,6 @@ import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
 import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
-import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
@@ -130,13 +129,9 @@ function captureLiveFrameHost(options: {
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
   // A recipient sees the document through its own share. Accepted events carry
   // binding, the lineage's one recorded binding, for every editor.
-  const shown = actor.kind === "owner" ? binding.selectorPaths : storage.readLiveRecipientSelector({ document, actor });
-  if (!shown) throw new Error("Named host standing changed.");
-  const projection = actor.kind === "link"
-    ? createAccountlessPathProjection({ paths: [...shown], versionId: null, access: "edit" }) : null;
-  const wireBinding = projection && actor.kind === "link" ? parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
-    currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths })
-    : actor.kind === "named" ? parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}`, selectorPaths: shown }) : binding;
+  const view = () => actor.kind === "owner" ? binding : storage.readLiveRecipientView({ document, actor }, binding);
+  const wireBinding = view();
+  if (!wireBinding) throw new Error("Named host standing changed.");
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -152,11 +147,12 @@ function captureLiveFrameHost(options: {
     try {
       standing();
       // A recipient's share stands while it covers the document under the same
-      // grant generation. A share edit that still covers it changes neither.
+      // grant generation. The session also ends when what that share shows
+      // changes, so a reconnect opens with the new view.
       const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
       if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
         !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
-        !isDeepStrictEqual(current.host, native.coordinate)) throw new Error("Named host standing changed.");
+        !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(view(), wireBinding)) throw new Error("Named host standing changed.");
     } catch (error) { close(); throw error; }
   }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });

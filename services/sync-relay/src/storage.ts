@@ -591,8 +591,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.resolveLiveObjectHostBinding(this, scope, objectId);
   }
 
-  readLiveRecipientSelector(input: CurrentLiveBindingRequest): readonly string[] | null {
-    return liveDocumentAuthorityStorage.readLiveRecipientSelector(this, input);
+  readLiveRecipientView(input: CurrentLiveBindingRequest,
+    binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding): import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding | null {
+    return liveDocumentAuthorityStorage.readLiveRecipientView(this, input, binding);
   }
 
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {

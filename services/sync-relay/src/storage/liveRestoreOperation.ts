@@ -169,7 +169,7 @@ function basis(storage: StorageContext, intent: StopRestoreIntent, authority: St
   const share = storage.getShare(intent.shareId), control = storage.getLiveHostControl();
   const storedSelector = share && parseStoredAnyShareSelectorJson(share.selectorJson);
   const selector = storedSelector && effectiveShareSelector(storedSelector,"edit");
-  // The share is the one whose access stops. The owner keeps the lineage's own binding.
+  // The share is the one whose access stops. Every editor, the owner included, keeps the lineage's own binding.
   const ownerBinding = recordedLiveBinding(storage, intent.document, authority.binding);
   if (!ownerBinding || !share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
     !selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share,selector) || !control ||

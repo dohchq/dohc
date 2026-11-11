@@ -72,6 +72,7 @@ import { liveBrowserActor } from "../liveBrowserContext";
 import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment, type LinkEnrollment } from "./linkEnrollment";
 import { agentWriteAuthorityInTransaction } from "./agentConnections";
 import { authorizeLinkShareAction } from "../shareAuthorization";
+import { createAccountlessPathProjection } from "../accountlessPathProjection";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
 export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
@@ -374,9 +375,9 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) return { kind: "refused", reason: "host-unavailable" };
-    const link = currentLinkEdit(storage, liveBrowserActor(scope));
+    const actor = liveBrowserActor(scope), link = currentLinkEdit(storage, actor);
     if (!link) return { kind: "refused", reason: "not-authorized" };
-    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), link.share, link.effectiveSelector);
+    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), actor, link.share, link.effectiveSelector);
     if (bound.kind !== "bound") return bound;
     return { kind: "current", binding: bound.binding,
       host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
@@ -692,7 +693,7 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       if (!named.ok) return { kind: "refused", reason: named.reason };
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
         grantId: named.grant.grantId, grantGeneration: named.grant.generation });
-      bound = bindLiveDocument(storage, document, stored, named.share, named.effectiveSelector);
+      bound = bindLiveDocument(storage, document, stored, actor, named.share, named.effectiveSelector);
     } else if (actor.kind === "link") {
       const link = currentLinkEdit(storage, actor);
       if (!link?.enrollment.principal || link.enrollment.sessionPrincipalId !== link.enrollment.principal.principalId) {
@@ -700,7 +701,7 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       }
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
         grantId: link.grant.grantId, grantGeneration: link.grant.generation });
-      bound = bindLiveDocument(storage, document, stored, link.share, link.effectiveSelector);
+      bound = bindLiveDocument(storage, document, stored, actor, link.share, link.effectiveSelector);
     } else {
       if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) return { kind: "refused", reason: "not-authorized" };
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
@@ -777,32 +778,53 @@ function liveDocumentIsCurrent(storage: StorageContext, document: LiveDocumentKe
       !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath);
   }
 
+type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner" }>;
+
 /**
- * A recipient's share decides only whether the recipient is admitted. Its
- * accepted events carry the lineage's recorded binding, as the owner's do.
+ * A recipient's share decides whether the recipient is admitted and what it
+ * is shown. Its accepted events carry the lineage's recorded binding, as the
+ * owner's do. A share whose paths can't form that view refuses here, before a
+ * ticket is minted or used.
  */
 function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null,
-  share: SyncRelayShareRow, selector: ShareSelector):
+  actor: LiveRecipient, share: SyncRelayShareRow, selector: ShareSelector):
   { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
     if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
     if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
     if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
       return { kind: "refused", reason: "stale-selector" };
     }
-    return bindRecordedLiveDocument(storage, document, stored);
+    const bound = bindRecordedLiveDocument(storage, document, stored);
+    if (bound.kind === "bound" && !liveRecipientView(bound.binding, actor, selector.paths)) return { kind: "refused", reason: "stale-selector" };
+    return bound;
 }
 
 /**
- * The paths a named or link recipient's own share selects: what the relay
- * shows that recipient of the document's workspace. Null when the share no
- * longer admits them to live editing there.
+ * What a recipient's share shows of `binding`: the share's own paths, under a
+ * workspace ID naming the grant. A link sees paths relative to its share.
+ * Null when those paths can't form a binding.
  */
-export function readLiveRecipientSelector(storage: StorageContext, input: CurrentLiveBindingRequest): readonly string[] | null {
+function liveRecipientView(binding: LiveObjectBinding, actor: LiveRecipient, paths: readonly string[]): LiveObjectBinding | null {
+  try {
+    if (actor.kind === "named") return parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}`, selectorPaths: paths });
+    const projection = createAccountlessPathProjection({ paths: [...paths], versionId: null, access: "edit" });
+    return parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
+      currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths });
+  } catch { return null; }
+}
+
+/**
+ * What a named or link recipient's own share now shows of `binding`, the
+ * lineage's recorded binding. Null when the share no longer admits them to
+ * live editing in the document's workspace, or can't form that view.
+ */
+export function readLiveRecipientView(storage: StorageContext, input: CurrentLiveBindingRequest, binding: LiveObjectBinding): LiveObjectBinding | null {
   const { document, actor } = snapshotCurrentBindingRequest(input);
-  if (actor.kind === "owner") throw new TypeError("An owner has no recipient selector.");
-  return storage.readLiveAuthority(() => {
+  if (actor.kind === "owner") throw new TypeError("An owner has no recipient view.");
+  const paths = storage.readLiveAuthority(() => {
     const shared = actor.kind === "named"
       ? authorizeNamedLiveEditShareGrant({ storage, actorUserId: actor.userId, grantId: actor.grantId }) : currentLinkEdit(storage, actor);
     return shared?.ok && shared.share.workspaceId === document.workspaceId ? shared.effectiveSelector.paths : null;
   });
+  return paths && liveRecipientView(binding, actor, paths);
 }

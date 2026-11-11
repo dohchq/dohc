@@ -815,8 +815,8 @@ export interface SyncRelayStorage {
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
-  /** The paths a named or link recipient's own share selects, or null when it no longer admits them. */
-  readLiveRecipientSelector(input: CurrentLiveBindingRequest): readonly string[] | null;
+  /** What a named or link recipient's own share shows of the lineage's binding, or null when it no longer admits them or can't form that view. */
+  readLiveRecipientView(input: CurrentLiveBindingRequest, binding: LiveObjectBinding): LiveObjectBinding | null;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
