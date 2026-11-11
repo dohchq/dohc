@@ -6514,6 +6514,105 @@ async fn a_close_that_conflicts_with_an_outside_edit_reports_it_then_closes() {
     call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
 
+/// Retrying a close that couldn't write the note's file must not drain what
+/// waits behind a session that has since reopened the note: that queue is the
+/// new session's to drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_close_leaves_a_reopened_notes_queue_to_its_session() {
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id,
+        key,
+        winner,
+        winner_claim,
+    } = queue_winning_lineage_behind_session("loser from B").await;
+    std::fs::write(
+        scratch.path().join(CLOSE_WINNER_PATH),
+        "changed outside dohc",
+    )
+    .expect("outside edit");
+    let close = json!({ "sessionId": session_id, "settle": false });
+    call_error(&transport, &handle, 5, "ydoc.close", close.clone()).await;
+
+    let reopened = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": CLOSE_WINNER_PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let mut store = EngineStore::open(&db_path, 2).expect("open fixture store");
+    let delta = winner.plaintext_insert(
+        winner.plaintext_string().len() as u32,
+        " behind the reopened session",
+    );
+    let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
+    let update = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: CLOSE_WINNER_WORKSPACE_ID.to_owned(),
+        origin_id: "winner-origin".to_owned(),
+        origin_seq: 2,
+        relay_seq: Some(12),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": CLOSE_WINNER_PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "lineageClaimId": winner_claim,
+            "isBaseState": false,
+        }),
+        recorded_at_ms: 40,
+    };
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &update,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue behind the reopened session");
+    assert!(matches!(
+        applied,
+        dohc_engine_sync::ApplyOutcome {
+            primary: dohc_engine_sync::ApplyDisposition::Applied(result),
+            ..
+        } if result.deferred
+    ));
+    drop(store);
+    let queued = || -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+            .expect("deferred row count")
+    };
+    assert_eq!(queued(), 1);
+
+    call_error(&transport, &handle, 7, "ydoc.close", close).await;
+    assert_eq!(
+        queued(),
+        1,
+        "the retry leaves the reopened session's queue to that session"
+    );
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+}
+
 fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.richdoc_append_paragraph(paragraph))
 }
