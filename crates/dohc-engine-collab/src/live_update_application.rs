@@ -2747,12 +2747,19 @@ mod tests {
         for row in vectors["deliveries"].as_array().unwrap() {
             let (_dir, mut store, mut cache, _owner, handle) = fixture();
             let mut update = event("credit", 1, Ydoc::wire().plaintext_insert(0, "x"));
-            update.metadata.canonical_version = Some(2);
-            update.metadata.author_snapshot =
-                serde_json::from_value(row["authorSnapshot"].clone()).unwrap();
+            if let Some(authority) = row.get("authority") {
+                update.metadata.accepted.authority =
+                    serde_json::from_value(authority.clone()).unwrap();
+            }
             update.metadata.first_seen = serde_json::from_value(row["firstSeen"].clone()).unwrap();
-            update.metadata.first_seen_deletes =
-                serde_json::from_value(row["firstSeenDeletes"].clone()).unwrap();
+            // A v1 delivery carries no author snapshot and no deletion ranges.
+            if row["canonicalVersion"] != 1 {
+                update.metadata.canonical_version = Some(2);
+                update.metadata.author_snapshot =
+                    serde_json::from_value(row["authorSnapshot"].clone()).unwrap();
+                update.metadata.first_seen_deletes =
+                    serde_json::from_value(row["firstSeenDeletes"].clone()).unwrap();
+            }
             ack(apply(&mut store, &mut cache, &handle, update));
             let credited = store
                 .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))

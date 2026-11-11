@@ -34,6 +34,16 @@
       "firstSeen": [],
       "firstSeenDeletes": [],
       "credits": []
+    },
+    {
+      "case": "a v1 delivery from a shared author with nothing first seen credits nobody",
+      "note": "Relays and self-hosted servers before #1586 (October 5, 2026) journaled v1 deliveries, which carry no author snapshot and no deletion ranges, so a deletion alone arrived with nothing first seen. The engine credited the sharing principal for it until #2251; the relay's author window never did. Both now credit nobody.",
+      "canonicalVersion": 1,
+      "authority": {"principalKind": "named", "principalId": "bob", "grantId": "grant-1", "grantGeneration": 1},
+      "authorSnapshot": [],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
     }
   ],
   "firstSeen": {
