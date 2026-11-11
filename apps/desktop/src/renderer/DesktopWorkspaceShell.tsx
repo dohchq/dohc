@@ -193,7 +193,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { advanceReopenKey, observeLiveSessions, useReopenKey } from "./documentVersionKey";
+import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -2427,6 +2427,7 @@ export function DesktopWorkspaceShell(props: {
   if (liveSessionsGenerationRef.current.workspaceId !== workspaceId) {
     liveSessionsGenerationRef.current = { workspaceId, generation: null };
   }
+  useEffect(() => watchLiveSessions(workspaceId), [workspaceId]);
   useEffect(() => {
     if (captureDecidedFor !== workspaceId || syncStatus === null) return;
     const next = syncStatus.liveSessionsGeneration;
