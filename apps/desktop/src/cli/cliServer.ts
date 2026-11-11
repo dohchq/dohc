@@ -156,6 +156,8 @@ import {
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
+import type { HeldSharePath } from "../workspaces/shareViewFiles";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -401,6 +403,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // The shared files this shared view holds back, or null outside a shared view.
+  sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
   // A save the engine holds for this path, as the held band's review shows it.
   heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
@@ -2828,6 +2832,21 @@ async function dispatchWorkspace(
         return { ok: true as const, ...(await keptCopies.list()) };
       } catch (error) {
         return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "sharedFilesHeld": {
+      if (!context.sharedFilesHeld) return { ok: false as const, reason: "dohc cannot read this workspace's shared files" };
+      try {
+        const held = await context.sharedFilesHeld();
+        return {
+          ok: true as const,
+          heldFiles: held && held.count > 0
+            ? { ...held, message: unjournalablePathMessages(held.files).join(" ") }
+            : null,
+        };
+      } catch (error) {
+        return mcpFailure(error, "failed to read the shared files held back");
       }
     }
 

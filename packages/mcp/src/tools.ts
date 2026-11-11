@@ -1097,13 +1097,14 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting, kept] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept, held] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
     requestCli(ctx, "collectionsWaiting", {}),
     ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
+    requestCli(ctx, "sharedFilesHeld", {}),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1126,6 +1127,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
     ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
+    ...(held.ok && held.heldFiles ? { heldFiles: held.heldFiles } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
