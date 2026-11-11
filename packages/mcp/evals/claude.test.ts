@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { readTranscript, sampleEnvironment } from "./claude";
+import { join } from "node:path";
+import { readTranscript, sampleEnvironment, workspacePaths } from "./claude";
 
 const line = (event: unknown) => JSON.stringify(event);
 
@@ -15,6 +16,13 @@ describe("eval samples", () => {
       CLAUDE_CODE_SESSION_ID: "session",
       T3CODE_THREAD_ID: "thread",
     })).toEqual({ PATH: "/bin", HOME: "/home/user" });
+  });
+
+  it("names a built-in tool's path as the workspace does, and leaves a sibling folder's path alone", () => {
+    const root = join("/tmp", "eval", "workspace");
+    const sibling = join("/tmp", "eval", "workspace-other", "plan.md");
+    expect(workspacePaths([{ tool: "Edit", args: { file_path: join(root, "notes", "plan.md"), other: sibling, new_string: "x" }, ok: true }], root))
+      .toEqual([{ tool: "Edit", args: { file_path: "notes/plan.md", other: sibling, new_string: "x" }, ok: true }]);
   });
 
   it("reads the calls, their outcomes, and the answer from Claude Code's output", () => {

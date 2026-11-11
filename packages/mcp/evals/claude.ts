@@ -109,9 +109,10 @@ export function readTranscript(lines: readonly string[]): {
 }
 
 /** Rewrites a built-in tool's absolute path as the workspace path a case names, such as `notes/plan.md`. */
-function workspacePaths(calls: readonly RecordedCall[], root: string): RecordedCall[] {
+export function workspacePaths(calls: readonly RecordedCall[], root: string): RecordedCall[] {
+  // The separator keeps a sibling folder whose name starts with the root's out of it.
   const inRoot = (value: unknown): value is string =>
-    typeof value === "string" && value.toLowerCase().startsWith(root.toLowerCase());
+    typeof value === "string" && `${value}${sep}`.toLowerCase().startsWith(`${root}${sep}`.toLowerCase());
   return calls.map((call) => ({
     ...call,
     args: Object.fromEntries(Object.entries(call.args).map(([key, value]) =>

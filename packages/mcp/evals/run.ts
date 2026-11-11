@@ -9,8 +9,8 @@ import type { Check, EvalCase, RecordedCall } from "./case";
 import { CASES } from "./cases";
 import { claudeArguments, runClaudeSample, type SampleUsage } from "./claude";
 import { casePasses, grade } from "./grade";
+import { readOptions, USAGE, type RunOptions } from "./options";
 
-const DEFAULT_MODEL = "claude-sonnet-5-5";
 const SAMPLE_TIMEOUT_MS = 300_000;
 
 interface ResultRow {
@@ -28,11 +28,6 @@ interface ResultRow {
   harness?: string;
   /** `session` when the sample kept the enclosing session's route to the model. */
   route: "sign-in" | "session";
-}
-
-function flag(argv: readonly string[], name: string): string | undefined {
-  const index = argv.indexOf(name);
-  return index < 0 ? undefined : argv[index + 1];
 }
 
 /** What the model reads of every tool: the bytes T3 Code's context budget counts the same way. */
@@ -136,40 +131,42 @@ function summary(input: { model: string; cases: readonly EvalCase[]; rows: reado
 }
 
 async function main(argv: readonly string[]): Promise<number> {
+  let options: RunOptions;
+  try {
+    options = readOptions(argv);
+  } catch (error) {
+    process.stderr.write(`${(error as Error).message}\n${USAGE}\n`);
+    return 1;
+  }
   const context = await toolListBytes();
-  if (argv.includes("--context")) {
+  if (options.context) {
     process.stdout.write(`${context.tools} tools, ${context.bytes} bytes of names, descriptions, and input schemas\n`);
     return 0;
   }
-  const wanted = flag(argv, "--case")?.split(",");
+  const wanted = options.cases;
   const cases = wanted ? CASES.filter((evalCase) => wanted.includes(evalCase.id)) : CASES;
   const unknown = (wanted ?? []).filter((id) => !CASES.some((evalCase) => evalCase.id === id));
-  if (unknown.length > 0 || cases.length === 0) {
-    process.stderr.write(`no case named ${unknown.join(", ") || "(none)"}; cases: ${CASES.map((evalCase) => evalCase.id).join(", ")}\n`);
+  if (unknown.length > 0) {
+    process.stderr.write(`no case named ${unknown.join(", ")}; cases: ${CASES.map((evalCase) => evalCase.id).join(", ")}\n`);
     return 1;
   }
-  const model = flag(argv, "--model") ?? DEFAULT_MODEL;
-  if (argv.includes("--dry-run")) {
+  const { model, samples, keepSessionRoute } = options;
+  if (options.dryRun) {
     for (const evalCase of cases) {
       process.stdout.write(`${evalCase.id}\n  claude ${claudeArguments({ prompt: evalCase.prompt, model, mcpConfigPath: "<mcp.json>" }).map((part) => JSON.stringify(part)).join(" ")}\n`);
     }
     return 0;
   }
-  const out = flag(argv, "--out");
-  if (!out) {
-    process.stderr.write("usage: run.ts --out <folder> [--model <id>] [--case <ids>] [--samples <n>] [--concurrency <n>] [--baseline <results.jsonl>] [--keep-session-route] [--dry-run] [--context]\n");
+  if (!options.out) {
+    process.stderr.write(`--out takes a folder for the run's results\n${USAGE}\n`);
     return 1;
   }
-  const samples = Number(flag(argv, "--samples") ?? 2);
-  const concurrency = Number(flag(argv, "--concurrency") ?? 2);
-  const keepSessionRoute = argv.includes("--keep-session-route");
-  const baselinePath = flag(argv, "--baseline");
-  const baseline = baselinePath
-    ? (await readFile(baselinePath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as ResultRow)
+  const baseline = options.baseline
+    ? (await readFile(options.baseline, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as ResultRow)
     : undefined;
 
-  await mkdir(out, { recursive: true });
-  const resultsPath = join(out, "results.jsonl");
+  await mkdir(options.out, { recursive: true });
+  const resultsPath = join(options.out, "results.jsonl");
   await writeFile(resultsPath, "");
   const rows: ResultRow[] = [];
   const record = async (row: ResultRow): Promise<void> => {
@@ -178,12 +175,12 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(`${row.case} #${row.sample}: ${row.error ? `error: ${row.error}` : row.pass ? "pass" : "FAIL"}\n`);
   };
   const queue = [...cases];
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, async () => {
+  await Promise.all(Array.from({ length: options.concurrency }, async () => {
     for (let evalCase = queue.shift(); evalCase; evalCase = queue.shift()) await runCase(evalCase, model, samples, keepSessionRoute, record);
   }));
 
   const report = summary({ model, cases, rows, baseline, context });
-  await writeFile(join(out, "summary.md"), report.text);
+  await writeFile(join(options.out, "summary.md"), report.text);
   process.stdout.write(`\n${report.text}`);
   return report.regressions.length > 0 ? 1 : 0;
 }

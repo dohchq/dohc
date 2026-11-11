@@ -251,7 +251,7 @@ export const CASES: readonly EvalCase[] = [
     },
     prompt: "What changed in proposal.md in its latest change?",
     expect: {
-      calls: [{ tool: "dohc_list_changes", args: { path: "proposal.md" } }, { tool: "dohc_read_change", args: { id: "moment-2" } }],
+      calls: [{ tool: "dohc_list_changes", args: { path: "proposal.md" }, ok: true }, { tool: "dohc_read_change", args: { id: "moment-2" }, ok: true }],
       text: ["4,?000", "5,?500"],
     },
     solution: {
@@ -398,11 +398,15 @@ export const CASES: readonly EvalCase[] = [
       chat: threadRead(thread("thread-launch", "Launch day"), [
         message("message-poll", "thread-launch", "Which day do we launch?", { needsDecision: true, decisionState: "open", options: ["Thursday", "Friday"] }),
       ]),
-      reply: { threadId: "th_launch", messageId: "msg_answer", warning: "reply msg_answer was posted, but decision msg_poll could not be resolved: decision update failed" },
+      // The reply posts. Closing the poll with it fails, and the result says so.
+      reply: (args: Args) => ({
+        threadId: "th_launch", messageId: "msg_answer",
+        ...(args.resolve ? { warning: "reply msg_answer was posted, but decision msg_poll could not be resolved: decision update failed" } : {}),
+      }),
     },
     prompt: "Answer the open poll in the thread thread-launch with Friday, then tell me whether the poll is closed.",
     expect: {
-      calls: [{ tool: "dohc_reply_to_chat", args: { threadId: "thread-launch", choose: "Friday" } }],
+      calls: [{ tool: "dohc_reply_to_chat", args: { threadId: "thread-launch", resolve: "message-poll", choose: "Friday" }, ok: true }],
       maxCalls: { dohc_reply_to_chat: 1 },
       text: ["still open|stayed open|remains open|is open|not (been |yet )?(closed|resolved)|n't (been |yet )?(closed|resolved)|could not be (closed|resolved)|did not close|didn't close"],
     },

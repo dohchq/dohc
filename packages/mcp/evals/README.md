@@ -36,6 +36,8 @@ pnpm eval --model claude-haiku-5-5 --out ../../.agent-artifacts/evals/haiku
 - `--context` prints the size of the tool list and calls no model.
 - `--dry-run` prints each sample's command and calls no model.
 
+A misspelled flag, a flag without its value, or a count below 1 stops the run before it starts.
+
 A case passes when more than half of its graded samples pass. A sample that cannot be graded is an error: the harness failed, or the case lists no answer for a request the agent made. Errors are listed and left out of every pass count.
 
 ## What a run uses
