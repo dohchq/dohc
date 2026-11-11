@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { openSyncRelayStorage } from "../storage";
 import { openEmptyRelayTestStorage } from "./emptyRelayStorage";
+import { closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, storagePath, testStorage } from "./index";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -52,4 +53,16 @@ it("retains configured storage validation and permits retry after an open failur
   expect(() => openEmptyRelayTestStorage(target, {workspaceQuotaBytes: 0})).toThrow(/workspaceQuotaBytes/);
   expect(existsSync(target)).toBe(false);
   openEmptyRelayTestStorage(target, {workspaceQuotaBytes: 1024}).close();
+});
+
+it("registers fresh fixtures, preserves their writes on reopen, and removes them after closing", async () => {
+  const storage = await testStorage(), file = storagePath(storage);
+  try {
+    inspectDatabase(file).exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES ('saved','owner',1)");
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(file);
+    expect(storagePath(reopened)).toBe(file);
+    expect(inspectDatabase(file).prepare("SELECT workspace_id FROM sync_relay_workspaces").all()).toEqual([{workspace_id: "saved"}]);
+  } finally { await closeTestStorages(); }
+  expect(existsSync(file)).toBe(false);
 });
