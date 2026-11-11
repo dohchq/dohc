@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { afterEach, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import type { LiveAuthorContext } from '@dohc/live-session-contract'
@@ -104,6 +105,24 @@ it('keeps Alice deletion coverage when Bob rewraps it with a new edit', () => {
   expect(result.admitted?.metadata.firstSeen).toEqual([{ clientId: 202, startClock: 0, endClock: 1 }])
   expect(result.admitted?.metadata.firstSeenDeletes).toEqual([])
   expect(f.journalRows().journal[1]!.first_seen_deletes_json).toBe(JSON.stringify(deleted.admitted?.metadata.firstSeenDeletes))
+})
+
+it('names what each delivery first adds as the shared cases do', () => {
+  // The engine's tests build their deliveries' ranges from the same cases.
+  const vectors = JSON.parse(readFileSync(new URL('../../live-session-contract/vectors/live-author-credit-vectors.json', import.meta.url), 'utf8')) as {
+    firstSeen: { baseline: number[]; cases: { case: string; deliveries: { update: number[]; firstSeen: unknown; firstSeenDeletes: unknown }[] }[] }
+  }
+  expect(vectors.firstSeen.cases.length).toBeGreaterThan(0)
+  for (const row of vectors.firstSeen.cases) {
+    const f = setup({ baselineBytes: Uint8Array.from(vectors.firstSeen.baseline) })
+    row.deliveries.forEach((delivery, index) => {
+      const result = f.storage.commitLiveUpdateJournal(authored(f.capture(Uint8Array.from(delivery.update), `delivery-${index}`)))
+      expect(result.result.kind, row.case).toBe('accepted')
+      const { firstSeen, firstSeenDeletes } = result.admitted!.metadata
+      expect({ firstSeen, firstSeenDeletes }, `${row.case} #${index}`)
+        .toEqual({ firstSeen: delivery.firstSeen, firstSeenDeletes: delivery.firstSeenDeletes })
+    })
+  }
 })
 
 it('admits an owner delta reconstructed from two unbound clients unattributed and replays its unchanged context', () => {

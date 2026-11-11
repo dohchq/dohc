@@ -564,7 +564,8 @@ fn client_busy_budget() -> std::time::Duration {
 /// A collaborator agent's accepted delivery of `bytes` at `cursor`. If
 /// write admission refuses it, the delivery goes again once the checkpoint
 /// admission waited on has finished, as the sync server sends a refused
-/// delivery again, within the client's busy budget.
+/// delivery again, within the client's busy budget. The delivery names no
+/// new content; `deliver_seen` names what the relay found new.
 async fn deliver_declared(
     actor: &ActorHandle,
     handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
@@ -572,6 +573,21 @@ async fn deliver_declared(
     cursor: i64,
     bytes: &[u8],
     declaration: AgentDeclaration,
+) -> (LiveUpdateReceipt, ApplicationResult) {
+    let unseen = (vec![], vec![]);
+    deliver_seen(actor, handle, binding, cursor, bytes, declaration, unseen).await
+}
+
+/// `deliver_declared` with the struct and delete ranges the relay, holding
+/// its accepted state, found new in `bytes`.
+async fn deliver_seen(
+    actor: &ActorHandle,
+    handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+    binding: &dohc_engine_collab::LiveObjectBinding,
+    cursor: i64,
+    bytes: &[u8],
+    declaration: AgentDeclaration,
+    (first_seen, first_seen_deletes): (Vec<LiveUpdateStructRange>, Vec<LiveUpdateStructRange>),
 ) -> (LiveUpdateReceipt, ApplicationResult) {
     let receipt = LiveUpdateReceipt {
         delivery_id: format!("remote-{cursor}"),
@@ -589,7 +605,7 @@ async fn deliver_declared(
                 },
                 received_at_ms: 20 + cursor,
             },
-            first_seen: vec![],
+            first_seen,
 
             canonical_version: Some(2),
 
@@ -600,7 +616,7 @@ async fn deliver_declared(
                     .collect(),
             ),
 
-            first_seen_deletes: Some(vec![]),
+            first_seen_deletes: Some(first_seen_deletes),
 
             checkpoint_coverage: None,
         },
@@ -770,20 +786,27 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         })
         .unwrap();
     assert!(metadata > LARGE_HISTORY_BYTES);
-    let remote_bytes = remote.richdoc_append_paragraph("Capacity remote paragraph");
-    f.doc.apply(&remote_bytes).unwrap();
     let mut admitted = 0;
     let mut terminal = None;
-    let refused = loop {
+    let (refused, remote_bytes, seen) = loop {
         assert!(admitted < 80, "the author bound never refused");
         let cursor = PREFIX + admitted as i64 + 1;
-        let (receipt, result) = deliver_declared(
+        // Each delivery adds a paragraph the relay has not seen, so each
+        // credits its agent.
+        let accepted = Ydoc::wire();
+        accepted.apply(&remote.encode_full_state()).unwrap();
+        let remote_bytes =
+            remote.richdoc_append_paragraph(&format!("Capacity remote paragraph {admitted}"));
+        f.doc.apply(&remote_bytes).unwrap();
+        let seen = first_seen_for_test(&accepted, &remote_bytes);
+        let (receipt, result) = deliver_seen(
             &actor,
             &handle,
             &f.binding,
             cursor,
             &remote_bytes,
             large_agent(admitted),
+            seen.clone(),
         )
         .await;
         match result {
@@ -791,7 +814,9 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
                 terminal = Some(receipt);
                 admitted += 1;
             }
-            ApplicationResult::Pending(ApplicationPending::SettlementRequired) => break cursor,
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired) => {
+                break (cursor, remote_bytes, seen);
+            }
             other => panic!("unexpected {other:?}"),
         }
     };
@@ -932,13 +957,14 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
 
     mark("ack-replay");
     // The refused delivery applies once the interval is free.
-    let (_, retried) = deliver_declared(
+    let (_, retried) = deliver_seen(
         &actor,
         &handle,
         &f.binding,
         refused,
         &remote_bytes,
         large_agent(admitted),
+        seen,
     )
     .await;
     assert!(matches!(retried, ApplicationResult::Applied(..)));
@@ -4233,13 +4259,16 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             dohc_engine_storage::get_binary_blob(conn, &digest).map(Option::unwrap)
         })
         .unwrap();
-    let (receipt, _) = deliver_declared(
+    let accepted = Ydoc::wire();
+    accepted.apply(&host.bytes).unwrap();
+    let (receipt, _) = deliver_seen(
         &host_actor,
         &host_handle,
         &host.binding,
         1,
         &update,
         declaration.clone(),
+        first_seen_for_test(&accepted, &update),
     )
     .await;
     let saved = host.settle(&host_handle, Some(receipt)).await;

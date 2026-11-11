@@ -1027,6 +1027,61 @@ pub fn initialize_adopted_history_for_test(
     };
     accepted_history::initialize(tx, &held, &baseline)
 }
+
+/// The ranges a relay first sees in `update` after `prior`: the structs it
+/// inserts past `prior`'s clocks, and the deletions `prior` does not already
+/// hold. Tests give a delivery these, as the relay would; the shared cases in
+/// `live-author-credit-vectors.json` hold this and the relay to one answer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_seen_for_test(
+    prior: &crate::Ydoc,
+    update: &[u8],
+) -> (Vec<LiveUpdateStructRange>, Vec<LiveUpdateStructRange>) {
+    use yrs::updates::decoder::Decode;
+    let update = yrs::Update::decode_v1(update).expect("a v1 update");
+    let known = prior.state_vector();
+    let range = |client: &yrs::ClientID, start: u32, end: u32| LiveUpdateStructRange {
+        client_id: client.get() as i64,
+        start_clock: i64::from(start),
+        end_clock: i64::from(end),
+    };
+    let mut structs = Vec::new();
+    for (client, ranges) in update.insertions(true).iter() {
+        for inserted in ranges.iter() {
+            let start = inserted.start.max(known.get(client));
+            if inserted.end > start {
+                structs.push(range(client, start, inserted.end));
+            }
+        }
+    }
+    let held = prior.delete_set();
+    let mut deletes = Vec::new();
+    for (client, ranges) in update.delete_set().iter() {
+        let mut already: Vec<_> = held
+            .get(client)
+            .map(|ranges| ranges.iter().map(|r| (r.0.start, r.0.end)).collect())
+            .unwrap_or_default();
+        already.sort_unstable();
+        for deleted in ranges.iter() {
+            let mut start = deleted.start;
+            for &(held_start, held_end) in &already {
+                if held_end <= start || held_start >= deleted.end {
+                    continue;
+                }
+                if held_start > start {
+                    deletes.push(range(client, start, held_start));
+                }
+                start = start.max(held_end);
+            }
+            if deleted.end > start {
+                deletes.push(range(client, start, deleted.end));
+            }
+        }
+    }
+    normalize_ranges(&mut structs).expect("valid ranges");
+    normalize_ranges(&mut deletes).expect("valid ranges");
+    (structs, deletes)
+}
 /// One trusted delivery owner for an engine workspace. Never deserialize this
 /// from an event. The production caller authenticates registration and namespace.
 pub struct ApplicationOwner {
@@ -2690,20 +2745,56 @@ mod tests {
         ))
         .unwrap();
         for row in vectors["deliveries"].as_array().unwrap() {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
             let mut update = event("credit", 1, Ydoc::wire().plaintext_insert(0, "x"));
+            update.metadata.canonical_version = Some(2);
             update.metadata.author_snapshot =
                 serde_json::from_value(row["authorSnapshot"].clone()).unwrap();
             update.metadata.first_seen = serde_json::from_value(row["firstSeen"].clone()).unwrap();
             update.metadata.first_seen_deletes =
                 serde_json::from_value(row["firstSeenDeletes"].clone()).unwrap();
-            let credits: Vec<LiveAuthorEntry> =
-                serde_json::from_value(row["credits"].clone()).unwrap();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            let credited = store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+                .unwrap();
             assert_eq!(
-                update.metadata.adds_content(),
-                !credits.is_empty(),
+                serde_json::from_str::<Value>(&credited.json()).unwrap(),
+                row["credits"],
                 "{}",
                 row["case"]
             );
+        }
+    }
+
+    #[test]
+    fn shared_vectors_name_what_the_relay_first_sees() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../packages/live-session-contract/vectors/live-author-credit-vectors.json"
+        ))
+        .unwrap();
+        let ranges = |value: &Value| -> Vec<LiveUpdateStructRange> {
+            serde_json::from_value(value.clone()).unwrap()
+        };
+        let baseline: Vec<u8> =
+            serde_json::from_value(vectors["firstSeen"]["baseline"].clone()).unwrap();
+        let cases = vectors["firstSeen"]["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for row in cases {
+            let accepted = Ydoc::wire();
+            accepted.apply(&baseline).unwrap();
+            for (index, delivery) in row["deliveries"].as_array().unwrap().iter().enumerate() {
+                let update: Vec<u8> = serde_json::from_value(delivery["update"].clone()).unwrap();
+                assert_eq!(
+                    first_seen_for_test(&accepted, &update),
+                    (
+                        ranges(&delivery["firstSeen"]),
+                        ranges(&delivery["firstSeenDeletes"])
+                    ),
+                    "{} #{index}",
+                    row["case"]
+                );
+                accepted.apply(&update).unwrap();
+            }
         }
     }
 
@@ -3223,6 +3314,15 @@ mod tests {
         })
     }
 
+    /// Give `update` the ranges a relay first sees in it after `prior`.
+    fn sees(update: &mut AdmittedLiveUpdate, prior: &Ydoc) {
+        let (structs, deletes) = first_seen_for_test(prior, &update.update_bytes);
+        update.metadata.first_seen = structs;
+        if update.metadata.canonical_version == Some(2) {
+            update.metadata.first_seen_deletes = Some(deletes);
+        }
+    }
+
     fn snapshot(metadata: &mut AdmittedLiveUpdateMetadata, declaration: Option<AgentDeclaration>) {
         metadata.canonical_version = Some(2);
         metadata.author_snapshot =
@@ -3296,6 +3396,7 @@ mod tests {
     ) -> Result<ApplicationResult, ApplicationError> {
         let mut update = event(&format!("declared-{cursor}"), cursor, bytes);
         snapshot(&mut update.metadata, Some(declaration.clone()));
+        sees(&mut update, &Ydoc::wire());
         apply_committed(
             store,
             cache,
@@ -3346,6 +3447,32 @@ mod tests {
         }
     }
 
+    /// The engine takes what a delivery adds from the relay's first-seen
+    /// ranges, not from its bytes. A delivery whose bytes add content but
+    /// whose first-seen names none, which no producer sends, still applies
+    /// and credits nobody, not even its declared agent (#2251). The same
+    /// delivery with the relay's ranges credits its author.
+    #[test]
+    fn content_whose_first_seen_names_nothing_applies_and_credits_nobody() {
+        for (case, named) in [("v1", false), ("v2", false), ("v1", true), ("v2", true)] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let mut update = event("unnamed", 1, Ydoc::wire().plaintext_insert(0, "added"));
+            if case == "v2" {
+                snapshot(&mut update.metadata, declared("trip-agent"));
+            }
+            if named {
+                sees(&mut update, &Ydoc::wire());
+                assert!(!update.metadata.first_seen.is_empty(), "{case}");
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            assert_eq!(
+                interval_len(&store),
+                usize::from(named),
+                "{case} named: {named}"
+            );
+        }
+    }
+
     /// Accepted deliveries' declared agents and local edits' authors share
     /// one interval and its bounds. At the boundary a new identity of either
     /// kind is refused before any write, even for a delivery whose bytes
@@ -3361,12 +3488,14 @@ mod tests {
             on_behalf_of: Some("\"".repeat(512)),
             depth: 1,
         };
-        // Every delivery after the first carries the first's bytes again.
-        let bytes = Ydoc::wire().plaintext_insert(0, "x");
+        // Each delivery adds a character, so each credits its agent.
+        let source = Ydoc::wire();
+        let mut bytes;
         let mut admitted = 0;
         let refused = loop {
             assert!(admitted < 80, "the author bound never refused");
             let cursor = admitted as i64 + 1;
+            bytes = source.plaintext_insert(0, "x");
             match deliver_declared(
                 &mut store,
                 &mut cache,
@@ -3393,7 +3522,7 @@ mod tests {
             )
         };
         let before = unchanged(&store);
-        assert_eq!(before, (admitted as i64, 1, admitted));
+        assert_eq!(before, (admitted as i64, admitted as i64, admitted));
 
         // A local edit by a new identity meets the same full interval.
         let local = large(999);
@@ -4608,8 +4737,8 @@ mod tests {
             let mut update = event(delivery, cursor, bytes);
             update.metadata.canonical_version = Some(2);
             update.metadata.author_snapshot = Some(authors);
-            update.metadata.first_seen_deletes = Some(Vec::new());
             update.metadata.accepted.authority = authority;
+            sees(&mut update, &Ydoc::wire());
             ack(apply(&mut store, &mut cache, &handle, update.clone()));
             // A replay matches the stored event, admitted snapshot included.
             assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
@@ -5262,12 +5391,13 @@ mod tests {
     #[test]
     fn field_history_names_the_accepted_person() {
         let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
-        let update = account_frame(
+        let mut update = account_frame(
             "person",
             1,
             Ydoc::wire().frontmatter_set("status", "done").unwrap(),
             false,
         );
+        sees(&mut update, &Ydoc::wire());
         ack(apply(&mut store, &mut cache, &handle, update.clone()));
         assert_eq!(
             newest_field_author(&store),
@@ -5324,12 +5454,13 @@ mod tests {
     #[test]
     fn field_history_names_the_accepted_agent_and_person() {
         let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
-        let update = account_frame(
+        let mut update = account_frame(
             "agent",
             1,
             Ydoc::wire().frontmatter_set("status", "done").unwrap(),
             true,
         );
+        sees(&mut update, &Ydoc::wire());
         ack(apply(&mut store, &mut cache, &handle, update));
         assert_eq!(
             newest_field_author(&store),
@@ -5582,6 +5713,7 @@ mod tests {
                 .unwrap();
             let mut update = event(&draft.delivery_id, cursor, bytes);
             snapshot(&mut update.metadata, declared("trip-agent"));
+            sees(&mut update, &Ydoc::wire());
             ack(apply(&mut store, &mut cache, &handle, update));
         }
         // History names the run each delivery's journal or draft recorded.
@@ -5743,6 +5875,7 @@ mod tests {
         let mut update = event(delivery, cursor, bytes);
         snapshot(&mut update.metadata, None);
         update.metadata.author_snapshot = Some(authors.to_vec());
+        sees(&mut update, &Ydoc::wire());
         ack(apply(store, cache, handle, update));
     }
 
