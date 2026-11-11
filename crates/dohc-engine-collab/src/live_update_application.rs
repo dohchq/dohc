@@ -545,16 +545,6 @@ impl LiveAuthorEntry {
         }
     }
 }
-/// Only the relay writes a personal agent's work, so no live update's author names one.
-fn validate_live_author(author: &LiveAuthorEntry) -> Result<(), ApplicationError> {
-    author.validate()?;
-    if let LiveAuthorEntry::Agent { agent_id, .. } = author {
-        if agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX) {
-            return Err(invalid("live author cannot be a personal agent"));
-        }
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -598,7 +588,7 @@ pub fn validate_checkpoint_coverage(
 ) -> Result<(), ApplicationError> {
     let mut identities = std::collections::BTreeSet::new();
     for entry in coverage {
-        validate_live_author(&entry.author)?;
+        entry.author.validate()?;
         canonical_ranges(&entry.struct_ranges)?;
         canonical_ranges(&entry.deletion_ranges)?;
         if !identities.insert(entry.author.identity()) {
@@ -762,7 +752,7 @@ impl AdmittedLiveUpdateMetadata {
                     return Err(invalid("noncanonical author snapshot"));
                 }
                 for author in authors {
-                    validate_live_author(author)?;
+                    author.validate()?;
                 }
                 canonical_ranges(deletes)?;
                 if let Some(coverage) = &self.checkpoint_coverage {

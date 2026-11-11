@@ -2158,39 +2158,30 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
 }
 
 /// Only the relay writes a personal agent's work. An owner device's audit
-/// record that names one, with every digest recomputed, is refused, so
-/// History never shows a personal agent editing a document.
+/// record that names one in its author snapshot or checkpoint coverage, with
+/// every digest recomputed, is refused, so History never shows a personal
+/// agent editing a document. History the relay committed before it refused
+/// personal agents can name one, so the same metadata still decodes as a
+/// committed event.
 #[test]
 fn an_audit_record_naming_a_personal_agent_is_refused() {
-    use dohc_engine_collab::live_update_application::{
-        LiveAuthorEntry, LiveCheckpointAuthorCoverage, validate_checkpoint_coverage,
-    };
-    let ordinary = format!("q-{}", "a".repeat(26));
-    let personal = format!("p-{}", "a".repeat(26));
-    assert!(!audit_record_refused(&ordinary));
-    assert!(audit_record_refused(&personal));
-    let coverage = |agent_id: &str| LiveCheckpointAuthorCoverage {
-        author: LiveAuthorEntry::Agent {
-            agent_id: agent_id.into(),
-            agent_name: None,
-            on_behalf_of: Some("owner".into()),
-            depth: None,
-        },
-        struct_ranges: Vec::new(),
-        deletion_ranges: Vec::new(),
-    };
-    assert!(validate_checkpoint_coverage(&[coverage(&ordinary)]).is_ok());
-    assert!(validate_checkpoint_coverage(&[coverage(&personal)]).is_err());
+    let ordinary = format!("q-{}", "b".repeat(26));
+    let personal = format!("p-{}", "b".repeat(26));
+    assert!(!audit_record_refused(None, None));
+    assert!(!audit_record_refused(None, Some(&ordinary)));
+    assert!(audit_record_refused(Some(&personal), None));
+    assert!(audit_record_refused(None, Some(&personal)));
 }
 
-/// Publishes an owner's audit record that declares an agent, renames the agent
-/// to `agent_id` with the record's digests recomputed, and says whether a peer
-/// refuses it.
-fn audit_record_refused(agent_id: &str) -> bool {
+/// Publishes an owner's audit record that declares an agent, then forges it
+/// with the record's digests recomputed: `snapshot` renames the agent and
+/// `coverage` adds a checkpoint author. Says whether a peer refuses the forged
+/// record, whose metadata still decodes as committed history.
+fn audit_record_refused(snapshot: Option<&str>, coverage: Option<&str>) -> bool {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
-        LiveUpdateReceipt, RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority,
-        apply_committed,
+        LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
+        ServerDerivedLiveUpdateAuthority, apply_committed,
     };
     use std::io::{Read, Write};
     fn agent(agent_id: &str) -> LiveAuthorEntry {
@@ -2205,7 +2196,6 @@ fn audit_record_refused(agent_id: &str) -> bool {
         hex_sha256(&serde_json::to_vec(&("accepted-event-v2", previous, 1, metadata)).unwrap())
     }
     let declared = format!("q-{}", "a".repeat(26));
-    assert_eq!(agent_id.len(), declared.len());
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
     let event = AdmittedLiveUpdate {
@@ -2276,13 +2266,26 @@ fn audit_record_refused(agent_id: &str) -> bool {
     let previous = &base.record.checkpoint.evidence_digest;
     let original = evidence(previous, &metadata);
     assert_eq!(record["evidenceDigest"].as_str(), Some(original.as_str()));
-    metadata.author_snapshot = Some(vec![agent(agent_id)]);
-    let renamed = evidence(previous, &metadata);
-    assert_eq!(text.matches(declared.as_str()).count(), 1);
+    let before = serde_json::to_string(&metadata).unwrap();
+    if let Some(agent_id) = snapshot {
+        metadata.author_snapshot = Some(vec![agent(agent_id)]);
+    }
+    metadata.checkpoint_coverage = coverage.map(|agent_id| {
+        vec![LiveCheckpointAuthorCoverage {
+            author: agent(agent_id),
+            struct_ranges: Vec::new(),
+            deletion_ranges: Vec::new(),
+        }]
+    });
+    let after = serde_json::to_string(&metadata).unwrap();
+    let rewritten = evidence(previous, &metadata);
+    let committed = serde_json::to_value(&metadata).unwrap();
+    AdmittedLiveUpdate::from_committed_metadata(committed, f.bytes.clone()).unwrap();
+    assert_eq!(text.matches(before.as_str()).count(), 1);
     assert_eq!(text.matches(original.as_str()).count(), 1);
     let forged = text
-        .replacen(&declared, agent_id, 1)
-        .replacen(&original, &renamed, 1);
+        .replacen(&before, &after, 1)
+        .replacen(&original, &rewritten, 1);
     let (_scratch, _path, mut receiver) = open_store();
     copy_audit_blobs(&f.store, &mut receiver);
     let dohc_engine_storage::TxnOutcome::Committed(forged_manifest) = receiver
