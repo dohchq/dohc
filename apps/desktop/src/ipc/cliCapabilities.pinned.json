@@ -78,6 +78,9 @@
     "fileDelete": [
       "file.delete"
     ],
+    "documentHeld": [
+      "document.held.read"
+    ],
     "documentRead": [
       "document.read"
     ],
@@ -265,6 +268,7 @@
     "access object": "access.object.read",
     "access sharing": "access.sharing.read",
     "document read": "document.read",
+    "document held": "document.held.read",
     "document edit": "document.edit",
     "document create": "document.create",
     "document chats": "file.chats.list",

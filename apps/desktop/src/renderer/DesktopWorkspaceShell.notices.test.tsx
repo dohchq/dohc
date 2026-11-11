@@ -2042,6 +2042,45 @@ describe("notices sent to you", () => {
     );
   }
 
+  // A note with parts dohc can't show, so its band appears.
+  const LOSSY_NOTE = ["# Readme", "", "<details>", "<summary>More</summary>", "", "Hidden.", "</details>", ""].join("\n");
+
+  it("keeps a held change's band after its Notice is dismissed, because the band reads the engine's hold", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.readHeldChange.mockImplementation(async ({ path }) => ({ change: { path, file: LOSSY_NOTE, held: `${LOSSY_NOTE}More.\n` } }));
+    // No Notice row names the hold: it was dismissed, and the hold remains.
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    // Only the open note's hold is read, never every hold in the workspace.
+    expect(bridge.readHeldChange).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, path: "b.md" });
+    expect(new Set(bridge.readHeldChange.mock.calls.map(([request]) => request.path))).toEqual(new Set(["b.md"]));
+  });
+
+  it("reads no hold when the workspace opens on a note dohc can show", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    await screen.findByTestId("markdown-editor");
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+    expect(bridge.readHeldChange).not.toHaveBeenCalled();
+  });
+
+  it("clears a note's held band when the engine no longer holds its change", async () => {
+    let listener: () => void = () => {};
+    const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
+      onNoticesChanged: vi.fn((next: () => void) => { listener = next; return () => {}; }),
+    });
+    bridge.readWorkspaceText.mockImplementation(async () => ({ text: LOSSY_NOTE, truncated: false as const, contentHash: "a".repeat(64) }));
+    bridge.readHeldChange.mockImplementation(async ({ path }) => ({ change: { path, file: LOSSY_NOTE, held: `${LOSSY_NOTE}More.\n` } }));
+    renderWithNotices(bridge, { sentNotices: sentNotices([]) });
+    const band = await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(band.textContent).toContain("dohc held a change"));
+    bridge.readHeldChange.mockImplementation(async () => ({ change: null }));
+    act(() => listener());
+    await waitFor(() => expect(screen.getByTestId("lossy-note-notice").textContent).not.toContain("dohc held a change"));
+  });
+
   it("keeps a held Notice dismissed after the Notice list updates", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));

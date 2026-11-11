@@ -38,6 +38,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { bridge } from "./bridge";
+import { useHeldChange } from "./useHeldChange";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
@@ -313,8 +314,6 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
-  // The engine holds a change to this lossy note until someone chooses Edit anyway.
-  changeHeld?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -611,6 +610,10 @@ export const FileInspector = memo(function FileInspector(
     : session === "lossy" ? "lossy"
     : session === "checking" || (large && engine.available && !bound && allowed === "clear") ? "checking"
     : allowed;
+  // The engine holds a change to this lossy note until someone chooses Edit
+  // anyway. A received share holds no saves of its own.
+  const changeHeld = useHeldChange(props.workspaceId, props.path,
+    lossyNote === "lossy" && !props.receivedShare, props.onButtonError);
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,
     authorCapacity: engine.authorCapacity, saveState: engine.saveState,
@@ -915,7 +918,7 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            changeHeld={props.changeHeld}
+            changeHeld={changeHeld}
             // A shared view's session drops Edit anyway's consent, so a
             // received share doesn't offer it (#2991).
             onEditAnyway={props.receivedShare ? undefined : () => {

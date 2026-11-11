@@ -31,6 +31,7 @@ import { collectionChangeDeletes, type CollectionChangeProposal, type Collection
 import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
 import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
 import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
+import { HeldChangeCard, type HeldChangeRead } from "../heldChangeReview";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -166,6 +167,19 @@ const SHADOW_ROOM = "p-10";
 // The change review is 760px wide in the app, wider than a pane, so it is
 // drawn at the pane's width, as the Settings frame is, with the shadow's room.
 const REVIEW_ROOM = `${SHADOW_ROOM} w-[672px] [&>[role=dialog]]:w-full`;
+
+// A held save to a note with raw HTML: the file, then what saving would write.
+const HELD_FILE = ["# Readme", "", "<details>", "<summary>Setup</summary>", "", "Run the installer.", "</details>", "", "See [the docs][docs].", "", "[docs]: https://example.com/docs", ""].join("\n");
+const HELD_CHANGE_READS: { label: string; read: HeldChangeRead }[] = [
+  { label: "the held change against the file", read: { kind: "ready", change: { path: "docs/readme.md", file: HELD_FILE,
+    held: HELD_FILE.replace("See [the docs][docs].", "See [the setup docs][docs] first.").replace("Run the installer.", "Run the installer, then sign in.") } } },
+  { label: "too large to show", read: { kind: "ready", change: { path: "docs/readme.md", tooLarge: true } } },
+  { label: "a failed read", read: { kind: "failed" } },
+  { label: "waiting for edits to sync, so no preview", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "waitingForSync" } } },
+  { label: "a save dohc can't reproduce, such as a live note's", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "unsupported" } } },
+  { label: "the file on disk could not be read", read: { kind: "ready", change: { path: "docs/readme.md", unavailable: "fileUnreadable" } } },
+  { label: "no longer held", read: { kind: "ready", change: null } },
+];
 
 // The parts the page renders, when it renders only some.
 const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
@@ -3135,6 +3149,18 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      <Section part="held-change-review" title="Held change review">
+        {HELD_CHANGE_READS.map(({ label, read }) => (
+          <Specimen key={label} label={label}>
+            <div className={SHADOW_ROOM}>
+              <div role="dialog" aria-label="Held change" className="dohc-elevated flex w-[592px] flex-col rounded-xl border border-line bg-panel text-ink">
+                <HeldChangeCard path="docs/readme.md" read={read} onRetry={noop} onClose={noop} />
+              </div>
+            </div>
+          </Specimen>
+        ))}
+      </Section>
+
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
@@ -3388,6 +3414,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <TabRowActionsSpecimen width="w-full" body={
               <LossyNoteNoticeView held={held}>
                 <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Open externally</button>
+                {held ? <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Show change</button> : null}
                 <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Edit anyway</button>
               </LossyNoteNoticeView>
             }>

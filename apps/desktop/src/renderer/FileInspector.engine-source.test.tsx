@@ -136,6 +136,9 @@ describe("engine markdown source view", () => {
     const bridgeMock = {
       platform: "linux" as const,
       onWorkspaceActivity: vi.fn(() => () => undefined),
+      // A lossy note's band asks the engine whether it holds a change.
+      readHeldChange: vi.fn(async () => ({ change: null })),
+      onNoticesChanged: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: markdown,

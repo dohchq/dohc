@@ -97,6 +97,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_read_file: ["file.read"],
   dohc_search_files: ["file.search"],
   dohc_read_document: ["document.read"],
+  dohc_read_held_change: ["document.held.read"],
   dohc_edit_document: ["document.edit"],
   dohc_create_document: ["document.create"],
   dohc_write_file: ["file.write"],
@@ -2493,6 +2494,12 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentRead", { path: resolved.normalized });
+}
+
+export async function readHeldChange(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentHeld", { path: resolved.normalized });
 }
 
 export async function editDocument(

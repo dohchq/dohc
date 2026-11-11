@@ -5,6 +5,8 @@ import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
 import { linksOperations } from "./ipc/linksOperations";
+import { heldChangeOperations } from "./ipc/heldChangeOperations";
+import { createWorkspaceHeldChanges } from "./workspaces/workspaceHeldChanges";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
@@ -3116,6 +3118,7 @@ async function withEngineAdapter<T>(
 }
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
+const workspaceHeldChanges = createWorkspaceHeldChanges(withEngineAdapter);
 const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
   findWorkspace,
   currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
@@ -5184,6 +5187,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     },
   }),
   links: workspaceLinks,
+  heldChanges: workspaceHeldChanges,
   chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
@@ -6598,6 +6602,9 @@ function registerIpcHandlers(): void {
     linksEdges: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.edges(operation.workspace, input),
     linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.incoming(operation.workspace, input),
     linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
+  });
+  registerOperations(operationBoundary, heldChangeOperations, {
+    readHeldChange: async ({ path }, { operation }) => ({ change: await workspaceHeldChanges.change(operation.workspace, path) }),
   });
   registerOperations(operationBoundary, shareCopyOperations, {
     getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
