@@ -7982,16 +7982,15 @@ export function createWorkspaceEngineCapture(
     resolveFileForPath,
 
     async notVersioned(listFiles) {
-      // Main tracks every file it can, so a change there neither waits for
-      // capture nor reads the disk.
-      const engine = await engineStore();
-      if (await activeVersionIdOf(engine) === ENGINE_MAIN_VERSION_ID) return null;
-      // Drain capture work, so a file saved a moment ago reads as tracked. A
-      // switch queued there may have left the version.
+      // A version switch queued ahead decides where the change lands. The
+      // change itself queues behind it, so the wait costs nothing on Main.
       await chain;
-      await engine.flushCapture?.();
+      const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
+      // Main tracks every file it can, so there the disk is never read.
       if (versionId === ENGINE_MAIN_VERSION_ID) return null;
+      // A file saved a moment ago then reads as tracked.
+      await engine.flushCapture?.();
       const files = await listFiles();
       if (files.length === 0) return [];
       // A few files resolve by path. Past that, one listing of the version

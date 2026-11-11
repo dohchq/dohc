@@ -181,15 +181,20 @@ export function notVersionedReason(paths: readonly string[]): string {
 // The files at or under the entries, which `spell` names as on disk, that the
 // active version does not track. None on Main, which reads no disk for it, or
 // without capture. An agent's change refuses files the History policy leaves
-// out, so for an agent only files the policy admits count.
+// out, and entries History cannot address, so for an agent only files the
+// policy admits count. A person's change carries them all along.
 async function notVersionedAt(rootPath: string, capture: Partial<Pick<WorkspaceEngineCapture, "notVersioned">> | null,
   spell: () => Promise<readonly (string | null)[]>, agent = false): Promise<string[]> {
   if (!capture?.notVersioned) return [];
-  return await capture.notVersioned(async () => {
+  // Entries History cannot address, such as .git, are never tracked, so they
+  // skip the engine's lookup.
+  const unaddressed: string[] = [];
+  const untracked = await capture.notVersioned(async () => {
     const allowed = agent ? historyPathAdmission(await readWorkspaceEnginePolicy(rootPath)) : () => true;
     return (await Promise.all((await spell()).map(entry => entry === null ? []
-      : historyFilesUnder(rootPath, entry, allowed, () => false).catch(() => [])))).flat();
-  }) ?? [];
+      : historyFilesUnder(rootPath, entry, allowed, () => false, agent ? undefined : path => unaddressed.push(path)).catch(() => [])))).flat();
+  });
+  return untracked === null ? [] : [...untracked, ...unaddressed];
 }
 
 // An agent's path as it is spelled on disk, or null where it leads nowhere
@@ -198,14 +203,18 @@ const spelledOnDisk = (rootPath: string, path: string) => admitPath(rootPath, pa
 
 // The regular files at or under `entry` that History records. A link moves
 // as itself and is never followed; a folder the policy wholly excludes, or
-// one History cannot address, is not read.
+// one History cannot address, is not read. `unaddressed` hears of each entry
+// History cannot address, such as .git.
 async function historyFilesUnder(rootPath: string, entry: string, allowed: (path: string) => boolean,
-  excludedFolder: (path: string) => boolean): Promise<string[]> {
+  excludedFolder: (path: string) => boolean, unaddressed?: (path: string) => void): Promise<string[]> {
   const files: string[] = [];
   const walk = async (path: string): Promise<void> => {
     const info = await lstat(join(rootPath, path));
     const addressed = validateUserMaterializePath(path, { platform: process.platform }).ok && engineAddresses(path);
-    if (!addressed) return;
+    if (!addressed) {
+      unaddressed?.(path);
+      return;
+    }
     if (info.isFile()) {
       if (allowed(path)) files.push(path);
       return;

@@ -120,3 +120,13 @@ it("an agent is not told to confirm a file History's rules leave out, which its 
   await expect(deleteWorkspacePathByHand(f.operation, "Media", person, f.options))
     .rejects.toMatchObject({ paths: ["Media/clip.mp4", "Media/cover.png"] });
 });
+
+it("counts a .git folder the app's change carries along, without reading inside it", async () => {
+  const f = await workspace([]);
+  await mkdir(join(f.rootPath, "Media/.git/objects"), { recursive: true });
+  await writeFile(join(f.rootPath, "Media/.git/config"), "[core]\n");
+  await expect(deleteWorkspacePathByHand(f.operation, "Media", person, f.options))
+    .rejects.toMatchObject({ name: "NotVersionedError", paths: ["Media/.git"] });
+  // The engine is never asked about it.
+  expect(f.asked).toEqual([["Media/clip.mp4", "Media/cover.png"]]);
+});
