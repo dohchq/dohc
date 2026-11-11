@@ -464,3 +464,16 @@ it("pulls another device's row while each upload outlasts the upload interval", 
   expect(f.pull).toHaveBeenCalledTimes(1);
   const stopped = f.sync.stop(); await vi.advanceTimersByTimeAsync(300); await stopped;
 });
+
+it("stops on an expired sign-in found by a recheck", async () => {
+  const relay = countingRelay(), f = await startWatched(relay);
+  const counted = relay.wait.getMockImplementation()!;
+  relay.wait.mockImplementation((since, signal, known, holdMs) =>
+    holdMs === 0 ? Promise.reject(new RelayUnauthorizedError()) : counted(since, signal, known, holdMs));
+  f.edit(); await vi.advanceTimersByTimeAsync(0);
+  expect(f.sync.snapshot().authExpired).toBe(true);
+  const pushes = f.push.mock.calls.length;
+  await typeFor(f, 1_000);
+  expect(f.push).toHaveBeenCalledTimes(pushes);
+  await f.sync.stop();
+});

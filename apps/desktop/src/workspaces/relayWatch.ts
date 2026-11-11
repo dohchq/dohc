@@ -96,13 +96,16 @@ export function startRelayWatch(input: {
       } else {
         reportWatch(result.value.watched);
         // The relay counted `known` rows as ours, but an upload may have
-        // added rows since. The recheck answers exactly; a failed one counts
-        // as a change.
+        // added rows since. The recheck answers exactly. A failed one fails
+        // like a read, and counts as a change.
         if (result.value.hasMore && known !== undefined && result.value.known === known && input.ownAppends) {
           const ownAppends = input.ownAppends;
           const recheck = yield* readOnce(signal => ownAppends.recheck(from, signal));
           if (recheck === undefined) continue;
-          if (recheck._tag === "Success") {
+          if (recheck._tag === "Failure") {
+            reportWatch(false);
+            input.failed(Cause.squash(recheck.cause));
+          } else {
             reportWatch(recheck.value.watched);
             if (!recheck.value.hasMore) continue;
           }
