@@ -27,7 +27,7 @@ export default function TabsLayout() {
 function Tabs() {
   // Design review only: the time the first usable screen is drawn, for launch timings.
   useEffect(() => {
-    if (demoMode !== "launch-plain") return;
+    if (demoMode !== "launch-plain" && demoMode !== "launch-plain-cold") return;
     requestAnimationFrame(() => void new File(Paths.document, "launch.json").write(JSON.stringify({ at: Date.now() })));
   }, []);
   const theme = useTheme();

@@ -38,7 +38,7 @@ const settingsRequests = [
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
-  [settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", archived: true }],
+  [settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", state: "archived" }],
   [settingsOperations.orderAgents.channel, { order: ["default"] }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
@@ -483,14 +483,14 @@ describe("registered settings IPC", () => {
   it("archives chats one after the other for the window's own workspace only", async () => {
     const h = await harness();
     const [first, second] = await Promise.all([
-      h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", archived: true }),
-      h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-2", archived: true }),
+      h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", state: "archived" }),
+      h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-2", state: "archived" }),
     ]);
     expect(first).toMatchObject({ settings: { sidebar: { archivedChats: { "workspace-a": ["channel-1"] } } } });
     expect(second).toMatchObject({ settings: { sidebar: { archivedChats: { "workspace-a": ["channel-1", "channel-2"] } } } });
-    await h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", archived: false });
+    await h.invoke(settingsOperations.setChatArchived.channel, { workspaceId: "workspace-a", channelId: "channel-1", state: "active" });
     await expect(h.invoke(settingsOperations.setChatArchived.channel,
-      { workspaceId: "workspace-a", channelId: "channel-3", archived: true }, h.second)).rejects.toThrow("this window changed workspaces");
+      { workspaceId: "workspace-a", channelId: "channel-3", state: "archived" }, h.second)).rejects.toThrow("this window changed workspaces");
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toMatchObject({
       settings: { sidebar: { archivedChats: { "workspace-a": ["channel-2"] } } },
     });
