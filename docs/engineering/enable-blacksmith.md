@@ -114,7 +114,7 @@ It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
 The local gate runs no Linux JavaScript, so the replica suites run only in this job.
 
-Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript shards move that file aside, so the login shell tests read the profile in their own `HOME`.
+The Bash profile fixtures use `--noprofile` and explicitly load their temporary profile. This isolates their assertions from the runner's system profile. They do not test automatic login-profile loading.
 
 ## Read the result
 

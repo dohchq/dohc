@@ -49,6 +49,7 @@ function privateShortTmpdir(): string {
 export default defineConfig({
   test: {
     testTimeout: 30_000,
+    maxConcurrency: 2,
     setupFiles: ["./vitest.setup.ts"],
     ...(selection === "only" ? { include: confinementSuites } : {}),
     ...(selection === "exclude" ? { exclude: [...configDefaults.exclude, ...confinementSuites] } : {}),
