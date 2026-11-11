@@ -4731,7 +4731,7 @@ fn ydoc_write_state_on_store(
     faults: &dyn FaultInjector,
 ) -> Result<YdocWriteState, RuntimeError> {
     let (writes, before) = store.read_with(|conn| {
-        Ok((
+        Ok::<_, StorageError>((
             pending_ydoc_writes_in(conn, key)?,
             last_pending_write_before_in(conn, key, moment_id)?,
         ))
@@ -5721,7 +5721,7 @@ mod pending_write_order_tests {
     /// moments happened. Each write expects the file to hold the one before
     /// it, so only moment order lands both.
     fn two_writes_that_tie_in_time() -> (ScratchDir, EngineStore, Vec<String>) {
-        let (scratch, mut store) = note_changes(&[
+        let (scratch, store) = note_changes(&[
             ("moment-base", "base", false),
             ("moment-z", "first edit", true),
             ("moment-a", "second edit", true),
