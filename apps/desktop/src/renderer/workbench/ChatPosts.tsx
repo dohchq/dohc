@@ -37,6 +37,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
+import { WorkLinkText } from "./workReferences";
 import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 import { FailedRunLine, failedRunEnd, WaitingLine } from "./ChatThreadPanel";
@@ -903,7 +904,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             data-testid="chats-thread-post-title"
             className={hasExplicitTitle ? "mb-0 mt-1 text-[16px] font-semibold leading-[22px] text-ink" : "sr-only"}
           >
-            {nav.thread.title}
+            <WorkLinkText text={nav.thread.title} />
           </h1>
           {/* A plain post is its body; the title above repeats it for the
               heading only. */}
