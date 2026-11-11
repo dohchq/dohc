@@ -102,9 +102,7 @@ pub enum WorkTarget {
         channel_id: Option<String>,
     },
     /// A Group, DM or agent chat.
-    Chat {
-        channel_id: String,
-    },
+    Chat { channel_id: String },
     /// `channelId` is null for a file's conversation.
     Thread {
         thread_id: String,
@@ -822,7 +820,12 @@ fn resolve_in(
         "chat" => {
             title = chat_name(conn, workspace_id, &target_id)?;
             let current = title.as_ref().map(|_| (None, WorkTargetState::Live));
-            (WorkTarget::Chat { channel_id: target_id }, current)
+            (
+                WorkTarget::Chat {
+                    channel_id: target_id,
+                },
+                current,
+            )
         }
         "thread" => {
             title = thread_title(conn, workspace_id, &target_id)?;

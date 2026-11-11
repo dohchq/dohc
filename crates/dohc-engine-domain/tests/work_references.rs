@@ -586,7 +586,8 @@ fn a_chat_or_thread_reference_names_it_by_id_and_shows_its_title() {
                 origin: None,
                 body: "
   Book the flights  
-by Friday".to_owned(),
+by Friday"
+                    .to_owned(),
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
@@ -631,13 +632,21 @@ by Friday".to_owned(),
     };
     assert_eq!(
         titled(&store, &chat.reference),
-        (chat_target.clone(), WorkTargetState::Live, Some("Trip".to_owned()))
+        (
+            chat_target.clone(),
+            WorkTargetState::Live,
+            Some("Trip".to_owned())
+        )
     );
     // An untitled thread reads as its first message's first line.
     let first_line = Some("Book the flights".to_owned());
     assert_eq!(
         titled(&store, &thread),
-        (thread_target.clone(), WorkTargetState::Live, first_line.clone())
+        (
+            thread_target.clone(),
+            WorkTargetState::Live,
+            first_line.clone()
+        )
     );
     assert_eq!(titled(&store, &message).2, first_line);
     for missing in [
@@ -657,8 +666,11 @@ by Friday".to_owned(),
     store
         .write_with(&NoFaults, |tx| {
             for table in ["chat_messages", "chat_threads", "chat_channels"] {
-                tx.execute(&format!("DELETE FROM {table} WHERE workspace_id = ?1"), [WS])
-                    .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
+                    [WS],
+                )
+                .map_err(StorageError::persist_public)?;
             }
             Ok::<_, StorageError>(())
         })

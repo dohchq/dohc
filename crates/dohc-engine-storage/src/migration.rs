@@ -6413,7 +6413,13 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(rows, [(a.clone(), "file".to_owned()), (b.clone(), "message".to_owned())]);
+        assert_eq!(
+            rows,
+            [
+                (a.clone(), "file".to_owned()),
+                (b.clone(), "message".to_owned())
+            ]
+        );
         let outbox: Vec<(String, i64)> = conn
             .prepare("SELECT reference, enqueued_at_ms FROM work_reference_outbox")
             .unwrap()
@@ -6430,18 +6436,27 @@ mod tests {
         };
         assert!(insert(&"C".repeat(43), "chat", None, None).is_ok());
         assert!(insert(&"D".repeat(43), "thread", None, Some("channel")).is_ok());
-        assert!(insert(&"E".repeat(43), "thread", None, None).is_err(), "a second reference to one thread");
+        assert!(
+            insert(&"E".repeat(43), "thread", None, None).is_err(),
+            "a second reference to one thread"
+        );
         for (kind, thread, channel) in [
             ("chat", None, Some("channel")),
             ("chat", Some("thread"), None),
             ("thread", Some("thread"), None),
             ("folder", None, None),
         ] {
-            assert!(insert(&"F".repeat(43), kind, thread, channel).is_err(), "{kind} {thread:?} {channel:?}");
+            assert!(
+                insert(&"F".repeat(43), kind, thread, channel).is_err(),
+                "{kind} {thread:?} {channel:?}"
+            );
         }
         assert!(
-            conn.execute("UPDATE work_references SET target_id = 'other' WHERE reference = ?1", [&a])
-                .is_err()
+            conn.execute(
+                "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+                [&a]
+            )
+            .is_err()
         );
         assert!(
             conn.execute(
@@ -6451,9 +6466,12 @@ mod tests {
             .is_err(),
             "the outbox still names work_references"
         );
-        conn.execute("DELETE FROM work_references WHERE reference = ?1", [&b]).unwrap();
+        conn.execute("DELETE FROM work_references WHERE reference = ?1", [&b])
+            .unwrap();
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM work_reference_outbox", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM work_reference_outbox", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(left, 0, "deleting a reference still clears its outbox row");
     }

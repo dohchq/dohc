@@ -1074,7 +1074,12 @@ fn shared_channel_mappings_admit_only_chat_in_the_receiving_channel() {
         ]
         .into_iter()
         .zip(["C", "D", "E"])
-        .map(|(target, r)| serde_json::from_value(json!({"reference":r.repeat(43),"createdAtMs":1,"target":target})).unwrap())
+        .map(|(target, r)| {
+            serde_json::from_value(
+                json!({"reference":r.repeat(43),"createdAtMs":1,"target":target}),
+            )
+            .unwrap()
+        })
         .collect(),
     ]
     .concat();
