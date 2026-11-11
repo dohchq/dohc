@@ -5711,7 +5711,9 @@ mod pending_write_order_tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
-                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind,                      updated_at_ms, path)                      VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
+                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, \
+                     updated_at_ms, path) \
+                     VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
                     [],
                 )
                 .map_err(StorageError::persist_public)
@@ -5770,7 +5772,8 @@ mod pending_write_order_tests {
         let on_disk = std::fs::read_to_string(scratch.path().join("note.md")).expect("file");
         assert_eq!(
             on_disk, "second edit",
-            "after the lock {after_lock:?} (failed {}), after reopening {after_reopen:?}              (completed {}, failed {})",
+            "after the lock {after_lock:?} (failed {}), after reopening {after_reopen:?} \
+             (completed {}, failed {})",
             locked.failed, reopened.completed, reopened.failed,
         );
         assert_eq!(after_lock, [JobStatus::Pending, JobStatus::Pending]);
