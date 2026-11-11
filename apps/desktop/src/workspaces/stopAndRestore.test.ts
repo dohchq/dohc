@@ -248,6 +248,84 @@ describe("recipient record restoration", () => {
     expect(e.dependencies.restore).toHaveBeenCalledWith("created", "exported", false);
   });
 
+  describe("a page they created that has live editing on", () => {
+    const LIVE = "dohc can't restore \"trip/One.md\" while it has live editing on\nIn Live documents, stop live editing for this page, then restore it again.";
+    // The engine refuses while live editing is on; the Stop's release may settle a last edit by `settledBy`.
+    // A `deferred` release leaves the engine refusing after the Stop.
+    function livePage(stop: () => Promise<"stopped" | "kept" | "waiting">, settledBy?: "ana" | "owner", deferred = false) {
+      const created = moment("created", "record", "trip/One.md", null, RECORD);
+      created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+      const e = engine([created]);
+      let live = true;
+      const restore = e.dependencies.restore.getMockImplementation()!;
+      e.dependencies.restore.mockImplementation(async (...args) => live
+        ? { kind: "refused", detail: LIVE, refusal: "live-page-owned" } : restore(...args));
+      const stopLiveEditing = vi.fn(async () => {
+        const answer = await stop();
+        if (answer === "waiting") return answer;
+        live = deferred;
+        if (settledBy) {
+          const settled = moment(`moment-ydoc-${"d".repeat(64)}`, "record", created.path, RECORD, `${RECORD}\n${settledBy} text`);
+          settled.metadata.origin = "ydoc";
+          settled.authors = [{ kind: "human", humanId: settledBy, relayConfirmed: true }];
+          e.all.push(settled);
+        }
+        return answer;
+      });
+      return { e, stopLiveEditing, files: [file(created.id, "record", created.path, true)] };
+    }
+
+    it("stops live editing for it and removes it, with the edits the Stop wrote", async () => {
+      const { e, stopLiveEditing, files } = livePage(async () => "stopped", "ana");
+      const outcome = await restoreDirectWrites({ ...e.dependencies, stopLiveEditing }, files);
+      expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [], unfinished: null });
+      expect(stopLiveEditing).toHaveBeenCalledWith("trip/One.md", "record");
+      expect(e.dependencies.restore).toHaveBeenLastCalledWith("created", `moment-ydoc-${"d".repeat(64)}`, false);
+    });
+
+    it("keeps it, and says live editing stopped, when the Stop writes someone else's edit into it", async () => {
+      const { e, stopLiveEditing, files } = livePage(async () => "stopped", "owner");
+      expect(await restoreDirectWrites({ ...e.dependencies, stopLiveEditing }, files)).toMatchObject({ restored: [], review: [{
+        path: "trip/One.md", reason: "restore-refused",
+        detail: "dohc stopped live editing for \"trip/One.md\" and kept it, because Person owner changed it too\nResume live editing for it in Live documents.",
+      }] });
+      expect(e.restored).toEqual([]);
+    });
+
+    it("keeps it when the engine still holds the page after the Stop", async () => {
+      const { e, stopLiveEditing, files } = livePage(async () => "stopped", undefined, true);
+      expect(await restoreDirectWrites({ ...e.dependencies, stopLiveEditing }, files)).toMatchObject({ restored: [], review: [{
+        path: "trip/One.md", reason: "restore-refused", detail: expect.stringContaining("kept edits that aren't in its file"),
+      }] });
+      expect(e.dependencies.restore).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      { answer: "kept", detail: "dohc stopped live editing for \"trip/One.md\" and kept edits that aren't in its file\nCheck Notices for them, then restore it again." },
+      { answer: "waiting", detail: "dohc can't restore \"trip/One.md\" while it has live editing on\ndohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again." },
+      { answer: new Error("Live editing didn't stop."), detail: LIVE },
+    ] as const)("keeps it for review when the Stop answers $answer", async ({ answer, detail }) => {
+      const { e, stopLiveEditing, files } = livePage(async () => {
+        if (answer instanceof Error) throw answer;
+        return answer;
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        expect(await restoreDirectWrites({ ...e.dependencies, stopLiveEditing }, files))
+          .toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "restore-refused", detail }], unfinished: null });
+      } finally { warn.mockRestore(); }
+      expect(e.restored).toEqual([]);
+      expect(e.dependencies.restore).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves live editing on for a page they only changed", async () => {
+      const { e, stopLiveEditing, files } = livePage(async () => "stopped");
+      expect(await restoreDirectWrites({ ...e.dependencies, stopLiveEditing }, [{ ...files[0]!, created: false }]))
+        .toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "restore-refused", detail: LIVE }] });
+      expect(stopLiveEditing).not.toHaveBeenCalled();
+    });
+  });
+
   it.each([
     { id: "edit", origin: "ydoc", removes: true },
     { id: "edit", origin: "sync", removes: false },
