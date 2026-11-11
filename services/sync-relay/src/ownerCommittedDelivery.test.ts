@@ -8,7 +8,9 @@ import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-s
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
 import {drainOwnerOutbox,ownerOutboxHeadIsSeed} from "./ownerOutboxDelivery";
 
-vi.mock("./ownerOutboxDelivery", () => ({drainOwnerOutbox: vi.fn(),ownerOutboxHeadIsSeed: vi.fn()}));
+vi.mock("./ownerOutboxDelivery", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./ownerOutboxDelivery")>(), drainOwnerOutbox: vi.fn(),ownerOutboxHeadIsSeed: vi.fn(),
+}));
 beforeEach(() => {
   vi.mocked(drainOwnerOutbox).mockReset();
   vi.mocked(ownerOutboxHeadIsSeed).mockReset().mockResolvedValue(false);
