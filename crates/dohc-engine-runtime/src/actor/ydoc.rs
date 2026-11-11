@@ -5678,22 +5678,45 @@ mod pending_write_order_tests {
     /// in time by the write's moment order, not by job id.
     #[test]
     fn recovery_replays_writes_that_tie_in_time_in_moment_order() {
-        let (scratch, mut store, _) = two_writes_that_tie_in_time();
-        let replay = replay_pending_materializations(
-            &mut store,
-            scratch.path(),
-            SCOPE,
-            6,
-            &NoFaults,
-            None,
-            false,
-        )
-        .expect("replay");
-        assert_eq!((replay.parked, replay.failed), (0, 0));
-        assert_eq!(
-            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
-            "second edit"
-        );
+        // Recovery replays every pending write; a drain can name the ones it
+        // replays.
+        for named in [false, true] {
+            let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+            if named {
+                // Out of order, the head's write would conflict.
+                with_document_row(&mut store);
+            }
+            let selected: HashSet<String> = writes.into_iter().collect();
+            let replay = replay_pending_materializations(
+                &mut store,
+                scratch.path(),
+                SCOPE,
+                6,
+                &NoFaults,
+                named.then_some(&selected),
+                false,
+            )
+            .expect("replay");
+            assert_eq!((replay.parked, replay.failed), (0, 0), "named: {named}");
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+                "second edit",
+                "named: {named}"
+            );
+        }
+    }
+
+    /// The note's document row, which a conflicted write reads.
+    fn with_document_row(store: &mut EngineStore) {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind,                      updated_at_ms, path)                      VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("the note's document row");
     }
 
     /// Recovery replays a note's writes in order, and each expects the file
@@ -5705,16 +5728,7 @@ mod pending_write_order_tests {
     #[test]
     fn recovery_leaves_an_older_write_alone_once_the_head_conflicted() {
         let (scratch, mut store, writes) = two_writes_that_tie_in_time();
-        // A conflicted write reads the note's document row.
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind,                      updated_at_ms, path)                      VALUES ('workspace', 'main', 'object', 'plaintext', 5, 'note.md')",
-                    [],
-                )
-                .map_err(StorageError::persist_public)
-            })
-            .expect("the note's document row");
+        with_document_row(&mut store);
         let older = writes[0].clone();
         let lock = super::super::history_operations::turns::tests::PlacementFault::jobs(
             scratch.path(),

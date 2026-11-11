@@ -901,15 +901,35 @@ fn replay_materializations(
         reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
     }
     let mut jobs = if let Some(selected) = selected {
-        let mut jobs = selected
+        let jobs = selected
             .iter()
             .map(|id| store.load_materialization_job(id))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
-        jobs
+        // As in the pending listing, a note's writes that tie in time go in
+        // moment order, since their job ids sort by hash.
+        let mut keyed = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let moment_order = match job.job_id.strip_prefix("ydoc-mat_") {
+                Some(moment_id) => store.read_with(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT moment_order FROM moments \
+                             WHERE workspace_id = ?1 AND moment_id = ?2",
+                            [job.workspace_id.as_str(), moment_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(StorageError::corrupt_public)
+                })?,
+                None => None,
+            };
+            keyed.push(((job.created_at_ms, moment_order, job.job_id.clone()), job));
+        }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        keyed.into_iter().map(|(_, job)| job).collect()
     } else {
         store.list_pending_materialization_jobs()?
     };
