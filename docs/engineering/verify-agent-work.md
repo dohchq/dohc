@@ -115,13 +115,19 @@ The cloud workload budgets are 300 s for JavaScript and 600 s for Rust.
 This includes preparation, internal scheduling, transfers, confinement, and aggregate reporting.
 Each job's runner wait is `started_at - created_at`. GitHub creates dependent jobs when their dependencies finish.
 Stages follow dependency depth in the workflow's `needs` graph, starting with selection at depth 0.
-Each stage contributes its largest required runner wait; `runnerWaitSeconds` is the sum of those maxima.
+For each job, include itself and its transitive workflow dependencies and runtime waits.
+Runtime waits are declared beside `CLOUD_JOB_GRAPH` in `scripts/verification/cloud-aggregate.mjs`.
+Discount each job's finish time by the sum of stage maxima within that job's dependency closure, through its own stage.
+`workloadSeconds` is the largest discounted finish time measured from the gate's start.
+The receipt names that critical job and records each job's wait and discount.
+`runnerWaitSeconds` is `seconds - workloadSeconds`; an unrelated queue cannot excuse slow work.
 A combined run includes JavaScript's dependency stage in Rust's timing. A Rust-only run removes skipped JavaScript jobs.
-The gate passes its timing check when `seconds <= budget`, or when `seconds - runnerWaitSeconds <= budget`.
+The gate passes its timing check when `seconds <= budget`, or when `workloadSeconds <= budget`.
 The logs and result JSON keep the wall span, runner waits, and adjusted workload separately.
 Worker aggregate receipts have `complete: false` because confinement can still be queued.
 The final check writes `complete: true` timing receipts after confinement finishes, including failed timing verdicts.
-Workers extend their preparation and reporting deadlines by measured stage waits. They keep polling while an awaited job is queued.
+Workers extend deadlines only by waits in their own or the awaited job's dependency closure.
+They keep polling while an awaited job is queued.
 Confinement's runner queue delays only the final check; workers and aggregates do not wait for it.
 Job timeouts are backstops: 10 minutes for selection and final reporting, 30 for preparation and confinement,
 40 for Rust compilation and policy, and 120 for workers and aggregates that can await sibling runners.

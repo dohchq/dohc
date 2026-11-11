@@ -4,7 +4,7 @@ import { gateDeadline } from "./cloud-aggregate.mjs";
 
 // Shards install their dependencies while the shared build runs. The complete
 // gate still includes both jobs, their transfer, and this wait.
-export async function waitForPreparation(scope, { env = process.env, request = fetch, pause = setTimeout, now = Date.now } = {}) {
+export async function waitForPreparation(scope, { waitingJob, env = process.env, request = fetch, pause = setTimeout, now = Date.now } = {}) {
   const preparation = scope === "js" ? { job: "shared preparation", artifact: "javascript-prepared", seconds: 300 }
     : scope === "rust" ? { job: "Rust build once", artifact: "rust-tests", seconds: 600 } : null;
   if (!preparation) throw new Error("Select js or rust preparation.");
@@ -30,7 +30,7 @@ export async function waitForPreparation(scope, { env = process.env, request = f
     const builds = jobs.filter(job => job.name === preparation.job);
     if (builds.length > 1) throw new Error(`Duplicate ${preparation.job} jobs.`);
     if (builds.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`${preparation.job} ended with ${builds[0].conclusion}.`);
-    const deadline = gateDeadline(scope, jobs, now());
+    const deadline = gateDeadline(scope, jobs, waitingJob ?? preparation.job, now());
     const queued = builds.some(job => ["queued", "waiting", "pending", "requested"].includes(job.status));
     if (now() >= deadline && !queued) throw overBudget();
     const { artifacts } = await read(`/artifacts?name=${encodeURIComponent(name)}&per_page=100`);
@@ -45,5 +45,5 @@ export async function waitForPreparation(scope, { env = process.env, request = f
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
-  waitForPreparation(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1; });
+  waitForPreparation(process.argv[2], { waitingJob: process.argv[3] }).catch(error => { console.error(error); process.exitCode = 1; });
 }

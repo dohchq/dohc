@@ -59,6 +59,15 @@ export const CLOUD_JOB_GRAPH = {
   rust: { names: ["engine gate"], needs: ["changes", "javascript"] },
 };
 
+// Runtime waits: cloud.mjs restores preparation; waitForGate joins sibling receipts.
+// Rust test jobs also wait for their archive in pr-checks.yml before cloud-rust.mjs.
+export const CLOUD_RUNTIME_DEPENDENCIES = {
+  "javascript-workers": ["javascript-prepare"],
+  javascript: ["javascript-prepare", "javascript-workers"],
+  "rust-tests": ["rust-archive"],
+  rust: ["javascript-prepare", "rust-archive", "rust-policy", "rust-tests"],
+};
+
 function gateGraph(scope, jobs, confinement = true) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
   // A combined run's Rust jobs depend on JavaScript. Include that group's waits;
@@ -98,14 +107,28 @@ export function gateQueueTiming(scope, jobs, now = Date.now(), confinement = tru
     stages[stage].runnerWaitSeconds = Math.max(stages[stage].runnerWaitSeconds, runnerWaitSeconds);
     required.push({ ...job, stage, runnerWaitSeconds, queued });
   }
-  return { runnerWaitSeconds: stages.reduce((total, stage) => total + stage.runnerWaitSeconds, 0), stages, jobs: required };
+  const dependencies = name => {
+    const [id, node] = graph.find(([, node]) => node.names.includes(name));
+    const parents = new Set([...node.needs, ...(CLOUD_RUNTIME_DEPENDENCIES[id] ?? [])]);
+    return new Set([name, ...graph.filter(([key]) => parents.has(key))
+      .flatMap(([, parent]) => parent.names.flatMap(name => [...dependencies(name)]))]);
+  };
+  const discounts = {};
+  for (const [id, node] of graph) for (const name of node.names) {
+    const ancestors = dependencies(name);
+    discounts[name] = stages.filter(stage => stage.stage <= depth(id)).reduce((total, stage) => total
+      + Math.max(0, ...required.filter(job => job.stage === stage.stage && ancestors.has(job.name)).map(job => job.runnerWaitSeconds)), 0);
+  }
+  return { discounts, stages, jobs: required };
 }
 
-export function gateDeadline(scope, jobs, now = Date.now()) {
+export function gateDeadline(scope, jobs, jobName, now = Date.now()) {
   const selections = jobs.filter(job => job.name === "what changed");
   if (selections.length !== 1 || !Number.isFinite(Date.parse(selections[0].started_at))) throw new Error("Gate selection has no unique start time.");
   const timing = gateQueueTiming(scope, jobs, now);
-  return Date.parse(selections[0].started_at) + ((scope === "js" ? 300 : 600) + timing.runnerWaitSeconds) * 1000;
+  const discount = timing.discounts[jobName];
+  if (!Number.isFinite(discount)) throw new Error(`Unknown ${scope} deadline job: ${jobName}.`);
+  return Date.parse(selections[0].started_at) + ((scope === "js" ? 300 : 600) + discount) * 1000;
 }
 
 function gateTiming(scope, required, finishedAt, queue) {
@@ -114,10 +137,16 @@ function gateTiming(scope, required, finishedAt, queue) {
   const startedAt = new Date(Math.min(...required.map(job => Date.parse(job.started_at)))).toISOString();
   const seconds = (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000;
   const budgetSeconds = scope === "js" ? 300 : 600;
-  const workloadSeconds = seconds - queue.runnerWaitSeconds;
-  return { startedAt, finishedAt, seconds, budgetSeconds, runnerWaitSeconds: queue.runnerWaitSeconds, workloadSeconds,
-    stages: queue.stages, jobs: queue.jobs.map(({ name, created_at, started_at, completed_at, conclusion, stage, runnerWaitSeconds }) =>
-      ({ name, createdAt: created_at, startedAt: started_at, finishedAt: completed_at, conclusion, stage, runnerWaitSeconds })),
+  const jobTimings = required.map(({ name, created_at, started_at, completed_at, conclusion }) => {
+    const { stage, runnerWaitSeconds } = queue.jobs.find(job => job.name === name);
+    const discountSeconds = queue.discounts[name];
+    return { name, createdAt: created_at, startedAt: started_at, finishedAt: completed_at, conclusion, stage, runnerWaitSeconds,
+      discountSeconds, workloadFinishSeconds: (Date.parse(completed_at) - Date.parse(startedAt)) / 1000 - discountSeconds };
+  });
+  const critical = jobTimings.reduce((maximum, job) => job.workloadFinishSeconds > maximum.workloadFinishSeconds ? job : maximum);
+  const workloadSeconds = critical.workloadFinishSeconds;
+  return { startedAt, finishedAt, seconds, budgetSeconds, runnerWaitSeconds: seconds - workloadSeconds, workloadSeconds,
+    criticalJob: critical.name, stages: queue.stages, jobs: jobTimings,
     withinBudget: seconds <= budgetSeconds || workloadSeconds <= budgetSeconds };
 }
 
@@ -176,7 +205,7 @@ export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, 
     const required = all.filter(job => expected.includes(job.name));
     if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
     if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
-    const remaining = gateDeadline(scope, all, now()) - now();
+    const remaining = gateDeadline(scope, all, finalJob, now()) - now();
     const queued = required.some(job => ["queued", "waiting", "pending", "requested"].includes(job.status));
     if (remaining <= 0 && !queued) throw new Error(`The ${scope} group has no time left for complete reporting within its budget.`);
     if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
@@ -199,7 +228,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), finishedAt, gateQueueTiming(scope, all, now())));
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), finishedAt, gateQueueTiming(scope, all, now(), false)));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;

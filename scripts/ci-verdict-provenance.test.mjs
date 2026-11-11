@@ -410,7 +410,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   for (const job of [tests, jobs.rust]) {
     assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
     const install = job.steps.findIndex(step => step.name === "Install dependencies");
-    const wait = job.steps.findIndex(step => step.run === "node scripts/verification/wait-preparation.mjs rust");
+    const wait = job.steps.findIndex(step => step.run === `node scripts/verification/wait-preparation.mjs rust "${job === jobs.rust ? "engine gate" : "Rust tests ${{ matrix.shard }}"}"`);
     const download = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
     assert.ok(install >= 0 && install < wait && wait < download);
     assert.equal(job.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");

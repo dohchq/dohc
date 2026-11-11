@@ -70,7 +70,7 @@ The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
-Gate timing records the full wall span and discounts runner waits by dependency stage when needed.
+Gate timing records the full wall span and discounts each job only for runner waits in its dependency closure.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.

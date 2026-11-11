@@ -102,8 +102,8 @@ async function runJavascript(groups, record, save, availability) {
   assertTaskCoverage([...selected.values()], [{ ...record, verdict: "PASS" }]);
 }
 
-async function restoreNativePreparation() {
-  const { artifact, deadline } = await waitForPreparation("js");
+async function restoreNativePreparation(index) {
+  const { artifact, deadline } = await waitForPreparation("js", { waitingJob: index === 0 ? "typecheck + tests" : `JS worker ${index}` });
   if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new Error("Native artifact transfer exceeded the JavaScript gate budget.");
@@ -151,7 +151,7 @@ export async function cloudJavascript(part, index = 0) {
       process.env.DOHC_QA_OUTPUT = output;
       let nativeReady = !shard.some(group => group.native);
       const preparation = nativeReady ? Promise.resolve() : step("native preparation", async () => {
-        const actions = [restoreNativePreparation().then(build => { record.build = build; })];
+        const actions = [restoreNativePreparation(index).then(build => { record.build = build; })];
         if (shard.some(group => ["desktop", "accounts"].includes(group.kind))) actions.push(step("browser installation", () =>
           run(...pnpm(["exec", "playwright", "install", "chromium"]), { log: join(output, "browser-install.log") })));
         const results = await Promise.allSettled(actions);
