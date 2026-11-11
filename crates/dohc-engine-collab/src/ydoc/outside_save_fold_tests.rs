@@ -340,16 +340,34 @@ const NEAR_MISSES: &[&str] = &[
     "Paragraph.\n\n---",
 ];
 
+fn foldable_near_misses() -> Vec<&'static str> {
+    NEAR_MISSES
+        .iter()
+        .copied()
+        .filter(|markdown| {
+            Ydoc::wire()
+                .rewrite_content_to_markdown_for_fold(
+                    ContentKind::Richdoc,
+                    &format!("{markdown}\n"),
+                )
+                .is_ok()
+        })
+        .collect()
+}
+
 #[test]
 fn the_direct_comparison_decides_as_the_json_one_did() {
     let mut tally = [0, 0];
-    // Every near miss against every other, each from a note with history
-    // against a fresh fold.
-    let fresh: Vec<Ydoc> = NEAR_MISSES
+    // Every near miss the fold can hold against every other, each from a
+    // note with history against a fresh fold. A note the fold can't hold,
+    // such as a nested list, never reaches the comparison.
+    let foldable = foldable_near_misses();
+    assert!(foldable.len() >= 10, "{foldable:?}");
+    let fresh: Vec<Ydoc> = foldable
         .iter()
         .map(|markdown| folded(&format!("{markdown}\n")))
         .collect();
-    for old in NEAR_MISSES {
+    for old in &foldable {
         let old = with_history(&format!("{old}\n")).expect(old);
         for new in &fresh {
             agree(&old, new, &mut tally);
@@ -381,7 +399,7 @@ fn the_direct_comparison_decides_as_the_json_one_did() {
         }
     }
     let [different, same] = tally;
-    assert!(same > NEAR_MISSES.len() + pairs.len(), "same {same}");
+    assert!(same > foldable.len() + pairs.len(), "same {same}");
     assert!(different > same, "different {different}, same {same}");
 }
 
@@ -407,16 +425,16 @@ fn set_attribute(doc: &Ydoc, key: &str, value: Any) {
 }
 
 /// Empties the first block's text and writes it again with `write`.
-fn rewrite_text(
-    doc: &Ydoc,
-    write: impl Fn(&yrs::XmlTextRef, &mut yrs::TransactionMut, Option<Box<yrs::types::Attrs>>),
-) {
+fn rewrite_text(doc: &Ydoc, write: impl Fn(&yrs::XmlTextRef, &mut yrs::TransactionMut)) {
     let text = doc.richdoc_block_text(0).unwrap();
     let mut txn = doc.doc.transact_mut();
-    let format = text.diff(&txn, YChange::identity)[0].attributes.clone();
     let len = text.len(&txn);
     text.remove_range(&mut txn, 0, len);
-    write(&text, &mut txn, format);
+    write(&text, &mut txn);
+}
+
+fn bold() -> yrs::types::Attrs {
+    yrs::types::Attrs::from([("bold".into(), Any::Bool(true))])
 }
 
 #[test]
@@ -460,30 +478,36 @@ fn where_the_comparisons_could_disagree_the_direct_one_keeps_nothing_json_would_
     assert_eq!(judged("# Kept.\n", first_a, first_b), (true, true));
     // Text written in two pieces reads as one run, so both keep it.
     let split = |doc: &Ydoc| {
-        rewrite_text(doc, |text, txn, _| {
+        rewrite_text(doc, |text, txn| {
             text.insert(txn, 0, "Ke");
             text.insert(txn, 2, "pt.");
         })
     };
     assert_eq!(judged("Kept.\n", split, unchanged), (true, true));
-    // A bold run written in two pieces: whatever the runs come out as, the
-    // two comparisons decide alike.
+    // A bold run written in two pieces against one written whole: whatever
+    // the runs come out as, the two comparisons decide alike.
     let split_bold = |doc: &Ydoc| {
-        rewrite_text(doc, |text, txn, format| {
-            let format = *format.expect("bold");
-            text.insert_with_attributes(txn, 0, "Ke", format.clone());
-            text.insert_with_attributes(txn, 2, "pt.", format);
+        rewrite_text(doc, |text, txn| {
+            text.insert_with_attributes(txn, 0, "Ke", bold());
+            text.insert_with_attributes(txn, 2, "pt.", bold());
         })
     };
-    let (json, direct) = judged("**Kept.**\n", split_bold, unchanged);
+    let whole_bold = |doc: &Ydoc| {
+        rewrite_text(doc, |text, txn| {
+            text.insert_with_attributes(txn, 0, "Kept.", bold())
+        })
+    };
+    let (json, direct) = judged("Kept.\n", split_bold, whole_bold);
     assert_eq!(direct, json);
+    // The same text with and without formatting.
+    assert_eq!(judged("Kept.\n", whole_bold, unchanged), (false, false));
     // A plain value embedded in the text against the same digits as text.
     let embed = |doc: &Ydoc| {
-        rewrite_text(doc, |text, txn, _| {
+        rewrite_text(doc, |text, txn| {
             text.insert_embed(txn, 0, Any::Number(7.0));
         })
     };
-    let digits = |doc: &Ydoc| rewrite_text(doc, |text, txn, _| text.insert(txn, 0, "7"));
+    let digits = |doc: &Ydoc| rewrite_text(doc, |text, txn| text.insert(txn, 0, "7"));
     assert_eq!(judged("Kept.\n", embed, digits), (false, false));
 }
 
