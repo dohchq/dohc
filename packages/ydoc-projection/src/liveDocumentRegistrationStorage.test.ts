@@ -430,7 +430,7 @@ it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority aft
     f.raw.exec(`INSERT INTO sync_relay_share_grants (grant_id, share_id, principal_kind, principal_user_id,
       principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
       VALUES ('grant', 'share', 'user', 'reader', NULL, 'edit', 4, 'active', 0, NULL, NULL)`)
-    const actor = kind === 'owner' ? { kind, userId: 'owner', shareId: 'share' } as const
+    const actor = kind === 'owner' ? { kind, userId: 'owner' } as const
       : { kind, userId: 'reader', grantId: 'grant' } as const
     const request = { document: input.evidence.document, actor }
     expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')

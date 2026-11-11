@@ -38,25 +38,6 @@ it("retries an unmaterialized owner settlement and caches only its completed res
   } finally {f.close();}
 });
 
-it("transfers owner metadata quota for all100 maximum-length selectors and detects selector changes", () => {
-  const f = registered();
-  try {
-    const selectors = ["docs",...Array.from({length: 99},(_,index) => `${index}`.padEnd(1024,"x"))];
-    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths: selectors,versionId: null}));
-    const history = createLiveJournalHistoryAuthority({namespace: "owner-history",reconciled: true}), store = f.storage.createLiveCommittedDeliveryStore(history);
-    const capture = store.captureOwnerCut({host,document: f.input.evidence.document,actor: {kind: "owner",userId: "owner"},adoptionId: "origin",expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
-    expect(capture.binding.selectorPaths).toHaveLength(100);
-    const before = Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw);
-    store.acknowledgeOwnerAdoption(capture,{adoptionId: "origin",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false});
-    expect(Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw)).toBe(before);
-    const row = f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!;
-    expect(JSON.parse(String(row.origin_json)).originalBinding).toEqual(capture.binding);
-    expect(Buffer.byteLength(String(row.origin_json))).toBeLessThan(Buffer.byteLength(JSON.stringify(capture.binding))+4096);
-    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths: ["docs/a.md"],versionId: null}));
-    expect(() => capture.assertCurrent()).toThrow();
-  } finally {f.close();}
-});
-
 it("records owner origin and ACK progress with exact quota transfer and restart replay", () => {
   const f = registered();
   try {

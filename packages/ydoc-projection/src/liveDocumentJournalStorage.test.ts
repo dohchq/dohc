@@ -155,12 +155,13 @@ function probeJournalCharge(f: ReturnType<typeof registered>, input: LiveUpdateJ
   } finally { raw.close(); probe.close(); }
 }
 
-it('charges wide actor selectors and provenance before committing within workspace quota', () => {
+// A recipient's binding takes its share's selector; an owner's does not.
+it('charges a recipient\'s wide selectors and provenance before committing within workspace quota', () => {
   const f = registered();
   try {
     const paths = ['docs', ...Array.from({ length: 99 }, (_, index) => `other/${index}/${'x'.repeat(200)}`)];
     f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({ paths, versionId: null }));
-    const input = f.capture(f.update()), initial = Number(f.journalRows().usage);
+    const input = f.capture(f.update(), 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' }), initial = Number(f.journalRows().usage);
     expect(input.updateBytes.byteLength).toBeLessThan(100);
     expect(Buffer.byteLength(JSON.stringify(input.metadata.binding.selectorPaths))).toBeGreaterThan(20_000);
     const payloadOnlyQuota = initial + input.updateBytes.byteLength + liveDeliveryEventReservationBytes(input.cutToken.document, host.hostId,
@@ -1268,7 +1269,8 @@ it.each([1, 100])('bounds repeated binding validation for %s selector paths whil
   try {
     const paths = ['docs', ...Array.from({length: pathCount - 1}, (_, index) => `other/${String(index).padStart(3, '0')}`)];
     f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths, versionId: null}));
-    for (let i = 0; i < 40; i++) expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + i, 'value-' + i), 'delivery-' + i)).result.kind).toBe('accepted');
+    const reader = {kind: 'named', userId: 'reader', grantId: 'grant'} as const;
+    for (let i = 0; i < 40; i++) expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + i, 'value-' + i), 'delivery-' + i, reader)).result.kind).toBe('accepted');
     calls.bindings = 0;
     const cut = f.storage.readLiveUpdateJournalCut({document: f.input.evidence.document});
     expect(cut.kind).toBe('cut');
@@ -1276,6 +1278,7 @@ it.each([1, 100])('bounds repeated binding validation for %s selector paths whil
     expect(cut.cut.suffix).toHaveLength(40);
     const firstBinding = cut.cut.suffix[0]!.metadata.accepted.binding;
     const secondBinding = cut.cut.suffix[1]!.metadata.accepted.binding;
+    expect(firstBinding.selectorPaths).toEqual(paths);
     expect(firstBinding).toEqual(secondBinding);
     expect(firstBinding).not.toBe(secondBinding);
     expect(firstBinding.selectorPaths).not.toBe(secondBinding.selectorPaths);
@@ -1291,7 +1294,7 @@ it.each([1, 100])('bounds repeated binding validation for %s selector paths whil
 
 it.each([
   ['current_path', 'docs/b.md', 'currentPath', 'docs/b.md'],
-  ['selector_paths_json', '["docs/a.md"]', 'selectorPaths', ['docs/a.md']],
+  ['selector_paths_json', '["docs"]', 'selectorPaths', ['docs']],
   ['restore_fence_generation', 1, 'restoreFenceGeneration', 1],
 ] as const)('reads changed %s from another connection without reusing the previous binding', (column, value, field, expected) => {
   const f = registered();

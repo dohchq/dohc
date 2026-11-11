@@ -39,6 +39,7 @@ import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerResto
 import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
 import {preparedStop} from '../../../services/sync-relay/src/liveTickets.test-helper.js'
 import {registered,cleanupLiveDeliveryFixtures} from './liveCommittedDeliveryTestSupport.js'
+import {liveDeliveryBookkeepingBytes} from './liveDeliveryQuotaTestSupport.js'
 import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -642,7 +643,8 @@ async function ownerCapture(f:ReturnType<typeof fixture>){
     localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
   return {capture,delivery,acknowledge}
 }
-it.each(['selector','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
+// The owner's binding takes no share's selector; a restore generation is what moves it.
+it.each(['generation','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
   const f=fixture();try{
     await f.prepare()
     const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
@@ -651,10 +653,35 @@ it.each(['selector','host'] as const)('revalidates a private pending activation 
     expect(captured.assertCurrent).not.toThrow()
     const wrong=f.storage.createLiveCommittedDeliveryStore(f.history,{activationId:'wrong-activation'})
     expect(()=>wrong.captureOwnerBinding({host,document:f.document,actor})).toThrow()
-    if(change==='selector')f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
-      .run(JSON.stringify({paths:['other'],versionId:null}))
+    if(change==='generation')f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
     else f.raw.exec("UPDATE sync_relay_session_host_control SET registered_connection_id='different-connection'")
     expect(captured.assertCurrent).toThrow()
+  }finally{f.close()}
+})
+// Proves: a lineage activated while owners still took a share's selector
+// recorded it, up to 100 selectors of the maximum length. Its owner adopts
+// under that recorded binding, and the adoption's origin is charged from its
+// reservation, so usage doesn't move. A later restore generation changes the
+// binding, and the capture no longer holds.
+it('transfers owner metadata quota for a recorded binding of 100 maximum-length selectors and detects a changed binding',async()=>{
+  const f=fixture();try{
+    await f.prepare()
+    const selectors=['docs',...Array.from({length:99},(_,index)=>`${index}`.padEnd(1024,'x'))]
+    const recorded=JSON.parse(String(f.raw.prepare('SELECT binding_json FROM sync_relay_service_activations').get()!.binding_json))
+    f.raw.prepare('UPDATE sync_relay_service_activations SET binding_json=?').run(JSON.stringify({...recorded,selectorPaths:selectors}))
+    const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+    const capture=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+      expectedLocalSequence:f.capture.source.nativeHeadSequence,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+    expect(capture.binding.selectorPaths).toEqual(selectors)
+    const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)-liveDeliveryBookkeepingBytes(f.raw)
+    const before=usage()
+    delivery.acknowledgeOwnerAdoption(capture,{adoptionId:f.capture.activationId,localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
+    expect(usage()).toBe(before)
+    const origin=String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json)
+    expect(JSON.parse(origin).originalBinding).toEqual(capture.binding)
+    expect(Buffer.byteLength(origin)).toBeLessThan(Buffer.byteLength(JSON.stringify(capture.binding))+4096)
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
+    expect(()=>capture.assertCurrent()).toThrow()
   }finally{f.close()}
 })
 it('revalidates the frozen activation source before acknowledging a captured owner cut',async()=>{
@@ -2628,6 +2655,7 @@ it('serves a folder-share lineage its recorded binding after the upgrade, consul
     reopened=openSyncRelayStorage(f.path)
     expect((reopened as StorageContext).db.prepare('SELECT binding_json FROM sync_relay_service_activations').all()).toEqual([{binding_json:JSON.stringify(recorded)}])
     reopened.close();reopened=undefined
+    f.storage.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}))
     expect(f.storage.resolveCurrentLiveDocumentBinding({document,actor:f.actor})).toMatchObject({kind:'current',binding:recorded})
     expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('title','Draft'),'draft')).result.kind).toBe('accepted')
     const narrowed=f.capture(f.update('title','Narrowed'),'narrowed')
