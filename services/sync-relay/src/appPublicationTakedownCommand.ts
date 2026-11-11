@@ -7,6 +7,7 @@ const usage = `Run inside the running relay container with host operator access:
 --publication-id ID --reason TEXT
   Disables one publication and stops its owner from publishing apps on this server.
   The owner sees the reason. Their other publications keep serving.
+  The reply lists the owner's other active publications of the same app, so you can disable each one.
   A retry keeps the first takedown record and places the hold again.
 --publication-id ID --lift-hold
   Lets that publication's owner publish apps again. The publication stays disabled.
