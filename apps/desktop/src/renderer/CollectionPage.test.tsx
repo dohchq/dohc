@@ -15,6 +15,7 @@ import type {
   AutomationRunWaitingEvent,
   GetCollectionResult,
   ListAutomationButtonsResult,
+  ListAutomationPeopleResult,
   PressAutomationButtonPayload,
   PressAutomationButtonResult,
   QueryCollectionRecordsResult,
@@ -277,6 +278,9 @@ function makeBridge(
     ),
     // The header's ⚡ count reads the Collection's automations.
     listCollectionAutomations: vi.fn(async () => ({ status: "missing" as const })),
+    // The people a person field can name. A Collection main cannot list them for keeps the typed id.
+    listAutomationPeople: vi.fn(async (_payload: { workspaceId: string; collectionPath: string }): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" })),
+    openExternalUrl: vi.fn(async (_payload: { url: string }) => undefined),
     listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: false })),
   };
 }
@@ -345,6 +349,25 @@ function renderPage(
   vi.stubGlobal("dohcDesktop", bridge);
   return render(pageWithHost(onNewRecord, onOpenRecord, view));
 }
+
+// The first record's cell in the table: the Open gutter is cell 0, then one cell per field.
+function fieldCell(fieldIndex: number): HTMLElement {
+  const cell = screen.getByRole("grid").querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[fieldIndex + 1];
+  if (!cell) throw new Error(`no cell for field ${fieldIndex}`);
+  return cell;
+}
+
+/**
+ * One edit of the tags cell, the second field: opens its picker, picks or
+ * removes each tag, and saves the way a press outside the picker does.
+ */
+function editTags(...tags: string[]) {
+  fireEvent.click(fieldCell(1));
+  for (const tag of tags) fireEvent.click(screen.getByRole("option", { name: tag }));
+  fireEvent.pointerDown(document.body);
+}
+
+const tagPicked = (name: string) => screen.getByRole("option", { name }).getAttribute("aria-selected") === "true";
 
 describe("CollectionPage", () => {
   it("keeps draft delivery separate from owner application, retries, and reverses local discard", async () => {
@@ -822,10 +845,11 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge(records, schema);
     const page = renderPage(bridge);
-    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await screen.findByRole("button", { name: "alpha" });
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    // The second edit reopens the cell before the index shows the first.
+    editTags("beta");
+    editTags("beta");
     for (let index = 0; index < 2; index += 1) {
       docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
       page.rerender(pageWithHost());
@@ -843,11 +867,11 @@ describe("CollectionPage", () => {
     };
     bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
     await act(() => vi.advanceTimersByTimeAsync(250));
-    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    editTags("gamma");
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
-  it.each([2, 3])("retries the latest of %i rapid toggles after earlier progress without an index refresh", async (count) => {
+  it.each([2, 3])("retries the latest of %i rapid tags edits after earlier progress without an index refresh", async (count) => {
     const schema: CollectionSchema = {
       ...SCHEMA,
       fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma", "delta"] }],
@@ -862,10 +886,10 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge(records, schema);
     const page = renderPage(bridge);
-    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await screen.findByRole("button", { name: "alpha" });
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    editTags("beta");
+    editTags("gamma");
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost());
     // The first write settles; the second writer cannot open its session.
@@ -873,7 +897,7 @@ describe("CollectionPage", () => {
     page.rerender(pageWithHost());
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()).toHaveLength(1);
-    if (count === 3) fireEvent.click(screen.getByRole("checkbox", { name: "delta" }));
+    if (count === 3) editTags("delta");
     const latest = collectionWriteFailures().at(-1)!;
     const desired = count === 3 ? ["alpha", "beta", "gamma", "delta"] : ["alpha", "beta", "gamma"];
     expect(latest.change.value).toEqual(desired);
@@ -885,7 +909,7 @@ describe("CollectionPage", () => {
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["retry", "discard"] as const)("keeps an open multi-select consistent after %s of retained input", async (action) => {
+  it.each(["retry", "discard"] as const)("keeps a reopened tags picker consistent after %s of retained input", async (action) => {
     const schema: CollectionSchema = {
       ...SCHEMA,
       fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
@@ -897,9 +921,9 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: false });
     const bridge = makeBridge(records, schema);
     renderPage(bridge);
-    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await screen.findByRole("button", { name: "alpha" });
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    editTags("gamma");
     expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha", "gamma"]);
 
     const doc = new Y.Doc();
@@ -912,8 +936,10 @@ describe("CollectionPage", () => {
     };
     bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
     await act(() => vi.advanceTimersByTimeAsync(250));
-    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
-    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+    // The reopened picker shows the other person's beta and the retained gamma.
+    fireEvent.click(fieldCell(1));
+    expect([tagPicked("beta"), tagPicked("gamma")]).toEqual([true, true]);
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
 
     fireEvent.click(screen.getByTestId(`collection-write-${action}`));
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
@@ -922,8 +948,11 @@ describe("CollectionPage", () => {
       expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
     } else {
       expect(collectionWriteFailures()).toEqual([]);
-      expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
-      fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+      // The discard reached the closed cell: its next edit starts without gamma.
+      fireEvent.click(fieldCell(1));
+      expect(tagPicked("gamma")).toBe(false);
+      fireEvent.click(screen.getByRole("option", { name: "alpha" }));
+      fireEvent.pointerDown(document.body);
       expect(doc.getMap("frontmatter").get("tags")).toEqual(["beta"]);
     }
   });
@@ -943,9 +972,9 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge(records, schema);
     const page = renderPage(bridge);
-    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await screen.findByRole("button", { name: "alpha" });
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    editTags("beta");
 
     let resolveQuery!: (result: QueryCollectionRecordsResult) => void;
     bridge.queryCollectionRecords.mockReturnValueOnce(new Promise((resolve) => { resolveQuery = resolve; }));
@@ -965,8 +994,11 @@ describe("CollectionPage", () => {
       nextCursor: null,
     }));
 
-    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
-    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    // That query read the index before the save, so the reopened picker still replays beta.
+    fireEvent.click(fieldCell(1));
+    expect(tagPicked("beta")).toBe(true);
+    fireEvent.click(screen.getByRole("option", { name: "gamma" }));
+    fireEvent.pointerDown(document.body);
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
@@ -1191,9 +1223,9 @@ describe("collection authoring", () => {
     await screen.findByText("Plan");
 
     fireEvent.click(screen.getByText("Todo"));
-    const addOption = screen.getByLabelText("Add option");
-    fireEvent.change(addOption, { target: { value: "Later" } });
-    fireEvent.keyDown(addOption, { key: "Enter" });
+    const search = screen.getByRole("combobox", { name: "Search options" });
+    fireEvent.change(search, { target: { value: "Later" } });
+    fireEvent.keyDown(search, { key: "Enter" });
 
     await waitFor(() =>
       expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
@@ -1232,9 +1264,9 @@ describe("collection authoring", () => {
     await screen.findByText("Plan");
 
     fireEvent.click(screen.getByText("Todo"));
-    const addOption = screen.getByLabelText("Add option");
-    fireEvent.change(addOption, { target: { value: "Later" } });
-    fireEvent.keyDown(addOption, { key: "Enter" });
+    const search = screen.getByRole("combobox", { name: "Search options" });
+    fireEvent.change(search, { target: { value: "Later" } });
+    fireEvent.keyDown(search, { key: "Enter" });
 
     // The accepted edit is in the global queue before any schema IPC
     // settles — the whole point: a version or path operation now sees it.
@@ -1300,9 +1332,9 @@ describe("collection authoring", () => {
     await screen.findByText("Plan");
 
     fireEvent.click(screen.getByText("Todo"));
-    const addOption = screen.getByLabelText("Add option");
-    fireEvent.change(addOption, { target: { value: "Later" } });
-    fireEvent.keyDown(addOption, { key: "Enter" });
+    const search = screen.getByRole("combobox", { name: "Search options" });
+    fireEvent.change(search, { target: { value: "Later" } });
+    fireEvent.keyDown(search, { key: "Enter" });
     page.rerender(
       <>
         {null}
@@ -2636,5 +2668,168 @@ describe("a calendar view without a date field", () => {
 
     expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
+  });
+});
+
+describe("table pickers", () => {
+  const valid = { validation: { status: "valid" as const }, resolvedRelations: [] };
+  const PEOPLE_SCHEMA: CollectionSchema = {
+    ...SCHEMA,
+    fields: [...SCHEMA.fields, { name: "owner", type: "person" }, { name: "site", type: "url" }],
+  };
+  const ownedRecord = (): CollectionRecord => ({
+    ...record("rec-1", "Plan"),
+    values: [
+      ...record("rec-1", "Plan").values,
+      { field: "owner", value: "user-7", ...valid },
+      { field: "site", value: "website.example", ...valid },
+    ],
+  });
+  // Grace cannot get a direct message or a notice. A person field can still name her.
+  const LISTED: ListAutomationPeopleResult = {
+    status: "listed",
+    people: [
+      { userId: "user-7", name: "Ada", you: true, dmStopped: "A direct message goes to another person.", noticeStopped: null },
+      { userId: "user-9", name: "Grace", you: false, dmStopped: "Grace has no chat here.", noticeStopped: "Grace cannot open Tasks." },
+    ],
+  };
+  const page = (collectionPath: string) => (
+    <>
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath={collectionPath}
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
+        onNewRecord={() => undefined}
+        onOpenRecord={() => undefined}
+        {...SHELL_PROPS}
+      />
+      <CollectionFieldWriteHost />
+    </>
+  );
+
+  it("shows people by name and picks one from the people main lists for this Collection", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
+    bridge.listAutomationPeople.mockResolvedValue(LISTED);
+    renderPage(bridge);
+
+    // The cell stores user-7 and shows the name.
+    expect(await screen.findByText("Ada")).toBeDefined();
+    expect(screen.queryByText("user-7")).toBeNull();
+    expect(bridge.listAutomationPeople).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", collectionPath: "tasks" });
+
+    fireEvent.click(fieldCell(1));
+    expect(screen.getByRole("combobox", { name: "Search people" })).toBeDefined();
+    fireEvent.click(screen.getByRole("option", { name: "Grace" }));
+    expect(doc.getMap("frontmatter").get("owner")).toBe("user-9");
+  });
+
+  it.each([
+    ["main cannot list people here", async (): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" })],
+    ["main cannot check who has access yet", async (): Promise<ListAutomationPeopleResult> => ({ status: "waiting", reason: "dohc cannot check who can edit Tasks yet." })],
+    ["the list is empty", async (): Promise<ListAutomationPeopleResult> => ({ status: "listed", people: [] })],
+    ["the read fails", async (): Promise<ListAutomationPeopleResult> => { throw new Error("offline"); }],
+  ])("keeps the typed id for a person when %s", async (_why, answer) => {
+    const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
+    bridge.listAutomationPeople.mockImplementation(answer);
+    const onError = vi.fn<CollectionPageProps["onError"]>();
+    renderPage(bridge, undefined, undefined, { onError });
+
+    expect(await screen.findByText("user-7")).toBeDefined();
+    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledOnce());
+    await act(async () => {});
+    fireEvent.click(fieldCell(1));
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByRole<HTMLInputElement>("textbox").value).toBe("user-7");
+    // The typed id still works, so there is nothing to report.
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("reads no people for a Collection without a person field", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+    await act(async () => {});
+    expect(bridge.listAutomationPeople).not.toHaveBeenCalled();
+  });
+
+  it("ignores a list of people that answers after the page moved to another Collection", async () => {
+    const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
+    const late = deferred<ListAutomationPeopleResult>();
+    bridge.listAutomationPeople.mockImplementation(({ collectionPath }) =>
+      collectionPath === "tasks" ? late.promise : Promise.resolve({ status: "unavailable" }),
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(page("tasks"));
+    await screen.findByText("user-7");
+    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "tasks" }));
+
+    view.rerender(page("projects"));
+    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "projects" }));
+    await act(async () => late.resolve(LISTED));
+
+    // The other Collection's people never name this one's cells or fill its picker.
+    expect(await screen.findByText("user-7")).toBeDefined();
+    expect(screen.queryByText("Ada")).toBeNull();
+    fireEvent.click(fieldCell(1));
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it.each([
+    ["select", "Todo"],
+    ["multi-select", ["Todo"]],
+  ] as const)("saves a %s option's color from the table's picker to the schema", async (type, value) => {
+    const schema: CollectionSchema = { ...SCHEMA, fields: [...SCHEMA.fields, { name: "status", type, options: ["Todo", "Doing"] }] };
+    const bridge = makeBridge([{ ...record("rec-1", "Plan"), values: [...record("rec-1", "Plan").values, { field: "status", value: typeof value === "string" ? value : [...value], ...valid }] }], schema);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(fieldCell(1));
+    fireEvent.click(screen.getByRole("button", { name: "Doing options" }));
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Color for Doing" })).getByRole("radio", { name: "Plum" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
+      name: "status",
+      type,
+      options: ["Todo", "Doing"],
+      colors: { Doing: "plum" },
+    });
+    // The picker stays open, and shows the color once the schema reads back.
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Doing" }).querySelector("[data-option-color]")?.getAttribute("data-option-color")).toBe("plum"),
+    );
+  });
+
+  it("reports an option color the table's picker could not save, with a retry", async () => {
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    bridge.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
+    const onError = vi.fn<CollectionPageProps["onError"]>();
+    renderPage(bridge, undefined, undefined, { onError });
+    await screen.findByText("Plan");
+
+    fireEvent.click(fieldCell(1));
+    fireEvent.click(screen.getByRole("button", { name: "Todo options" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const [message, , retry] = onError.mock.calls[0]!;
+    expect(message).toMatch(/^dohc could not update this collection\./);
+    retry!();
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toMatchObject({ colors: { Todo: "plum" } });
+  });
+
+  it("opens a url cell's link the way the shell opens any link, and does not edit the cell", async () => {
+    const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
+    renderPage(bridge);
+    fireEvent.click(await screen.findByRole("link", { name: "website.example" }));
+    await waitFor(() => expect(bridge.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "https://website.example/" }));
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+
+    // A click beside the link text edits the url.
+    fireEvent.click(within(fieldCell(2)).getByRole("button", { name: "Edit site" }));
+    expect(screen.getByRole<HTMLInputElement>("textbox").value).toBe("website.example");
   });
 });

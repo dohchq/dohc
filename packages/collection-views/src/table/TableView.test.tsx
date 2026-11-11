@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createPortal } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
@@ -95,7 +95,7 @@ describe("New record row", () => {
 });
 
 describe("paused table editing", () => {
-  it("keeps a typed multi-select option mounted and disabled until editing resumes", () => {
+  it("keeps a tags picker's picks and typed text mounted and still until editing resumes", () => {
     const records = [makeRecord("rec-1", [indexedValue("tags", ["alpha"])])];
     const schema = makeSchema([{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }]);
     const onCellChange = vi.fn(() => 1);
@@ -106,24 +106,32 @@ describe("paused table editing", () => {
     );
     const view = render(table(false));
     fireEvent.click(screen.getByRole("button", { name: "alpha" }));
-    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    const input = screen.getByRole<HTMLInputElement>("combobox");
     fireEvent.change(input, { target: { value: "delta" } });
     view.rerender(table(true));
-    expect(screen.getByLabelText("Add option")).toBe(input);
+    expect(screen.getByRole("combobox")).toBe(input);
     expect(input.matches(":disabled")).toBe(true);
-    fireEvent.blur(input);
+    // A paused picker takes no pick, no key, and no press outside.
+    fireEvent.click(screen.getByRole("option", { name: "Create delta" }));
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Tab" });
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("button", { name: "Remove delta" })).toBeNull();
     expect(onCreateOption).not.toHaveBeenCalled();
     expect(onCellChange).not.toHaveBeenCalled();
 
     view.rerender(table(false));
-    expect(screen.getByLabelText("Add option")).toBe(input);
+    expect(screen.getByRole("combobox")).toBe(input);
     expect(input.value).toBe("delta");
     expect(input.matches(":disabled")).toBe(false);
     fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).not.toHaveBeenCalled();
+    fireEvent.pointerDown(document.body);
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-1", recordPath: records[0]!.path, field: "tags", option: "delta",
       value: ["alpha", "delta"], previousValues: [["alpha"]],
     });
+    expect(onCellChange).not.toHaveBeenCalled();
   });
 
   it("does not commit or close a text draft when pausing blurs its input", () => {
@@ -507,11 +515,8 @@ describe("selection and keys", () => {
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ field: "estimate", value: 75 }));
     expect(selection()).toEqual([1, 1]);
 
-    // Ctrl+V is the app's key, and a select opens no text editor.
+    // Ctrl+V is the app's key.
     expect(press("v", { ctrlKey: true })).toBe(true);
-    press("ArrowRight");
-    press("ArrowRight");
-    press("d");
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
   });
 
@@ -693,5 +698,367 @@ describe("selection and keys", () => {
       ["f-2", true],
       ["f-1", "Invoice 13"],
     ]);
+  });
+});
+
+describe("pickers", () => {
+  // Column order and left edges: title 0 at 0, status 1 at 260, tags 2 at 440, due 3 at 620, owner 4 at 800, link 5 at 980.
+  const schema = makeSchema([
+    { name: "title", type: "text" },
+    { name: "status", type: "select", options: ["todo", "doing"] },
+    { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] },
+    { name: "due", type: "date" },
+    { name: "owner", type: "person" },
+    { name: "link", type: "url" },
+  ]);
+  const [STATUS, TAGS, DUE, OWNER, LINK] = [1, 2, 3, 4, 5];
+  const people = [{ id: "user-7", name: "Ada" }, { id: "user-9", name: "Grace" }];
+  const pickerRecords = () =>
+    ["a", "b"].map((id) =>
+      makeRecord(`rec-${id}`, [
+        indexedValue("title", `Task ${id}`),
+        indexedValue("status", "todo"),
+        indexedValue("tags", ["alpha"]),
+        indexedValue("due", "2026-11-20"),
+        indexedValue("owner", "user-7"),
+        indexedValue("link", "https://dohc.dev"),
+      ]),
+    );
+
+  function setup(props: Partial<TableViewProps> = {}) {
+    let writeId = 0;
+    const onCellChange = vi.fn((_change: CollectionCellChange) => ++writeId);
+    const table = (extra: Partial<TableViewProps> = {}) => (
+      <TableView schema={schema} records={pickerRecords()} onCellChange={onCellChange} {...props} {...extra} />
+    );
+    const view = render(table());
+    const grid = screen.getByRole("grid");
+    const cell = (row: number, column: number) => {
+      const found = grid.querySelectorAll<HTMLElement>(`[role="row"][data-index="${row}"] [role="gridcell"]`)[column];
+      if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
+      return found;
+    };
+    /** Opens a cell's editor as one click does. */
+    const open = (row: number, column: number) => fireEvent.click(cell(row, column));
+    const selection = () => {
+      const active = grid.querySelector<HTMLElement>('[aria-selected="true"][role="gridcell"]');
+      if (!active?.parentElement?.hasAttribute("data-index")) return null;
+      return [Number(active.parentElement.dataset.index), [...active.parentElement.children].indexOf(active)];
+    };
+    const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
+    const search = () => screen.getByRole<HTMLInputElement>("combobox");
+    const option = (name: string) => screen.getByRole("option", { name });
+    const chips = () => screen.queryAllByRole("button", { name: /^Remove / }).map((chip) => chip.getAttribute("aria-label")?.slice(7));
+    const press = (key: string) => fireEvent.keyDown(grid, { key });
+    const saved = () => onCellChange.mock.calls.map(([change]) => [change.field, change.value]);
+    return { view, table, grid, cell, open, selection, editor, search, option, chips, press, saved, onCellChange };
+  }
+
+  it("opens a picker as a popover on its cell, wider than the column", () => {
+    const { open, editor, press } = setup();
+    open(0, STATUS);
+    expect(editor()?.className).toContain("dohc-popover dohc-pop-in");
+    expect(editor()?.style.width).toBe("240px");
+    expect(editor()?.style.top).toBe("0px");
+    press("Escape");
+    open(1, DUE);
+    expect(editor()?.style.width).toBe("250px");
+    expect(editor()?.style.top).toBe("32px");
+    fireEvent.keyDown(screen.getByRole("grid", { name: "due" }), { key: "Escape" });
+    // A text cell is edited in the cell, at the column's width.
+    open(0, 0);
+    expect(editor()?.className).not.toContain("dohc-pop-in");
+    expect(editor()?.style.width).toBe("260px");
+  });
+
+  it("keeps a picker inside the visible table when its cell is near the right edge", () => {
+    const { grid, open, editor, search } = setup();
+    Object.defineProperty(grid, "clientWidth", { configurable: true, value: 600 });
+    // status starts at 260: 240 wide, it ends at 500 and fits.
+    open(0, STATUS);
+    expect(editor()?.style.left).toBe("260px");
+    fireEvent.keyDown(search(), { key: "Escape" });
+    // tags starts at 440 and would end at 680. It moves left to end 8px inside the edge.
+    open(0, TAGS);
+    expect(editor()?.style.left).toBe("352px");
+    fireEvent.keyDown(search(), { key: "Escape" });
+    // Scrolled right, the visible part of the table moves with it.
+    grid.scrollLeft = 300;
+    open(0, DUE);
+    expect(editor()?.style.left).toBe("620px");
+    fireEvent.keyDown(screen.getByRole("grid", { name: "due" }), { key: "Escape" });
+    Object.defineProperty(grid, "clientWidth", { configurable: true, value: 500 });
+    open(0, DUE);
+    expect(editor()?.style.left).toBe("542px");
+  });
+
+  it("saves a picked option, closes, and gives the keys back to the grid with the cell still selected", () => {
+    const { grid, open, option, editor, selection, onCellChange } = setup();
+    open(1, STATUS);
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Search options" }));
+    fireEvent.click(option("doing"));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-b", recordPath: "tasks/rec-b.md", field: "status", value: "doing",
+    });
+    expect(editor()).toBeNull();
+    expect(selection()).toEqual([1, STATUS]);
+    expect(document.activeElement).toBe(grid);
+  });
+
+  it("opens a picker with Enter, picks with the keys, and cancels with Escape", () => {
+    const { grid, open, search, press, editor, selection, saved } = setup();
+    open(0, STATUS);
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(selection()).toEqual([0, STATUS]);
+    expect(document.activeElement).toBe(grid);
+
+    press("Enter");
+    fireEvent.keyDown(search(), { key: "ArrowDown" });
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(saved()).toEqual([["status", "doing"]]);
+    expect(selection()).toEqual([0, STATUS]);
+    expect(document.activeElement).toBe(grid);
+  });
+
+  it("opens a select, tags, or person picker from a typed character, with the character in its search box", () => {
+    const { open, search, press, editor, option, saved } = setup({ people });
+    open(0, STATUS);
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(press("i")).toBe(false);
+    expect(search().value).toBe("i");
+    expect(screen.getAllByRole("option").map((row) => row.textContent)).toEqual(["doing"]);
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(saved()).toEqual([["status", "doing"]]);
+
+    press("ArrowRight");
+    press("g");
+    expect(search().value).toBe("g");
+    expect(option("gamma")).toBeDefined();
+    fireEvent.keyDown(search(), { key: "Escape" });
+
+    // A date has no search, so a typed character opens nothing.
+    press("ArrowRight");
+    press("1");
+    expect(editor()).toBeNull();
+
+    press("ArrowRight");
+    press("g");
+    expect(screen.getByRole<HTMLInputElement>("combobox", { name: "Search people" }).value).toBe("g");
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(saved().at(-1)).toEqual(["owner", "user-9"]);
+  });
+
+  it("saves a tags picker once on Tab and moves the selection sideways", () => {
+    const { open, option, search, selection, editor, grid, onCellChange } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.click(option("gamma"));
+    expect(onCellChange).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(search(), { key: "Tab" })).toBe(false);
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
+      value: ["alpha", "beta", "gamma"], previousValues: [["alpha"]],
+    });
+    expect(editor()).toBeNull();
+    expect(selection()).toEqual([0, DUE]);
+    expect(document.activeElement).toBe(grid);
+
+    open(0, TAGS);
+    fireEvent.keyDown(search(), { key: "Tab", shiftKey: true });
+    expect(selection()).toEqual([0, STATUS]);
+    // Nothing changed in the second edit, so nothing saved.
+    expect(onCellChange).toHaveBeenCalledOnce();
+  });
+
+  it("drops a tags picker's picks on Escape and keeps the cell selected", () => {
+    const { open, option, search, selection, editor, onCellChange } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(onCellChange).not.toHaveBeenCalled();
+    expect(selection()).toEqual([0, TAGS]);
+  });
+
+  it("saves a tags picker once when a press lands outside it, and leaves the cell selected", () => {
+    const { open, option, selection, editor, saved } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    // A press on the picker itself is not a press away.
+    fireEvent.pointerDown(screen.getByRole("combobox"));
+    expect(editor()).not.toBeNull();
+    fireEvent.pointerDown(document.body);
+    expect(saved()).toEqual([["tags", ["alpha", "beta"]]]);
+    expect(editor()).toBeNull();
+    expect(selection()).toEqual([0, TAGS]);
+  });
+
+  it("saves the open picker and opens the next cell when a click moves to another cell", () => {
+    const { open, option, cell, selection, saved } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    const other = cell(1, STATUS);
+    fireEvent.pointerDown(other);
+    fireEvent.click(other);
+    expect(saved()).toEqual([["tags", ["alpha", "beta"]]]);
+    expect(selection()).toEqual([1, STATUS]);
+    expect(screen.getByRole("listbox", { name: "status options" })).toBeDefined();
+  });
+
+  it("starts a second tags edit from the first when the index has not caught up", () => {
+    const { open, option, search, chips, onCellChange } = setup();
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.pointerDown(document.body);
+    // The cell still shows the indexed ["alpha"]. The reopened picker shows the save.
+    open(0, TAGS);
+    expect(chips()).toEqual(["alpha", "beta"]);
+    fireEvent.click(option("alpha"));
+    fireEvent.keyDown(search(), { key: "Tab" });
+    expect(onCellChange).toHaveBeenLastCalledWith({
+      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
+      value: ["beta"], previousValues: [["alpha"], ["alpha", "beta"]],
+    });
+    // Another record's cell has its own saves.
+    open(1, TAGS);
+    expect(chips()).toEqual(["alpha"]);
+  });
+
+  it("forgets a saved tags edit the host discards while the picker is closed, and one the index acknowledges", () => {
+    const listeners = new Set<(writeId: number) => void>();
+    const subscribeToDiscardedWrites = (listener: (writeId: number) => void) => {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    };
+    const discard = (writeId: number) => listeners.forEach((listener) => listener(writeId));
+    const { view, table, open, option, chips } = setup({ subscribeToDiscardedWrites });
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.pointerDown(document.body);
+    act(() => discard(1));
+    open(0, TAGS);
+    expect(chips()).toEqual(["alpha"]);
+    fireEvent.click(option("gamma"));
+    fireEvent.pointerDown(document.body);
+
+    // The index now shows edit 2, with someone else's removal of alpha on top.
+    view.rerender(table({
+      records: [makeRecord("rec-a", [indexedValue("tags", ["gamma"])])],
+      acknowledgedWriteId: () => 2,
+    }));
+    open(0, TAGS);
+    expect(chips()).toEqual(["gamma"]);
+  });
+
+  it("creates a tags option with the picks when the picker closes, and starts the next edit from them", () => {
+    const onCreateOption = vi.fn((_create: { option: string }) => 41);
+    const { open, option, search, chips, onCellChange } = setup({ onCreateOption });
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.change(search(), { target: { value: "delta" } });
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(onCreateOption).not.toHaveBeenCalled();
+    fireEvent.keyDown(search(), { key: "Tab" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags", option: "delta",
+      value: ["alpha", "beta", "delta"], previousValues: [["alpha"]],
+    });
+    expect(onCellChange).not.toHaveBeenCalled();
+    open(0, TAGS);
+    expect(chips()).toEqual(["alpha", "beta", "delta"]);
+  });
+
+  it("hands an option's new color to the host with the field's key", () => {
+    const onOptionColorChange = vi.fn();
+    const { open, press, search } = setup({ onOptionColorChange });
+    open(0, STATUS);
+    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    const unchosen = screen.getAllByRole("radio").find((swatch) => swatch.getAttribute("aria-checked") === "false")!;
+    fireEvent.click(unchosen);
+    expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith("status", "doing", unchosen.getAttribute("aria-label")!.toLowerCase());
+    // The picker is still open, and a tags field's options take colors too.
+    fireEvent.keyDown(search(), { key: "Escape" });
+    press("ArrowRight");
+    press("Enter");
+    expect(screen.getByRole("button", { name: "beta options" })).toBeDefined();
+  });
+
+  it("saves a picked date and gives the keys back to the grid", () => {
+    const { grid, open, selection, editor, saved } = setup();
+    open(0, DUE);
+    fireEvent.click(screen.getByRole("gridcell", { name: "November 3, 2026" }));
+    expect(saved()).toEqual([["due", "2026-11-03"]]);
+    expect(editor()).toBeNull();
+    expect(selection()).toEqual([0, DUE]);
+    expect(document.activeElement).toBe(grid);
+  });
+
+  it("opens a people picker when the host lists people, and a typed id when it does not", () => {
+    const withPeople = setup({ people, personLabel: (id) => people.find((person) => person.id === id)?.name ?? null });
+    expect(withPeople.cell(0, OWNER).textContent).toBe("AAda");
+    withPeople.open(0, OWNER);
+    fireEvent.click(withPeople.option("Grace"));
+    expect(withPeople.saved()).toEqual([["owner", "user-9"]]);
+    cleanup();
+
+    const without = setup();
+    without.open(0, OWNER);
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(without.editor()?.querySelector("input")?.value).toBe("user-7");
+    expect(without.editor()?.style.width).toBe("180px");
+  });
+
+  it("opens a filled link from its text, and edits it from a click beside the text", () => {
+    const onOpenLink = vi.fn();
+    const { cell, editor, selection } = setup({ onOpenLink });
+    fireEvent.click(within(cell(0, LINK)).getByRole("link", { name: "https://dohc.dev" }));
+    expect(onOpenLink).toHaveBeenCalledExactlyOnceWith("https://dohc.dev");
+    expect(editor()).toBeNull();
+    expect(selection()).toBeNull();
+
+    fireEvent.click(within(cell(0, LINK)).getByRole("button", { name: "Edit link" }));
+    expect(editor()?.querySelector("input")?.value).toBe("https://dohc.dev");
+    expect(selection()).toEqual([0, LINK]);
+    expect(onOpenLink).toHaveBeenCalledOnce();
+    cleanup();
+
+    // Without a way to open links, the whole cell edits, as before.
+    const plain = setup();
+    expect(within(plain.cell(0, LINK)).queryByRole("link")).toBeNull();
+    plain.open(0, LINK);
+    expect(plain.editor()?.querySelector("input")?.value).toBe("https://dohc.dev");
+  });
+
+  it("names a picker's parts by the field's label, not its key", () => {
+    const idSchema = makeSchema([
+      { name: "f-1", type: "select", options: ["todo"] },
+      { name: "f-2", type: "date" },
+    ]);
+    render(
+      <TableView
+        schema={idSchema}
+        records={[makeRecord("rec-1", [indexedValue("f-1", "todo"), indexedValue("f-2", "2026-11-20")])]}
+        fieldLabel={(field) => ({ "f-1": "Stage", "f-2": "Due" })[field] ?? field}
+        onCellChange={vi.fn(() => 1)}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "todo" }));
+    expect(screen.getByRole("listbox", { name: "Stage options" })).toBeDefined();
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Tab" });
+    fireEvent.keyDown(screen.getByRole("grid", { name: "" }), { key: "Enter" });
+    expect(screen.getByRole("grid", { name: "Due" })).toBeDefined();
+    expect(screen.queryByText(/f-\d/)).toBeNull();
+  });
+
+  it("keeps every cell's element while a picker opens, takes picks, and closes", () => {
+    const { cell, open, option } = setup();
+    const before = [cell(0, 0).firstElementChild, cell(0, TAGS).firstElementChild, cell(1, STATUS).firstElementChild];
+    open(0, TAGS);
+    fireEvent.click(option("beta"));
+    fireEvent.pointerDown(document.body);
+    open(1, STATUS);
+    expect([cell(0, 0).firstElementChild, cell(0, TAGS).firstElementChild, cell(1, STATUS).firstElementChild]).toEqual(before);
+    expect(before.every((element) => element?.isConnected)).toBe(true);
   });
 });

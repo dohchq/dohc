@@ -45,6 +45,7 @@ import {
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
 import { setOptionColor } from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
+import { openLink } from "./linkActivation";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 import {
   AUTOMATIONS_FILE,
@@ -124,6 +125,9 @@ function NewRecordButton({ onClick }: { onClick: () => void }) {
 }
 
 const VIEW_KIND_ICONS = { table: Table2, board: SquareKanban, calendar: CalendarDays } as const;
+
+// A url cell's link opens the way a link in a chat or a document does.
+const openCellLink = (url: string) => void openLink(url);
 
 export function CollectionPage({
   readOnly = false,
@@ -220,6 +224,31 @@ export function CollectionPage({
   // The ⚡ on each field an automation sets: one read per Collection, again
   // only when main's automations change.
   const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(collectionPath));
+
+  // The people a person field can name: the ones main lists for this
+  // Collection. A person cell then opens a picker and shows names. Without
+  // the list, as on a received share, the cell keeps the typed id.
+  const [people, setPeople] = useState<ReadonlyArray<{ id: string; name: string }> | undefined>(undefined);
+  const peopleRequests = useRequestSequence([workspaceId, collectionPath]);
+  const hasPersonField = details?.schema.fields.some((field) => field.type === "person") ?? false;
+  useEffect(() => {
+    setPeople(undefined);
+    if (!hasPersonField) return;
+    const request = peopleRequests.next();
+    void bridge()
+      .listAutomationPeople({ workspaceId, collectionPath })
+      .then((result) => {
+        if (!peopleRequests.isCurrent(request) || result.status !== "listed" || result.people.length === 0) return;
+        setPeople(result.people.map((person) => ({ id: person.userId, name: person.name })));
+      })
+      // A failed read leaves the typed id, which still works.
+      .catch(() => undefined);
+  }, [workspaceId, collectionPath, hasPersonField]);
+  const personLabel = useMemo(() => {
+    if (!people) return undefined;
+    const names = new Map(people.map((person) => [person.id, person.name]));
+    return (userId: string) => names.get(userId) ?? null;
+  }, [people]);
 
   const views = details?.schema.views ?? [];
   const activeView: ViewDefinition | null =
@@ -521,17 +550,23 @@ export function CollectionPage({
   );
 
   const changeOptionColor = useCallback(
-    function change(option: string, color: OptionColor) {
-      if (!groupBy) return;
+    function change(field: string, option: string, color: OptionColor) {
       const dialog = currentSchemaDialog.current;
-      void applySchemaChange((current) => setOptionColor(current, groupBy, option, color)).then((failure) => {
+      void applySchemaChange((current) => setOptionColor(current, field, option, color)).then((failure) => {
         // applySchemaChange reports a failure itself only when a dialog changed.
         if (failure !== null && currentSchemaDialog.current === dialog) {
-          onError(failure, new Error(failure), () => change(option, color));
+          onError(failure, new Error(failure), () => change(field, option, color));
         }
       });
     },
-    [applySchemaChange, groupBy, onError],
+    [applySchemaChange, onError],
+  );
+  // A board colors the options of the field it groups by.
+  const changeGroupColor = useCallback(
+    (option: string, color: OptionColor) => {
+      if (groupBy) changeOptionColor(groupBy, option, color);
+    },
+    [changeOptionColor, groupBy],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
@@ -787,7 +822,8 @@ export function CollectionPage({
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
             onNewRecord={readOnly || writesPaused ? undefined : newRecordInGroup}
-            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            onOptionColorChange={readOnly ? undefined : changeGroupColor}
+            personLabel={personLabel}
           />
         ) : calendarReady ? (
           <CalendarView
@@ -812,6 +848,10 @@ export function CollectionPage({
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}
             onCreateOption={readOnly ? undefined : createOption}
+            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            people={people}
+            personLabel={personLabel}
+            onOpenLink={openCellLink}
             onOpenRecord={openRecord}
             relationExecutor={executor}
             fieldMarks={tableFieldMarks}

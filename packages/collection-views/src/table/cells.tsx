@@ -1,15 +1,26 @@
-import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { CircleAlert } from "lucide-react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
   FieldDefinition,
   FieldValueReasonCode,
+  OptionColor,
 } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
-import { useAcknowledgedSelection } from "../useAcknowledgedSelection";
+import type { CarriedSelection } from "../useAcknowledgedSelection";
 import { RelationPicker } from "../relation/RelationPicker";
 import { OptionPill, optionColor, PersonChip, shortDate } from "../values";
+import {
+  composing,
+  DatePicker,
+  OptionPicker,
+  PeoplePicker,
+  TagsPicker,
+  type CellClose,
+  type CellMove,
+  type TablePerson,
+} from "./pickers";
 
 export interface FieldCellProps {
   field: FieldDefinition;
@@ -32,6 +43,11 @@ export interface FieldCellProps {
    * editor is never clipped by the fixed row height.
    */
   editable?: boolean;
+  /**
+   * Opens a url value. With it, a filled url cell shows its text as a link:
+   * a click on the text opens it, and a click beside it still edits.
+   */
+  onOpenLink?: (url: string) => void;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -135,18 +151,8 @@ function wrapFlagged(
   );
 }
 
-// During IME composition, Enter and Escape work the candidate list. Some
-// browsers mark those keys only with keyCode 229.
-export function composing(event: KeyboardEvent): boolean {
-  return event.nativeEvent.isComposing || event.keyCode === 229;
-}
-
-/** Where the selection goes when a key closes an editor: one row down, or one cell on or back. */
-export type CellMove = "down" | "next" | "previous";
-
 interface CellInputProps {
   defaultValue: string;
-  type?: string;
   /** The value `raw` saves as. Undefined keeps the editor open and shows `invalid`. */
   parse: (raw: string) => CollectionValue | undefined;
   /** What is wrong with a value `parse` refuses, and what to do. */
@@ -154,16 +160,14 @@ interface CellInputProps {
   /** The edit began with a typed character, so the caret follows it. */
   caretAtEnd?: boolean;
   emit: (value: CollectionValue) => void;
-  close: (move?: CellMove) => void;
+  close: CellClose;
 }
 
-function CellInput({ defaultValue, type = "text", parse, invalid, caretAtEnd = false, emit, close }: CellInputProps) {
+function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, close }: CellInputProps) {
   const [refused, setRefused] = useState(false);
   const errorId = useId();
   // Enter and Tab close the editor, which can blur the input. One edit saves once.
   const done = useRef(false);
-  // A date input keeps Tab for its day, month, and year.
-  const moves = type !== "date";
   const save = (raw: string, move?: CellMove) => {
     if (done.current) return;
     const value = parse(raw);
@@ -176,7 +180,7 @@ function CellInput({ defaultValue, type = "text", parse, invalid, caretAtEnd = f
     <>
       <input
         autoFocus
-        type={type}
+        type="text"
         defaultValue={defaultValue}
         aria-invalid={refused || undefined}
         aria-describedby={refused ? errorId : undefined}
@@ -193,8 +197,8 @@ function CellInput({ defaultValue, type = "text", parse, invalid, caretAtEnd = f
         }
         onKeyDown={(event) => {
           if (composing(event)) return;
-          if (event.key === "Enter") save(event.currentTarget.value, moves ? "down" : undefined);
-          else if (event.key === "Tab" && moves) {
+          if (event.key === "Enter") save(event.currentTarget.value, "down");
+          else if (event.key === "Tab") {
             event.preventDefault();
             save(event.currentTarget.value, event.shiftKey ? "previous" : "next");
           } else if (event.key === "Escape") {
@@ -216,128 +220,40 @@ function CellInput({ defaultValue, type = "text", parse, invalid, caretAtEnd = f
   );
 }
 
-/**
- * The typed text of an option that does not exist yet. Enter with a known
- * option picks it instead, so typing never forks an existing option.
- */
-function AddOptionInput({
-  options,
-  onPick,
-  cancel,
-}: {
-  options: readonly string[];
-  onPick: (option: string, isNew: boolean) => void;
-  cancel: () => void;
-}) {
-  return (
-    <input
-      type="text"
-      aria-label="Add option"
-      placeholder="Add option"
-      className="w-full rounded border border-line bg-bg px-1 text-[13px] placeholder:text-subtle"
-      onKeyDown={(event) => {
-        if (composing(event)) return;
-        if (event.key === "Escape") return cancel();
-        if (event.key !== "Enter") return;
-        const option = event.currentTarget.value.trim();
-        if (option === "") return;
-        onPick(option, !options.includes(option));
-      }}
-    />
-  );
-}
-
-// The indexed result acknowledges saved edits by id, including round trips
-// whose final value equals the original. Later local changes still apply on
-// top of that result, including any external edits it contains.
-function MultiSelectEditor({
-  options,
-  value,
-  acknowledgedWriteId,
-  subscribeToDiscardedWrites,
-  emit,
-  close,
-  onCreateOption,
-}: {
-  options: readonly string[];
-  value: CollectionValue;
-  acknowledgedWriteId: number;
-  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
-  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
-  close: () => void;
-  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
-}) {
-  const { selected, select, previousValues } = useAcknowledgedSelection({ value, ids: asTextArray(value), acknowledgedWriteId, subscribeToDiscardedWrites, emit });
-  return (
-    <span className="flex w-full flex-col gap-0.5">
-      <span
-        role="listbox"
-        aria-multiselectable="true"
-        className="flex flex-col gap-0.5"
-        onKeyDown={(event) => {
-          if (event.key === "Escape") close();
-        }}
-      >
-        {options.map((option) => (
-          <label key={option} className="flex items-center gap-1.5 text-[13px]">
-            <input
-              type="checkbox"
-              checked={selected.includes(option)}
-              onChange={() =>
-                select(
-                  selected.includes(option)
-                    ? selected.filter((entry) => entry !== option)
-                    : [...selected, option],
-                )
-              }
-            />
-            {option}
-          </label>
-        ))}
-      </span>
-      {onCreateOption ? (
-        <AddOptionInput
-          options={options}
-          cancel={close}
-          onPick={(option, isNew) => {
-            const next = selected.includes(option)
-              ? selected
-              : [...selected, option];
-            if (isNew) {
-              onCreateOption(option, next, previousValues);
-              close();
-            } else {
-              select(next);
-            }
-          }}
-        />
-      ) : null}
-    </span>
-  );
-}
-
 export interface CellEditorProps {
   field: FieldDefinition;
+  /** The field's name as people read it. Absent, the key is the name. */
+  label?: string;
   indexed: CollectionIndexedValue | undefined;
-  /** The character that started a text, number, url, or person edit. It replaces the old value. */
+  /**
+   * The character that started the edit. It replaces a text, number, url,
+   * or typed person value, and starts the search in a picker.
+   */
   typed?: string;
   /** Highest saved edit id reflected in this indexed value; 0 before any edit. */
   acknowledgedWriteId: number;
   subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
+  /** A multi-select cell's saved picks that the index does not show yet. */
+  carried?: CarriedSelection;
   /**
    * Receives the edited value. The host applies it through its own write
    * path and returns a monotonically increasing edit id; this package never writes.
    */
   emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
-  /** Closes the editor. A key that saves also says where the selection goes. */
-  close: (move?: CellMove) => void;
+  close: CellClose;
   /**
    * Select and multi-select editors offer to add a typed value the field's
    * options do not have yet. The host must add `option` to the schema first
    * and only then write `nextValue` to the cell; this package never writes.
-   * Absent means editors only pick existing options.
+   * Absent means editors only pick existing options. One edit adds one
+   * option. A host that returns the save's edit id lets a second edit of
+   * the same cell start from this one.
    */
-  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => number | void;
+  /** Changes the color of one of the field's options. Absent, the options offer no colors. */
+  onOptionColorChange?: (option: string, color: OptionColor) => void;
+  /** The people a person field can name. Absent, a person edit is a typed id. */
+  people?: readonly TablePerson[];
   /**
    * Runs the relation picker's queries against a relation field's related
    * collection. The table never opens a relation editor without one.
@@ -347,21 +263,22 @@ export interface CellEditorProps {
 
 export function CellEditor({
   field,
+  label = field.name,
   indexed,
   typed,
   acknowledgedWriteId,
   subscribeToDiscardedWrites,
+  carried,
   emit,
   close,
   onCreateOption,
+  onOptionColorChange,
+  people,
   relationExecutor,
 }: CellEditorProps) {
   const value = indexed?.value ?? null;
-  const commitAndClose = (next: CollectionValue) => {
-    emit(next);
-    close();
-  };
   const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close };
+  const picker = { label, typed, emit, close };
   switch (field.type) {
     case "number":
       return (
@@ -377,71 +294,29 @@ export function CellEditor({
         />
       );
     case "date":
+      return <DatePicker label={label} current={value === null ? null : asText(value)} emit={emit} close={close} />;
+    case "select":
       return (
-        <CellInput
-          type="date"
-          defaultValue={typeof value === "string" ? value : ""}
-          parse={(raw) => raw || null}
-          emit={emit}
-          close={close}
+        <OptionPicker
+          {...picker}
+          field={field}
+          current={value === null ? null : asText(value)}
+          onCreateOption={onCreateOption}
+          onColor={onOptionColorChange}
         />
       );
-    case "select": {
-      const picker = (
-        <select
-          autoFocus
-          defaultValue={typeof value === "string" ? value : ""}
-          className="w-full rounded border border-line bg-bg text-[13px]"
-          onChange={(event) =>
-            commitAndClose(event.currentTarget.value === "" ? null : event.currentTarget.value)
-          }
-          onKeyDown={(event) => {
-            if (event.key === "Escape") close();
-          }}
-          onBlur={onCreateOption ? undefined : () => close()}
-        >
-          <option value="" />
-          {field.options.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      );
-      if (!onCreateOption) return picker;
-      return (
-        <span
-          className="flex w-full flex-col gap-0.5"
-          onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget)) close();
-          }}
-        >
-          {picker}
-          <AddOptionInput
-            options={field.options}
-            cancel={close}
-            onPick={(option, isNew) => {
-              if (isNew) {
-                onCreateOption(option, option);
-                close();
-              } else {
-                commitAndClose(option);
-              }
-            }}
-          />
-        </span>
-      );
-    }
     case "multi-select":
       return (
-        <MultiSelectEditor
-          options={field.options}
+        <TagsPicker
+          {...picker}
+          field={field}
           value={value}
+          ids={asTextArray(value)}
           acknowledgedWriteId={acknowledgedWriteId}
           subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-          emit={emit}
-          close={close}
+          carried={carried}
           onCreateOption={onCreateOption}
+          onColor={onOptionColorChange}
         />
       );
     case "relation": {
@@ -459,11 +334,13 @@ export function CellEditor({
         />
       );
     }
-    // A person value is a user id. The renderer has no workspace people
-    // source yet, so edits work on the raw id; the trim keeps a
+    // A person value is a user id. A host that lists people gets a picker.
+    // Without the list, edits work on the raw id; the trim keeps a
     // whitespace-only entry from indexing as a flagged empty id.
     case "person":
-      return <CellInput {...textInput} parse={(raw) => raw.trim() || null} />;
+      return people
+        ? <PeoplePicker {...picker} people={people} current={value === null ? null : asText(value)} />
+        : <CellInput {...textInput} parse={(raw) => raw.trim() || null} />;
     // text, url: a plain text value.
     default:
       return <CellInput {...textInput} parse={(raw) => raw || null} />;
@@ -477,6 +354,7 @@ export function FieldCell({
   personLabel,
   onChange,
   editable = false,
+  onOpenLink,
 }: FieldCellProps) {
   const reason =
     indexed !== undefined && indexed.validation.status === "flagged"
@@ -506,6 +384,30 @@ export function FieldCell({
         onChange={() => onChange?.(!checked)}
         className="size-3.5 cursor-pointer accent-accent disabled:cursor-default"
       />,
+    );
+  }
+
+  // A valid url opens from its text. The rest of the cell still edits it.
+  if (field.type === "url" && reason === null && typeof value === "string" && value !== "" && onOpenLink) {
+    return (
+      <span className="flex w-full min-w-0 items-center text-[13px]">
+        <span
+          role="link"
+          // The grid is the Tab stop.
+          tabIndex={-1}
+          className="cursor-pointer truncate underline decoration-line underline-offset-[3px] transition-colors duration-75 hover:decoration-ink"
+          onClick={(event) => {
+            // The click opens the link. It neither selects nor edits the cell.
+            event.stopPropagation();
+            onOpenLink(value);
+          }}
+        >
+          {value}
+        </span>
+        {editable ? (
+          <button type="button" tabIndex={-1} aria-label={`Edit ${label}`} className="min-h-5 min-w-6 flex-1 self-stretch" />
+        ) : null}
+      </span>
     );
   }
 

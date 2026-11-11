@@ -29,11 +29,6 @@ const CLIENTS_TAB = editorTabTestId("tab://collection/clients");
 // reads could straddle a month boundary at midnight.
 const NOW = new Date();
 
-function currentMonthDay(day: number): string {
-  const month = String(NOW.getMonth() + 1).padStart(2, "0");
-  return `${NOW.getFullYear()}-${month}-${String(day).padStart(2, "0")}`;
-}
-
 // The application menu's New Collection… item sends this exact command over
 // the menu channel; driving the channel is driving the File menu without a
 // native-menu robot.
@@ -63,7 +58,7 @@ function fieldCell(row: Locator, fieldIndex: number): Locator {
   return row.locator('[role="gridcell"]').nth(fieldIndex + 1);
 }
 
-// Inline edit of a plain-input cell (text, number, date, person, url):
+// Inline edit of a plain-input cell (text, number, url, a typed person id):
 // click the cell's display button, type into the editor, commit with Enter,
 // then wait for the settled value to come back from the index.
 async function editInputCell(
@@ -87,8 +82,34 @@ async function editSelectCell(
 ): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
-  await row.page().locator("[data-cell-editor] select").selectOption(option);
+  // The option picker opens in the table-owned overlay. A pick saves and closes it.
+  await row.page().locator("[data-cell-editor]").getByRole("option", { name: option, exact: true }).click();
   await expect(cell).toContainText(option, { timeout: 30_000 });
+}
+
+// Picks a day of the current month in a date cell's picker, which opens on
+// today's month for an empty cell. The cell then shows the date as people
+// read it ("Nov 10").
+async function editDateCell(
+  row: Locator,
+  fieldIndex: number,
+  day: number,
+): Promise<void> {
+  const cell = fieldCell(row, fieldIndex);
+  await cell.getByRole("button").click();
+  const date = new Date(NOW.getFullYear(), NOW.getMonth(), day);
+  await row
+    .page()
+    .locator("[data-cell-editor]")
+    .getByRole("gridcell", {
+      name: date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+      exact: true,
+    })
+    .click();
+  await expect(cell).toContainText(
+    date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+    { timeout: 30_000 },
+  );
 }
 
 interface FieldSpec {
@@ -193,8 +214,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   let desktop: Desktop | null = null;
-  const dueDate = currentMonthDay(10);
-  const startedDate = currentMonthDay(20);
 
   try {
     await seedWorkspaceManifest(temp, "collections-walkthrough-e2e");
@@ -279,22 +298,34 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     const doneBox = fieldCell(websiteRow, 2).locator('input[type="checkbox"]');
     await doneBox.click();
     await expect(doneBox).toBeChecked({ timeout: 30_000 });
-    await editInputCell(websiteRow, 3, dueDate);
+    await editDateCell(websiteRow, 3, 10);
     await editSelectCell(websiteRow, 5, "Todo");
-    // Multi-select: toggle an option inside the editor, then close it.
+    // Multi-select: pick an option in the tags picker, then close it with
+    // Tab. The picker saves once, when it closes; Escape would drop the pick.
     const overlay = page.locator("[data-cell-editor]");
     const tagsCell = fieldCell(websiteRow, 6);
     await tagsCell.getByRole("button").click();
     const designOption = overlay
       .getByRole("listbox")
-      .locator("label")
-      .filter({ hasText: "Design" })
-      .locator("input");
+      .getByRole("option", { name: "Design", exact: true });
     await designOption.click();
-    await expect(designOption).toBeChecked({ timeout: 30_000 });
-    await page.keyboard.press("Escape");
+    await expect(designOption).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Tab");
     await expect(tagsCell).toContainText("Design", { timeout: 30_000 });
-    await editInputCell(websiteRow, 7, "ice");
+    // Person: where dohc lists this Collection's people, the cell opens a
+    // people picker. Where it cannot, the cell takes a typed id.
+    const ownerCell = fieldCell(websiteRow, 7);
+    await ownerCell.getByRole("button").click();
+    await expect(overlay).toBeVisible();
+    if (await overlay.getByRole("combobox", { name: "Search people" }).isVisible()) {
+      await overlay.getByRole("option").first().click();
+      await expect(ownerCell).toContainText(/\S/, { timeout: 30_000 });
+    } else {
+      const ownerInput = overlay.locator("input");
+      await ownerInput.fill("ice");
+      await ownerInput.press("Enter");
+      await expect(ownerCell).toContainText("ice", { timeout: 30_000 });
+    }
     // Relation: the picker lists the clients records by label in the overlay.
     const clientCell = fieldCell(websiteRow, 8);
     await clientCell.getByRole("button").click();
@@ -315,7 +346,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await editInputCell(row2, 0, "Launch");
     const launchRow = recordRows(page).filter({ hasText: "Launch" });
     await editSelectCell(launchRow, 5, "Doing");
-    await editInputCell(launchRow, 4, startedDate);
+    await editDateCell(launchRow, 4, 20);
 
     // --- Views: table, board grouped by Status, and two calendars — the
     // second keyed to the other date field IS the rekey (a view's key is

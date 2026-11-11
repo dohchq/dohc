@@ -9,6 +9,7 @@ import {
   Paperclip,
   Type,
   User,
+  X,
 } from "lucide-react";
 import {
   chosenOptionColor,
@@ -50,11 +51,14 @@ export function OptionPill({
   label,
   color,
   dot = false,
+  onRemove,
 }: {
   label: string;
   color: OptionColor;
   /** A select shows a dot before its label; a multi-select tag does not. */
   dot?: boolean;
+  /** Makes the pill a chip a person can remove, as in the tags picker. */
+  onRemove?: () => void;
 }) {
   const tone = TONES[color];
   return (
@@ -64,6 +68,19 @@ export function OptionPill({
     >
       {dot ? <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${tone.dot}`} /> : null}
       <span className="truncate">{label}</span>
+      {onRemove ? (
+        <button
+          type="button"
+          // Backspace removes a chip from the keyboard, so the chips add no Tab stops.
+          tabIndex={-1}
+          aria-label={`Remove ${label}`}
+          title={`Remove ${label}`}
+          onClick={onRemove}
+          className="-mr-1 grid size-4 shrink-0 place-items-center rounded transition-colors duration-75 hover:bg-hover"
+        >
+          <X size={12} strokeWidth={2.25} aria-hidden />
+        </button>
+      ) : null}
     </span>
   );
 }

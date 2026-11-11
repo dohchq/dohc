@@ -19,13 +19,16 @@ import type {
   CollectionSchema,
   CollectionValue,
   FieldDefinition,
+  OptionColor,
 } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
 import { Tooltip, useTooltip } from "../tooltip";
+import { withoutDiscarded, type CarriedSelection } from "../useAcknowledgedSelection";
 import { FieldTypeIcon } from "../values";
-import { CellEditor, FieldCell, composing, type CellMove } from "./cells";
+import { CellEditor, FieldCell } from "./cells";
+import { composing, pickerWidth, type CellMove, type TablePerson } from "./pickers";
 
 /**
  * One inline edit, surfaced for the host to apply through its own write path
@@ -44,7 +47,8 @@ export interface CollectionCellChange {
 /**
  * A typed select value the field's options do not have yet. The host adds
  * `option` to the schema first and writes `value` to the cell only after
- * that write succeeds; the package never writes either.
+ * that write succeeds; the package never writes either. One edit adds one
+ * option.
  */
 export interface CollectionOptionCreate {
   recordId: string;
@@ -81,7 +85,28 @@ export interface TableViewProps {
   acknowledgedWriteId?: (record: CollectionRecord, field: string) => number;
   /** Explicitly discarded edit ids retire local input without claiming a save. */
   subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
-  onCreateOption?: (create: CollectionOptionCreate) => void;
+  /**
+   * A host that returns the save's edit id, as `onCellChange` does, lets a
+   * second edit of the same cell start from this one.
+   */
+  onCreateOption?: (create: CollectionOptionCreate) => number | void;
+  /**
+   * Changes the color of one option of a select or multi-select field. The
+   * host saves it. Absent, the pickers offer no colors.
+   */
+  onOptionColorChange?: (field: string, option: string, color: OptionColor) => void;
+  /**
+   * The people a person field can name. With it, a person cell opens a
+   * picker. Absent, a person edit is a typed id. Pair it with `personLabel`,
+   * so cells show the same names.
+   */
+  people?: readonly TablePerson[];
+  /**
+   * Opens a url value. With it, a click on a filled url cell's text opens
+   * the link, and a click beside it edits. Built once by the host: a new
+   * function rebuilds every column.
+   */
+  onOpenLink?: (url: string) => void;
   /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
   /**
@@ -145,8 +170,13 @@ function opensEditor(field: FieldDefinition, relationExecutor: CollectionQueryEx
   );
 }
 
-/** The fields whose edit a typed character starts. */
-const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person"]);
+/**
+ * The fields whose edit a typed character starts: it replaces a text,
+ * number, url, or typed person value, and starts the search in a picker.
+ */
+const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person", "select", "multi-select"]);
+/** The room a picker keeps between it and the table's right edge. */
+const PICKER_EDGE = 8;
 
 /** Rows and columns each arrow key moves the selection by. */
 const ARROWS: Readonly<Record<string, readonly [number, number]>> = {
@@ -191,6 +221,8 @@ interface TableCell {
 /** The cell whose editor is open, and the character that opened it, if one did. */
 interface EditingCell extends TableCell {
   typed?: string;
+  /** The editor's left edge. A picker near the table's right edge sits left of its cell's. */
+  left: number;
 }
 
 /**
@@ -250,6 +282,9 @@ export function TableView({
   acknowledgedWriteId,
   subscribeToDiscardedWrites,
   onCreateOption,
+  onOptionColorChange,
+  people,
+  onOpenLink,
   onOpenRecord,
   relationExecutor,
   personLabel,
@@ -297,13 +332,14 @@ export function TableView({
                       : undefined
                   }
                   editable={!editingDisabled && onCellChange !== undefined && opensEditor(field, relationExecutor)}
+                  onOpenLink={onOpenLink}
                 />
               ),
             },
           ),
         ),
       ),
-    [fields, onCellChange, editingDisabled, personLabel, fieldLabel, relationExecutor, renderButton],
+    [fields, onCellChange, editingDisabled, personLabel, fieldLabel, relationExecutor, renderButton, onOpenLink],
   );
 
   const table = useTable({
@@ -333,6 +369,28 @@ export function TableView({
   const editingField =
     editing === null ? undefined : fields.find((field) => field.name === editing.field);
   const editingValue = editingRow?.original.values.find((entry) => entry.field === editingField?.name);
+  const editingColumn = editingField ? fields.indexOf(editingField) : -1;
+  // A picker is a popover on its cell, as wide as it needs. Other editors fill the cell.
+  const editingPickerWidth = editingField ? pickerWidth(editingField, people !== undefined) : null;
+
+  // Each multi-select cell's saved picks that the index does not show yet.
+  // They outlive the picker, so a second edit starts from the first.
+  const carriedSelections = useRef(new Map<string, CarriedSelection>());
+  const carriedSelection = (cell: TableCell) => {
+    const key = JSON.stringify([cell.recordId, cell.field]);
+    let carried = carriedSelections.current.get(key);
+    if (!carried) carriedSelections.current.set(key, (carried = { pending: [] }));
+    return carried;
+  };
+  useEffect(
+    () =>
+      subscribeToDiscardedWrites?.((writeId) => {
+        for (const carried of carriedSelections.current.values()) {
+          carried.pending = withoutDiscarded(carried.pending, writeId);
+        }
+      }),
+    [subscribeToDiscardedWrites],
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFieldSetElement>(null);
@@ -378,16 +436,41 @@ export function TableView({
     return [wrapped, back ? fields.length - 1 : 0];
   };
 
-  const closeEditor = (move?: CellMove) => {
+  const closeEditor = (to?: CellMove | "away") => {
     setEditing(null);
-    // A click away closes the editor too, and focus belongs to what was clicked.
-    if (!editorRef.current?.contains(document.activeElement)) return;
+    // A press away closes the editor too, and focus belongs to what was pressed.
+    if (to === "away" || !editorRef.current?.contains(document.activeElement)) return;
     reveal.current = true;
-    if (!move || !editingField) return;
+    if (!to || !editingField) return;
     const column = fields.indexOf(editingField);
-    if (move === "down") select(clamp(editingRowIndex + 1, rows.length), column);
-    else select(...(beside(editingRowIndex, column, move === "previous") ?? [editingRowIndex, column]));
+    if (to === "down") select(clamp(editingRowIndex + 1, rows.length), column);
+    else select(...(beside(editingRowIndex, column, to === "previous") ?? [editingRowIndex, column]));
   };
+
+  const startEdit = (recordId: string, column: number, typed?: string) => {
+    const field = fields[column];
+    if (!field) return;
+    const grid = scrollRef.current;
+    const width = pickerWidth(field, people !== undefined);
+    let left = gutter + columnLeft(column);
+    // A picker is wider than most cells. Near the right edge it moves left to stay in view.
+    if (width !== null && grid) {
+      const room = grid.scrollLeft + grid.clientWidth - Math.max(width, columnWidth(column)) - PICKER_EDGE;
+      left = Math.min(left, Math.max(grid.scrollLeft, room));
+    }
+    setEditing({ recordId, field: field.name, typed, left });
+  };
+
+  // A picker that opens low in the table scrolls into view, down to its last row.
+  const editingKey = editing && editingPickerWidth !== null ? `${editing.recordId}:${editing.field}` : null;
+  useLayoutEffect(() => {
+    const grid = scrollRef.current;
+    const editor = editorRef.current;
+    if (editingKey === null || !grid || !editor) return;
+    const top = editor.offsetTop;
+    const needed = HEADER_HEIGHT + top + editor.offsetHeight - grid.clientHeight;
+    if (needed > grid.scrollTop) grid.scrollTop = Math.min(needed, top);
+  }, [editingKey]);
 
   const clickCell = (row: number, column: number) => {
     // An editor holding a value it cannot save keeps its place and takes
@@ -397,9 +480,8 @@ export function TableView({
     const record = rows[row];
     const field = fields[column];
     if (!record || !field) return;
-    const cell = { recordId: record.id, field: field.name };
-    setSelected(cell);
-    if (onCellChange && !editingDisabled && opensEditor(field, relationExecutor)) setEditing(cell);
+    setSelected({ recordId: record.id, field: field.name });
+    if (onCellChange && !editingDisabled && opensEditor(field, relationExecutor)) startEdit(record.id, column);
     // A host-drawn button keeps the focus its press took.
     else if (field.type !== "button") scrollRef.current?.focus({ preventScroll: true });
   };
@@ -455,7 +537,7 @@ export function TableView({
     if (key === " ") return;
     if (key === "Enter") {
       event.preventDefault();
-      if (opensEditor(field, relationExecutor)) setEditing({ recordId: record.id, field: field.name });
+      if (opensEditor(field, relationExecutor)) startEdit(record.id, at.column);
       return;
     }
     // A relation's records are removed in its picker.
@@ -466,7 +548,7 @@ export function TableView({
       if (!empty) onCellChange({ ...cell, value: field.type === "multi-select" ? [] : null });
     } else if (key.length === 1 && TYPED_INTO.has(field.type)) {
       event.preventDefault();
-      setEditing({ recordId: record.id, field: field.name, typed: key });
+      startEdit(record.id, at.column, key);
     }
   };
 
@@ -628,11 +710,11 @@ export function TableView({
               <fieldset
                 // One editor for every cell type, drawn in an overlay above
                 // the rows and anchored to the cell's top edge. Growing
-                // downward from there, a tall editor (a multi-select's
-                // option list) is never clipped by the fixed row height and
-                // never extends up under the column header, which would
-                // steal its clicks. Remounting on cell switch resets the
-                // editor's inputs to the next cell's value.
+                // downward from there, a tall editor (a picker's option
+                // list) is never clipped by the fixed row height and never
+                // extends up under the column header, which would steal its
+                // clicks. Remounting on cell switch resets the editor's
+                // inputs to the next cell's value.
                 key={`${editing.recordId}:${editing.field}`}
                 ref={editorRef}
                 data-cell-editor=""
@@ -640,19 +722,26 @@ export function TableView({
                 onBlurCapture={(event) => {
                   if (editingDisabled) event.stopPropagation();
                 }}
-                className="dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
+                className={
+                  editingPickerWidth === null
+                    ? "dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
+                    : "dohc-popover dohc-pop-in absolute z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal"
+                }
                 style={{
                   top: editingRowIndex * ROW_HEIGHT,
-                  left: gutter + columnLeft(fields.indexOf(editingField)),
-                  width: columnWidth(fields.indexOf(editingField)),
+                  left: editing.left,
+                  // A picker covers its cell, so a press on the cell is a press on the picker.
+                  width: Math.max(columnWidth(editingColumn), editingPickerWidth ?? 0),
                   minHeight: ROW_HEIGHT,
                 }}
               >
                 <CellEditor
                   field={editingField}
+                  label={fieldLabel?.(editingField.name) ?? editingField.name}
                   typed={editing.typed}
                   acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
                   subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+                  carried={editingField.type === "multi-select" ? carriedSelection(editing) : undefined}
                   indexed={editingValue}
                   emit={(value, previousValues) =>
                     onCellChange({
@@ -677,6 +766,12 @@ export function TableView({
                           })
                       : undefined
                   }
+                  onOptionColorChange={
+                    onOptionColorChange
+                      ? (option, color) => onOptionColorChange(editingField.name, option, color)
+                      : undefined
+                  }
+                  people={people}
                   relationExecutor={relationExecutor}
                 />
               </fieldset>
