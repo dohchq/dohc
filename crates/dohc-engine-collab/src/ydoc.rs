@@ -49,6 +49,8 @@ mod bounded_encoder;
 mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
+#[cfg(test)]
+mod outside_save_fold_tests;
 mod reference_links;
 mod restore_copy;
 mod wikilinks;
@@ -1611,12 +1613,23 @@ impl Ydoc {
                         map.insert(txn, key.as_str(), json_to_any(value));
                     }
                     keep_frontmatter_source(&map, &meta, txn, source.as_deref());
+                    // A live note keeps every block it deletes, so an outside
+                    // save keeps the blocks it left alone at either end and
+                    // adds only what changed (#3741).
+                    let (start, end) = if file_fold {
+                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
+                    } else {
+                        (0, 0)
+                    };
                     let len = frag.len(txn);
-                    if len > 0 {
-                        frag.remove_range(txn, 0, len);
+                    if len > start + end {
+                        frag.remove_range(txn, start, len - start - end);
                     }
-                    for block in blocks.iter().rev() {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, 0, block);
+                    for block in blocks[start as usize..blocks.len() - end as usize]
+                        .iter()
+                        .rev()
+                    {
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block);
                     }
                 };
                 if WIRE_SEED {
@@ -5039,6 +5052,51 @@ fn out_json<T: ReadTxn>(txn: &T, out: Out) -> Value {
         Out::Any(any) => json!({ "type": "any", "value": any_to_json(&any) }),
         other => json!({ "type": "unsupported", "debug": format!("{other:?}") }),
     }
+}
+
+/// How many of `body`'s blocks at the start and at the end are already what
+/// `blocks` would insert there, compared without overlapping.
+fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
+    txn: &T,
+    body: &yrs::XmlFragmentRef,
+    blocks: &[MdBlock<'_>],
+) -> (u32, u32) {
+    let old: Vec<Value> = body
+        .children(txn)
+        .map(|child| xml_json(txn, child))
+        .collect();
+    if old.is_empty() || blocks.is_empty() {
+        return (0, 0);
+    }
+    let scratch = yrs::Doc::new();
+    let scratch_body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    {
+        let mut scratch_txn = scratch.transact_mut();
+        for block in blocks.iter().rev() {
+            insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &scratch_body, 0, block);
+        }
+    }
+    let scratch_txn = scratch.transact();
+    let new: Vec<Value> = scratch_body
+        .children(&scratch_txn)
+        .map(|child| xml_json(&scratch_txn, child))
+        .collect();
+    if new.len() != blocks.len() {
+        return (0, 0);
+    }
+    let start = old
+        .iter()
+        .zip(&new)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let end = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(old.len().min(new.len()) - start)
+        .take_while(|(old, new)| old == new)
+        .count();
+    (start as u32, end as u32)
 }
 
 fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {
