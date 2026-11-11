@@ -24,6 +24,9 @@ export const WorkReferences = createContext<WorkReferenceLinks | null>(null);
 // A chat or file can be renamed or deleted after its link was read, so a link
 // shown again after this long is read again.
 const FRESH_MS = 30_000;
+// What a link names can arrive by sync after the link shows, so a link read
+// as unavailable is read again while it shows.
+const UNAVAILABLE_FRESH_MS = 10_000;
 const BATCH = 64;
 
 export interface WorkReferenceHandlers {
@@ -69,7 +72,8 @@ export function createWorkReferenceLinks(
     view: (reference) => views.get(reference)?.view,
     want(reference) {
       const known = views.get(reference);
-      if (disposed || (known && Date.now() - known.at < FRESH_MS) || asking.has(reference) || queued.has(reference)) return;
+      const fresh = known && Date.now() - known.at < (known.view.kind === null ? UNAVAILABLE_FRESH_MS : FRESH_MS);
+      if (disposed || fresh || asking.has(reference) || queued.has(reference)) return;
       queued.add(reference);
       if (scheduled) return;
       scheduled = true;
@@ -138,6 +142,12 @@ export function WorkRef(props: { reference: string; interactive: boolean; testId
   const links = useContext(WorkReferences);
   const view = useSyncExternalStore(links?.subscribe ?? noLinks, () => links?.view(props.reference));
   useEffect(() => links?.want(props.reference), [links, props.reference]);
+  const unavailable = view?.kind === null;
+  useEffect(() => {
+    if (!links || !unavailable) return;
+    const timer = setInterval(() => links.want(props.reference), UNAVAILABLE_FRESH_MS);
+    return () => clearInterval(timer);
+  }, [links, props.reference, unavailable]);
   const testId = props.testId ? `${props.testId}-work-link` : undefined;
   const onOpen = props.interactive && links ? () => void links.open(props.reference) : undefined;
   if (!view || view.kind === null) {

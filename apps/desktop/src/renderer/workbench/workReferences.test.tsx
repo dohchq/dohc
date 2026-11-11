@@ -156,6 +156,16 @@ describe("a work link in a chat message", () => {
     expect(view.queryByRole("button")).toBeNull();
   });
 
+  it("reads an unavailable link again while it shows, so work that syncs later opens", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const views: WorkReferenceView[] = [{ reference: ref("A"), kind: null, label: "", open: null }];
+    const { view } = renderLinks(`@[work:${ref("A")}]`, views);
+    await vi.waitFor(() => expect(view.getByTestId("body-work-link").textContent).toContain("Unavailable"));
+    views[0] = chat(ref("A"));
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    await vi.waitFor(() => expect(view.getByRole("button", { name: "Open Trip" })).toBeTruthy());
+  });
+
   it("leaves text that only looks like a link alone", () => {
     const { view } = renderLinks("`@[work:" + ref("A") + "]` and @[work:short]", []);
     expect(view.queryByTestId("body-work-link")).toBeNull();
