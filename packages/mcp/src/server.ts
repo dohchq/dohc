@@ -68,6 +68,7 @@ import {
   queryDatabase,
   readChange,
   readDocument,
+  readHeldChange,
   readWorkspaceFile,
   saveKeptCopy,
   restoreProtectedCopy,
@@ -451,6 +452,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await readDocument(ctx, args)),
+  );
+
+  register(
+    "dohc_read_held_change",
+    {
+      description:
+        "Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await readHeldChange(ctx, args)),
   );
 
   // The client names itself in the MCP handshake. A name the document door

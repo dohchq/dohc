@@ -281,6 +281,7 @@
   "chat.archive.set",
   "agent.personal.read",
   "agent.personal.change",
+  "document.held.read",
   "file.protected.restore",
   "file.protected.discard"
 ]

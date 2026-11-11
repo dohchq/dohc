@@ -112,6 +112,8 @@ function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"],
 function makeBridge(): DohcDesktopBridge {
   return {
     onWorkspaceActivity: vi.fn(() => () => undefined),
+    onNoticesChanged: vi.fn(() => () => undefined),
+    readHeldChange: vi.fn(async () => ({ change: null })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Plan\n", truncated: false, contentHash: "sha256:test" })),
     writeWorkspaceText: vi.fn(async () => ({ status: "written" as const, contentHash: "sha256:test" })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" as const }], folders: [] })),

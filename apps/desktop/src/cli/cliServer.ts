@@ -402,6 +402,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // A save the engine holds for this path, as the held band's review shows it.
+  heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
   createGroup?(input: { name: string; purpose?: string; type?: ChatChannelType }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -830,6 +832,13 @@ function keptEditsUnavailable() {
   return {
     ok: false as const,
     reason: "Kept edits are kept only in the original workspace. Open it to continue.",
+  };
+}
+
+function heldChangesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Held changes are kept only in the original workspace. Open it to continue.",
   };
 }
 
@@ -2065,7 +2074,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2081,6 +2090,7 @@ async function dispatch(
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
   // Protected copies stay on the computer of the workspace that kept them.
   if (paths.shared && (request.verb === "restoreProtectedCopy" || request.verb === "discardProtectedCopy")) return keptCopiesUnavailable();
+  if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2115,6 +2125,7 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
       case "documentRead":
+      case "documentHeld":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
       case "documentEdit":
@@ -2707,6 +2718,15 @@ async function dispatchWorkspace(
         return await readDocument(context.documents, request.args.path, process.platform);
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+
+    case "documentHeld":
+      // A share mount's notes are held in their original workspace, not this one.
+      if (!context.heldChange || context.readOnly || isSharedWithMePath(request.args.path)) return heldChangesUnavailable();
+      try {
+        return { ok: true as const, change: await context.heldChange(request.args.path) };
+      } catch (error) {
+        return mcpFailure(error, `dohc could not read the held change for ${request.args.path}.`);
       }
 
     case "versionList":
