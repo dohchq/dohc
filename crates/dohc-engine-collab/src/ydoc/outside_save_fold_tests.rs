@@ -233,3 +233,218 @@ fn folding_over_another_note_reads_as_a_fresh_fold() {
         fold_over(before, after);
     }
 }
+
+/// #3746 compared blocks as JSON. It stays here as the oracle the direct
+/// comparison must agree with, or else treat the block as changed.
+fn json_same<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
+    fn plain<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
+        match node {
+            XmlOut::Element(element) => {
+                element
+                    .attributes(txn)
+                    .all(|(_, value)| matches!(value, Out::Any(_)))
+                    && element.children(txn).count() as u32 == element.len(txn)
+                    && element.children(txn).all(|child| plain(txn, &child))
+            }
+            XmlOut::Text(text) => text
+                .diff(txn, YChange::identity)
+                .iter()
+                .all(|chunk| matches!(chunk.insert, Out::Any(_))),
+            XmlOut::Fragment(_) => false,
+        }
+    }
+    plain(old_txn, old) && xml_json(old_txn, old.clone()) == xml_json(new_txn, new.clone())
+}
+
+fn blocks_of(doc: &Ydoc) -> Vec<XmlOut> {
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    let txn = doc.doc.transact();
+    body.children(&txn).collect()
+}
+
+/// A note holding `markdown` after another note was folded into it first, so
+/// its blocks sit among deleted ones, as a live note's do.
+fn with_history(markdown: &str) -> Option<Ydoc> {
+    let doc = folded("An earlier note.\n\n- with a list\n");
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .ok()?;
+    Some(doc)
+}
+
+/// Compares every block of `old` with every block of `new` both ways, and
+/// counts the pairs judged different and the same.
+fn agree(old: &Ydoc, new: &Ydoc, tally: &mut [usize; 2]) {
+    let (old_blocks, new_blocks) = (blocks_of(old), blocks_of(new));
+    let (old_txn, new_txn) = (old.doc.transact(), new.doc.transact());
+    for old in &old_blocks {
+        for new in &new_blocks {
+            let json = json_same(&old_txn, old, &new_txn, new);
+            assert_eq!(
+                same_xml(&old_txn, old, &new_txn, new),
+                json,
+                "{} vs {}",
+                xml_json(&old_txn, old.clone()),
+                xml_json(&new_txn, new.clone())
+            );
+            tally[usize::from(json)] += 1;
+        }
+    }
+}
+
+/// Blocks that differ from a neighbour by one thing: tag, an attribute, a
+/// child, or a run's text or formatting.
+const NEAR_MISSES: &[&str] = &[
+    "Kept.",
+    "Kept!",
+    "Kept. ",
+    "## Kept.",
+    "### Kept.",
+    "**Kept.**",
+    "*Kept.*",
+    "`Kept.`",
+    "~~Kept.~~",
+    "[Kept.](https://a.example)",
+    "[Kept.](https://b.example)",
+    "[Kept.](https://a.example \"title\")",
+    "Kept **and** bold.",
+    "Kept *and* bold.",
+    "Kept **and bold.**",
+    "Line one  \nline two",
+    "Line one\\\nline two",
+    "![Kept.](a.png)",
+    "![Kept!](a.png)",
+    "- Kept.",
+    "- Kept.\n- Two.",
+    "- Kept.\n- Too.",
+    "* Kept.",
+    "1. Kept.",
+    "3. Kept.",
+    "1. Kept.\n2. Two.",
+    "- [ ] Kept.",
+    "- [x] Kept.",
+    "- Kept.\n  - Nested.",
+    "- Kept.\n  - Nested!",
+    "- Kept.\n\n  More.",
+    "> Kept.",
+    "> Kept!",
+    "> - Kept.",
+    "```\nKept.\n```",
+    "```rust\nKept.\n```",
+    "```ts\nKept.\n```",
+    "    Kept.",
+    "| a | b |\n|---|---|\n| 1 | 2 |",
+    "| a | b |\n|---|---|\n| 1 | 3 |",
+    "| a | b |\n|:--|--:|\n| 1 | 2 |",
+    "| a | c |\n|---|---|\n| 1 | 2 |",
+    "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+    "Paragraph.\n\n---",
+];
+
+#[test]
+fn the_direct_comparison_decides_as_the_json_one_did() {
+    let mut tally = [0, 0];
+    // Every near miss against every other, each from a note with history
+    // against a fresh fold.
+    let fresh: Vec<Ydoc> = NEAR_MISSES
+        .iter()
+        .map(|markdown| folded(&format!("{markdown}\n")))
+        .collect();
+    for old in NEAR_MISSES {
+        let old = with_history(&format!("{old}\n")).expect(old);
+        for new in &fresh {
+            agree(&old, new, &mut tally);
+        }
+    }
+    // Every Markdown contract source that folds, against itself and the
+    // next two.
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
+    let pairs: Vec<(Ydoc, Ydoc)> = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|case| {
+            let source = case["source"].as_str().unwrap();
+            let fresh = Ydoc::wire();
+            fresh
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+                .ok()?;
+            Some((with_history(source)?, fresh))
+        })
+        .collect();
+    assert!(pairs.len() > 100, "{} sources fold", pairs.len());
+    for (index, (old, _)) in pairs.iter().enumerate() {
+        for (_, new) in pairs.iter().skip(index).take(3) {
+            agree(old, new, &mut tally);
+        }
+    }
+    let [different, same] = tally;
+    assert!(same > NEAR_MISSES.len() + pairs.len(), "same {same}");
+    assert!(different > same, "different {different}, same {same}");
+}
+
+#[test]
+fn the_direct_comparison_treats_what_json_cannot_tell_apart_as_changed() {
+    // A heading's level, a number either way, stored as the other kind.
+    let fresh = folded("## Kept.\n");
+    let old = folded("## Kept.\n");
+    let XmlOut::Element(heading) = blocks_of(&old).remove(0) else {
+        panic!("not a heading")
+    };
+    {
+        let mut txn = old.doc.transact_mut();
+        let other = match heading.get_attribute(&txn, "level") {
+            Some(Out::Any(Any::Number(level))) => Any::BigInt(level as i64),
+            Some(Out::Any(Any::BigInt(level))) => Any::Number(level as f64),
+            level => panic!("{level:?}"),
+        };
+        heading.insert_attribute(&mut txn, "level", other);
+    }
+    let (old_block, new_block) = (blocks_of(&old).remove(0), blocks_of(&fresh).remove(0));
+    let (old_txn, new_txn) = (old.doc.transact(), fresh.doc.transact());
+    // JSON spells both the same; the direct comparison keeps nothing.
+    assert!(json_same(&old_txn, &old_block, &new_txn, &new_block));
+    assert!(!same_xml(&old_txn, &old_block, &new_txn, &new_block));
+}
+
+#[test]
+fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
+    // Each block is compared with itself, so only what it holds can make
+    // either comparison call it changed.
+    // A paragraph with a plain number among its children.
+    let child = folded("Kept.\n");
+    let XmlOut::Element(paragraph) = blocks_of(&child).remove(0) else {
+        panic!("not a paragraph")
+    };
+    {
+        let mut txn = child.doc.transact_mut();
+        let branch = yrs::branch::BranchPtr::from(paragraph.as_ref());
+        yrs::ArrayRef::from(branch).push_back(&mut txn, 7);
+    }
+    // A heading whose level is a shared array.
+    let attribute = folded("## Kept.\n");
+    let XmlOut::Element(element) = blocks_of(&attribute).remove(0) else {
+        panic!("not a heading")
+    };
+    {
+        let mut txn = attribute.doc.transact_mut();
+        element.insert_attribute(&mut txn, "level", yrs::ArrayPrelim::from([2]));
+    }
+    // A paragraph whose text is an embedded array.
+    let embed = folded("Kept.\n");
+    let text = embed.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = embed.doc.transact_mut();
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        text.insert_embed(&mut txn, 0, yrs::ArrayPrelim::from([1, 2]));
+    }
+    for doc in [&child, &attribute, &embed] {
+        let block = blocks_of(doc).remove(0);
+        let txn = doc.doc.transact();
+        assert!(!json_same(&txn, &block, &txn, &block));
+        assert!(!same_xml(&txn, &block, &txn, &block));
+    }
+}
