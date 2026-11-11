@@ -7394,7 +7394,30 @@ export type WorkspacePathOpenFailure = z.infer<typeof WorkspacePathOpenFailure>;
 // it loads loses nothing.
 export const WorkspacePathOpenFailedEvent = z.undefined();
 
+// Typing kept for a workspace no longer in the list, such as one whose join
+// failed. It stays until the person dismisses it.
+export const KeptTyping = z.object({
+  workspaceId: WORKSPACE_ID,
+  recordId: LiveDraftRecoveryRecord.shape.recordId,
+  path: LiveDraftRecoveryRecord.shape.path,
+  text: z.string(),
+}).strict();
+export type KeptTyping = z.infer<typeof KeptTyping>;
+
 export const noticeOperations = {
+  listKeptTyping: {
+    capabilityId: "document.typing.kept.list",
+    scope: "device",
+    channel: "desktop:list-kept-typing",
+    payload: z.object({}), result: z.array(KeptTyping), guard: "trusted-sender",
+  },
+  dismissKeptTyping: {
+    capabilityId: "document.typing.kept.dismiss",
+    channel: "desktop:dismiss-kept-typing",
+    payload: KeptTyping.pick({ workspaceId: true, recordId: true }).strict(), guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "findWorkspace === null + removeKeptTyping", reason: "Main deletes kept typing only for a workspace no longer in the list, and only the record that names that workspace." },
+  },
   listNotices: {
     capabilityId: "notice.list",
     scope: "device",

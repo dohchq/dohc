@@ -282,5 +282,7 @@
   "agent.personal.read",
   "agent.personal.change",
   "document.held.read",
-  "document.held.change"
+  "document.held.change",
+  "document.typing.kept.list",
+  "document.typing.kept.dismiss"
 ]

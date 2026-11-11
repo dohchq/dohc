@@ -10,6 +10,7 @@ import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspac
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
+import { useKeptTyping } from "./shell/useKeptTyping";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
@@ -202,6 +203,7 @@ export function WorkspaceManager(props: {
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
+  const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
@@ -500,6 +502,8 @@ export function WorkspaceManager(props: {
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
         {...crashReportNotice}
+        keptTyping={keptTyping.keptTyping}
+        onDismissKeptTyping={keptTyping.dismiss}
       />
     </div>
   );
