@@ -390,8 +390,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.
               // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
-              // A diverged server copy goes first: only the server's operator can continue it.
-              const reason = diverged === true ? "session-host-diverged" :
+              // A diverged server copy, or one document's damaged server record, goes first: only the server's operator can continue it.
+              const reason = diverged === true || unavailableFor("session-host-diverged") ? "session-host-diverged" :
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :

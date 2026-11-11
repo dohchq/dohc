@@ -2156,6 +2156,11 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       rows = [ready, ...others]; diverged = false; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      // One document's damaged server record marks only its row diverged; it still outranks a refusal.
+      rows = [ready, refused, divergedRow]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
       // A document edited while live editing was off outranks a frozen one and
       // the server's other reasons, but not a refusal a Resume can still help.
       rows = [ready, ...others, edited]; f.engine.retryOwnerDelivery("owner");
