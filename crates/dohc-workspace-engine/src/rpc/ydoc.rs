@@ -424,6 +424,12 @@ struct YdocRecordUpdateResult {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HeldChangeParams {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocSettleParams {
     #[serde(default)]
     allow_lossy_source_sha256: Option<String>,
@@ -2149,6 +2155,35 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
+    }
+
+    /// One held save: the file on disk beside what saving the waiting change
+    /// would write. Read only; a pair past the response cap answers
+    /// `tooLarge` instead of either text.
+    pub(super) async fn ydoc_held_change(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: HeldChangeParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let change = Self::read_under_ctx(
+            &cancellation,
+            "ydoc.heldChange",
+            open.actor.held_markdown_change(
+                open.workspace_id.clone(),
+                params.path.clone(),
+                open.root.clone(),
+            ),
+        )
+        .await?;
+        let result = serde_json::json!({ "change": change });
+        if super::reads::response_encoded_bytes(u64::MAX, &result) > collection_in_band_cap(ctx) {
+            return Ok(serde_json::json!({ "change": { "path": params.path, "tooLarge": true } }));
+        }
+        Ok(result)
     }
 
     pub(super) async fn ydoc_close(

@@ -1,3 +1,4 @@
+use super::super::markdown_recovery::{HeldChangeUnavailable, HeldMarkdownChange};
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dohc_engine_collab::{LeaseRegistry, Ydoc, reader_resolver};
@@ -205,6 +206,13 @@ impl Fixture {
                 )
                 .await
         }
+    }
+
+    async fn held_change(&self, path: &str) -> Option<HeldMarkdownChange> {
+        self.actor
+            .held_markdown_change("w".into(), path.into(), self.scratch.path().to_owned())
+            .await
+            .unwrap()
     }
 
     async fn unchanged(&self) {
@@ -529,6 +537,161 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
             .unwrap();
         f.supervisor.close(&f.db).unwrap();
     }
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed() {
+    let f = Fixture::new().await;
+    assert_eq!(f.held_change("note.md").await, None);
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.actor
+        .run(|store, _| {
+            let notices = dohc_engine_sync::list_refusal_notices(store, "w")?;
+            assert_eq!(notices.len(), 1);
+            dohc_engine_sync::dismiss_refusal_notice(
+                store,
+                "w",
+                &notices[0].notice_id,
+                &notices[0].refusal_coordinates,
+                &NoFaults,
+            )?;
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Dismissing the Notice deleted nothing: the save is still held.
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a dismissed Notice must leave its held change readable");
+    };
+    assert_eq!(file.as_deref(), Some(f.source.as_str()));
+    assert_ne!(held, f.source);
+    assert!(held.contains("Accepted text remains available"));
+    assert_eq!(f.held_change("other.md").await, None);
+    f.unchanged().await;
+    // What the review showed is exactly what consenting writes.
+    assert!(
+        f.settle(false, Some(f.consent()))
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        held
+    );
+    assert_eq!(f.held_change("note.md").await, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_compares_against_the_file_on_disk() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // An outside edit capture has not taken in: History still holds the source.
+    let outside = "Edited outside dohc.\n";
+    std::fs::write(f.scratch.path().join("note.md"), outside).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a held change over readable text must be shown");
+    };
+    assert_eq!(file.as_deref(), Some(outside));
+    assert!(held.contains("Accepted text remains available"));
+    // Bytes that are not text can't be compared.
+    std::fs::write(f.scratch.path().join("note.md"), [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::FileUnreadable,
+        })
+    );
+    std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, .. }) = f.held_change("note.md").await else {
+        panic!("a deleted file leaves the held change readable");
+    };
+    assert_eq!(file, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_waits_for_a_missing_dependency_like_the_save() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let remote = Ydoc::wire();
+            remote.apply(
+                &dohc_engine_collab::load_persisted(store, &key)?
+                    .unwrap()
+                    .doc
+                    .encode_full_state(),
+            )?;
+            remote.richdoc_append_paragraph("Not yet received");
+            let waiting = remote.richdoc_append_paragraph("Waits for the paragraph above");
+            match store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_update_in_tx(tx, &key, &waiting, None, None, 6)
+            })? {
+                TxnOutcome::Committed(_) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::WaitingForSync,
+        })
+    );
+    // The save refuses for the same reason, so the review shows no text it won't write.
+    assert!(matches!(
+        f.settle(false, Some(f.consent())).await,
+        Err(RuntimeError::Collab(CollabError::MissingDependencies))
+    ));
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_adopted_owner_held_change_is_not_previewed() {
+    let mut f = Fixture::with_reader_source(true).await;
+    f.adopt().await;
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+    let (_owner, host) = f.audited_host().await;
+    assert!(matches!(
+        f.audited_settle(&host, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // The save writes only what the relay accepted, and only the live host
+    // knows that prefix, so the review refuses rather than show another text.
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::Unsupported,
+        })
+    );
+    assert!(
+        f.audited_settle(&host, Some(f.consent()))
+            .await
+            .unwrap()
+            .materialized
+    );
+    assert_eq!(f.held_change("note.md").await, None);
+    f.supervisor.close(&f.db).unwrap();
 }
 
 #[tokio::test]
@@ -2489,51 +2652,11 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         .unwrap()
         .remove(0)
         .obligation;
-    let key = f.key.clone();
-    let next_claim = f
-        .actor
-        .run(move |store, cache| {
-            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
-            store.write_with(&NoFaults, |tx| {
-                dohc_engine_collab::record_base_coordinate_in_tx(
-                    tx,
-                    dohc_engine_collab::BaseCoordinateRecord {
-                        key: &key,
-                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
-                        origin_id: "old-base",
-                        origin_seq: 0,
-                        relay_seq: Some(20),
-                        now_ms: 20,
-                    },
-                )
-            })?;
-            let doc = dohc_engine_collab::load_persisted(store, &key)?
-                .unwrap()
-                .doc;
-            doc.richdoc_append_paragraph("A replacement lineage edit");
-            let base = doc.encode_full_state();
-            let result = dohc_engine_collab::claim_base_at_relay(
-                store,
-                &key,
-                ContentKind::Richdoc,
-                &base,
-                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
-                &NoFaults,
-                21,
-            )?;
-            assert!(matches!(
-                result,
-                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
-            ));
-            cache.remove(&key);
-            Ok(dohc_engine_collab::read_marker(store, &key)?
-                .unwrap()
-                .lineage_claim_id
-                .unwrap())
-        })
-        .await
-        .unwrap();
+    let next_claim = replace_lineage(&f).await;
     assert_ne!(next_claim, f.claim);
+    // Recovery retires the old row without writing, so the review shows no
+    // held change rather than the replacement lineage's document.
+    assert_eq!(f.held_change("note.md").await, None);
     assert!(matches!(
         f.settle(false, Some(grant.clone())).await,
         Err(RuntimeError::Collab(CollabError::LineageWriteStale { .. }))
@@ -2636,6 +2759,92 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         saved.contains("Accepted text remains available")
             && saved.contains("A replacement lineage edit")
     );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+/// Replaces the note's lineage with a relay base that adds a paragraph, and
+/// returns the new lineage's claim.
+async fn replace_lineage(f: &Fixture) -> String {
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, cache| {
+            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+            store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_base_coordinate_in_tx(
+                    tx,
+                    dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
+                        origin_id: "old-base",
+                        origin_seq: 0,
+                        relay_seq: Some(20),
+                        now_ms: 20,
+                    },
+                )
+            })?;
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            doc.richdoc_append_paragraph("A replacement lineage edit");
+            let base = doc.encode_full_state();
+            let result = dohc_engine_collab::claim_base_at_relay(
+                store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
+                &NoFaults,
+                21,
+            )?;
+            assert!(matches!(
+                result,
+                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
+            ));
+            cache.remove(&key);
+            Ok(dohc_engine_collab::read_marker(store, &key)?
+                .unwrap()
+                .lineage_claim_id
+                .unwrap())
+        })
+        .await
+        .unwrap()
+}
+
+// A replaced lineage's row can still wait beside a new hold under the
+// current lineage; the review shows the current one, which a save writes.
+#[tokio::test]
+async fn markdown_hold_review_shows_the_current_lineage_hold_beside_a_retiring_one() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let next_claim = replace_lineage(&f).await;
+    let root = f.scratch.path().to_owned();
+    assert!(matches!(
+        f.actor
+            .ydoc_settle(
+                root,
+                f.key.clone(),
+                "note.md".into(),
+                ContentKind::Richdoc,
+                Some(next_claim),
+                Some(hex_sha256(f.source.as_bytes())),
+                "owner-session".into(),
+                Arc::new(()),
+                23,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+                None
+            )
+            .await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let Some(HeldMarkdownChange::Ready { held, .. }) = f.held_change("note.md").await else {
+        panic!("the current lineage's hold must be reviewable");
+    };
+    assert!(held.contains("A replacement lineage edit"));
     f.supervisor.close(&f.db).unwrap();
 }
 

@@ -66,6 +66,7 @@ const PARTS = [
   "chat-rows",
   "change-card",
   "change-review",
+  "held-change-review",
   "settings-frame",
   "theme-picker",
   "zoom-stepper",

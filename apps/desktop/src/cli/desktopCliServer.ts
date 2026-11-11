@@ -108,6 +108,7 @@ interface DesktopCliServerDependencies<State> {
   chatLinks: NonNullable<CliServerOptions["chatLinks"]>;
   chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
+  heldChanges: import("../workspaces/workspaceHeldChanges").WorkspaceHeldChanges;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
@@ -488,6 +489,7 @@ export function createDesktopCliServer<State>(
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into
       // an open editor instead of racing it on disk.
+      heldChange: path => dependencies.heldChanges.change(workspace, path),
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
