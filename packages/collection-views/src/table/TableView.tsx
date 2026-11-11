@@ -6,14 +6,16 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
-import { ArrowDown, ArrowUp, Maximize2, Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, CircleAlert, Clock, Maximize2, Plus, RotateCw, TriangleAlert, X } from "lucide-react";
 import type {
+  CollectionIndexedValue,
   CollectionQuerySort,
   CollectionRecord,
   CollectionSchema,
@@ -70,6 +72,39 @@ export interface TableFieldMark {
   label: string;
 }
 
+/**
+ * What the person did to one cell that the host has not confirmed. `value`
+ * shows in place of the stored one, and the editor opens on it. The host
+ * gives the words: the table cannot know why a change waits or was refused.
+ */
+export type TableCellStatus = { value: CollectionValue } & (
+  | { state: "pending" }
+  | { state: "waiting"; reason: string }
+  | { state: "unconfirmed"; reason: string; retry(): void }
+  | { state: "refused"; reason: string; dismiss(): void }
+);
+
+/**
+ * The host's unconfirmed cells. Each cell reads its own, so a change of
+ * status draws that cell and no other.
+ */
+export interface TableCellStatuses {
+  subscribe(listener: () => void): () => void;
+  /** The same object until this cell's status changes. */
+  get(recordId: string, field: string): TableCellStatus | undefined;
+}
+
+/** A cell the host draws, for a kind of value the table does not know, such as a file. */
+export interface TableHostCell {
+  cell(record: CollectionRecord): ReactNode;
+  /**
+   * The cell's editor, drawn in the table's overlay. `close` ends the edit.
+   * An editor that holds a value it has not saved marks a control
+   * `data-unsaved`, as the table's own do. Absent, the cell does not edit.
+   */
+  editor?(record: CollectionRecord, close: () => void): ReactNode;
+}
+
 export interface TableViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -81,6 +116,20 @@ export interface TableViewProps {
   onCellChange?: (change: CollectionCellChange) => number;
   /** Pause controls while keeping the open editor and its draft mounted. */
   editingDisabled?: boolean;
+  /**
+   * Whether this cell takes an edit now, by click or by key. Absent, every
+   * cell does. The host checks again when it saves. Built once by the host:
+   * a new function rebuilds every column.
+   */
+  canEditCell?: (record: CollectionRecord, field: FieldDefinition) => boolean;
+  /** Whether this field's header sorts. Absent, every field but a button does. */
+  canSortField?: (field: FieldDefinition) => boolean;
+  /** The cells whose change the host has not confirmed. One store for the table's life. */
+  cellStatuses?: TableCellStatuses;
+  /** Cells the host draws, by field key. Built once by the host, as the marks are. */
+  hostCells?: ReadonlyMap<string, TableHostCell>;
+  /** What a table with no records says. Absent, it says so only when it has no New record row. */
+  emptyText?: string;
   /** Highest saved edit id reflected in this record's queried field value. */
   acknowledgedWriteId?: (record: CollectionRecord, field: string) => number;
   /** Explicitly discarded edit ids retire local input without claiming a save. */
@@ -161,8 +210,14 @@ const columnLeft = (index: number) => (index === 0 ? 0 : TITLE_COLUMN_WIDTH + (i
 
 // Relation editing needs query access to the related collection; without an
 // executor the cell stays read-only. Checkboxes commit through onChange and
-// never open an editor. Buttons store no value.
-function opensEditor(field: FieldDefinition, relationExecutor: CollectionQueryExecutor | undefined): boolean {
+// never open an editor. Buttons store no value. A host-drawn cell opens only
+// the host's own editor.
+function opensEditor(
+  field: FieldDefinition,
+  relationExecutor: CollectionQueryExecutor | undefined,
+  host: TableHostCell | undefined,
+): boolean {
+  if (host) return host.editor !== undefined;
   return (
     field.type !== "checkbox" &&
     field.type !== "button" &&
@@ -177,6 +232,12 @@ function opensEditor(field: FieldDefinition, relationExecutor: CollectionQueryEx
 const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person", "select", "multi-select"]);
 /** The room a picker keeps between it and the table's right edge. */
 const PICKER_EDGE = 8;
+/** A host's editor holds a search or a file input, so it gets a popover's room. */
+const HOST_EDITOR_WIDTH = 320;
+const NO_STATUSES: TableCellStatuses = { subscribe: () => () => undefined, get: () => undefined };
+const MARK_ICON = { size: 12, strokeWidth: 1.9, "aria-hidden": true } as const;
+/** A 16px control inside a cell's line. */
+const MARK_BUTTON = "grid size-4 shrink-0 place-items-center rounded text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
 
 /** Rows and columns each arrow key moves the selection by. */
 const ARROWS: Readonly<Record<string, readonly [number, number]>> = {
@@ -208,6 +269,104 @@ function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: nu
 }
 
 /**
+ * The mark of a change the host has not confirmed, after the cell's value.
+ * A pending change is a quiet dot. One that waits, could not be confirmed,
+ * or was refused shows an icon, with its words on hover and for a screen
+ * reader. The selected cell shows the same words under it.
+ */
+function StatusMark({ status }: { status: TableCellStatus }) {
+  if (status.state === "pending") {
+    return (
+      <span data-cell-status="pending" className="ml-1 inline-flex shrink-0 items-center">
+        <span aria-hidden className="size-1.5 rounded-full bg-subtle" />
+        <span className="sr-only">Saving</span>
+      </span>
+    );
+  }
+  const Icon = status.state === "waiting" ? Clock : status.state === "unconfirmed" ? TriangleAlert : CircleAlert;
+  const tone = status.state === "waiting" ? "text-muted" : status.state === "unconfirmed" ? "text-warning" : "text-danger";
+  const action = status.state === "unconfirmed" ? "Try again" : status.state === "refused" ? "Dismiss" : null;
+  return (
+    <span data-cell-status={status.state} title={status.reason} className="ml-1 inline-flex shrink-0 items-center gap-1">
+      <Icon {...MARK_ICON} className={tone} />
+      <span className="sr-only">{status.reason}</span>
+      {action ? (
+        <button
+          type="button"
+          // The grid is the Tab stop. Tab on the selected cell reaches the same action under it.
+          tabIndex={-1}
+          aria-label={action}
+          title={action}
+          className={MARK_BUTTON}
+          onClick={(event) => {
+            // The press acts on the change. It neither selects nor edits the cell.
+            event.stopPropagation();
+            if (status.state === "unconfirmed") status.retry();
+            else if (status.state === "refused") status.dismiss();
+          }}
+        >
+          {status.state === "unconfirmed" ? <RotateCw {...MARK_ICON} /> : <X {...MARK_ICON} />}
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/** A status's value in place of the stored one. */
+function shownValue(
+  field: string,
+  indexed: CollectionIndexedValue | undefined,
+  status: TableCellStatus | undefined,
+): CollectionIndexedValue | undefined {
+  if (!status) return indexed;
+  return { field, value: status.value, validation: { status: "valid" }, resolvedRelations: indexed?.resolvedRelations ?? [] };
+}
+
+/**
+ * One field cell's content. It reads its own status, so a change the host
+ * has not confirmed draws this cell alone.
+ */
+function CellContent(props: {
+  field: FieldDefinition;
+  label: string;
+  record: CollectionRecord;
+  indexed: CollectionIndexedValue | undefined;
+  statuses: TableCellStatuses;
+  host: TableHostCell | undefined;
+  /** The cell opens an editor. */
+  editable: boolean;
+  /** Takes a checkbox's toggle. Absent, the box is disabled. */
+  onToggle: ((change: CollectionCellChange) => number) | undefined;
+  personLabel: ((userId: string) => string | null) | undefined;
+  onOpenLink: ((url: string) => void) | undefined;
+}) {
+  const { field, record, statuses, host, onToggle } = props;
+  const status = useSyncExternalStore(statuses.subscribe, () => statuses.get(record.id, field.name));
+  const content = host ? host.cell(record) : (
+    <FieldCell
+      field={field}
+      label={props.label}
+      indexed={shownValue(field.name, props.indexed, status)}
+      personLabel={props.personLabel}
+      onChange={
+        onToggle
+          ? (value) => onToggle({ recordId: record.id, recordPath: record.path, field: field.name, value })
+          : undefined
+      }
+      editable={props.editable}
+      onOpenLink={props.onOpenLink}
+    />
+  );
+  if (!status) return content;
+  return (
+    <>
+      <span className="flex min-w-0 flex-1 items-center overflow-hidden">{content}</span>
+      <StatusMark status={status} />
+    </>
+  );
+}
+
+/**
  * One cell, addressed by record id and field key so the selection and an
  * open edit survive a store refresh (a new records array), a sort-driven row
  * move, and scrolling. Row index and record object identity are both
@@ -235,10 +394,38 @@ function FieldHeader(props: {
   width: number;
   sorted: "asc" | "desc" | null;
   mark: TableFieldMark | undefined;
-  onSort: () => void;
+  /** Absent, the header is a label: a button field, or one the host cannot sort by. */
+  onSort: (() => void) | undefined;
 }) {
   const { mark, sorted } = props;
   const tooltip = useTooltip();
+  if (!props.onSort) {
+    return (
+      <div
+        role="columnheader"
+        className="relative flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0"
+        style={{ width: props.width }}
+        {...(mark ? tooltip.hoverProps : {})}
+      >
+        <FieldTypeIcon type={props.type} className="shrink-0 text-subtle" />
+        <span className="truncate">{props.name}</span>
+        {mark ? (
+          // With no sort control to describe, the mark takes focus for its words.
+          <span
+            role="img"
+            tabIndex={0}
+            aria-label={mark.label}
+            data-testid="table-field-mark"
+            className="inline-flex shrink-0 rounded"
+            {...tooltip.focusProps}
+          >
+            {mark.icon}
+          </span>
+        ) : null}
+        {mark ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
+      </div>
+    );
+  }
   return (
     <div
       role="columnheader"
@@ -279,6 +466,11 @@ export function TableView({
   onSortChange,
   onCellChange,
   editingDisabled = false,
+  canEditCell,
+  canSortField,
+  cellStatuses = NO_STATUSES,
+  hostCells,
+  emptyText,
   acknowledgedWriteId,
   subscribeToDiscardedWrites,
   onCreateOption,
@@ -314,32 +506,31 @@ export function TableView({
             (record) => record.values.find((entry) => entry.field === field.name),
             {
               id: field.name,
-              cell: (context) => field.type === "button" && renderButton ? renderButton(field, context.row.original) : (
-                <FieldCell
-                  field={field}
-                  label={fieldLabel?.(field.name) ?? field.name}
-                  indexed={context.getValue()}
-                  personLabel={personLabel}
-                  onChange={
-                    onCellChange && !editingDisabled
-                      ? (value) =>
-                          onCellChange({
-                            recordId: context.row.original.id,
-                            recordPath: context.row.original.path,
-                            field: field.name,
-                            value,
-                          })
-                      : undefined
-                  }
-                  editable={!editingDisabled && onCellChange !== undefined && opensEditor(field, relationExecutor)}
-                  onOpenLink={onOpenLink}
-                />
-              ),
+              cell: (context) => {
+                const record = context.row.original;
+                if (field.type === "button" && renderButton) return renderButton(field, record);
+                const host = hostCells?.get(field.name);
+                const edits = onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
+                return (
+                  <CellContent
+                    field={field}
+                    label={fieldLabel?.(field.name) ?? field.name}
+                    record={record}
+                    indexed={context.getValue()}
+                    statuses={cellStatuses}
+                    host={host}
+                    editable={edits && opensEditor(field, relationExecutor, host)}
+                    onToggle={edits ? onCellChange : undefined}
+                    personLabel={personLabel}
+                    onOpenLink={onOpenLink}
+                  />
+                );
+              },
             },
           ),
         ),
       ),
-    [fields, onCellChange, editingDisabled, personLabel, fieldLabel, relationExecutor, renderButton, onOpenLink],
+    [fields, onCellChange, editingDisabled, canEditCell, cellStatuses, hostCells, personLabel, fieldLabel, relationExecutor, renderButton, onOpenLink],
   );
 
   const table = useTable({
@@ -370,8 +561,22 @@ export function TableView({
     editing === null ? undefined : fields.find((field) => field.name === editing.field);
   const editingValue = editingRow?.original.values.find((entry) => entry.field === editingField?.name);
   const editingColumn = editingField ? fields.indexOf(editingField) : -1;
-  // A picker is a popover on its cell, as wide as it needs. Other editors fill the cell.
-  const editingPickerWidth = editingField ? pickerWidth(editingField, people !== undefined) : null;
+  const editingHost = editingField ? hostCells?.get(editingField.name) : undefined;
+  // A picker or a host's editor is a popover on its cell, as wide as it needs. Other editors fill the cell.
+  const popoverWidth = (field: FieldDefinition) =>
+    hostCells?.has(field.name) ? HOST_EDITOR_WIDTH : pickerWidth(field, people !== undefined);
+  const editingPickerWidth = editingField ? popoverWidth(editingField) : null;
+
+  // The selected cell's status, read here so its words can show under it.
+  const selectedStatus = useSyncExternalStore(cellStatuses.subscribe, () =>
+    selected === null ? undefined : cellStatuses.get(selected.recordId, selected.field),
+  );
+  const noteId = useId();
+  const noteRef = useRef<HTMLDivElement>(null);
+  const hasEditor = (field: FieldDefinition) => opensEditor(field, relationExecutor, hostCells?.get(field.name));
+  /** Whether the cell takes an edit now. Every edit path asks, by click or by key. */
+  const editsAt = (record: CollectionRecord, field: FieldDefinition) =>
+    onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
 
   // Each multi-select cell's saved picks that the index does not show yet.
   // They outlive the picker, so a second edit starts from the first.
@@ -451,7 +656,7 @@ export function TableView({
     const field = fields[column];
     if (!field) return;
     const grid = scrollRef.current;
-    const width = pickerWidth(field, people !== undefined);
+    const width = popoverWidth(field);
     let left = gutter + columnLeft(column);
     // A picker is wider than most cells. Near the right edge it moves left to stay in view.
     if (width !== null && grid) {
@@ -481,7 +686,7 @@ export function TableView({
     const field = fields[column];
     if (!record || !field) return;
     setSelected({ recordId: record.id, field: field.name });
-    if (onCellChange && !editingDisabled && opensEditor(field, relationExecutor)) startEdit(record.id, column);
+    if (editsAt(record.original, field) && hasEditor(field)) startEdit(record.id, column);
     // A host-drawn button keeps the focus its press took.
     else if (field.type !== "button") scrollRef.current?.focus({ preventScroll: true });
   };
@@ -513,6 +718,12 @@ export function TableView({
       return onOpenRecord?.(record);
     }
     if (key === "Tab") {
+      // A cell that says what went wrong offers its action before the next cell.
+      const action = event.shiftKey ? null : noteRef.current?.querySelector<HTMLElement>("button");
+      if (action) {
+        event.preventDefault();
+        return action.focus();
+      }
       const to = beside(at.row, at.column, event.shiftKey);
       // Past the first or last cell, Tab leaves the grid.
       if (!to) return;
@@ -527,9 +738,11 @@ export function TableView({
     }
     // Space scrolls a focused scroller. Here it only ticks a checkbox.
     if (key === " ") event.preventDefault();
-    if (!onCellChange || editingDisabled) return;
+    if (!onCellChange || !editsAt(record, field)) return;
     const cell = { recordId: record.id, recordPath: record.path, field: field.name };
-    const value = record.values.find((entry) => entry.field === field.name)?.value ?? null;
+    // The keys act on what the cell shows.
+    const status = cellStatuses.get(record.id, field.name);
+    const value = status ? status.value : record.values.find((entry) => entry.field === field.name)?.value ?? null;
     if (field.type === "checkbox" && (key === "Enter" || key === " ")) {
       event.preventDefault();
       return onCellChange({ ...cell, value: value !== true });
@@ -537,11 +750,11 @@ export function TableView({
     if (key === " ") return;
     if (key === "Enter") {
       event.preventDefault();
-      if (opensEditor(field, relationExecutor)) startEdit(record.id, at.column);
+      if (hasEditor(field)) startEdit(record.id, at.column);
       return;
     }
-    // A relation's records are removed in its picker.
-    if (!opensEditor(field, relationExecutor) || field.type === "relation") return;
+    // A relation's records are removed in its picker, and a host's value in the host's editor.
+    if (!hasEditor(field) || field.type === "relation" || hostCells?.has(field.name)) return;
     if (key === "Delete" || key === "Backspace") {
       event.preventDefault();
       if (field.type === "multi-select") {
@@ -605,6 +818,10 @@ export function TableView({
     }
   };
 
+  // The words of the selected cell's status, while no editor covers them.
+  const note = at && editing === null && selectedStatus && selectedStatus.state !== "pending" ? selectedStatus : null;
+  const leaveNote = () => scrollRef.current?.focus({ preventScroll: true });
+
   const openColumn = Boolean(onOpenRecord);
   return (
     <div
@@ -627,35 +844,23 @@ export function TableView({
           {fields.map((field, index) => {
             const label = fieldLabel?.(field.name) ?? field.name;
             // A button stores no value to sort by, so its header is a label.
-            if (field.type === "button") {
-              return (
-                <div
-                  key={field.name}
-                  role="columnheader"
-                  className="flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0"
-                  style={{ width: columnWidth(index) }}
-                >
-                  <FieldTypeIcon type={field.type} className="shrink-0 text-subtle" />
-                  <span className="truncate">{label}</span>
-                </div>
-              );
-            }
+            const sorts = field.type !== "button" && (canSortField?.(field) ?? true);
             return (
               <FieldHeader
                 key={field.name}
                 name={label}
                 type={field.type}
                 width={columnWidth(index)}
-                sorted={primarySort?.field === field.name ? primarySort.direction : null}
-                mark={fieldMarks?.get(field.name)}
-                onSort={() => toggleSort(field.name)}
+                sorted={sorts && primarySort?.field === field.name ? primarySort.direction : null}
+                mark={field.type === "button" ? undefined : fieldMarks?.get(field.name)}
+                onSort={sorts ? () => toggleSort(field.name) : undefined}
               />
             );
           })}
         </div>
-        {records.length === 0 && !onNewRecord ? (
+        {records.length === 0 && (emptyText !== undefined || !onNewRecord) ? (
           <div className="py-4 pr-2 text-sm text-muted" style={{ paddingLeft: (openColumn ? OPEN_COLUMN_WIDTH : 0) + 8 }}>
-            No records in this collection yet.
+            {emptyText ?? "No records in this collection yet."}
           </div>
         ) : null}
         {records.length > 0 ? (
@@ -699,6 +904,7 @@ export function TableView({
                         role="gridcell"
                         id={isSelected ? selectedCellId : undefined}
                         aria-selected={isSelected || undefined}
+                        aria-describedby={isSelected && note ? noteId : undefined}
                         className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
                           index === 0 ? "font-medium" : ""
                         } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
@@ -745,14 +951,15 @@ export function TableView({
                   minHeight: ROW_HEIGHT,
                 }}
               >
-                <CellEditor
+                {editingHost ? editingHost.editor?.(editingRow.original, () => closeEditor()) : <CellEditor
                   field={editingField}
                   label={fieldLabel?.(editingField.name) ?? editingField.name}
                   typed={editing.typed}
                   acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
                   subscribeToDiscardedWrites={subscribeToDiscardedWrites}
                   carried={editingField.type === "multi-select" ? carriedSelection(editing) : undefined}
-                  indexed={editingValue}
+                  // The edit starts from what the cell shows, so a refused value is not typed twice.
+                  indexed={shownValue(editingField.name, editingValue, cellStatuses.get(editing.recordId, editing.field))}
                   emit={(value, previousValues) =>
                     onCellChange({
                       recordId: editingRow.original.id,
@@ -783,8 +990,47 @@ export function TableView({
                   }
                   people={people}
                   relationExecutor={relationExecutor}
-                />
+                />}
               </fieldset>
+            ) : null}
+            {note && at ? (
+              <div
+                ref={noteRef}
+                id={noteId}
+                role="note"
+                data-cell-note={note.state}
+                className="dohc-popover absolute z-10 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
+                style={{ top: (at.row + 1) * ROW_HEIGHT, left: gutter + columnLeft(at.column), minWidth: columnWidth(at.column) }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape" && event.key !== "Tab") return;
+                  // Tab goes on to the next cell. Shift+Tab and Escape go back to this one.
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const to = event.key === "Tab" && !event.shiftKey ? beside(at.row, at.column, false) : null;
+                  if (to) select(...to);
+                  else leaveNote();
+                }}
+              >
+                <p className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}>
+                  {note.reason}
+                </p>
+                {note.state === "unconfirmed" || note.state === "refused" ? (
+                  <button
+                    type="button"
+                    // Tab on the selected cell reaches it.
+                    tabIndex={-1}
+                    className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                    onClick={() => {
+                      // The words go once the action runs, so the grid takes the keys back first.
+                      leaveNote();
+                      if (note.state === "unconfirmed") note.retry();
+                      else note.dismiss();
+                    }}
+                  >
+                    {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

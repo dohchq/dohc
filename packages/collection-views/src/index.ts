@@ -23,7 +23,10 @@ export {
   TableView,
   type CollectionCellChange,
   type CollectionOptionCreate,
+  type TableCellStatus,
+  type TableCellStatuses,
   type TableFieldMark,
+  type TableHostCell,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";
