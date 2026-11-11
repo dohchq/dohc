@@ -107,11 +107,17 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await page.mouse.move(0, 0);
     await shoot(page, dialog, "agents-you-run-c-page");
     await agentPage.getByRole("button", { name: "Scout actions" }).click();
-    await expect(page.getByRole("menuitem")).toHaveText(["Rename", "Remove"]);
+    await expect(page.getByRole("menuitem")).toHaveText(["Rename"]);
     await shoot(page, dialog, "agents-you-run-c-menu");
+    await page.keyboard.press("Escape");
 
-    // Just after Remove, the list is back and its toast offers Undo.
-    await page.getByRole("menuitem", { name: "Remove" }).click();
+    // Remove asks first. Just after it, the list is back and its toast offers Undo.
+    await agentPage.getByRole("button", { name: "Remove Scout…" }).click();
+    const confirm = page.getByTestId("remove-agent-dialog");
+    await expect(confirm).toContainText("Remove Scout?");
+    await page.mouse.move(0, 0);
+    await shoot(page, page, "agents-you-run-c-remove");
+    await confirm.getByRole("button", { name: "Remove agent" }).click();
     await expect(agentPage).toHaveCount(0);
     await expect(row("scout")).toHaveCount(0);
     const toasts = page.getByTestId("notice-toasts");

@@ -112,6 +112,7 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
+  listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
   readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
   readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
   requestAccessRefresh: vi.fn(async () => undefined),
@@ -1585,8 +1586,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     expect(Object.keys(file.agents)).toEqual(["default"]);
 
@@ -1615,8 +1616,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
 
     await act(async () => onNotice.mock.calls[0]![1]!());
@@ -1649,8 +1650,8 @@ describe("SettingsDialog", () => {
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
     await openAgent("Codex");
-    await user.click(screen.getByRole("button", { name: "Codex actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
+    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
     await user.click(await screen.findByTestId("agent-add"));
     await user.click(screen.getByTestId("agent-runs-with-codex"));

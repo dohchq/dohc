@@ -32,6 +32,8 @@ import {
   isGroupNameTaken,
   isChatMentionPageChanged,
   isDatasetServerNotFound,
+  datasetOwnerOnlyError,
+  isDatasetOwnerOnly,
   markDatasetServerNotFound,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
@@ -93,6 +95,14 @@ it("keeps a server Collection's not found code across Electron, with the words o
   expect(isDatasetServerNotFound(acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"))).toBe(false);
   expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }))).toBe(false);
   expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
+});
+
+it("keeps a shared view's owner-only refusal code across Electron, with its words", () => {
+  const error = acrossIpc(datasetOwnerOnlyError(), "desktop:dataset");
+  expect(isDatasetOwnerOnly(error)).toBe(true);
+  expect(isDatasetServerNotFound(error)).toBe(false);
+  expect(readError(error).words).toBe("Open the original workspace to manage this Collection.");
+  expect(isDatasetOwnerOnly(acrossIpc(new Error("Open the original workspace to manage this Collection."), "desktop:dataset"))).toBe(false);
 });
 
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {

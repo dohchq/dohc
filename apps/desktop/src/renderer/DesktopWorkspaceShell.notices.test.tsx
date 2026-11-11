@@ -17,6 +17,8 @@ import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { NoticeTarget } from "../notices/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
+import { useEngineDoc } from "./collab/useEngineDoc";
+import { useReopenKey } from "./documentVersionKey";
 import { deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
@@ -1060,6 +1062,54 @@ describe("engine store recovery", () => {
       );
     },
   );
+
+  it("moves a cell write's session with the open editor's in the same step when live sessions reopen", async () => {
+    let liveSessionsGeneration = 0;
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
+    bridge.openWorkspace = vi.fn(async () => ({ ...SYNC_STATUS, liveSessionsGeneration }));
+    bridge.getSyncStatus = vi.fn(async () => ({ ...SYNC_STATUS, liveSessionsGeneration }));
+    // Sessions main holds for a.md. Main refuses a second session for one
+    // document, so a write and an editor on different keys collide.
+    let live = 0, overlapped = false;
+    const openEngineYDocSession = vi.fn(async () => {
+      live++; overlapped ||= live > 1;
+      return { available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc("# Doc\n")), lineageGeneration: 1 };
+    });
+    const closeEngineYDocSession = vi.fn(async () => { live--; });
+    Object.assign(bridge, {
+      openEngineYDocSession, closeEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ accepted: true as const, updates: [] })),
+    });
+    // A cell write to a.md opens the record as CollectionRecordFieldWrite does.
+    function CellWrite() {
+      useEngineDoc({ workspaceId: WORKSPACE.workspaceId, path: "a.md", enabled: true, reopenKey: useReopenKey(WORKSPACE.workspaceId) });
+      return null;
+    }
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<>
+      <CellWrite />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+    </>);
+    await screen.findByTestId("markdown-source-toggle");
+    // The write and the editor share one session.
+    await waitFor(() => expect(live).toBe(1));
+    const opened = openEngineYDocSession.mock.calls.length;
+    overlapped = false;
+    // dohc restarts its live sessions, as a rebuild or a shared view's refresh does.
+    await act(async () => {
+      liveSessionsGeneration = 1;
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(opened + 1));
+    await waitFor(() => expect(live).toBe(1));
+    expect(overlapped).toBe(false);
+  });
 
   it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
     const rebuild = deferred<RebuildEngineStoreResult>();

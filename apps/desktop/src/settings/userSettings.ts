@@ -352,6 +352,14 @@ export const SidebarSettings = z.object({
       message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
     })
     .default({}),
+  // Each workspace's chats of removed agents taken off Archived, by the
+  // chat's id. One shows again when an agent with its id is added again.
+  hiddenChats: z
+    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+    .refine((hidden) => Object.keys(hidden).length <= MAX_PINNED_WORKSPACES, {
+      message: `Remove chats from the list in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+    })
+    .default({}),
 }).strict();
 export type SidebarSettings = z.infer<typeof SidebarSettings>;
 
@@ -360,6 +368,7 @@ export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
   hidden: [],
   pinnedApps: {},
   archivedChats: {},
+  hiddenChats: {},
 };
 
 // Reports this computer sends to dohc's developers. A release build that

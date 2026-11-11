@@ -28,12 +28,12 @@ describe("ChatsView archive and row menus", () => {
     expect(menuLabels()).toEqual(["Add people…", "Archive"]);
     await user.click(screen.getByTestId("chat-row-menu-archive"));
 
-    expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelId: "channel-1", archived: true });
+    expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelId: "channel-1", state: "archived" });
     await waitFor(() => expect(onNotice).toHaveBeenCalledOnce());
     const [words, undo] = onNotice.mock.lastCall!;
     expect(words).toBe("Archived general");
     undo();
-    await waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: "channel-1", archived: false }));
+    await waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: "channel-1", state: "active" }));
     expect(screen.queryByTestId("chat-row-menu")).toBeNull();
   });
 
@@ -80,7 +80,7 @@ describe("ChatsView archive and row menus", () => {
     // Open, it says it is archived and offers the way back.
     await user.click(trip);
     await user.click(await screen.findByTestId("chats-unarchive"));
-    expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelId: "channel-trip", archived: false });
+    expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelId: "channel-trip", state: "active" });
   });
 
   it("counts Archived quietly when nothing in it is unread", async () => {
@@ -199,17 +199,21 @@ describe("ChatsView archive and row menus", () => {
 
     const row = await screen.findByTestId("chats-my-agent");
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
-    expect(menuLabels()).toEqual(["Agent settings", "Turn off", "Archive", "Remove agent"]);
+    expect(menuLabels()).toEqual(["Agent settings", "Turn off", "Archive", "Remove agent…"]);
     await user.click(screen.getByTestId("chat-row-menu-agent-power"));
     await waitFor(() => expect(onSaveUserSettings).toHaveBeenCalledOnce());
     expect(onSaveUserSettings.mock.lastCall).toEqual([
       { ...settings, agents: { ...settings.agents, scout: { ...scout, enabled: false } } }, settings,
     ]);
 
-    // Remove works as it does in Settings: the agent's failed check goes, and
-    // Undo puts it back where it was.
+    // Remove asks first, then works as it does in Settings: the agent's
+    // failed check goes, and Undo puts it back where it was.
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
     await user.click(screen.getByTestId("chat-row-menu-remove-agent"));
+    const dialog = within(screen.getByTestId("remove-agent-dialog"));
+    expect(dialog.getByText("Remove Ranger?")).toBeTruthy();
+    expect(bridgeMock.setUserSettings).not.toHaveBeenCalled();
+    await user.click(dialog.getByRole("button", { name: "Remove agent" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledOnce());
     expect(bridgeMock.setUserSettings).toHaveBeenCalledExactlyOnceWith({ settings: removed, base: settings });
     expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:workspace-a:scout");
@@ -223,7 +227,7 @@ describe("ChatsView archive and row menus", () => {
     });
   });
 
-  it("offers a removed agent's archived chat only Open Agents", async () => {
+  it("offers a removed agent's archived chat Open Agents and Remove from list", async () => {
     const user = userEvent.setup();
     const onSetupAgent = vi.fn();
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -243,7 +247,7 @@ describe("ChatsView archive and row menus", () => {
     await user.click(await screen.findByTestId("chats-archived-toggle"));
     const codex = within(screen.getByTestId("chats-archived-list")).getByTestId("chats-my-agent");
     fireEvent.contextMenu(codex, { clientX: 40, clientY: 200 });
-    expect(menuLabels()).toEqual(["Open Agents"]);
+    expect(menuLabels()).toEqual(["Open Agents", "Remove from list…"]);
     await user.click(screen.getByTestId("chat-row-menu-open-agents"));
     expect(onSetupAgent).toHaveBeenCalledOnce();
 
@@ -251,6 +255,40 @@ describe("ChatsView archive and row menus", () => {
     await user.click(codex);
     expect((await screen.findByTestId("chats-agent-problem")).textContent).toContain("Codex was removed.");
     expect(screen.queryByTestId("chats-archived-line")).toBeNull();
+  });
+
+  it("takes a removed agent's chat off Archived after asking, with Undo", async () => {
+    const user = userEvent.setup();
+    const onNotice = vi.fn();
+    bridgeMock.setChatArchived.mockResolvedValue({ settings: DEFAULT_USER_SETTINGS });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel(), channel({ id: "chat-codex", name: "Codex", slug: "agent-codex", kind: "agent", agentId: "codex" })],
+      fileThreads: [],
+    });
+    const settings = settingsWithAgent({ name: "Nova" });
+    const { unmount } = renderView(vi.fn(), vi.fn(), { userSettings: settings, onNotice, onSetupAgent: vi.fn() });
+
+    await user.click(await screen.findByTestId("chats-archived-toggle"));
+    fireEvent.contextMenu(within(screen.getByTestId("chats-archived-list")).getByTestId("chats-my-agent"), { clientX: 40, clientY: 200 });
+    await user.click(screen.getByTestId("chat-row-menu-hide-chat"));
+    const dialog = within(screen.getByTestId("hide-agent-chat-dialog"));
+    expect(dialog.getByText("Remove Codex's chat from the list?")).toBeTruthy();
+    expect(bridgeMock.setChatArchived).not.toHaveBeenCalled();
+    await user.click(dialog.getByRole("button", { name: "Remove from list" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex's chat from the list.", expect.any(Function)));
+    expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", channelId: "chat-codex", state: "hidden" });
+
+    onNotice.mock.lastCall![1]();
+    await waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: "chat-codex", state: "active" }));
+
+    // With the settings saying so, Archived has nothing left to show.
+    unmount();
+    renderView(vi.fn(), vi.fn(), {
+      userSettings: { ...settings, sidebar: { ...settings.sidebar, hiddenChats: { "workspace-a": ["chat-codex"] } } },
+      onSetupAgent: vi.fn(),
+    });
+    await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
   });
 
   it("keeps a personal agent's chat in the sidebar while your roster holds it, and archives it once removed", async () => {
