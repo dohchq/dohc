@@ -110,6 +110,9 @@ Both restore and check the prepared engine, desktop artifacts, and runtime bundl
 Workers and aggregates do not wait for confinement. Only the final verdict waits for it.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
+Shard costs use measured group wall times from `shard-times.json` when the task membership matches, with file estimates for new groups.
+Native placement predicts each worker's finish using preparation arrival, its two initial slots and third slot after preparation, and exclusive resources.
+These estimates change placement only; each worker still verifies its complete assigned inventory.
 The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.

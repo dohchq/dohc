@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
+import { assertTaskCoverage, javascriptGroupKey, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
 import { aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
@@ -96,12 +96,22 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   assertTaskCoverage(tasks, partitionTasks(groups, JS_SHARDS).map((groups, part) => ({ part, verdict: "PASS", completed: groups.flatMap(group => group.tasks.map(task => task.id)) })));
 });
 
-test("native preparation does not leave one worker with most of the native work", () => {
-  const groups = [false, true].flatMap(native => [90, 70, 50, 30].map((weight, index) => ({ id: `${native}-${index}`, native, weight })));
-  const shards = partitionJavascript(groups, 2);
-  for (const native of [false, true]) {
-    assert.deepEqual(shards.map(shard => shard.filter(group => group.native === native).reduce((total, group) => total + group.weight, 0)), [120, 120]);
-  }
+test("group costs use measured wall time only for the same task membership", () => {
+  const tasks = ["a", "b"].map(id => ({ id, kind: "vitest", package: "proof", weight: 10 }));
+  const timings = { [javascriptGroupKey(tasks)]: 35 };
+  assert.equal(javascriptGroups(tasks, timings)[0].weight, 35);
+  assert.equal(javascriptGroups(tasks.toReversed(), timings)[0].weight, 35);
+  assert.equal(javascriptGroups(tasks.slice(0, 1), timings)[0].weight, 14);
+});
+
+test("native placement accounts for arrival, worker slots, and exclusive resources", () => {
+  const groups = [10, 120, 90, 40, 60, 30, 30, 60].map((weight, index) => ({ id: `group-${index}`, weight,
+    native: index >= 4, resource: [0, 3, 5, 6, 7].includes(index) ? "serial" : null }));
+  const shards = partitionJavascript(groups, 2, 80);
+  // Independent pure/native balancing takes 170 s here; these assignments finish at 140 s.
+  assert.deepEqual(shards.map(shard => shard.map(group => group.id)), [["group-1", "group-0", "group-4", "group-7"], ["group-2", "group-3", "group-5", "group-6"]]);
+  assert.deepEqual(partitionJavascript(groups.toReversed(), 2, 80), shards);
+  assert.throws(() => partitionJavascript([...groups, groups[4]], 2, 80), /Duplicate/u);
   assertTaskCoverage(groups, shards.map((shard, part) => ({ part, verdict: "PASS", completed: shard.map(group => group.id) })));
 });
 
