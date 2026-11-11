@@ -143,6 +143,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "path_aliases",
     "snapshots",
     "fork_base_snapshots",
+    "merge_bases",
     "links",
     "link_sources",
     "link_occurrence_keys",

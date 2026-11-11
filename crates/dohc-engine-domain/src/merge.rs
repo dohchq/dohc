@@ -649,6 +649,28 @@ where
     F: Fn(&Transaction<'_>, &MergeTextFileResult) -> Result<(), DomainError>,
 {
     after(tx, &result)?;
+    // The version's side reached the target, so its next merge of this path
+    // starts from here. Source unchanged and a conflict move nothing.
+    let merged = match &result {
+        MergeTextFileResult::Write { comparison, write } => Some((
+            comparison,
+            Some(("text", write.snapshot.blob_sha256.as_str())),
+        )),
+        MergeTextFileResult::BinaryWrite { comparison, write } => Some((
+            comparison,
+            Some(("binary", write.head.snapshot.blob_sha256.as_str())),
+        )),
+        MergeTextFileResult::Delete { comparison, .. } => Some((comparison, None)),
+        MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::AlreadySame,
+            comparison,
+            ..
+        } => Some((comparison, content_identity(&comparison.current))),
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
+    };
+    if let Some((comparison, target_after)) = merged {
+        record_merge_base(tx, comparison, target_after)?;
+    }
     let result_seq = match &result {
         MergeTextFileResult::Write { write, .. } => write.moment.moment_order,
         MergeTextFileResult::BinaryWrite { write, .. } => write.moment.moment_order,
@@ -891,19 +913,19 @@ fn compare_text_file_versions_in_db(
     {
         return Err(DomainError::ForkBaseNotFound);
     }
-    let base = select_snapshot(
-        conn,
-        "fork_base_snapshots",
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-    )?;
     let current = select_snapshot(
         conn,
         "snapshots",
         &input.workspace_id,
         &input.target_version_id,
         &input.path,
+    )?;
+    let base = select_merge_base(
+        conn,
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.path,
+        &current,
     )?;
     let incoming = select_snapshot(
         conn,
@@ -936,6 +958,275 @@ fn select_snapshot(
     version_id: &str,
     path: &str,
 ) -> Result<Option<ComparisonSide>, DomainError> {
+    let sql = format!(
+        "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
+         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
+         s.binary_sha256, bb.byte_length FROM {table} s \
+         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
+    );
+    select_side(conn, &sql, workspace_id, version_id, path)
+}
+
+/// What a side holds: its content kind and content address, or `None` when
+/// the path holds no file.
+pub(crate) type ContentIdentity<'a> = Option<(&'static str, &'a str)>;
+
+fn content_identity(side: &Option<ComparisonSide>) -> ContentIdentity<'_> {
+    side.as_ref().map(|side| {
+        let kind = if side.binary { "binary" } else { "text" };
+        (kind, side.snapshot.blob_sha256.as_str())
+    })
+}
+
+/// The base a merge of `path` from a named version compares against: what
+/// the version last merged at that path, or its fork point if it never has.
+/// When the target holds what it held just before that merge, and not what
+/// the merge left, the merge was undone there; the base is then the one that
+/// merge itself used, so merging again applies the version's change again.
+fn select_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    source_version_id: &str,
+    path: &str,
+    current: &Option<ComparisonSide>,
+) -> Result<Option<ComparisonSide>, DomainError> {
+    type MergeBaseRow = (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<MergeBaseRow> = conn
+        .query_row(
+            "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
+             target_after_kind, target_after_sha256 FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
+            params![workspace_id, source_version_id, path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((base_exists, prior_exists, before_kind, before_sha, after_kind, after_sha)) = row
+    else {
+        return select_snapshot(
+            conn,
+            "fork_base_snapshots",
+            workspace_id,
+            source_version_id,
+            path,
+        );
+    };
+    let held = content_identity(current);
+    let before = before_kind.as_deref().zip(before_sha.as_deref());
+    let after = after_kind.as_deref().zip(after_sha.as_deref());
+    let (side, exists) = if held == before && held != after {
+        ("prior", prior_exists)
+    } else {
+        ("base", base_exists)
+    };
+    if exists == 0 {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT m.{side}_object_id, m.path, b.sha256, m.{side}_blob_sha256, \
+         m.{side}_updated_at_ms, m.{side}_latest_moment_id, m.{side}_metadata_origin, \
+         m.{side}_metadata_summary, m.{side}_metadata_correlation_id, \
+         m.{side}_content_kind, m.{side}_binary_sha256, bb.byte_length FROM merge_bases m \
+         LEFT JOIN blobs b ON b.sha256 = m.{side}_blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = m.{side}_binary_sha256 \
+         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3"
+    );
+    select_side(conn, &sql, workspace_id, source_version_id, path)
+}
+
+/// Record that `comparison.path` of a named version reached its fork parent:
+/// the incoming side becomes the path's merge base, the base the comparison
+/// used becomes its prior, and the target's content before (`current`) and
+/// after (`target_after`) tell a later merge whether this one was undone.
+fn record_merge_base(
+    tx: &Transaction<'_>,
+    comparison: &VersionedTextComparison,
+    target_after: ContentIdentity<'_>,
+) -> Result<(), DomainError> {
+    use rusqlite::types::Value;
+    fn text(value: &str) -> Value {
+        Value::Text(value.to_owned())
+    }
+    fn optional(value: &Option<String>) -> Value {
+        value.as_deref().map_or(Value::Null, text)
+    }
+    fn side(side: &Option<ComparisonSide>) -> [Value; 10] {
+        let Some(side) = side else {
+            return [
+                Value::Integer(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ];
+        };
+        let snapshot = &side.snapshot;
+        let (kind, blob, binary) = if side.binary {
+            ("binary", Value::Null, text(&snapshot.blob_sha256))
+        } else {
+            ("text", text(&snapshot.blob_sha256), Value::Null)
+        };
+        [
+            Value::Integer(1),
+            text(&snapshot.object_id),
+            text(kind),
+            blob,
+            binary,
+            Value::Integer(snapshot.updated_at_ms),
+            text(&snapshot.latest_moment_id),
+            text(&snapshot.metadata_origin),
+            optional(&snapshot.metadata_summary),
+            optional(&snapshot.metadata_correlation_id),
+        ]
+    }
+    fn identity(identity: ContentIdentity<'_>) -> [Value; 2] {
+        identity.map_or([Value::Null, Value::Null], |(kind, sha)| {
+            [text(kind), text(sha)]
+        })
+    }
+    let mut values = vec![
+        text(&comparison.workspace_id),
+        text(&comparison.source_version_id),
+        text(&comparison.path),
+    ];
+    values.extend(side(&comparison.incoming));
+    values.extend(side(&comparison.base));
+    values.extend(identity(content_identity(&comparison.current)));
+    values.extend(identity(target_after));
+    tx.execute(
+        "INSERT OR REPLACE INTO merge_bases (workspace_id, source_version_id, path, \
+         base_exists, base_object_id, base_content_kind, base_blob_sha256, \
+         base_binary_sha256, base_updated_at_ms, base_latest_moment_id, base_metadata_origin, \
+         base_metadata_summary, base_metadata_correlation_id, \
+         prior_exists, prior_object_id, prior_content_kind, prior_blob_sha256, \
+         prior_binary_sha256, prior_updated_at_ms, prior_latest_moment_id, \
+         prior_metadata_origin, prior_metadata_summary, prior_metadata_correlation_id, \
+         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+        rusqlite::params_from_iter(values),
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// Record a resolved merge conflict as merged, whatever the resolution kept,
+/// as Git does. A sync conflict, or a resolution that wrote another path,
+/// records nothing.
+pub(crate) fn record_resolved_merge_conflict(
+    tx: &Transaction<'_>,
+    conflict: &TextConflict,
+    target_after: Option<ContentIdentity<'_>>,
+) -> Result<(), DomainError> {
+    let Some(target_after) = target_after else {
+        return Ok(());
+    };
+    let source: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT kind, fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![conflict.workspace_id, conflict.source_version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((kind, fork_version_id)) = source else {
+        return Ok(());
+    };
+    if VersionKind::from_db(&kind)? != VersionKind::Named
+        || fork_version_id.as_deref() != Some(conflict.target_version_id.as_str())
+    {
+        return Ok(());
+    }
+    let side = |state: &ConflictFileState| conflict_state_side(conflict, state);
+    let (Some(base), Some(current), Some(incoming)) = (
+        side(&conflict.base),
+        side(&conflict.current),
+        side(&conflict.incoming),
+    ) else {
+        return Ok(());
+    };
+    let comparison = VersionedTextComparison {
+        workspace_id: conflict.workspace_id.clone(),
+        path: conflict.path.clone(),
+        target_version_id: conflict.target_version_id.clone(),
+        source_version_id: conflict.source_version_id.clone(),
+        status: comparison_status(&base, &current, &incoming),
+        base,
+        current,
+        incoming,
+    };
+    record_merge_base(tx, &comparison, target_after)
+}
+
+/// A conflict side as a comparison side; `None` when a binary side lacks
+/// the head identity a merge conflict always records.
+fn conflict_state_side(
+    conflict: &TextConflict,
+    state: &ConflictFileState,
+) -> Option<Option<ComparisonSide>> {
+    if let Some(snapshot) = &state.snapshot {
+        return Some(Some(ComparisonSide {
+            byte_length: snapshot.text.len() as i64,
+            snapshot: snapshot.clone(),
+            binary: false,
+        }));
+    }
+    let Some(binary_sha256) = &state.binary_sha256 else {
+        return Some(None);
+    };
+    Some(Some(ComparisonSide {
+        snapshot: TextSnapshot {
+            workspace_id: conflict.workspace_id.clone(),
+            version_id: String::new(),
+            object_id: state.binary_object_id.clone()?,
+            path: state.path.clone(),
+            text: String::new(),
+            blob_sha256: binary_sha256.clone(),
+            updated_at_ms: state.binary_updated_at_ms?,
+            latest_moment_id: state.binary_latest_moment_id.clone()?,
+            // A binary conflict side keeps no origin of its own.
+            metadata_origin: conflict.metadata.origin.clone(),
+            metadata_summary: state.metadata_summary.clone(),
+            metadata_correlation_id: state.metadata_correlation_id.clone(),
+        },
+        binary: true,
+        byte_length: state.binary_byte_length.unwrap_or(0),
+    }))
+}
+
+/// Read one comparison side with `sql`, which selects `select_snapshot`'s
+/// columns for `(workspace_id, version_id, path)`.
+fn select_side(
+    conn: &Connection,
+    sql: &str,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<ComparisonSide>, DomainError> {
     type SideRow = (
         String,
         String,
@@ -950,17 +1241,8 @@ fn select_snapshot(
         Option<String>,
         Option<i64>,
     );
-    let sql = format!(
-        "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
-         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
-         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
-         s.binary_sha256, bb.byte_length FROM {table} s \
-         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
-         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
-    );
     let row: Option<SideRow> = conn
-        .query_row(&sql, params![workspace_id, version_id, path], |row| {
+        .query_row(sql, params![workspace_id, version_id, path], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
