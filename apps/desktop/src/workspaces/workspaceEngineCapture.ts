@@ -1705,6 +1705,13 @@ async function diskContentOf(path: string, size: number, read: () => Promise<Buf
   return { kind: "text", text, sha256: sha256Utf8(text) };
 }
 
+// readDiskSecretState for text dohc keeps or restores. The leaf check alone
+// would read through a folder that links outside the workspace.
+async function readContainedSecretState(rootPath: string, path: string): ReturnType<typeof readDiskSecretState> {
+  await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Protected file path", access: "entry" });
+  return await readDiskSecretState(rootPath, path);
+}
+
 // Like readDiskTextState but for secret-classified paths: `.env` has no text
 // media type, so the media-type heuristic is skipped — any regular file whose
 // bytes round-trip through UTF-8 within the size cap is capturable secret
@@ -4375,16 +4382,16 @@ export function createWorkspaceEngineCapture(
       operation: Extract<MaterializeOperation, { kind: "write" | "delete" }>,
     ): Promise<boolean | "skip"> {
       const { path } = operation;
-      const disk = await readDiskSecretState(rootPath, path);
+      const disk = await readContainedSecretState(rootPath, path);
       if (disk.kind === "absent") return false;
       if (disk.kind === "unreadable") {
         throw await OutsideWriteCopyError.from(path, new Error(`Could not read ${path}`), rootPath, PROTECTED_COPIES_PATH);
       }
       if (disk.kind === "untracked-content") return disk.reason === "non-file" ? false : "skip";
       if (operation.kind === "write" && disk.text === operation.text) return false;
-      // Nothing larger is in History, and the engine call would carry it all.
-      if (Buffer.byteLength(disk.text) <= MAX_PROTECTED_HISTORY_BYTES &&
-          await secretStoreFor().secretTextRecorded({ workspaceId, path, text: disk.text })) return false;
+      // History holds nothing larger, so Restore could not bring it back.
+      if (Buffer.byteLength(disk.text) > MAX_PROTECTED_HISTORY_BYTES) return "skip";
+      if (await secretStoreFor().secretTextRecorded({ workspaceId, path, text: disk.text })) return false;
       const { versionId } = await lookupContext();
       return await protectedCopies.keep(path, disk.text, versionId).catch(async (error: unknown) => {
         // Every failure here names paths only; this guards the notice anyway.
@@ -7335,7 +7342,7 @@ export function createWorkspaceEngineCapture(
         const correlationId = `restore-${createId()}`;
         // Save what is on disk first, so Restore never loses an edit
         // capture has not saved yet, and History can bring it back.
-        const disk = await readDiskSecretState(rootPath, path);
+        const disk = await readContainedSecretState(rootPath, path);
         if (disk.kind === "unreadable") throw new Error(`dohc could not read ${path} on disk.`);
         if (disk.kind === "untracked-content") {
           throw new Error(`dohc saves what is at ${path} first, and it cannot save that item. Move the item to another folder, then try again.`);

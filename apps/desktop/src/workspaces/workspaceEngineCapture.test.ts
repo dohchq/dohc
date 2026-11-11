@@ -224,6 +224,8 @@ function caseInsensitiveDisk(root: string, path: string, text: string) {
     async deletePath(path) {
       operations.push("delete");
       files.delete(key(path));
+      // A protected write reads the real file first, so it must be gone there too.
+      await rm(path, { force: true });
     },
   };
   return { writer, operations, read: (path: string) => files.get(key(join(root, path))) };
@@ -4166,6 +4168,49 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       await expect(run).rejects.not.toThrow("TOKEN=mine");
       expect(commit).not.toHaveBeenCalled();
       expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
+    } finally { await engine.stop(); }
+  });
+
+  it.each(["write", "removal"] as const)("leaves protected text over 1 MB as it is before a pulled %s, since Restore could not bring it back", async change => {
+    const big = `TOKEN=${"x".repeat(1024 * 1024)}\n`;
+    const { root, sessions, page } = await protectedPullFixture(change, ["TOKEN=saved\n"], big);
+    const engine = capture(root, { rustEngineSessions: sessions });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await engine.runRelaySync(page(commit));
+      expect(commit).toHaveBeenCalledOnce();
+      expect(await readFile(join(root, ".env"), "utf8")).toBe(big);
+      expect(await protectedCopyFiles(root)).toEqual([]);
+    } finally { await engine.stop(); }
+  });
+
+  it("keeps and restores no protected text through a folder that leads outside the workspace", async () => {
+    const root = await createTestScratch("relay-protected-copy-");
+    const outside = await createTestScratch("relay-protected-copy-");
+    await write(outside, ".env", "TOKEN=outside\n");
+    try {
+      // A junction needs no privilege on Windows; symlink elsewhere.
+      await symlink(outside, join(root, "linked"), process.platform === "win32" ? "junction" : "dir");
+    } catch { return; }
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: "linked/.env", text: "TOKEN=theirs\n", origin: "sync" });
+    const sessions = mockLiveSessions(loopback);
+    const engine = capture(root, { rustEngineSessions: sessions, onError: () => undefined });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await expect(engine.runRelaySync(materializePage => deliverRelayPage(materializePage, {
+        fastForwardedPaths: [{ versionId: "main", path: "linked/.env", operation: "write" as const, contentKind: "secret" as const }],
+      }, commit))).rejects.toThrow("escapes the workspace");
+      expect(commit).not.toHaveBeenCalled();
+      expect(await protectedCopyFiles(root)).toEqual([]);
+      expect(await readFile(join(outside, ".env"), "utf8")).toBe("TOKEN=outside\n");
+
+      const copies = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await copies.keep("linked/.env", "TOKEN=mine\n", "main");
+      await expect(engine.restoreProtectedCopy((await copies.list())[0]![1])).rejects.toThrow("escapes the workspace");
+      const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: "linked/.env", text: "TOKEN=outside\n" })).toBe(false);
     } finally { await engine.stop(); }
   });
 
