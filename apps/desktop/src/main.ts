@@ -5252,7 +5252,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   ownerDraftState: (workspace, path) => requireEngineSessions().run(workspace, async session => {
     const client = desktopEngine.daemon?.currentClient();
     if (!(client instanceof EngineClient)) throw new Error("dohc could not read this note. Restart dohc and try again.");
-    return readOwnerDraftState(client, session.workspace, path);
+    return readOwnerDraftState(client, session.workspace, path, async () =>
+      (await withEngineAdapter(workspace, adapter => adapter.getActiveVersion({ workspaceId: workspace.workspaceId })))?.id ?? "main");
   }),
   sharedCaptureFor: async (workspace) => {
     await warmCredentialCache();
