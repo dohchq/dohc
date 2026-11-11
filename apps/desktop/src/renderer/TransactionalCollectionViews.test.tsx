@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
@@ -321,4 +321,44 @@ it("reads a board again in place when fields it does not group by change, and op
   const regrouped={...added,revision:3,revisionSha256:"c".repeat(64),tables:[{...added.tables[0]!,fields:added.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field)}]};
   result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
   await waitFor(()=>expect(screen.getByText("First task")).not.toBe(card));
+});
+describe("when the Collection's rules change",()=>{
+  const revision=(n:number,fields=dataset.tables[0]!.fields)=>({...dataset,revision:n,revisionSha256:String(n).repeat(64),tables:[{...dataset.tables[0]!,fields}]});
+  const notes={fieldId:"notes",name:"Notes",type:"text" as const,required:false,unique:false};
+  const answer=(request:TransactionalInvoke,name:string)=>{
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:1,version:1,values:{name,status:"Todo"}}]:[]}};
+  };
+  it("drops a board read that started under the old rules, and reads under the new ones",async()=>{
+    const old=deferred(), now=deferred();
+    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ await (request.revision===1?old:now).promise; return answer(request,request.revision===1?"Old task":"New task"); });
+    const result=setup(invoke);
+    await waitFor(()=>expect(invoke).toHaveBeenCalled());
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
+    await act(async()=>old.resolve());
+    expect(screen.queryByText("Old task")).toBeNull();
+    await act(async()=>now.resolve());
+    expect(await screen.findByText("New task")).toBeTruthy();
+    expect(screen.queryByText("Old task")).toBeNull();
+  });
+  it("shows the refusal and Try again when the board's read under new rules fails",async()=>{
+    const refusal=Error("The read action changed.");
+    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ if(request.revision===2)throw refusal; return answer(request,"First task"); });
+    const result=setup(invoke);
+    await screen.findByText("First task");
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
+    await waitFor(()=>expect(result.props.onError).toHaveBeenCalledWith("dohc could not open this view.",refusal,expect.any(Function),expect.anything()));
+    expect(screen.queryByText("First task")).toBeNull();
+  });
+  it("reads a board again in place when a field it doesn't show changes type",async()=>{
+    const invoke=vi.fn(async(request:TransactionalInvoke)=>answer(request,"First task"));
+    const result=setup(invoke);
+    const card=await screen.findByText("First task");
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
+    await waitFor(()=>expect(invoke.mock.calls.some(([request])=>request.revision===2)).toBe(true));
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(3,[...dataset.tables[0]!.fields,{...notes,type:"number" as const}])}/>);
+    await waitFor(()=>expect(invoke.mock.calls.some(([request])=>request.revision===3)).toBe(true));
+    expect(screen.queryByText("Loading view…")).toBeNull();
+    await waitFor(()=>expect(screen.getByText("First task")).toBe(card));
+  });
 });

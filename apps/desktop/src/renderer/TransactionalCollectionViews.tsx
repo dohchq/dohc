@@ -17,6 +17,8 @@ interface Props {
   refresh: number;
   /** Rises when records changed elsewhere; the view reads them again in place. */
   changed: number;
+  /** The Collection's rules. A change reads again, and a failure then says so, since what shows was read under the old ones. */
+  rules: string;
   /** The records a read in place found, so an open record shows its new values. */
   onReadInPlace(rows: readonly TransactionalRow[]): void;
   disabled: boolean;
@@ -125,17 +127,27 @@ export function TransactionalCollectionViews(props: Props) {
   },[queryKey]);
   // A change elsewhere waits for a read in flight, then replaces what shows without a loading state.
   // One that fails keeps what the view shows, which Refresh reads again.
-  const changedSeen = useRef(props.changed);
+  const changedSeen = useRef(props.changed), rulesSeen = useRef(props.rules);
   useEffect(() => {
-    if (changedSeen.current === props.changed || busy || reading.current) return;
+    if (changedSeen.current === props.changed) return;
+    const rules = props.rules, newRules = rulesSeen.current !== rules;
+    // A read that shows "Loading view…" and started under the old rules starts again under the new ones.
+    if (newRules && reading.current) { changedSeen.current = props.changed; rulesSeen.current = rules; setAttempt(value => value + 1); return; }
+    if (busy || reading.current) return;
     changedSeen.current = props.changed;
     const request = ++current.current, abort = new AbortController();
     void readLatest.current(abort.signal).then(next => {
       if (request!==current.current||abort.signal.aborted) return;
+      rulesSeen.current = rules;
       setLoaded(next);
       latest.current.onLoaded();
       latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows));
-    }, () => undefined);
+    }, error => {
+      if (!newRules || request!==current.current || abort.signal.aborted) return;
+      rulesSeen.current = rules;
+      setLoaded(null);
+      latest.current.onError("dohc could not open this view.", error, () => { if (request===current.current) setAttempt(value => value + 1); });
+    });
     return () => abort.abort();
   },[props.changed, busy]);
 

@@ -1086,9 +1086,12 @@ describe("when the Collection's fields change", () => {
     const result = setup({ invoke });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    screen.getByLabelText<HTMLInputElement>("Name").focus();
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(name, "number"))} />);
     const cell = within(screen.getByRole("form", { name: "Edit Name" }));
     expect(cell.getByLabelText<HTMLInputElement>("Name").readOnly).toBe(true);
+    // The field that had focus keeps it, now showing what was typed.
+    expect(document.activeElement).toBe(cell.getByLabelText("Name"));
     expect(cell.getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
     await waitFor(() => expect(reads(invoke).at(-1)!.revision).toBe(2));
     fireEvent.click(cell.getByRole("button", { name: "Clear value" }));
@@ -1189,5 +1192,69 @@ describe("when the Collection's fields change", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Create record" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
+  });
+
+  it("keeps a field being edited in record details, and its focus, when its edit is gone, offline, or its field is gone", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Name" }));
+    const input = within(dialog).getByLabelText<HTMLInputElement>("Name");
+    fireEvent.change(input, { target: { value: "Alicia" } }); input.focus();
+    const show = (description: TransactionalDatasetDescription, offline = false) =>
+      result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} copy={offline ? { offline: true, savedAtMs: 1 } : undefined} />);
+    // A rename elsewhere keeps the dialog and the focus in it.
+    show(revised(2, next => { field(next, amount).name = "Total"; }));
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    expect(document.activeElement).toBe(input);
+    show(revised(3, next => { next.operations = next.operations.filter(entry => entry.operationId !== edit); }));
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(within(dialog).getByText("The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.")).toBeTruthy();
+    show(revised(4), true);
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(within(dialog).getByText("You can save this once the Collection is back online.")).toBeTruthy();
+    show(revised(5, next => {
+      next.tables[0]!.fields = next.tables[0]!.fields.filter(entry => entry.fieldId !== name);
+      for (const entry of next.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== name);
+    }));
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(within(dialog).getByText(CHANGED)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clear value" }));
+    expect(within(dialog).queryByLabelText("Name")).toBeNull();
+  });
+
+  it("offers the related records of a relation field's new table once its table changes", async () => {
+    const team = id(8);
+    const relation = (tableId: string) => (next: TransactionalDatasetDescription) => {
+      next.tables[0]!.fields.push({ fieldId: team, name: "Team", type: "relation", required: false, unique: false, relation: { datasetId: id(1), tableId, fieldId: id(40), many: false } });
+      operation(next, create).fieldIds.push(team);
+    };
+    const resolveRelation = vi.fn(async () => ({ options: [{ value: 1, label: resolveRelation.mock.calls.length > 1 ? "Blue team" : "Old team" }], hasMore: false }));
+    const result = setup({ resolveRelation, dataset: revised(1, relation(id(41))) }); await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    expect(await screen.findByRole("button", { name: "Old team" })).toBeTruthy();
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, relation(id(42)))} />);
+    expect(await screen.findByRole("button", { name: "Blue team" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Old team" })).toBeNull();
+  });
+
+  it("reopens a kept edit in record details without values read under a field's old type, and reads the record again", async () => {
+    const first = setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const before = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
+    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
+    first.unmount();
+    // Amount became text while the page was closed, and the record is no longer on the first page.
+    const byId = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
+      (request.input as { filters?: unknown[] }).filters ? byId.promise : Promise.resolve({ result: { rows: [], nextCursor: null } }));
+    const reopened = revised(2, next => { retype(amount, "text")(next); next.tables[0]!.primaryKeyFieldId = name; });
+    render(<TransactionalCollectionPage {...first.props} invoke={invoke} dataset={reopened} />);
+    const dialog = await screen.findByRole("dialog", { name: "Record details" });
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(within(dialog).queryByText("5")).toBeNull();
+    await act(async () => byId.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
+    expect(within(dialog).getByText("five")).toBeTruthy();
   });
 });

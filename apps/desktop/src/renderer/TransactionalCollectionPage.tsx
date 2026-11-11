@@ -149,7 +149,17 @@ function Cell({ field, value }: { field: TransactionalField; value: AppBackendJs
 }
 
 const sameRecord = (a: TransactionalRow, b: TransactionalRow) => JSON.stringify(a.id) === JSON.stringify(b.id);
-type KeptEdit = { editor: Editor; draft: Record<string, Typed>; inDetails: boolean };
+/** Whether a field's values, read or typed under the `before` fields, may not show under the `now` ones. */
+function staleUnder(before: readonly TransactionalField[], now: readonly TransactionalField[]): (fieldId: string) => boolean {
+  const old = new Map(before.map(field => [field.fieldId, field])), current = new Map(now.map(field => [field.fieldId, field]));
+  return fieldId => { const a = old.get(fieldId), b = current.get(fieldId); return !a || !b || fieldShape(a) !== fieldShape(b); };
+}
+/** The row without the values `stale` names, or the same row when it has none. */
+function withoutStale(row: TransactionalRow, stale: (fieldId: string) => boolean): TransactionalRow {
+  return Object.keys(row.values).some(stale) ? { ...row, values: Object.fromEntries(Object.entries(row.values).filter(([fieldId]) => !stale(fieldId))) } : row;
+}
+// `fields`: the table's fields when the edit was kept, under which its record's values were read.
+type KeptEdit = { editor: Editor; draft: Record<string, Typed>; inDetails: boolean; fields: TransactionalField[] };
 // Edits with changes a page held when it closed without asking, as when another file opens in its
 // tab group, by workspace, Collection and table. The page opens the edit again.
 const keptEdits = new Map<string, KeptEdit>();
@@ -200,6 +210,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const openDetails = useRef(details); openDetails.current = details;
   // The by-id read of an open record a read in place left out, while it runs.
   const openRecordRead = useRef<AbortController | null>(null);
+  // The element that last took focus in an open form, and its field.
+  const lastFocus = useRef<{ element: Element; fieldId: string } | null>(null);
   const detailsOpen = details !== null;
   useEffect(() => { if (!detailsOpen) setDetailsUnavailable(null); }, [detailsOpen]);
   const editorForm = useRef<HTMLFormElement>(null), createRow = useRef<HTMLTableRowElement>(null), addRow = useRef<HTMLButtonElement>(null);
@@ -301,8 +313,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     priorContract.current = contractKey;
     const before = new Map(priorFields.current.map(field => [field.fieldId, field]));
     const now = new Map((table?.fields ?? []).map(field => [field.fieldId, field]));
+    const stale = staleUnder(priorFields.current, table?.fields ?? []);
     priorFields.current = table?.fields ?? [];
-    const stale = (fieldId: string) => { const old = before.get(fieldId), field = now.get(fieldId); return !old || !field || fieldShape(old) !== fieldShape(field); };
     sequence.current++; readActive.current?.abort(); openRecordRead.current?.abort();
     const change = mutation.current;
     if (change?.request && (change.request.revision !== dataset.revision || change.request.revisionSha256 !== dataset.revisionSha256)) {
@@ -313,9 +325,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     // The read stopped above can't end its own load now.
     if (!mutation.current) { locked.current = false; setBusy(false); }
     // A value read under a field's old definition must not show under its new one, so it goes until the read below fills it in.
-    const strip = (row: TransactionalRow): TransactionalRow => Object.keys(row.values).some(stale) ? { ...row, values: Object.fromEntries(Object.entries(row.values).filter(([fieldId]) => !stale(fieldId))) } : row;
+    const strip = (row: TransactionalRow) => withoutStale(row, stale);
     setPage(current => current && { ...current, rows: current.rows.map(strip) });
     setDetails(current => current && strip(current));
+    // An open edit shows its record's values from the page, its details, or as it opened, so all three lose them.
+    setEditor(current => { if (current?.kind !== "edit") return current; const row = strip(current.row); return row === current.row ? current : { ...current, row }; });
+    // A field whose focused input went, for another input or its changed value, keeps focus. Focus the person moved elsewhere stays there.
+    const focused = lastFocus.current;
+    if (focused && !focused.element.isConnected && (document.activeElement === null || document.activeElement === document.body)) focusField(focused.fieldId);
     // Undo sends its prior values with its operation, so it stays only while both still apply.
     setUndo(current => {
       const operation = current && dataset.operations.find(entry => entry.operationId === current.operation.operationId);
@@ -325,7 +342,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     });
     if (visual) {
       const used = [shownView?.kind === "board" ? shownView.groupBy : shownView?.dateField, query.sort?.fieldId, ...(query.filters ?? []).map(filter => filter.fieldId)];
-      if (used.some(fieldId => fieldId !== undefined && stale(fieldId)) || [...before.keys()].some(fieldId => now.has(fieldId) && stale(fieldId))) setVisualEpoch(value => value + 1);
+      if (used.some(fieldId => fieldId !== undefined && stale(fieldId)) || fields.some(field => before.has(field.fieldId) && stale(field.fieldId))) setVisualEpoch(value => value + 1);
       else setVisualChanged(value => value + 1);
       return;
     }
@@ -359,7 +376,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   })();
   const typed = form.some(({ field, value, changed }) => draft[field.fieldId] !== undefined && (changed || JSON.stringify(value) !== JSON.stringify(untouched(field))));
   const keeping = useRef<KeptEdit | null>(null);
-  keeping.current = editor && typed ? { editor, draft, inDetails: editor.kind === "edit" && details !== null && sameRecord(details, editor.row) } : null;
+  keeping.current = editor && typed ? { editor, draft, inDetails: editor.kind === "edit" && details !== null && sameRecord(details, editor.row), fields: table?.fields ?? [] } : null;
   useEffect(() => {
     keptEdits.delete(keptKey);
     // A change still saving goes on without the page and reports how it ended, so its edit is not kept.
@@ -371,9 +388,16 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     // A board or calendar opens the edit once its view has read, since the page's first load closes record details.
     if (!kept || (visual ? visualRefresh === 0 || visualBusy : page === null)) return;
     restoring.current = null;
-    // Fields that changed while the page was closed flag their values, as for a change while it is open.
-    setDraft(kept.draft); setInvalid({}); setEditor(kept.editor);
-    if (kept.inDetails && kept.editor.kind === "edit") { const row = kept.editor.row; setDetails(page?.rows.find(shown => sameRecord(shown, row)) ?? row); }
+    // Fields that changed while the page was closed flag their values, as for a change while it is open,
+    // and the record's values read under their old definitions go.
+    const editor = kept.editor.kind === "edit" ? { ...kept.editor, row: withoutStale(kept.editor.row, staleUnder(kept.fields, table?.fields ?? [])) } : kept.editor;
+    setDraft(kept.draft); setInvalid({}); setEditor(editor);
+    if (kept.inDetails && editor.kind === "edit") {
+      const shown = page?.rows.find(row => sameRecord(row, editor.row));
+      setDetails(shown ?? editor.row);
+      // Not on the page, the record is read by its id for the values that went.
+      if (!shown && kept.editor.kind === "edit" && editor.row !== kept.editor.row) void readOpenRecord(editor.row);
+    }
   }, [page, visual, visualRefresh, visualBusy]);
   useEffect(() => {
     const view = selectedView;
@@ -464,13 +488,15 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useEffect(() => { if (emptyForm) closeEditor(); }, [emptyForm]);
   // A cleared value's field takes focus, now an ordinary input.
   const refocus = useRef<string | null>(null);
-  useLayoutEffect(() => {
-    const fieldId = refocus.current;
-    refocus.current = null;
-    if (fieldId === null) return;
+  function focusField(fieldId: string): void {
     const root = createRow.current ?? editorForm.current;
     const holder = root && [root, ...root.querySelectorAll<HTMLElement>("[data-field]")].find(element => element.dataset.field === fieldId);
     holder?.querySelector<HTMLElement>("input, select, button")?.focus();
+  }
+  useLayoutEffect(() => {
+    const fieldId = refocus.current;
+    refocus.current = null;
+    if (fieldId !== null) focusField(fieldId);
   }, [draft]);
   function clearValue(fieldId: string): void {
     refocus.current = fieldId;
@@ -592,10 +618,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setDraft(current => ({ ...current, [field.fieldId]: { value, under: field } }));
       setInvalid(current => current[field.fieldId] === undefined ? current : Object.fromEntries(Object.entries(current).filter(([fieldId]) => fieldId !== field.fieldId)));
     } };
-    return field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => {
+    // A new definition, such as another related table, gets a new input with nothing it found under the old one.
+    return field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput key={fieldShape(field)} {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => {
       if (value) pendingResources.current.add(field.fieldId); else pendingResources.current.delete(field.fieldId);
       resourceLock.current = pendingResources.current.size > 0; setResourceBusy(resourceLock.current);
-    }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />;
+    }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput key={fieldShape(field)} {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />;
   };
   // An open cell, in the table or in record details: its form, its Cancel and Save, and its keys.
   // Escape works from the input and from Cancel and Save, which sit outside the form.
@@ -614,7 +641,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
   const hasManagement = props.onCustomize || props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
-  return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
+  return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4" onFocus={event => {
+    const fieldId = event.target.closest<HTMLElement>("[data-field]")?.dataset.field;
+    lastFocus.current = fieldId === undefined ? null : { element: event.target, fieldId };
+  }}>
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
       <div className="flex shrink-0 items-center gap-2">{props.automationsButton}
       {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={writeDisabled || editor !== null} onClick={event => openCreate(event.currentTarget)}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}</div>
@@ -660,7 +690,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
-    : visual && shownView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
+    : visual && shownView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey} onReadInPlace={showOpenRecord}
       disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
@@ -703,7 +733,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"}{previous.length > 0 || page.nextCursor !== null ? " on this page" : ""}</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
     {/* While a field is open in details, its other controls wait. Closing details closes the field, as Cancel does. */}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled || detailsEdit !== null} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
-      editing={detailsEdit ? { fieldId: detailsEdit.field.fieldId, content: <div data-edit-in-place className="flex min-w-0 flex-1 items-start gap-2" onKeyDown={editKeys}>
+      editing={detailsEdit ? { fieldId: detailsEdit.field.fieldId, name: editEntry!.field.name, content: <div data-edit-in-place className="flex min-w-0 flex-1 items-start gap-2" onKeyDown={editKeys}>
         {editForm(editEntry!, `min-w-0 flex-1${inPlace(editEntry!.field) && !editEntry!.changed ? " -mt-[7px] -mb-[2.5px] -ml-[11px]" : ""}`)}<span className="flex shrink-0 gap-2">{editButtons}</span>
       </div>, onCancel: () => { if (!cellDisabled) closeEditor(); } } : undefined}
       onClose={() => { setDetails(null); if (detailsEdit) closeEditor(); }}
