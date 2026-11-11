@@ -607,6 +607,16 @@ pub fn validate_checkpoint_coverage(
     Ok(())
 }
 impl AdmittedLiveUpdateMetadata {
+    /// Whether this delivery adds or removes content. Only such a delivery
+    /// credits authors, here and in the relay's author window
+    /// (`live-author-credit-vectors.json`).
+    fn adds_content(&self) -> bool {
+        !self.first_seen.is_empty()
+            || self
+                .first_seen_deletes
+                .as_ref()
+                .is_some_and(|ranges| !ranges.is_empty())
+    }
     fn field_history_link_author(&self) -> Option<dohc_engine_domain::CollectionLiveLinkAuthor> {
         if self.canonical_version != Some(2) {
             return None;
@@ -1897,8 +1907,13 @@ pub fn apply_committed_with_settlement_limit(
             // their client sent a recording context. That entry carries the
             // grant, so it stands in for the same principal's snapshot entry.
             // A declared agent stays beside it.
-            let shared = event.metadata.accepted.authority.shared_author();
-            let snapshot = event.metadata.author_snapshot.as_deref().unwrap_or_default();
+            // A delivery that adds or removes no content credits nobody.
+            let adds_content = event.metadata.adds_content();
+            let shared = event.metadata.accepted.authority.shared_author().filter(|_| adds_content);
+            let snapshot = match event.metadata.author_snapshot.as_deref() {
+                Some(snapshot) if adds_content => snapshot,
+                _ => &[],
+            };
             // This computer's own agent update names, in its History only, the
             // run its journal or draft recorded, so two runs stay two authors.
             // The canonical snapshot keeps no run.
@@ -1921,8 +1936,6 @@ pub fn apply_committed_with_settlement_limit(
             // A delivery without recording context keeps that gap in coverage,
             // even when the relay's authority names who sent it. A delivery
             // that adds no content leaves no gap.
-            let adds_content = !event.metadata.first_seen.is_empty()
-                || event.metadata.first_seen_deletes.as_ref().is_some_and(|ranges| !ranges.is_empty());
             if snapshot.is_empty() && adds_content {
                 authors.push(r#"[{"kind":"unattributed"}]"#.to_owned());
             }
@@ -2663,6 +2676,31 @@ mod tests {
             assert_eq!(
                 committed.is_ok(),
                 row["committedValid"].as_bool().unwrap(),
+                "{}",
+                row["case"]
+            );
+        }
+    }
+
+    /// The relay's author window reads the same vectors.
+    #[test]
+    fn shared_vectors_credit_only_deliveries_that_change_content() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../packages/live-session-contract/vectors/live-author-credit-vectors.json"
+        ))
+        .unwrap();
+        for row in vectors["deliveries"].as_array().unwrap() {
+            let mut update = event("credit", 1, Ydoc::wire().plaintext_insert(0, "x"));
+            update.metadata.author_snapshot =
+                serde_json::from_value(row["authorSnapshot"].clone()).unwrap();
+            update.metadata.first_seen = serde_json::from_value(row["firstSeen"].clone()).unwrap();
+            update.metadata.first_seen_deletes =
+                serde_json::from_value(row["firstSeenDeletes"].clone()).unwrap();
+            let credits: Vec<LiveAuthorEntry> =
+                serde_json::from_value(row["credits"].clone()).unwrap();
+            assert_eq!(
+                update.metadata.adds_content(),
+                !credits.is_empty(),
                 "{}",
                 row["case"]
             );

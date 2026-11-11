@@ -1,0 +1,39 @@
+{
+  "deliveries": [
+    {
+      "case": "new structs credit the snapshot",
+      "authorSnapshot": [{"kind": "human", "humanId": "alice", "humanName": "Alice"}],
+      "firstSeen": [{"clientId": 3, "startClock": 0, "endClock": 1}],
+      "firstSeenDeletes": [],
+      "credits": [{"kind": "human", "humanId": "alice", "humanName": "Alice"}]
+    },
+    {
+      "case": "a deletion alone credits the snapshot",
+      "authorSnapshot": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 0}],
+      "firstSeen": [],
+      "firstSeenDeletes": [{"clientId": 3, "startClock": 1, "endClock": 2}],
+      "credits": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 0}]
+    },
+    {
+      "case": "content without a snapshot credits the unattributed marker",
+      "authorSnapshot": [],
+      "firstSeen": [{"clientId": 4, "startClock": 0, "endClock": 1}],
+      "firstSeenDeletes": [],
+      "credits": [{"kind": "unattributed"}]
+    },
+    {
+      "case": "a repeated delivery that changes nothing credits nobody",
+      "authorSnapshot": [{"kind": "agent", "agentId": "review-agent", "onBehalfOf": "owner", "depth": 2}],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    },
+    {
+      "case": "a delivery with no snapshot and no content credits nobody",
+      "authorSnapshot": [],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    }
+  ]
+}
