@@ -142,8 +142,8 @@ a combined run should use roughly 90 to 130 custom REST requests, including nati
 This estimate assumes unchanged artifact polls return 304. Confirm it from the next run's headers and counters.
 Standard action upload, download, and cache requests are additional.
 Job timeouts are 10 minutes for selection and final verification, 20 for preparation and confinement,
-25 for Rust archive and policy jobs and ordinary workers, and 30 for aggregate jobs.
-The worker and aggregate limits leave 10 minutes beyond their respective wait caps for setup and execution.
+25 for Rust archive and policy jobs and ordinary workers, and 40 for aggregate jobs.
+Workers have 10 minutes beyond their preparation wait cap. Aggregates have 5 minutes beyond both sequential wait caps for setup and execution.
 The compiler archive adds one package's test compilation, packing, and transfer to preparation.
 Confinement runs those test binaries without compilation or retries. Its Node staging tests still build the release compiler owner.
 For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
