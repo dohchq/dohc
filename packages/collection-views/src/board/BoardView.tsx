@@ -46,6 +46,8 @@ export interface BoardViewProps {
   onOptionColorChange?: (option: string, color: OptionColor) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
+  /** The name people read for a field. A host that keys fields by id provides it; absent, the key is the name. */
+  fieldLabel?: (field: string) => string;
   /**
    * Hosts with paged queries provide controls and a truthful page count.
    * Both receive the query's group and its index in `groups`. A paged board
@@ -56,6 +58,7 @@ export interface BoardViewProps {
 }
 
 type PersonLabel = (userId: string) => string | null;
+type FieldLabel = (field: string) => string;
 
 /** One board column: a query group, or an option no record uses yet. */
 interface BoardColumnModel {
@@ -94,8 +97,8 @@ function boardColumns(
   return columns;
 }
 
-function columnLabel(value: CollectionValue, groupField: FieldDefinition | null, personLabel?: PersonLabel): string {
-  if (value === null) return groupField ? `No ${groupField.name}` : "No value";
+function columnLabel(value: CollectionValue, groupField: FieldDefinition | null, personLabel?: PersonLabel, fieldLabel?: FieldLabel): string {
+  if (value === null) return groupField ? `No ${fieldLabel?.(groupField.name) ?? groupField.name}` : "No value";
   if (!groupField) return asText(value);
   return fieldDisplayText(groupField, { field: groupField.name, value, validation: { status: "valid" }, resolvedRelations: [] }, personLabel);
 }
@@ -105,8 +108,10 @@ function isFlagged(record: CollectionRecord): boolean {
 }
 
 /** One field on a card. Text takes its own lines; the rest sit in a row. */
-function CardProperty({ field, indexed, personLabel }: {
+function CardProperty({ field, label, indexed, personLabel }: {
   field: FieldDefinition;
+  /** The field's name as people read it. */
+  label: string;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: PersonLabel;
 }) {
@@ -116,7 +121,7 @@ function CardProperty({ field, indexed, personLabel }: {
     return (
       <span className={`inline-flex items-center gap-1 text-[12px] ${value === true ? "text-ink" : "text-subtle"}`}>
         <Icon size={13} strokeWidth={1.9} aria-hidden />
-        {field.name}
+        {label}
       </span>
     );
   }
@@ -129,7 +134,7 @@ function CardProperty({ field, indexed, personLabel }: {
     );
   }
   if (field.type === "number") {
-    return <span className="text-[12px] text-muted">{field.name} <span className="tabular-nums text-ink">{asText(value)}</span></span>;
+    return <span className="text-[12px] text-muted">{label} <span className="tabular-nums text-ink">{asText(value)}</span></span>;
   }
   if (field.type === "relation" || field.type === "url") {
     return (
@@ -150,10 +155,11 @@ interface BoardCardProps {
   fields: FieldDefinition[];
   onOpen?: (record: CollectionRecord) => void;
   personLabel?: PersonLabel;
+  fieldLabel?: FieldLabel;
   canDrag: boolean;
 }
 
-function BoardCard({ record, fields, onOpen, personLabel, canDrag }: BoardCardProps) {
+function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, canDrag }: BoardCardProps) {
   const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
   // Click opens the record. Enter belongs to the keyboard drag sensor (it
   // lifts the card), so it must not also open; keyboard users open through
@@ -239,7 +245,7 @@ function BoardCard({ record, fields, onOpen, personLabel, canDrag }: BoardCardPr
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           {chips.map(({ field, indexed }) => (
-            <CardProperty key={field.name} field={field} indexed={indexed} personLabel={personLabel} />
+            <CardProperty key={field.name} field={field} label={fieldLabel?.(field.name) ?? field.name} indexed={indexed} personLabel={personLabel} />
           ))}
         </div>
       ) : null}
@@ -325,6 +331,7 @@ interface BoardColumnProps {
   onNew?: () => void;
   onColor?: (color: OptionColor) => void;
   personLabel?: PersonLabel;
+  fieldLabel?: FieldLabel;
 }
 
 /**
@@ -345,6 +352,7 @@ function BoardColumn({
   onNew,
   onColor,
   personLabel,
+  fieldLabel,
   footer,
   count,
   canDrag,
@@ -436,6 +444,7 @@ function BoardColumn({
                   fields={fields}
                   onOpen={onOpen}
                   personLabel={personLabel}
+                  fieldLabel={fieldLabel}
                   canDrag={canDrag}
                 />
               </div>
@@ -469,6 +478,7 @@ export function BoardView({
   onNewRecord,
   onOptionColorChange,
   personLabel,
+  fieldLabel,
   groupFooter,
   groupCount,
 }: BoardViewProps) {
@@ -524,7 +534,7 @@ export function BoardView({
         {columns.map((column, index) => {
           const group = column.groupIndex === null ? null : groups[column.groupIndex] ?? null;
           const option = typeof column.value === "string" && options?.has(column.value) ? column.value : null;
-          const label = columnLabel(column.value, groupField, personLabel);
+          const label = columnLabel(column.value, groupField, personLabel, fieldLabel);
           return (
             <BoardColumn
               key={valueKey(column.value)}
@@ -538,6 +548,7 @@ export function BoardView({
               onNew={onNewRecord && (option !== null || column.value === null) ? () => onNewRecord(column.value) : undefined}
               onColor={option !== null && onOptionColorChange ? (color) => onOptionColorChange(option, color) : undefined}
               personLabel={personLabel}
+              fieldLabel={fieldLabel}
               footer={group && column.groupIndex !== null ? groupFooter?.(group, column.groupIndex) : undefined}
               count={group && column.groupIndex !== null ? groupCount?.(group, column.groupIndex) : undefined}
               canDrag={!!onCellChange}
