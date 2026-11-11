@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
-import { Check, Pencil, Square } from "lucide-react";
+import { Check, Pencil, Square, Trash2 } from "lucide-react";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { Overlay } from "./Overlay";
 import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -30,6 +30,8 @@ export interface TransactionalRecordDetailsDialogProps extends Pick<CollectionRe
    * While it is open, Escape anywhere in details calls `onCancel`, so the next Escape closes details. */
   editing?: { fieldId: string; name: string; content: ReactNode; onCancel(): void };
   onAction?(operation: DatasetOperation): void;
+  /** Asks to delete the record. The shell confirms before anything is deleted. Absent, the record can't be deleted here. */
+  onDelete?(): void;
   onClose(): void;
   onError: CollectionResourceError;
   /** Why the dialog cannot show the record now, which replaces its values, as for a record deleted since it opened. */
@@ -75,6 +77,9 @@ function ScopedRecordDetails(props: TransactionalRecordDetailsDialogProps) {
     {actions.length ? <div className="grid gap-2 border-t border-line pt-3"><p className="m-0 text-[12px] text-muted">Open an action to review its inputs before running it.</p><div className="flex flex-wrap gap-2">{actions.map(operation => <SecondaryButton key={operation.operationId} disabled={props.disabled} onClick={() => props.onAction?.(operation)}>Open {operation.label}</SecondaryButton>)}</div></div> : null}
     {props.offline ? <p className="m-0 text-[12px] text-muted">Offline copy · Read-only</p> : !hasEditableField && !actions.length ? <p className="m-0 text-[12px] text-muted">No edit action is available for this record.</p> : null}
     </>}
-    <div className="flex justify-end"><PrimaryButton onClick={props.onClose}>Done</PrimaryButton></div>
+    <div className="flex items-center justify-end gap-2">
+      {props.onDelete && !props.offline && !props.unavailable ? <SecondaryButton className="mr-auto flex items-center gap-2 text-danger" disabled={props.disabled} onClick={props.onDelete}><Trash2 size={14} strokeWidth={1.9} aria-hidden />Delete record…</SecondaryButton> : null}
+      <PrimaryButton onClick={props.onClose}>Done</PrimaryButton>
+    </div>
   </Overlay>;
 }

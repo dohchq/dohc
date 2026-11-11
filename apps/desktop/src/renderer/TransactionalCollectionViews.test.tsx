@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
@@ -25,7 +25,17 @@ function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<
   const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onSettled:vi.fn(),onNotice:vi.fn(),activeView:view};
   return {...render(<TransactionalCollectionPage {...props}/>),props};
 }
-afterEach(() => { cleanup(); resetKeptCollectionEditsForTests(); });
+// The table's virtualizer reads offsetWidth and offsetHeight, which jsdom reports as 0, so every element
+// gets a nonzero box and a table view's rows render.
+const offsetDescriptors = { offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"), offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth") };
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 600 });
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 900 });
+});
+afterEach(() => {
+  cleanup(); resetKeptCollectionEditsForTests();
+  for (const [key, descriptor] of Object.entries(offsetDescriptors)) if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
+});
 it("queries every board group beyond the first table page and pages each independently",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
     const input=request.input as Record<string,AppBackendJson>,group=input.group as {fieldId:string;value:string};
@@ -116,6 +126,47 @@ it("opens a board edit with changes again in record details when its page closes
   expect(document.activeElement).toBe(input);
   fireEvent.keyDown(input,{key:"Escape"});
   expect(document.activeElement).toBe(within(dialog).getByRole("button",{name:"Edit Status"}));
+});
+it("moves a board's card through the approved edit with the record's version, without holding the page, and reads the board again in place",async()=>{
+  const answer=deferred<{result:AppBackendJson}>();
+  let moved=false;
+  const invoke=vi.fn((request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(request.operationId==="edit")return answer.promise;
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return Promise.resolve({result:{...empty,group,rows:group.value===(moved?"Done":"Todo")?[{id:4,version:moved?8:7,values:{name:"Task",status:group.value}}]:[]}});
+  });
+  const result=setup(invoke);
+  fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
+  const edits=()=>invoke.mock.calls.map(([request])=>request).filter(request=>request.operationId==="edit");
+  expect(edits()).toHaveLength(1);
+  expect(edits()[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,input:{id:4,expectedVersion:7,values:{status:"Done"}}});
+  // The page does not lock while the move waits to be confirmed.
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false);
+  moved=true;
+  await act(async()=>answer.resolve({result:{id:4,version:8,priorValues:{status:"Todo"}}}));
+  await waitFor(()=>expect(within(screen.getByRole("region",{name:"Done"})).getByText("Task")).toBeTruthy());
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("lists a board move dohc could not confirm with Try again, which sends the exact request again",async()=>{
+  let fail=true;
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(request.operationId==="edit"){if(fail)throw new Error("Lost reply");return {result:{id:4,version:8}};}
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
+  });
+  const result=setup(invoke);
+  fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
+  // A board has no cell to say so, so the page lists the change.
+  const list=within(await screen.findByRole("group",{name:"Changes dohc did not confirm"}));
+  expect(list.getByText("dohc could not confirm a change to record 4.")).toBeTruthy();
+  expect(result.props.onError).toHaveBeenCalledWith("dohc could not confirm this change.",expect.objectContaining({message:"Lost reply"}),expect.any(Function),expect.any(String));
+  fail=false;
+  fireEvent.click(list.getByRole("button",{name:"Try again"}));
+  await waitFor(()=>expect(screen.queryByRole("group",{name:"Changes dohc did not confirm"})).toBeNull());
+  const edits=invoke.mock.calls.map(([request])=>request).filter(request=>request.operationId==="edit");
+  expect(edits).toHaveLength(2);expect(edits[1]).toEqual(edits[0]);
 });
 it("does not move offline records and refuses an authored read that ignores board filtering",async()=>{
   const invoke=vi.fn(async()=>({result:{...empty,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));

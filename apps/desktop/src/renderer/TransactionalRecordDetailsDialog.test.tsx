@@ -58,6 +58,21 @@ describe("record details", () => {
     expect(readFile).not.toHaveBeenCalled();
   });
 
+  it("offers Delete record only where the page can delete, and never offline or for a record it can't show", () => {
+    const onDelete = vi.fn();
+    const view = render(<TransactionalRecordDetailsDialog {...base} />);
+    expect(screen.queryByRole("button", { name: "Delete record…" })).toBeNull();
+    view.rerender(<TransactionalRecordDetailsDialog {...base} onDelete={onDelete} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete record…" }));
+    expect(onDelete).toHaveBeenCalledOnce();
+    view.rerender(<TransactionalRecordDetailsDialog {...base} onDelete={onDelete} disabled />);
+    expect((screen.getByRole("button", { name: "Delete record…" }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<TransactionalRecordDetailsDialog {...base} onDelete={onDelete} offline />);
+    expect(screen.queryByRole("button", { name: "Delete record…" })).toBeNull();
+    view.rerender(<TransactionalRecordDetailsDialog {...base} onDelete={onDelete} unavailable="This record is no longer in this Collection." />);
+    expect(screen.queryByRole("button", { name: "Delete record…" })).toBeNull();
+  });
+
   it("downloads through the exact read projection and safe byte helper", async () => {
     const response = { file: { fileId: "abcdefghijklmnop", name: "receipt.txt", byteLength: 3, contentType: "text/plain", sha256: "b".repeat(64) }, bytesBase64: "YWJj" };
     const readFile = vi.fn(async () => response);
