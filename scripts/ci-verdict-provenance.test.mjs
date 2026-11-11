@@ -1128,10 +1128,11 @@ test("workflows reject generic self-hosted labels and restrict the task label to
   assert.ok(files.length > 0);
   const unsafe = [];
   for (const file of files) {
-    const document = load(await readFile(join(directory, file), "utf8"));
+    const source = await readFile(join(directory, file), "utf8");
+    if (/self-hosted/i.test(source) || (file !== "pr-checks.yml" && source.includes("verification-perf-landlock"))) unsafe.push(file);
+    const document = load(source);
     for (const [name, job] of Object.entries(document.jobs ?? {})) {
-      const labels = JSON.stringify(job["runs-on"]);
-      if (/self-hosted/i.test(labels)) unsafe.push(`${file}:${name}`);
+      const labels = JSON.stringify(job) ?? "";
       if (labels.includes("verification-perf-landlock") && (file !== "pr-checks.yml" || name !== "javascript-prepare")) {
         unsafe.push(`${file}:${name}`);
       }
