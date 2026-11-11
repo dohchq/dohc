@@ -1227,6 +1227,14 @@ impl CaptureIndexing {
     }
 }
 
+/// The reader's folds for a capture batch, kept across busy retries of the
+/// same inputs. The write transaction rechecks each note's freshness, so a
+/// note that changed since its fold is read again rather than trusted.
+#[derive(Default)]
+pub struct CaptureBatchReads {
+    folds: Option<Arc<Vec<dohc_engine_collab::reader_resolver::PreparedFold>>>,
+}
+
 pub struct CapturePlacementPath {
     pub path: String,
     pub released_hold: bool,
@@ -1544,6 +1552,33 @@ impl ActorHandle {
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        self.capture_ingest_batch_reusing_reads_blocking(
+            inputs,
+            search_policy,
+            leases,
+            faults,
+            root_dir,
+            root_guard,
+            &mut CaptureBatchReads::default(),
+        )
+    }
+
+    /// [`Self::capture_ingest_batch_blocking`] for a caller that retries the
+    /// same inputs after a busy store. Pass the same `reads` to each retry.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the batch call's arguments plus the retry's reads"
+    )]
+    pub fn capture_ingest_batch_reusing_reads_blocking(
+        &self,
+        inputs: impl Into<Arc<[CaptureIngest]>>,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_dir: PathBuf,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+        reads: &mut CaptureBatchReads,
+    ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
         let mut inputs = inputs.into();
         #[cfg(feature = "fault-injection")]
         let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new(
@@ -1560,6 +1595,7 @@ impl ActorHandle {
         let mut indices: Vec<_> = (0..inputs.len()).collect();
         let mut reader_deadline = None;
         for attempt in 0..=2 {
+            let _ = &reads.folds;
             let folds = if attempt < 2 {
                 reader::prepare_blocking(self, inputs.clone(), &root_dir, &mut reader_deadline)
             } else {
