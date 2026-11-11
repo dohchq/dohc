@@ -70,7 +70,8 @@ The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
-Gate timing records the full wall span and discounts each job only for runner waits in its dependency closure.
+Gate timing records each gate's span and preparation plus confinement execution, without estimating workload from runner waits.
+An over-budget run with more than 30 s of gate-job runner wait warns that timing is unmeasured; uncontended overruns fail.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
@@ -108,9 +109,11 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `compiler and relay confinement` job runs those suites on Linux with Landlock whenever either gate runs.
-It downloads the prepared engine and compiler test archive, then runs the compiler and replica proofs concurrently.
-Workers and aggregates do not wait for confinement. The final verdict requires it for both gate spans.
+The `compiler and relay confinement` job always uses GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
+Its engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
+It downloads those artifacts, checks the engine's identity, and runs the compiler and replica proofs concurrently.
+Workers and aggregates do not wait for confinement. The final verdict requires it and includes its execution time in both gates.
+If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
 It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
 It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.

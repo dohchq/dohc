@@ -492,7 +492,6 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
     for (const name of ["javascript", "rust"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
-      assert.equal(jobs[name]["timeout-minutes"], 120);
     }
     for (const name of ["changes", "verification"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
@@ -559,8 +558,8 @@ test("job names match the workflow graph and timeout backstops", () => {
       ? job.strategy.matrix.shard.map(shard => job.name.replace("${{ matrix.shard }}", shard)) : [job.name], id);
   }
   assert.deepEqual(Object.fromEntries(Object.entries(jobs).map(([id, job]) => [id, job["timeout-minutes"]])), {
-    changes: 10, "javascript-prepare": 30, confinement: 30, "javascript-workers": 120, javascript: 120,
-    "rust-archive": 40, "rust-tests": 120, "rust-policy": 40, rust: 120, verification: 10,
+    changes: 10, "javascript-prepare": 20, confinement: 20, "javascript-workers": 25, javascript: 30,
+    "rust-archive": 25, "rust-tests": 25, "rust-policy": 25, rust: 30, verification: 10,
   });
   const upload = jobs.verification.steps.find(step => step.with?.name === "verification-completed-${{ github.run_attempt }}");
   assert.equal(upload.if, "always()");
