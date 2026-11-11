@@ -46,33 +46,110 @@ export function aggregateRust(records) {
   return { tasks: archive.planned.length, steps: [...policy.steps, ...[...RUST_ARCHIVE_PROOFS, ...RUST_TEST_PROOFS].map(name => ({ name, status: "PASS" })), { name: "test --workspace", status: "PASS" }], parts: records.map(({ part, seconds }) => ({ part, seconds })) };
 }
 
-function gateJobNames(scope) {
+// These are workflow `needs` edges. The workflow tests compare every edge and name.
+export const CLOUD_JOB_GRAPH = {
+  changes: { names: ["what changed"], needs: [] },
+  "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
+  confinement: { names: ["compiler and relay confinement"], needs: ["changes", "javascript-prepare"] },
+  "javascript-workers": { names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
+  javascript: { names: ["typecheck + tests"], needs: ["changes"] },
+  "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
+  "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
+  "rust-tests": { names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "javascript"] },
+  rust: { names: ["engine gate"], needs: ["changes", "javascript"] },
+};
+
+function gateGraph(scope, jobs, confinement = true) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  return ["what changed", "shared preparation", "compiler and relay confinement", ...(scope === "js"
-    ? ["typecheck + tests", ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`)]
-    : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`)])];
+  // A combined run's Rust jobs depend on JavaScript. Include that group's waits;
+  // a Rust-only dispatch skips JavaScript and has no such dependency stage.
+  const javascript = scope === "js" || jobs.some(job => (job.name === "typecheck + tests" || /^JS worker /u.test(job.name)) && job.status !== "skipped" && job.conclusion !== "skipped");
+  return Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id === "changes" || id === "javascript-prepare"
+    || (id === "confinement" ? confinement : id.startsWith("rust") ? scope === "rust" : javascript));
+}
+
+function gateJobNames(scope, jobs, confinement = true) {
+  return gateGraph(scope, jobs, confinement).flatMap(([, job]) => job.names);
+}
+
+export function gateQueueTiming(scope, jobs, now = Date.now(), confinement = true) {
+  const graph = gateGraph(scope, jobs, confinement);
+  const depths = new Map();
+  const depth = id => {
+    if (!depths.has(id)) {
+      const parents = CLOUD_JOB_GRAPH[id].needs.filter(parent => graph.some(([key]) => key === parent));
+      depths.set(id, parents.length ? 1 + Math.max(...parents.map(depth)) : 0);
+    }
+    return depths.get(id);
+  };
+  const stages = [], required = [];
+  for (const [id, node] of graph) for (const name of node.names) {
+    const rows = jobs.filter(job => job.name === name);
+    if (rows.length > 1) throw new Error(`Duplicate ${scope} jobs: ${name}.`);
+    if (!rows.length) continue;
+    const job = rows[0], created = Date.parse(job.created_at);
+    const queued = ["queued", "waiting", "pending", "requested"].includes(job.status);
+    const started = queued ? now : Date.parse(job.started_at);
+    if (!Number.isFinite(created) || !Number.isFinite(started) || started < created) throw new Error(`A required ${scope} job has invalid runner wait times: ${name}.`);
+    const runnerWaitSeconds = (started - created) / 1000;
+    const stage = depth(id);
+    stages[stage] ??= { stage, runnerWaitSeconds: 0, jobs: [] };
+    stages[stage].jobs.push(name);
+    stages[stage].runnerWaitSeconds = Math.max(stages[stage].runnerWaitSeconds, runnerWaitSeconds);
+    required.push({ ...job, stage, runnerWaitSeconds, queued });
+  }
+  return { runnerWaitSeconds: stages.reduce((total, stage) => total + stage.runnerWaitSeconds, 0), stages, jobs: required };
+}
+
+export function gateDeadline(scope, jobs, now = Date.now()) {
+  const selections = jobs.filter(job => job.name === "what changed");
+  if (selections.length !== 1 || !Number.isFinite(Date.parse(selections[0].started_at))) throw new Error("Gate selection has no unique start time.");
+  const timing = gateQueueTiming(scope, jobs, now);
+  return Date.parse(selections[0].started_at) + ((scope === "js" ? 300 : 600) + timing.runnerWaitSeconds) * 1000;
+}
+
+function gateTiming(scope, required, finishedAt, queue) {
+  if (required.some(job => !Number.isFinite(Date.parse(job.started_at)) || !Number.isFinite(Date.parse(job.completed_at))
+    || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
+  const startedAt = new Date(Math.min(...required.map(job => Date.parse(job.started_at)))).toISOString();
+  const seconds = (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000;
+  const budgetSeconds = scope === "js" ? 300 : 600;
+  const workloadSeconds = seconds - queue.runnerWaitSeconds;
+  return { startedAt, finishedAt, seconds, budgetSeconds, runnerWaitSeconds: queue.runnerWaitSeconds, workloadSeconds,
+    stages: queue.stages, jobs: queue.jobs.map(({ name, created_at, started_at, completed_at, conclusion, stage, runnerWaitSeconds }) =>
+      ({ name, createdAt: created_at, startedAt: started_at, finishedAt: completed_at, conclusion, stage, runnerWaitSeconds })),
+    withinBudget: seconds <= budgetSeconds || workloadSeconds <= budgetSeconds };
+}
+
+function requireBudget(scope, timing) {
+  if (!timing.withinBudget) throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s (${timing.workloadSeconds}s after ${timing.runnerWaitSeconds}s runner wait), exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
+  return timing;
 }
 
 export function completedGateTiming(scope, jobs, commit) {
-  const expected = gateJobNames(scope);
+  const expected = gateJobNames(scope, jobs);
   const required = jobs.filter(job => expected.includes(job.name));
   if (!commit || required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  if (required.some(job => !Number.isFinite(Date.parse(job.started_at)) || !Number.isFinite(Date.parse(job.completed_at))
-    || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
-  const startedAt = new Date(Math.min(...required.map(job => Date.parse(job.started_at)))).toISOString();
   const finishedAt = new Date(Math.max(...required.map(job => Date.parse(job.completed_at)))).toISOString();
-  const seconds = (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000;
-  const budgetSeconds = scope === "js" ? 300 : 600;
-  if (seconds > budgetSeconds) throw new Error(`The complete ${scope} gate took ${seconds}s, exceeding its ${budgetSeconds}s budget including final reporting.`);
-  return { startedAt, finishedAt, seconds, budgetSeconds };
+  return requireBudget(scope, gateTiming(scope, required, finishedAt, gateQueueTiming(scope, jobs)));
 }
 
 export async function verifyCompletedCloud(scope) {
-  const timing = completedGateTiming(scope, await jobs(), process.env.DOHC_WORKFLOW_HEAD_SHA);
-  console.log(`[verification] PASS (${scope} completed group): ${JSON.stringify(timing)}`);
+  const report = { version: 1, scope, verdict: "FAIL", complete: true, commit: process.env.DOHC_WORKFLOW_HEAD_SHA };
+  try {
+    Object.assign(report, completedGateTiming(scope, await jobs(), report.commit));
+    report.verdict = "PASS";
+  } catch (error) {
+    Object.assign(report, error.timing, { error: error.message });
+    throw error;
+  } finally {
+    mkdirSync(".agent-artifacts/verification/aggregate", { recursive: true });
+    writeFileSync(`.agent-artifacts/verification/aggregate/${scope}-completed-result.json`, JSON.stringify(report, null, 2) + "\n");
+    console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
+  }
 }
 
 async function jobs() {
@@ -93,55 +170,49 @@ async function jobs() {
 // The reporting job runs partition zero before waiting for the other workers.
 export async function waitForGate(scope, { readJobs = jobs, pause = setTimeout, now = Date.now } = {}) {
   const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-  const expected = gateJobNames(scope).filter(name => name !== finalJob && name !== "compiler and relay confinement");
-  const budget = scope === "js" ? 300 : 600;
-  for (let reads = 0; reads < 125; reads++) {
+  for (;;) {
     const all = await readJobs();
-    const selections = all.filter(job => job.name === "what changed");
-    if (selections.length !== 1 || !Number.isFinite(Date.parse(selections[0].started_at))) throw new Error("Gate selection has no unique start time.");
-    const remaining = Date.parse(selections[0].started_at) + budget * 1000 - now();
-    if (remaining <= 10_000) throw new Error(`The ${scope} group has no time left for complete reporting within ${budget}s.`);
+    const expected = gateJobNames(scope, all, false).filter(name => name !== finalJob);
     const required = all.filter(job => expected.includes(job.name));
     if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
     if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
+    const remaining = gateDeadline(scope, all, now()) - now();
+    const queued = required.some(job => ["queued", "waiting", "pending", "requested"].includes(job.status));
+    if (remaining <= 0 && !queued) throw new Error(`The ${scope} group has no time left for complete reporting within its budget.`);
     if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
-    await pause(Math.min(5_000, remaining - 10_000));
+    await pause(queued ? 10_000 : Math.min(5_000, remaining));
   }
-  throw new Error(`Waiting for the ${scope} group exceeded its bounded job reads.`);
 }
 
-export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded") {
-  const report = { version: 1, scope, verdict: "FAIL", steps: [] };
+export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded", { readJobs = jobs, now = Date.now, env = process.env, outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
+  const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
   try {
     const records = [...globSync(`${directory}/**/result.json`)].map(path => JSON.parse(readFileSync(path, "utf8"))).filter(record => record.scope === scope);
     if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-    if (!process.env.GITHUB_SHA || records.some(record => record.commit !== process.env.GITHUB_SHA)) throw new Error("The gate evidence does not cover the requested commit.");
-    report.commit = process.env.GITHUB_SHA;
+    if (!env.GITHUB_SHA || records.some(record => record.commit !== env.GITHUB_SHA)) throw new Error("The gate evidence does not cover the requested commit.");
+    report.commit = env.GITHUB_SHA;
     Object.assign(report, scope === "js" ? aggregateJavascript(records) : aggregateRust(records));
     const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-    const expected = gateJobNames(scope).filter(name => name !== "compiler and relay confinement");
-    const required = (await jobs()).filter(job => expected.includes(job.name));
+    const all = await readJobs();
+    const expected = gateJobNames(scope, all, false);
+    const required = all.filter(job => expected.includes(job.name));
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
-      || required.some(job => job.name !== finalJob && job.conclusion !== "success")) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
-    if (required.some(job => !Number.isFinite(Date.parse(job.started_at)))) throw new Error("A required job has no start time.");
-    report.startedAt = new Date(Math.min(...required.map(job => Date.parse(job.started_at)))).toISOString();
-    report.finishedAt = new Date().toISOString();
-    report.seconds = (Date.parse(report.finishedAt) - Date.parse(report.startedAt)) / 1000;
-    report.budgetSeconds = scope === "js" ? 300 : 600;
-    report.jobs = required.map(({ name, started_at, completed_at, conclusion }) => ({ name, startedAt: started_at, finishedAt: completed_at, conclusion }));
-    // Artifact upload and the runner's final reporting still have to finish.
-    if (report.seconds + 10 > report.budgetSeconds) throw new Error(`The complete ${scope} gate has used ${report.seconds}s of its ${report.budgetSeconds}s budget before final reporting.`);
+      || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
+    const finishedAt = new Date(now()).toISOString();
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), finishedAt, gateQueueTiming(scope, all, now())));
+    requireBudget(scope, report);
     report.verdict = "PASS";
+    return report;
   } catch (error) { report.error = error.message; throw error; }
   finally {
-    mkdirSync(".agent-artifacts/verification/aggregate", { recursive: true });
-    writeFileSync(`.agent-artifacts/verification/aggregate/${scope}-result.json`, JSON.stringify(report, null, 2) + "\n");
+    mkdirSync(outputDirectory, { recursive: true });
+    writeFileSync(`${outputDirectory}/${scope}-result.json`, JSON.stringify(report, null, 2) + "\n");
     if (scope === "rust") {
       console.log("\n== summary ==");
       for (const step of report.steps) console.log(`  ${step.status} ${step.name}`);
       console.log(`  ${report.verdict} complete gate${report.error ? `: ${report.error}` : ""}`);
     }
-    console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s, ${report.tasks ?? 0} tasks`);
+    console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s wall, ${report.runnerWaitSeconds ?? "unknown"}s runner wait, ${report.workloadSeconds ?? "unknown"}s workload, ${report.tasks ?? 0} tasks`);
   }
 }
 

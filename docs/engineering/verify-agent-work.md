@@ -110,8 +110,24 @@ Workers run pure tests during preparation. Native tests start after the prepared
 The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks the completed job times.
 A local `pnpm verify:pr` still runs the whole selected gate.
-The cloud budgets are 300 s for JavaScript and 600 s for Rust, from selection's actual start through the gate's last required job finish.
-These times include preparation, internal scheduling, transfers, confinement, and aggregate reporting. Report the initial runner queue separately.
+The cloud workload budgets are 300 s for JavaScript and 600 s for Rust.
+`seconds` remains the wall span from the first required job's start through the last required job's finish.
+This includes preparation, internal scheduling, transfers, confinement, and aggregate reporting.
+Each job's runner wait is `started_at - created_at`. GitHub creates dependent jobs when their dependencies finish.
+Stages follow dependency depth in the workflow's `needs` graph, starting with selection at depth 0.
+Each stage contributes its largest required runner wait; `runnerWaitSeconds` is the sum of those maxima.
+A combined run includes JavaScript's dependency stage in Rust's timing. A Rust-only run removes skipped JavaScript jobs.
+The gate passes its timing check when `seconds <= budget`, or when `seconds - runnerWaitSeconds <= budget`.
+The logs and result JSON keep the wall span, runner waits, and adjusted workload separately.
+Worker aggregate receipts have `complete: false` because confinement can still be queued.
+The final check writes `complete: true` timing receipts after confinement finishes, including failed timing verdicts.
+Workers extend their preparation and reporting deadlines by measured stage waits. They keep polling while an awaited job is queued.
+Confinement's runner queue delays only the final check; workers and aggregates do not wait for it.
+Job timeouts are backstops: 10 minutes for selection and final reporting, 30 for preparation and confinement,
+40 for Rust compilation and policy, and 120 for workers and aggregates that can await sibling runners.
+These limits allow slow hosts to publish receipts and bound sibling waits without replacing the workload budgets.
+The compiler archive adds one package's test compilation, packing, and transfer to preparation.
+Confinement executes those binaries once without compiling or retrying them.
 For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
 Read the cache logs before describing a hit or miss. A requested cache condition alone does not establish one.
 Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change the optional Blacksmith runners.

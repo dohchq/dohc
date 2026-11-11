@@ -9,6 +9,7 @@ import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import { JS_SHARDS } from "./verification/shards.mjs";
+import { CLOUD_JOB_GRAPH } from "./verification/cloud-aggregate.mjs";
 import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
@@ -376,14 +377,14 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 test("distributed gate jobs retain source identity and pinned Rust tools", () => {
   const {jobs, env} = load(workflow);
   for (const [name, job] of Object.entries(jobs)) {
-    if (["changes", "verification", "confinement"].includes(name)) continue;
+    if (["changes", "verification"].includes(name)) continue;
     assert.ok([job.needs].flat().includes("changes"), name + " cannot bypass selection");
     const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"));
     assert.equal(checkout.with.ref, "${{ github.sha }}");
     assert.equal(checkout.with["fetch-depth"], 2);
     assert.equal(checkout.with["persist-credentials"], false);
   }
-  for (const [name, tools] of [["rust-archive", ["nextest"]], ["rust-tests", ["nextest"]], ["rust", ["nextest"]], ["rust-policy", ["deny", "audit", "nextest"]]]) {
+  for (const [name, tools] of [["confinement", ["nextest"]], ["rust-archive", ["nextest"]], ["rust-tests", ["nextest"]], ["rust", ["nextest"]], ["rust-policy", ["deny", "audit", "nextest"]]]) {
     const install = jobs[name].steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
     assert.deepEqual(install.with.tool.split(",").sort(), tools.map(tool =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
@@ -491,7 +492,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
     for (const name of ["javascript", "rust"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
-      assert.ok(jobs[name]["timeout-minutes"] <= 10);
+      assert.equal(jobs[name]["timeout-minutes"], 120);
     }
     for (const name of ["changes", "verification"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
@@ -544,6 +545,24 @@ test("confinement reuses build artifacts without occupying worker or aggregate r
   assert.match(proof, /Seccomp:/);
   assert.match(proof, /wait "\$compiler_pid" \|\| status=1/);
   assert.match(proof, /wait "\$relay_pid" \|\| status=1/);
+});
+
+test("timing stages match the workflow dependency graph and timeout backstops", () => {
+  const {jobs} = load(workflow);
+  assert.deepEqual(Object.keys(CLOUD_JOB_GRAPH).sort(), Object.keys(jobs).filter(name => name !== "verification").sort());
+  for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
+    const job = jobs[id];
+    assert.deepEqual(node.needs, [job.needs ?? []].flat(), id);
+    assert.deepEqual(node.names, job.strategy?.matrix?.shard
+      ? job.strategy.matrix.shard.map(shard => job.name.replace("${{ matrix.shard }}", shard)) : [job.name], id);
+  }
+  assert.deepEqual(Object.fromEntries(Object.entries(jobs).map(([id, job]) => [id, job["timeout-minutes"]])), {
+    changes: 10, "javascript-prepare": 30, confinement: 30, "javascript-workers": 120, javascript: 120,
+    "rust-archive": 40, "rust-tests": 120, "rust-policy": 40, rust: 120, verification: 10,
+  });
+  const upload = jobs.verification.steps.find(step => step.with?.name === "verification-completed-${{ github.run_attempt }}");
+  assert.equal(upload.if, "always()");
+  assert.equal(upload.with.path, ".agent-artifacts/verification/aggregate/*-completed-result.json");
 });
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
@@ -602,7 +621,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     ...Array.from({length: JS_SHARDS - 1}, (_, index) => `JS worker ${index + 1}`),
     ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
-    started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
+    created_at: new Date(started).toISOString(), started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => spawnSync(process.execPath, ["--input-type=module", "-e",
     `globalThis.fetch = async () => Response.json({jobs: JSON.parse(process.env.TIMING_JOBS)});\n${source}`], {
     env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate, TIMING_JOBS: JSON.stringify(rows),
