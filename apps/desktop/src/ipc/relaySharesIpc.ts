@@ -68,22 +68,24 @@ const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
 const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
 const knownReasons: ReadonlySet<string> = new Set(OwnerLiveDocument.shape.reason.unwrap().options);
-// A reason this build doesn't know still shows its row; an unknown status doesn't, since Stop and Resume depend on it.
+const knownStatuses: ReadonlySet<string> = new Set(OwnerLiveDocument.shape.status.exclude(["unrecognized"]).options);
+// A reason or status this build doesn't know still shows its row, as unrecognized: it offers no Resume, and no Stop for a status.
 function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
   return rows.flatMap(row => {
-    const parsed = schema.safeParse(row.reason === undefined || knownReasons.has(row.reason) ? row : {...row, reason: "unrecognized"});
+    const parsed = schema.safeParse(!knownStatuses.has(row.status) ? {...row, status: "unrecognized", reason: "unrecognized"}
+      : row.reason === undefined || knownReasons.has(row.reason) ? row : {...row, reason: "unrecognized"});
     return parsed.success ? [parsed.data] : [];
   });
 }
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
   ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
-  status: z.enum(["ready", "preparing", "paused", "unavailable"]),
+  status: z.enum(["ready", "preparing", "paused", "unavailable", "unrecognized"]),
   })),
 }));
 const retiredLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments,
   nextCursor: OwnerLiveDocumentsResult.shape.nextCursor}).transform(page => ({
   ...page, lastPath: page.documents.at(-1)?.path,
-  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.literal("retired")})),
+  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.enum(["retired", "unrecognized"])})),
 }));
 
 interface RelayShareRequest {

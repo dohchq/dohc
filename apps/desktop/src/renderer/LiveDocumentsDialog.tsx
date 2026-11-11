@@ -10,7 +10,7 @@ import { useRequestSequence } from "./useRequestSequence";
 
 export type LiveDocumentRow = {
   path: string;
-  status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
+  status: "ready" | "preparing" | "paused" | "unavailable" | "retired" | "unrecognized";
   reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "document-too-dense" | "unrecognized";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
@@ -219,7 +219,7 @@ function statusTone(row: LiveDocumentRow): string {
 
 // The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return !row.saveOnly && row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
+  return !row.saveOnly && row.status !== "retired" && row.status !== "unrecognized" && !row.deferredStop && row.reason !== "session-host-diverged";
 }
 
 // The server refuses this note's history, not one edit, so Resume and Try again cannot help.

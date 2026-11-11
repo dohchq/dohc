@@ -882,15 +882,16 @@ describe("owner live document enrollment", () => {
     ], nextCursor: null});
   });
 
-  it("keeps known active and retired rows beside an unknown status, using the last raw cursor", async () => {
+  it("shows a row whose status this build doesn't know, as unrecognized and without Stop or Resume, using the last raw cursor", async () => {
     const h = harness();
-    const unknown = () => ({path: "unknown.md", objectId: "unknown", status: "future-value"});
+    const unknown = () => ({path: "unknown.md", objectId: "unknown", status: "future-value", reason: "session-host-refused"});
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
       ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown()], nextCursor: "unknown.md"}
       : {ok: true, documents: [unknown(), {path: "live.md", objectId: "live", status: "ready"},
         {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
       {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      {path: "unknown.md", objectId: "unknown", status: "unrecognized", reason: "unrecognized", canResume: false},
       {path: "live.md", objectId: "live", status: "ready", canResume: false},
       {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
     ], nextCursor: "unknown.md"});

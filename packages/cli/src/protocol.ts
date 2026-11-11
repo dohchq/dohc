@@ -1683,7 +1683,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
     documents: z.array(z.object({
       path: z.string().min(1),
       objectId: z.string().min(1).max(512),
-      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired", "unrecognized"]),
       reason: liveDocumentReasonSchema.optional(),
       canResume: z.boolean(),
       deferredStop: z.object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() }).strict().optional(),

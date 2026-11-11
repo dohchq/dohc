@@ -492,7 +492,8 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
-  status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+  // `unrecognized`: the server gave a status this build doesn't know. The row shows without Stop or Resume.
+  status: z.enum(["ready", "preparing", "paused", "unavailable", "retired", "unrecognized"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "document-too-dense",
     // The server gave a reason this build doesn't know. The row still shows, without Resume.
     "unrecognized"]).optional(),

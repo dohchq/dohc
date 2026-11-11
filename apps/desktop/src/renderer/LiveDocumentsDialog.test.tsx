@@ -510,6 +510,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "unrecognized",
           canResume: false,
         }),
+        row("docs/future-status.md", {
+          status: "unrecognized",
+          reason: "unrecognized",
+          canResume: false,
+        }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
     );
@@ -532,6 +537,7 @@ describe("LiveDocumentsDialog", () => {
       "Server copy is missing an edit",
       "Can't resume",
       "Needs a newer dohc",
+      "Needs a newer dohc",
       "Stopped",
       "Stopped",
     ]);
@@ -553,6 +559,10 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getByTestId("live-document-row-docs/future.md").textContent).toContain(
       "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.");
     expect(actions("docs/future.md")).toEqual(["Stop live editing"]);
+    // A status it doesn't know offers neither Stop nor Resume, since both depend on it.
+    expect(screen.getByTestId("live-document-row-docs/future-status.md").textContent).toContain(
+      "The server stopped live editing for a reason this version of dohc doesn't know. Update dohc to see why and what to do.");
+    expect(actions("docs/future-status.md")).toEqual([]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
