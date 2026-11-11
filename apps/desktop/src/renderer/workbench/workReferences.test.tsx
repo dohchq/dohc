@@ -15,11 +15,12 @@ afterEach(() => {
 const ref = (letter: string) => letter.repeat(43);
 const chat = (reference: string): WorkReferenceView =>
   ({ reference, kind: "chat", label: "Trip", open: { to: "chat-channel", channel: "c-1" } });
+const handlers = (open = vi.fn(), failed = vi.fn()) => ({ open, failed });
 
 describe("the work link store", () => {
   it("asks main once per batch of 64, for each link once while its answer is fresh", async () => {
     const describe = vi.fn(async (references: string[]) => references.map(chat));
-    const links = createWorkReferenceLinks("ws", vi.fn(), describe);
+    const links = createWorkReferenceLinks("ws", handlers(), describe);
     const many = Array.from({ length: 70 }, (_, at) => String(at).padStart(43, "x"));
     for (const reference of [...many, many[0]!]) links.want(reference);
     await vi.waitFor(() => expect(links.view(many[69]!)).toBeDefined());
@@ -32,7 +33,7 @@ describe("the work link store", () => {
   it("reads a link again once its answer is old", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const describe = vi.fn(async (references: string[]) => references.map(chat));
-    const links = createWorkReferenceLinks("ws", vi.fn(), describe);
+    const links = createWorkReferenceLinks("ws", handlers(), describe);
     links.want(ref("A"));
     await vi.waitFor(() => expect(links.view(ref("A"))).toBeDefined());
     vi.setSystemTime(Date.now() + 30_001);
@@ -43,7 +44,7 @@ describe("the work link store", () => {
   it("drops an answer and an open after the workspace changes", async () => {
     let answer!: (views: WorkReferenceView[]) => void;
     const open = vi.fn();
-    const links = createWorkReferenceLinks("ws", open, () => new Promise((resolve) => { answer = resolve; }));
+    const links = createWorkReferenceLinks("ws", handlers(open), () => new Promise((resolve) => { answer = resolve; }));
     links.want(ref("A"));
     await vi.waitFor(() => expect(answer).toBeDefined());
     links.dispose();
@@ -56,19 +57,46 @@ describe("the work link store", () => {
 
   it("asks again after a failed read", async () => {
     const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped")).mockImplementation(async (references: string[]) => references.map(chat));
-    const links = createWorkReferenceLinks("ws", vi.fn(), describe);
+    const links = createWorkReferenceLinks("ws", handlers(), describe);
     links.want(ref("A"));
     await vi.waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
     await Promise.resolve();
     links.want(ref("A"));
     await vi.waitFor(() => expect(links.view(ref("A"))).toBeDefined());
   });
+
+  it("opens only the newest click when an older one is answered last", async () => {
+    const answers = new Map<string, (views: WorkReferenceView[]) => void>();
+    const open = vi.fn();
+    const links = createWorkReferenceLinks("ws", handlers(open), ([reference]) =>
+      new Promise((resolve) => answers.set(reference!, resolve)));
+    const first = links.open(ref("A"));
+    const second = links.open(ref("B"));
+    answers.get(ref("B"))!([{ ...chat(ref("B")), open: { to: "chat-channel", channel: "c-2" } }]);
+    await second;
+    answers.get(ref("A"))!([chat(ref("A"))]);
+    await first;
+    expect(open.mock.calls).toEqual([[{ to: "chat-channel", channel: "c-2" }]]);
+  });
+
+  it("says when a click cannot be read, and Try again opens it", async () => {
+    const error = new Error("engine stopped");
+    const describe = vi.fn().mockRejectedValueOnce(error).mockImplementation(async (references: string[]) => references.map(chat));
+    const open = vi.fn();
+    const failed = vi.fn();
+    const links = createWorkReferenceLinks("ws", handlers(open, failed), describe);
+    await links.open(ref("A"));
+    expect(open).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledWith(error, expect.any(Function));
+    failed.mock.calls[0]![1]();
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }));
+  });
 });
 
 describe("a work link in a chat message", () => {
   function renderLinks(body: string, views: WorkReferenceView[]) {
     const open = vi.fn();
-    const links = createWorkReferenceLinks("ws", open, async (references) =>
+    const links = createWorkReferenceLinks("ws", handlers(open), async (references) =>
       views.filter((view) => references.includes(view.reference)));
     const view = render(
       <WorkReferences.Provider value={links}>
@@ -109,7 +137,7 @@ describe("a work link in a chat message", () => {
     const open = vi.fn();
     const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped"))
       .mockImplementation(async (references: string[]) => references.map(chat));
-    const links = createWorkReferenceLinks("ws", open, describe);
+    const links = createWorkReferenceLinks("ws", handlers(open), describe);
     const view = render(
       <WorkReferences.Provider value={links}>
         <ChatMarkdown body={`@[work:${ref("A")}]`} candidates={[]} testId="body" onOpenPath={vi.fn()} />

@@ -56,6 +56,7 @@ export function workLinkTarget(message: WorkspaceActivatedMessage): Extract<Noti
 }
 
 export const CHAT_LOOKUP_FAILED_NOTE = "dohc could not open this chat.";
+export const WORK_LINK_LOOKUP_FAILED_NOTE = "dohc could not open this link.";
 
 // Only a chat or an automation is looked up, so only they can fail this way.
 export function targetLookupFailedNote(target: NoticeTarget): string {

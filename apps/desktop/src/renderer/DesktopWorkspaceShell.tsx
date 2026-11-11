@@ -243,7 +243,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { lastOpenedOwnWorkspace, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import { useKeptTyping } from "./shell/useKeptTyping";
-import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, WORK_LINK_LOOKUP_FAILED_NOTE, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChannel, findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "../notices/sentNoticePlace";
@@ -3387,7 +3387,10 @@ export function DesktopWorkspaceShell(props: {
       ? { to: "chat", thread: target.thread, ...(target.channel ? { channel: target.channel } : {}), ...(target.message ? { message: target.message } : {}) }
       : target);
   }, []);
-  const workReferenceLinks = useWorkReferenceLinks(workspaceId, openWorkReference);
+  const workReferenceLinks = useWorkReferenceLinks(workspaceId, {
+    open: openWorkReference,
+    failed: (error, retry) => reportShellError(WORK_LINK_LOOKUP_FAILED_NOTE, error, retry),
+  });
   // A work link clicked in a chat or a document opens its message here, or
   // in the workspace on this computer that holds it. A link none holds, or
   // one main could not look up, goes to the browser. Only the newest link

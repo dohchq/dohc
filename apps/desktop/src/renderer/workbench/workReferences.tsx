@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { extractChatWorkReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkReferenceOpen, WorkReferenceView } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -8,8 +8,9 @@ import type { ObjectKind } from "../ui/KindGlyph";
 
 // The work links in a window's chat messages, `@[work:REF]`: what each one
 // names, asked of main in batches, and how one opens. A link is read again
-// when it is opened, so a click never follows a rename it has not seen. One
-// store serves one workspace; the shell makes a new one when its workspace
+// when it is opened, so a click never follows a rename it has not seen. Only
+// the newest click opens, and a click that cannot be read says so. One store
+// serves one workspace; the shell makes a new one when its workspace
 // changes, and an answer for the old one is dropped.
 export interface WorkReferenceLinks {
   view(reference: string): WorkReferenceView | undefined;
@@ -25,9 +26,14 @@ export const WorkReferences = createContext<WorkReferenceLinks | null>(null);
 const FRESH_MS = 30_000;
 const BATCH = 64;
 
+export interface WorkReferenceHandlers {
+  open(target: WorkReferenceOpen): void;
+  failed(error: unknown, retry: () => void): void;
+}
+
 export function createWorkReferenceLinks(
   workspaceId: string,
-  open: (target: WorkReferenceOpen) => void,
+  handlers: WorkReferenceHandlers,
   describe = (references: string[]) => bridge().describeWorkReferences({ workspaceId, references }),
 ): WorkReferenceLinks & { dispose(): void } {
   const views = new Map<string, { view: WorkReferenceView; at: number }>();
@@ -36,6 +42,7 @@ export function createWorkReferenceLinks(
   const listeners = new Set<() => void>();
   let scheduled = false;
   let disposed = false;
+  let latestOpen = 0;
 
   function keep(answer: WorkReferenceView[]) {
     if (disposed) return;
@@ -58,7 +65,7 @@ export function createWorkReferenceLinks(
     }
   }
 
-  return {
+  const links: WorkReferenceLinks & { dispose(): void } = {
     view: (reference) => views.get(reference)?.view,
     want(reference) {
       const known = views.get(reference);
@@ -74,20 +81,33 @@ export function createWorkReferenceLinks(
     },
     async open(reference) {
       if (disposed) return;
-      const answer = await describe([reference]);
+      const ticket = ++latestOpen;
+      let answer: WorkReferenceView[];
+      try {
+        answer = await describe([reference]);
+      } catch (error) {
+        if (!disposed && ticket === latestOpen) handlers.failed(error, () => void links.open(reference));
+        return;
+      }
       keep(answer);
       const target = answer.find((view) => view.reference === reference)?.open;
-      if (!disposed && target) open(target);
+      if (!disposed && ticket === latestOpen && target) handlers.open(target);
     },
     dispose() {
       disposed = true;
       listeners.clear();
     },
   };
+  return links;
 }
 
-export function useWorkReferenceLinks(workspaceId: string, open: (target: WorkReferenceOpen) => void): WorkReferenceLinks {
-  const links = useMemo(() => createWorkReferenceLinks(workspaceId, open), [workspaceId, open]);
+export function useWorkReferenceLinks(workspaceId: string, handlers: WorkReferenceHandlers): WorkReferenceLinks {
+  const latest = useRef(handlers);
+  latest.current = handlers;
+  const links = useMemo(() => createWorkReferenceLinks(workspaceId, {
+    open: (target) => latest.current.open(target),
+    failed: (error, retry) => latest.current.failed(error, retry),
+  }), [workspaceId]);
   useEffect(() => () => links.dispose(), [links]);
   return links;
 }
@@ -119,7 +139,7 @@ export function WorkRef(props: { reference: string; interactive: boolean; testId
   const view = useSyncExternalStore(links?.subscribe ?? noLinks, () => links?.view(props.reference));
   useEffect(() => links?.want(props.reference), [links, props.reference]);
   const testId = props.testId ? `${props.testId}-work-link` : undefined;
-  const onOpen = props.interactive && links ? () => void links.open(props.reference).catch(() => {}) : undefined;
+  const onOpen = props.interactive && links ? () => void links.open(props.reference) : undefined;
   if (!view || view.kind === null) {
     return (
       <Ref

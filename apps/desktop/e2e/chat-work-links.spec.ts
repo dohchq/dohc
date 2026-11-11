@@ -75,27 +75,30 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await expect(chips.nth(0)).toContainText("Trip");
     await expect(chips.nth(1)).toContainText("Flights");
     await expect(chips.nth(2)).toContainText("trip.md");
-    await expect(card.getByRole("button", { name: "Open Trip" })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: "Open Trip", exact: true })).toHaveCount(0);
     await shoot(page, "a-post");
 
     // In the post, the Group chip opens the Group.
     await openPost();
-    await expect(thread.getByRole("button", { name: "Open Flights" })).toBeVisible();
-    await expect(thread.getByRole("button", { name: "Open trip.md" })).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Open Flights", exact: true })).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Open trip.md", exact: true })).toBeVisible();
+    // The post's title, its first line, names its links too.
+    await expect(main.getByTestId("chats-thread-title-work-link")).toHaveCount(3);
+    await expect(main.getByTestId("chats-thread-title")).not.toContainText("@[work:");
     await shoot(page, "b-thread-chips");
-    await thread.getByRole("button", { name: "Open Trip" }).click();
+    await thread.getByRole("button", { name: "Open Trip", exact: true }).click();
     await expect(main.getByTestId("chats-channel-title")).toHaveText("Trip");
     await shoot(page, "c-group");
 
     // The thread chip opens the thread.
     await openPost();
-    await thread.getByRole("button", { name: "Open Flights" }).click();
+    await thread.getByRole("button", { name: "Open Flights", exact: true }).click();
     await expect(thread).toContainText("Book by Friday");
     await shoot(page, "d-thread");
 
     // The file chip opens the file.
     await openPost();
-    await thread.getByRole("button", { name: "Open trip.md" }).click();
+    await thread.getByRole("button", { name: "Open trip.md", exact: true }).click();
     await expect(page.getByText("Flights on Friday.")).toBeVisible();
     await shoot(page, "e-file");
   } finally {
