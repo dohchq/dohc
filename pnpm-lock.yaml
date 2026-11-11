@@ -53,7 +53,7 @@ overrides:
   prosemirror-model: 1.25.11
   prosemirror-view: 1.42.2
 
-packageExtensionsChecksum: sha256-YXluaL9EEbODrJI+SuPxKm4U9Q66TxPBkOANS3thXpI=
+packageExtensionsChecksum: sha256-he9Oxkq3Y0YH353KOhX1H58932GrBk0+7UCz+kIyhGE=
 
 patchedDependencies:
   '@legendapp/list@3.3.11': ab6f0e9cddd0e8a6ac3c43e22ef95252c9942947f55a50e1d74caa7c9d69035b
@@ -8828,6 +8828,8 @@ packages:
 
   tunnel-rat@0.1.2:
     resolution: {integrity: sha512-lR5VHmkPhzdhrM092lI2nACsLO4QubF0/yoOhzX7c+wIpbN1GjHNzCc91QlpxBi+cnx8vVJ+Ur6vL5cEoQPFpQ==}
+    peerDependencies:
+      react: '>=16.8'
 
   type-fest@0.13.1:
     resolution: {integrity: sha512-34R7HTnG0XIJcBSn5XhDd7nNFPRcXYRZrBB2O2jdKqYODldSzBAqzsWoZYYvduky73toYS/ESqxPvkDf/F0XMg==}
@@ -18143,11 +18145,11 @@ snapshots:
 
   tunnel-rat@0.1.2(@types/react@19.2.18)(react@19.2.8):
     dependencies:
+      react: 19.2.8
       zustand: 4.5.7(@types/react@19.2.18)(react@19.2.8)
     transitivePeerDependencies:
       - '@types/react'
       - immer
-      - react
 
   type-fest@0.13.1:
     optional: true
