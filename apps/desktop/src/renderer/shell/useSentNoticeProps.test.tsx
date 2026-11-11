@@ -777,7 +777,7 @@ describe("Try again on a failed agent run", () => {
     ({ ...IDLE, failedRun: { runId, triggerMessageId: `ask-${runId}`, words: "Nova didn't reply. dohc quit during its run.", retryable } });
   beforeEach(() => {
     states = {};
-    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => states[threadId] ?? IDLE);
+    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => (threadId === null ? IDLE : states[threadId] ?? IDLE));
     retryStoppedRun.mockResolvedValue({ queued: true });
   });
 

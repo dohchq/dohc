@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
+import { ipcErrorMessage } from "../ipcError";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -18,10 +19,10 @@ const onError = vi.fn();
 const onThreadRead = vi.fn();
 const onAgentWaitsForTrust = vi.fn();
 const onOpenAgentSettings = vi.fn();
-function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel", agentId?: string, mentionCandidates: MentionCandidate[] = []) {
+function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel", agentId?: string, mentionCandidates: MentionCandidate[] = [], dispatchPaused = false) {
   return <ReactionStoreProvider workspaceId={workspaceId}>
     <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind, ...(agentId ? { agentId } : {}) })}
-      locked={false} mentionCandidates={mentionCandidates} onError={onError} onThreadRead={onThreadRead} revision={0}
+      locked={false} mentionCandidates={mentionCandidates} onError={onError} onThreadRead={onThreadRead} revision={0} dispatchPaused={dispatchPaused}
       onAgentWaitsForTrust={onAgentWaitsForTrust} onOpenAgentSettings={onOpenAgentSettings} />
   </ReactionStoreProvider>;
 }
@@ -299,6 +300,60 @@ describe("ChatLane", () => {
     expect(screen.getByText("Our first message")).toBeTruthy();
   });
 
+  // A send that saved answers with its ids and what failed after the save.
+  it.each(["message", "post"] as const)("says a %s that saved was sent, clears the draft, and shows it on reload", async (kind) => {
+    if (kind === "post") bridgeMock.listChannelThreads.mockResolvedValueOnce({ threads: [] });
+    render(lane());
+    await screen.findByText(kind === "post" ? "No messages in #general yet." : "Old message");
+    const saved = { message: { id: "reply", threadId: "thread-1" }, failure: "Error: Chats stopped because this window changed workspaces." };
+    (kind === "post" ? bridgeMock.startChannelThread : bridgeMock.sendChatMessage).mockImplementationOnce(async () => {
+      bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "reply", body: "Reply" })] });
+      return saved;
+    });
+    send("Reply");
+    await screen.findByText("Reply");
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your message. dohc could not show it yet.", saved.failure, expect.any(Function));
+    expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(onAgentWaitsForTrust).not.toHaveBeenCalled();
+  });
+
+  it("gives a message that saved a Try again that reloads its conversation, only while the lane shows it", async () => {
+    const view = render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: { id: "reply", threadId: "thread-1" }, failure: "Error: The bookmark projection stopped." });
+    const before = bridgeMock.listChatMessages.mock.calls.length;
+    send("Reply");
+    // The send's own reload has read the conversation before the message shows.
+    await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(before));
+    expect(onError).toHaveBeenCalledOnce();
+    const again = onError.mock.lastCall?.[2] as () => void;
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "reply", body: "Reply" })] });
+    await act(async () => again());
+    await screen.findByText("Reply");
+
+    // Once the lane shows another workspace, Try again reads nothing.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Other workspace" })] });
+    view.rerender(lane("channel-1", "workspace-b"));
+    await screen.findByText("Other workspace");
+    const reads = bridgeMock.listChatMessages.mock.calls.length;
+    await act(async () => again());
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(reads);
+    expect(bridgeMock.listChannelThreads).not.toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "workspace-a" }));
+  });
+
+  it.each(["message", "post"] as const)("says a %s that saved nothing failed to send and keeps the draft", async (kind) => {
+    if (kind === "post") bridgeMock.listChannelThreads.mockResolvedValueOnce({ threads: [] });
+    render(lane());
+    await screen.findByText(kind === "post" ? "No messages in #general yet." : "Old message");
+    const refusal = new Error("Chats stopped because this window changed workspaces.");
+    (kind === "post" ? bridgeMock.startChannelThread : bridgeMock.sendChatMessage).mockRejectedValueOnce(refusal);
+    send("Reply");
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(ipcErrorMessage(refusal, "Could not send that message."), refusal));
+    expect(onError.mock.lastCall?.[0]).not.toMatch(/^Sent/);
+    expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("Reply");
+  });
+
   it("marks the loaded thread read and reports completion only after the write", async () => {
     const read = deferred<void>();
     bridgeMock.markChatThreadRead.mockReturnValueOnce(read.promise);
@@ -434,54 +489,43 @@ describe("ChatLane", () => {
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
-  // A send can fail after main saved the choice, so no failure offers to
-  // send it again.
+  // A choice that saved answers with its ids, so only a refusal says it failed.
   describe("a choice whose send failed", () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
-    async function choose(afterFailure: () => void) {
+    const failure = "Error: Chats stopped because this window changed workspaces.";
+    function choose(answer: () => Promise<unknown>) {
       bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
-        afterFailure();
-        throw new Error("Your server session changed. Try again.");
-      });
+      bridgeMock.sendChatMessage.mockImplementationOnce(answer);
       render(lane());
-      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
-      await waitFor(() => expect(onError).toHaveBeenCalled());
     }
 
-    it("says dohc can't tell whether it was sent, with no Try again, while the question stays open", async () => {
-      await choose(() => undefined);
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
-      expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
-    });
-
-    it("says dohc can't tell whether it was sent when the question can't be read either", async () => {
-      await choose(() => {
-        bridgeMock.listChatThreadDecisions.mockRejectedValueOnce(new Error("The engine stopped."));
-      });
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
-    });
-
-    it("says nothing when the question now shows the choice answered", async () => {
-      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
+    it("says a choice that saved was sent and shows it answered on reload", async () => {
+      choose(async () => {
         bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
           { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" }] });
-        throw new Error("Your server session changed. Try again.");
+        return { message: { id: "answer", threadId: "thread-1" }, failure };
       });
-      render(lane());
       fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
       await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
-      expect(onError).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledExactlyOnceWith("Sent your choice. dohc could not show it yet.", failure, expect.any(Function));
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
     });
 
-    it("still says it can't tell when someone else answered with another choice", async () => {
-      await choose(() => {
-        bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
-          { ...decision, state: "resolved", chosenOption: "Friday", resolvedByMessageId: "other" }] });
-      });
-      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
+    it("says why a choice that saved left its question open", async () => {
+      choose(async () => ({ message: { id: "answer", threadId: "thread-1" }, failure, resolveFailure: "Error: Pick one of the poll's choices." }));
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
+        "Sent your choice. dohc could not mark the question answered.", "Error: Pick one of the poll's choices."));
+      expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+    });
+
+    it("says a choice that saved nothing could not be sent", async () => {
+      const refusal = new Error("Chats stopped because this window changed workspaces.");
+      choose(async () => { throw refusal; });
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(ipcErrorMessage(refusal, "Could not send that choice."), refusal));
+      expect(onError.mock.lastCall?.[0]).not.toMatch(/^Sent/);
+      expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
     });
   });
 
@@ -692,6 +736,65 @@ describe("ChatLane", () => {
     expect((await screen.findByTestId("chats-lane-working")).textContent).toBe("Your agentWorkingStop");
     expect(screen.getByTestId("chats-lane-dispatch-announcement")).toBe(announcement);
     expect(announcement.textContent).toBe("Agent working, 2 queued");
+  });
+
+  it("says under a message to a busy agent that it will reply, until it starts on that message", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Plan day 1" }),
+      message({ id: "later", body: "Add the ferry times" }),
+    ] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...working, liveTriggerMessageId: "ask", pendingCount: 1,
+      waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["later"] },
+    });
+    render(lane("agent-dm", "workspace-a", "agent", "nova"));
+    const line = await screen.findByTestId("chats-lane-waiting");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("later");
+    expect(line.textContent).toBe("Nova will reply when it's free.");
+    expect(line.querySelector(".dohc-working-dots")).toBeNull();
+
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, liveRunId: "run-2", liveTriggerMessageId: "later" });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-waiting")).toBeNull());
+  });
+
+  it("hides the waiting line while this computer pauses agent replies, and reads it again on resume", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Plan day 1" }),
+      message({ id: "later", body: "Add the ferry times" }),
+    ] });
+    const queued = { ...working, liveTriggerMessageId: "ask", pendingCount: 1 };
+    const waiting = { ...queued, waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["later"] } };
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(waiting);
+    const view = render(lane("agent-dm", "workspace-a", "agent", "nova"));
+    await screen.findByTestId("chats-lane-waiting");
+
+    view.rerender(lane("agent-dm", "workspace-a", "agent", "nova", [], true));
+    expect(screen.queryByTestId("chats-lane-waiting")).toBeNull();
+    // While paused, main names no request waiting on Nova, and another joins the queue.
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...queued, pendingCount: 2 });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await waitFor(() => expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe("Agent working, 2 queued"));
+
+    // No activity follows the resume, so the lane reads its dispatch itself.
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...waiting, pendingCount: 2 });
+    view.rerender(lane("agent-dm", "workspace-a", "agent", "nova", [], false));
+    expect((await screen.findByTestId("chats-lane-waiting")).textContent).toBe("Nova will reply when it's free.");
+  });
+
+  it("says under a reply to an earlier post that the busy agent will reply", async () => {
+    bridgeMock.listChannelThreads.mockImplementation(async ({ lane }) => ({ threads: lane === "posts" ? [thread({ id: "post-1" })] : [] }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "post", threadId: "post-1", body: "Here's the trip plan.", authorKind: "agent", authorDisplayName: "Nova" }),
+      message({ id: "reply", threadId: "post-1", body: "Add the ferry times", parentMessageId: "post" }),
+    ] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["reply"] } });
+    render(lane("agent-dm", "workspace-a", "agent", "nova"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const line = await screen.findByTestId("chats-lane-waiting");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply");
+    // The DM has only its earlier post, and the one read covers it.
+    expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: null, postThreadIds: ["post-1"] });
   });
 
   it("ignores a run answer from a workspace the reader left", async () => {

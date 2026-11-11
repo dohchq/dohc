@@ -320,8 +320,8 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     await page.evaluate(async ({ workspaceId, bodies }) => {
       const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
       const { channel } = await bridge.createChatChannel({ workspaceId, name: "Run check", type: "posts" });
-      const { thread } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
-      for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: thread.id, body });
+      const { message } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
+      for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: message.threadId, body });
     }, { workspaceId, bodies: [aboveBody, belowBody] });
     await (await openChatsView(page)).getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
     await page.getByTestId(activityPin("chats")).click();

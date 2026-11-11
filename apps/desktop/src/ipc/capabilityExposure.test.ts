@@ -86,11 +86,19 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     const chatRows = rows.filter(row => channels.includes(row.channel));
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    // A send holds its own workspace operation, so a failure after the save still answers.
+    const sends = ["desktop:send-chat-message", "desktop:start-channel-thread"];
     for (const row of chatRows) {
+      if (sends.includes(row.channel)) {
+        expect(row, row.channel).toMatchObject({
+          guard: "trusted-sender", scope: "workspace", handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation" },
+        });
+        expect(row).not.toHaveProperty("inactiveMessage");
+        continue;
+      }
       const chatRefusal = [
         "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:chat-links", "desktop:list-chat-messages",
-        "desktop:send-chat-message", "desktop:list-personal-chat-feed", "desktop:list-channel-threads",
-        "desktop:start-channel-thread",
+        "desktop:list-personal-chat-feed", "desktop:list-channel-threads",
       ].includes(row.channel);
       expect(row, row.channel).toMatchObject({
         guard: "active-workspace", scope: "workspace",

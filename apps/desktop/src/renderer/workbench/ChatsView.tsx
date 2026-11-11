@@ -868,9 +868,11 @@ export function ChatsView(props: {
   const sendContextKey =
     nav.level === "thread"
       ? `${workspaceId}:thread:${nav.thread.id}`
-      : nav.level === "dm"
-        ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
-        : `${workspaceId}:${nav.level}`;
+      : nav.level === "channel"
+        ? `${workspaceId}:channel:${nav.channel.id}`
+        : nav.level === "dm"
+          ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
+          : `${workspaceId}:${nav.level}`;
   const activeSendContext = useRef(sendContextKey);
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
@@ -2184,6 +2186,22 @@ export function ChatsView(props: {
     refreshChannelBadges,
     refreshDms,
   ]);
+  const latestRefresh = useRef(refreshForActivity);
+  latestRefresh.current = refreshForActivity;
+  // False once this view unmounts, so its notices' Try again reloads nothing.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  // A message that saved while a later step failed. What the window shows
+  // reloads to list it, and the notice's Try again reloads it again while the
+  // window still shows the conversation it saved in, in this workspace.
+  const reportUnshown = useCallback((words: string, failure: string, context: string) => {
+    const reload = () => { if (mounted.current && activeSendContext.current === context) latestRefresh.current(); };
+    reload();
+    props.onError(words, failure, reload);
+  }, [props.onError]);
   // Resuming after a suspension owes one catch-up pass: the activity events
   // that fired meanwhile reached only the page instance, and waiting for the
   // next event would leave this surface stale for as long as the workspace
@@ -2209,6 +2227,14 @@ export function ChatsView(props: {
     }
     return unsubscribe;
   }, [awaitingAgentChannel, props.suspendPolling, refreshChannelBadges, refreshForActivity, workspaceId]);
+  // A resume puts requests back to waiting on a busy agent, and no activity
+  // says so, so the open thread reads its dispatch again.
+  const dispatchWasPaused = useRef(computerDispatchPaused);
+  useEffect(() => {
+    const resumed = dispatchWasPaused.current && !computerDispatchPaused;
+    dispatchWasPaused.current = computerDispatchPaused;
+    if (resumed && nav.level === "thread") refreshForActivity();
+  }, [computerDispatchPaused, nav.level, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -2221,6 +2247,7 @@ export function ChatsView(props: {
     if (asked && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
+    const context = activeSendContext.current;
     startingThreadRef.current = true;
     setStartingThread(true);
     try {
@@ -2234,6 +2261,15 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
+      if ("failure" in result) {
+        if (token !== liveToken.current) return;
+        // The post saved, so it is not posted again. The Group reloads to list it.
+        props.onThreadStarted?.();
+        setNewThreadBody("");
+        setNewThreadPoll(null);
+        reportUnshown("Posted your message. dohc could not open it yet.", result.failure, context);
+        return;
+      }
       // The new message has no reactions yet; the start names the viewer.
       reactions.ingest([{
         threadId: result.thread.id,
@@ -2269,7 +2305,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, reportUnshown, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2324,7 +2360,7 @@ export function ChatsView(props: {
       latestComposerState.current = next;
     };
     // The message's poll lands with it, so it shows wherever the message does.
-    const showSent = (sent: SendChatMessageResult) => {
+    const showSent = (sent: Exclude<SendChatMessageResult, { failure: string }>) => {
       setMessages((current) =>
         current.some((message) => message.id === sent.message.id)
           ? current
@@ -2357,40 +2393,46 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      showSent(result);
-      const resolvedDecision = result.resolved;
-      if (resolvedDecision) {
-        const decisionWasOpen = reconcileResolvedChatDecision(
-          latestDecisions.current,
-          resolvedDecision,
-        ).wasOpen;
-        setDecisions(
-          (current) =>
-            reconcileResolvedChatDecision(current, resolvedDecision).decisions,
-        );
-        if (decisionWasOpen) {
-          setChannelThreads((current) =>
-            current.map((thread) =>
-              thread.id === nav.thread.id
-                ? {
-                    ...thread,
-                    openDecisionCount: Math.max(
-                      0,
-                      (thread.openDecisionCount ?? 0) - 1,
-                    ),
-                  }
-                : thread,
-            ),
+      // A message that saved without showing reloads below.
+      if (!("failure" in result)) {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        showSent(result);
+        const resolvedDecision = result.resolved;
+        if (resolvedDecision) {
+          const decisionWasOpen = reconcileResolvedChatDecision(
+            latestDecisions.current,
+            resolvedDecision,
+          ).wasOpen;
+          setDecisions(
+            (current) =>
+              reconcileResolvedChatDecision(current, resolvedDecision).decisions,
           );
+          if (decisionWasOpen) {
+            setChannelThreads((current) =>
+              current.map((thread) =>
+                thread.id === nav.thread.id
+                  ? {
+                      ...thread,
+                      openDecisionCount: Math.max(
+                        0,
+                        (thread.openDecisionCount ?? 0) - 1,
+                      ),
+                    }
+                  : thread,
+              ),
+            );
+          }
         }
       }
-      // A reply whose answer failed still leaves the mode, so retrying cannot
-      // silently post the reply twice.
+      // A message that saved leaves the composer, and a reply whose answer
+      // failed leaves the mode, so retrying cannot silently post either twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
+        if ("failure" in result) refreshForActivity();
         props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+      } else if ("failure" in result) {
+        reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -2412,6 +2454,8 @@ export function ChatsView(props: {
     poll,
     props.onAgentWaitsForTrust,
     props.onError,
+    refreshForActivity,
+    reportUnshown,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2755,13 +2799,17 @@ export function ChatsView(props: {
           : {}),
       });
       if (!requestOwnsActiveContext()) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      dmRefreshSeq.current += 1;
-      setMessages((current) =>
-        current.some((message) => message.id === result.message.id)
-          ? current
-          : [...current, result.message],
-      );
+      if ("failure" in result) {
+        reportUnshown("Sent your message. dohc could not show it yet.", result.failure, sendContextKey);
+      } else {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        dmRefreshSeq.current += 1;
+        setMessages((current) =>
+          current.some((message) => message.id === result.message.id)
+            ? current
+            : [...current, result.message],
+        );
+      }
       if (latestComposerState.current.composer === composer) {
         latestComposerState.current = {
           ...latestComposerState.current,
@@ -2784,7 +2832,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, reportUnshown, sendContextKey, sending, workspaceId]);
 
   // A reply in one of the DM's threads.
   const sendDmReply = useCallback(async (rootId: string, body: string) => {
@@ -2800,6 +2848,11 @@ export function ChatsView(props: {
         ...(references.length > 0 ? { fileReferences: references } : {}),
       });
       if (activeSendContext.current !== context) return false;
+      if ("failure" in result) {
+        // The reply saved, so it is not sent again.
+        reportUnshown("Sent your reply. dohc could not show it yet.", result.failure, context);
+        return true;
+      }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       dmRefreshSeq.current += 1;
       setMessages((current) =>
@@ -2810,7 +2863,7 @@ export function ChatsView(props: {
       if (activeSendContext.current === context) props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
       return false;
     }
-  }, [nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, workspaceId]);
+  }, [nav, props.onAgentWaitsForTrust, props.onError, reportUnshown, sendContextKey, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
@@ -4046,6 +4099,14 @@ export function ChatsView(props: {
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   const failedRun = dispatchState?.failedRun ?? null;
+  // The messages that wait for an agent to end its run, by the agent's name
+  // and colors. None do while this computer's pause holds them.
+  const waitingDispatch = computerDispatchPaused ? undefined : dispatchState?.waiting;
+  const waiting = useMemo(() => waitingDispatch ? {
+    agentName: waitingDispatch.name,
+    presentation: agentChatIdentity({ agentId: waitingDispatch.agentId, name: waitingDispatch.name }, settingsAgents).presentation,
+    messageIds: new Set(waitingDispatch.triggerMessageIds),
+  } : null, [settingsAgents, waitingDispatch]);
   const retryFailedRun = useCallback(async () => {
     if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
@@ -4739,6 +4800,7 @@ export function ChatsView(props: {
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
               onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
+              waiting={waiting}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -5053,6 +5115,7 @@ export function ChatsView(props: {
             {...(agentDm ? {
               agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
               ...(channelAgent ? { agentPresentation: channelAgent.presentation } : {}),
+              dispatchPaused: computerDispatchPaused,
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,
