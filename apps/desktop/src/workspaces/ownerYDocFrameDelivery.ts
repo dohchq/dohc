@@ -25,7 +25,6 @@ export interface OwnerAcceptedState {
 
 export interface OwnerYDocFrameDeliveryOptions {
   relayUrl: string;
-  shareId: string;
   frames: LiveFrameSessionPolicy;
   attemptTimeoutMs: number;
   signal: AbortSignal;
@@ -111,10 +110,9 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private routeUrl(binding: Pick<LiveObjectBinding, "workspaceId" | "objectId" | "lineageClaimId">): URL {
     const url = new URL(this.options.relayUrl);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || !["", "/"].includes(url.pathname)) throw new TypeError("Invalid owner relay URL.");
-    if (!this.options.shareId || /[\u0000-\u001f\u007f]/.test(this.options.shareId)) throw new TypeError("Invalid owner share selector.");
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.pathname = `/sync/workspaces/${encodeURIComponent(binding.workspaceId)}/live/owner`;
-    url.searchParams.set("objectId", binding.objectId); url.searchParams.set("lineageClaimId", binding.lineageClaimId); url.searchParams.set("shareId", this.options.shareId);
+    url.searchParams.set("objectId", binding.objectId); url.searchParams.set("lineageClaimId", binding.lineageClaimId);
     return url;
   }
 

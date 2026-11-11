@@ -55,7 +55,7 @@ function fixture(overrides: {binding?: typeof binding; initialCursor?: number; i
     }, transport: {send: async bytes => input.receive(bytes), close: input.closed}});
     return {send: async bytes => server!.receive(bytes), close: () => server!.close()};
   }));
-  const delivery = new OwnerYDocFrameDelivery({relayUrl: "https://relay.example.test", shareId: "share", frames, attemptTimeoutMs: 10_000,
+  const delivery = new OwnerYDocFrameDelivery({relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000,
     signal: controller.signal, freshBearer: async () => "actual-owner-bearer", authenticatedAccountId: async () => overrides.accountId === null ? undefined : overrides.accountId ?? "owner", acceptedState, connect});
   disposals.push(() => {delivery.dispose(); controller.abort(); server?.close();});
   return {delivery, acceptedState, connect, submit, submitted, receiptChecked, feedApplied, receipt, controller,
@@ -66,7 +66,7 @@ it("uses owner bearer route and exact stored delivery bytes; waits for durable o
   const f = fixture(), fresh = await f.delivery.freshOwnerAuthority(binding);
   expect(fresh.kind).toBe("authority"); if (fresh.kind !== "authority") return;
   const call = f.connect.mock.calls[0]![0];
-  expect(call.url.toString()).toBe(`wss://relay.example.test/sync/workspaces/workspace/live/owner?objectId=object&lineageClaimId=${binding.lineageClaimId}&shareId=share`);
+  expect(call.url.toString()).toBe(`wss://relay.example.test/sync/workspaces/workspace/live/owner?objectId=object&lineageClaimId=${binding.lineageClaimId}`);
   expect(call.bearer).toBe("actual-owner-bearer"); expect(call.url.toString()).not.toContain("bearer");
   let settled = false;
   const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
@@ -121,7 +121,7 @@ it.each([
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {
-  const options = {relayUrl: "https://relay.example.test", shareId: "share", attemptTimeoutMs: 10_000, signal: new AbortController().signal,
+  const options = {relayUrl: "https://relay.example.test", attemptTimeoutMs: 10_000, signal: new AbortController().signal,
     freshBearer: async () => "bearer", acceptedState: {} as OwnerAcceptedState};
   expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}}})).toThrow("owner frame policy");
   expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}})).toThrow("owner frame policy");
