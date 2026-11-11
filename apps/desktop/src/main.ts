@@ -3652,6 +3652,8 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  readRunLogKeepDays: async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.agentRunLogs.keepDays,
   agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,

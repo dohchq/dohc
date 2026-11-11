@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
@@ -349,6 +349,29 @@ describe("agent run IPC registrations", () => {
     } } });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
     expect(h.records).toHaveBeenCalledWith("workspace-a", "thread-1", { limit: 200 });
+  });
+
+  it("says a finished run's log was removed when its file is gone, and names a running run's log", async () => {
+    const h = await harness();
+    const logs = await createTestScratch("agent-run-logs-");
+    const kept = join(logs, "run-kept.log");
+    await writeFile(kept, "output");
+    const run = (runId: string, extra: object) => ({
+      workspaceId: "workspace-a", runId, threadId: "thread-1", triggerMessageId: runId, agentId: "default", command: "claude",
+      startedAtMs: 1, failureHandled: false, ...extra,
+    });
+    h.records.mockResolvedValue({
+      kept: run("run-kept", { endedAtMs: 2, exitCode: 0, logPath: kept }),
+      gone: run("run-gone", { endedAtMs: 2, exitCode: 0, logPath: join(logs, "run-gone.log") }),
+      starting: run("run-starting", { logPath: join(logs, "run-starting.log") }),
+    });
+    const { runs } = await h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload) as { runs: Record<string, { logPath?: string; logRemoved?: true }> };
+    expect(runs.kept).toMatchObject({ logPath: kept });
+    expect(runs.kept?.logRemoved).toBeUndefined();
+    expect(runs.gone?.logRemoved).toBe(true);
+    expect(runs.gone?.logPath).toBeUndefined();
+    expect(runs.starting).toMatchObject({ logPath: join(logs, "run-starting.log") });
+    expect(runs.starting?.logRemoved).toBeUndefined();
   });
 
   it.each([CHANNELS.chatRunRecordsForThread, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, retryStoppedRun.channel])("propagates capture refusal before %s store work", async (channel) => {

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AgentsSettings,
+  DEFAULT_AGENT_RUN_LOGS_SETTINGS,
   DEFAULT_PRIVACY_SETTINGS,
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -81,6 +82,7 @@ describe("desktop user settings model", () => {
       agents: {},
       sidebar: DEFAULT_SIDEBAR_SETTINGS,
       privacy: DEFAULT_PRIVACY_SETTINGS,
+      agentRunLogs: DEFAULT_AGENT_RUN_LOGS_SETTINGS,
     });
   });
 
@@ -532,6 +534,22 @@ describe("desktop user settings store", () => {
         { key: "wallpaper", reason: "unknown" },
       ],
     });
+  });
+
+  it("keeps run logs 30 days unless the file asks for longer or forever", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const read = async (keepDays: unknown) => {
+      await writeFile(join(root, USER_SETTINGS_FILE), JSON.stringify({ version: 2, agentRunLogs: { keepDays } }));
+      const result = await readUserSettingsFile(root);
+      return { keepDays: result.settings.agentRunLogs.keepDays, ignored: result.ignored };
+    };
+    expect(DEFAULT_USER_SETTINGS.agentRunLogs.keepDays).toBe(30);
+    expect(await read(90)).toEqual({ keepDays: 90, ignored: undefined });
+    expect(await read("forever")).toEqual({ keepDays: "forever", ignored: undefined });
+    // Shorter than 30 days, or not a whole number of days, falls back to 30.
+    for (const keepDays of [7, 30.5, "never"]) {
+      expect(await read(keepDays)).toEqual({ keepDays: 30, ignored: [{ key: "agentRunLogs.keepDays", reason: "invalid" }] });
+    }
   });
 
   it("saves only what changed, so keys dohc does not use stay in the file", async () => {

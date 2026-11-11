@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { normalizeRootPath } from "@dohc/workspace-core";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
@@ -65,6 +66,10 @@ export function createAgentRunsIpc<
 
   const workspaceHandler = createWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
 
+  // dohc removes a finished run's log once the settings file stops keeping it
+  // (agents/runLogRetention.ts), so its details say so instead of naming no file.
+  const removed = (path: string) => stat(path).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+
   function registerChatRunRecords(): void {
     registerHandler(CHANNELS.chatRunRecordsForThread, workspaceHandler(async (event, payload) => {
       const input = ChatRunRecordsForThreadPayload.parse(payload);
@@ -80,8 +85,8 @@ export function createAgentRunsIpc<
         input.threadId,
         { limit: 200 },
       );
-      const runs = Object.fromEntries(
-        Object.entries(found).map(([messageId, run]) => [
+      const runs = Object.fromEntries(await Promise.all(
+        Object.entries(found).map(async ([messageId, run]) => [
           messageId,
           {
             runId: run.runId,
@@ -93,10 +98,12 @@ export function createAgentRunsIpc<
               ? { endedAtMs: run.endedAtMs }
               : {}),
             ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
-            ...(run.logPath ? { logPath: run.logPath } : {}),
+            ...(!run.logPath ? {}
+              : run.endedAtMs !== undefined && await removed(run.logPath) ? { logRemoved: true }
+              : { logPath: run.logPath }),
           },
         ]),
-      );
+      ));
       return ChatRunRecordsForThreadResult.parse({ runs });
     }));
   }

@@ -376,6 +376,16 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
   errorReports: true,
 };
 
+// How long dohc keeps a finished agent run's log (agents/runLogRetention.ts):
+// 30 days unless the settings file asks for longer, or for "forever".
+export const DEFAULT_RUN_LOG_KEEP_DAYS = 30;
+export const AgentRunLogsSettings = z.object({
+  keepDays: z.union([z.number().int().min(DEFAULT_RUN_LOG_KEEP_DAYS).max(36_500), z.literal("forever")]),
+}).strict();
+export type AgentRunLogsSettings = z.infer<typeof AgentRunLogsSettings>;
+
+export const DEFAULT_AGENT_RUN_LOGS_SETTINGS: AgentRunLogsSettings = { keepDays: DEFAULT_RUN_LOG_KEEP_DAYS };
+
 export const DesktopUserSettings = z.object({
   version: z.literal(2),
   // Added after the original v1 settings shipped. The default makes old v1
@@ -407,6 +417,7 @@ export const DesktopUserSettings = z.object({
   agents: AgentsSettings.default({}),
   sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
   privacy: PrivacySettings.default(DEFAULT_PRIVACY_SETTINGS),
+  agentRunLogs: AgentRunLogsSettings.default(DEFAULT_AGENT_RUN_LOGS_SETTINGS),
 }).strict();
 export type DesktopUserSettings = z.infer<typeof DesktopUserSettings>;
 
@@ -428,6 +439,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   agents: {},
   sidebar: DEFAULT_SIDEBAR_SETTINGS,
   privacy: DEFAULT_PRIVACY_SETTINGS,
+  agentRunLogs: DEFAULT_AGENT_RUN_LOGS_SETTINGS,
 };
 
 // Main-only settings. Actor keys never cross the renderer boundary.

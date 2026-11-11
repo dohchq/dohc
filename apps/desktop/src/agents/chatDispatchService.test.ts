@@ -8,7 +8,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -1211,6 +1211,25 @@ describe("chatDispatchService", () => {
     });
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
+  });
+
+  it("removes run logs older than the settings file keeps them when it starts", async () => {
+    const fixture = await createFixture();
+    const logs = join(fixture.stateRoot, "run-logs");
+    await mkdir(logs, { recursive: true });
+    await writeFile(join(logs, "run-old.log"), "output");
+    await writeFile(join(logs, "run-recent.log"), "output");
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    await utimes(join(logs, "run-old.log"), old, old);
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions, nowMs: () => Date.now(), readRunLogKeepDays: async () => 30,
+    });
+    service.start();
+    try {
+      await vi.waitFor(async () => expect(await readdir(logs)).toEqual(["run-recent.log"]));
+    } finally {
+      await service.stop();
+    }
   });
 
   it("reports each pause and resume once, wherever it came from", async () => {

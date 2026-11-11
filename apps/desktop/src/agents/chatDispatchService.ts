@@ -21,7 +21,8 @@ import type {
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { Agent, AgentWithLaunch } from "../settings/userSettings";
+import type { Agent, AgentRunLogsSettings, AgentWithLaunch } from "../settings/userSettings";
+import { removeExpiredRunLogs } from "./runLogRetention";
 import type { AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -149,6 +150,7 @@ export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
 const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
+export const RUN_LOG_SWEEP_MS = 24 * 60 * 60 * 1000;
 export const APP_QUIT_EXIT_CODE = 143;
 
 export const SELF_TEST_RESTRICTED_DETAIL =
@@ -208,6 +210,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   ): AwaitableAgentDispatchStore;
   // The person's agents, in the order the settings file lists them.
   readDispatchAgents(): Promise<Agent[]>;
+  // How long the settings file keeps a finished run's log.
+  readRunLogKeepDays?(): Promise<AgentRunLogsSettings["keepDays"]>;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
@@ -423,6 +427,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   >();
   const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
+  let runLogSweepTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
   let stopped = true;
@@ -1570,6 +1575,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pumpTimer = setInterval(() => {
       schedulePump();
     }, CHAT_DISPATCH_PUMP_MS);
+    void sweepRunLogs();
+    runLogSweepTimer = setInterval(() => void sweepRunLogs(), RUN_LOG_SWEEP_MS);
+  }
+
+  // At start and once a day, removes the logs of runs that ended longer ago
+  // than the settings file keeps them. A running agent's log stays.
+  async function sweepRunLogs(): Promise<void> {
+    if (!options.readRunLogKeepDays) return;
+    try {
+      await removeExpiredRunLogs({
+        stateDir: options.stateDir(),
+        keepDays: await options.readRunLogKeepDays(),
+        nowMs: nowMs(),
+        isRunning: (runId) =>
+          [...liveRuns.values()].some((live) => live.claim.run.runId === runId) ||
+          [...selfTests.values()].some((test) => test.runId === runId),
+      });
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   function setPaused(next: boolean): void {
@@ -2149,6 +2174,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopped = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
+    if (runLogSweepTimer) clearInterval(runLogSweepTimer);
+    runLogSweepTimer = null;
     for (const timer of recoveryTimers.values()) clearTimeout(timer);
     recoveryTimers.clear();
     recoveryAttempts.clear();
