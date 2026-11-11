@@ -427,7 +427,7 @@ pub(crate) fn unsupported(err: &io::Error) -> bool {
 
 /// Open `path`, sharing it for reading and writing but not for removal.
 /// `flags` adds to the flag every folder needs.
-fn open(path: &Path, access: u32, flags: u32) -> io::Result<File> {
+pub(crate) fn open(path: &Path, access: u32, flags: u32) -> io::Result<File> {
     std::fs::OpenOptions::new()
         .access_mode(access)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -530,7 +530,7 @@ fn create_dir(path: &Path, private: Option<&PrivateDescriptor>) -> io::Result<()
 
 /// Whether the volume `item` is on keeps a DACL dohc can set: a local volume
 /// with persistent ACLs.
-fn keeps_dacl(item: &File) -> io::Result<bool> {
+pub(crate) fn keeps_dacl(item: &File) -> io::Result<bool> {
     let handle = item.as_raw_handle() as HANDLE;
     let mut remote = FILE_REMOTE_PROTOCOL_INFO::default();
     // SAFETY: The handle is open and the output is writable for this
@@ -907,7 +907,7 @@ impl PrivateDescriptor {
 }
 
 /// This process's user, as a string SID.
-fn current_user() -> io::Result<String> {
+pub(crate) fn current_user() -> io::Result<String> {
     let mut token = std::ptr::null_mut();
     // SAFETY: The pseudo handle for this process needs no closing, and the
     // token handle Windows returns is closed once, by `OwnedHandle`.

@@ -61,6 +61,7 @@ import {
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import { versionNameRefusal } from "../ipc/errorWords";
+import { nextStepWords } from "../ipc/bridgeContract";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
@@ -111,6 +112,7 @@ import {
   type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import type { ChatDispatchService } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
@@ -153,6 +155,8 @@ import {
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
+import type { HeldSharePath } from "../workspaces/shareViewFiles";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -313,6 +317,10 @@ export interface CliKeptEditsPort {
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
+// The owner's Live documents list, read as the dialog reads it. Paths are
+// workspace-relative; the cursor is the list's own nextCursor.
+export type CliLiveDocumentsPort = (cursor?: string) => Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
 // Notices row offers the same step after the same warning.
@@ -402,6 +410,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // The shared files this shared view holds back, or null outside a shared view.
+  sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
   // A save the engine holds for this path, as the held band's review shows it.
   heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
@@ -438,6 +448,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
+  liveDocuments?: CliLiveDocumentsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -468,6 +479,8 @@ export interface CliServerOptions {
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
+  // Try again for a conversation's stopped agent request, as the chat runs it.
+  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun">;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -826,6 +839,10 @@ function retainedCopiesUnavailable() {
     ok: false as const,
     reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
   };
+}
+
+function liveDocumentsUnavailable() {
+  return { ok: false as const, reason: "Live documents are listed only in the original workspace. Open it to continue." };
 }
 
 function keptEditsUnavailable() {
@@ -2074,7 +2091,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2090,6 +2107,7 @@ async function dispatch(
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
   // Protected copies stay on the computer of the workspace that kept them.
   if (paths.shared && (request.verb === "restoreProtectedCopy" || request.verb === "discardProtectedCopy")) return keptCopiesUnavailable();
+  if (paths.shared && request.verb === "liveDocuments") return liveDocumentsUnavailable();
   if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
@@ -2828,6 +2846,21 @@ async function dispatchWorkspace(
       }
     }
 
+    case "sharedFilesHeld": {
+      if (!context.sharedFilesHeld) return { ok: false as const, reason: "dohc cannot read this workspace's shared files" };
+      try {
+        const held = await context.sharedFilesHeld();
+        return {
+          ok: true as const,
+          heldFiles: held && held.count > 0
+            ? { ...held, message: unjournalablePathMessages(held.files).join(" ") }
+            : null,
+        };
+      } catch (error) {
+        return mcpFailure(error, "failed to read the shared files held back");
+      }
+    }
+
     case "collectionsWaiting":
       try {
         return { ok: true as const, waiting: await context.daemonReads.collectionsWaiting() };
@@ -2933,6 +2966,16 @@ async function dispatchWorkspace(
         return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits };
       } catch (error) {
         return mcpFailure(error, `failed to stop live editing again for ${request.args.path}`);
+      }
+    }
+
+    case "liveDocuments": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        return { ok: true as const, ...await live(request.args.cursor) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list live documents");
       }
     }
 
@@ -3055,6 +3098,28 @@ async function dispatchWorkspace(
         await notifyWrite(options, context);
       }
       return shown.thread;
+    }
+
+    // Try again, for anyone who may post in the conversation: the same
+    // checks a reply makes, then the same two-attempt limit the chat's button
+    // keeps.
+    case "chatRetry": {
+      if (!options.chatRuns) return { ok: false as const, reason: "Agent runs are not available here." };
+      const { threadId } = await readReplyThread(context, chats, request.args.thread);
+      await options.chatWrites.assertMayPost(context, threadId);
+      const { failedRun } = await options.chatRuns.dispatchStateForThread(context.workspaceId, threadId);
+      if (!failedRun) return { ok: false as const, reason: "No agent request in this conversation has stopped." };
+      if (!failedRun.retryable) {
+        const nextStep = failedRun.nextStep ? ` ${nextStepWords(failedRun.nextStep, undefined)}` : "";
+        return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
+      }
+      try {
+        if (!await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId)) {
+          return { ok: false as const, reason: "This request can't run again now. Check dohc chat show for its state." };
+        }
+      } catch (error) { return mcpFailure(error, "dohc could not run this request again."); }
+      await notifyWrite(options, context);
+      return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
     }
   }
 
@@ -3566,6 +3631,7 @@ async function workspaceContextForRequest(
     request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
+    request.verb === "chatRetry" ||
     request.verb === "react" ||
     request.verb === "export" ||
     (request.verb === "show" && !request.args.peek);

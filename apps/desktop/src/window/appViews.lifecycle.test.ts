@@ -52,9 +52,9 @@ function fixture() {
     } }, appViewOperations, { appView: manager.appView });
   installAppViewEmbedder(owner as unknown as WebContents);
   cleanups.push(() => manager.closeOwner(owner.id));
-  const invoke = (payload: unknown) => Promise.resolve(handler({ sender: owner } as unknown as IpcMainInvokeEvent, payload));
+  const invoke = (payload: unknown, sender: unknown = owner) => Promise.resolve(handler({ sender } as unknown as IpcMainInvokeEvent, payload));
   const open = (viewId = "one") => invoke({ action: "open", workspaceId: "w", appRoot: "app", viewId, colorScheme: "dark" });
-  return { manager, owner, isolated, activePublication, launches, lifetime, invoke, open };
+  return { manager, owner, window, isolated, activePublication, launches, lifetime, invoke, open };
 }
 it("denies unissued attachments and strips every renderer-supplied preference from an issued one", async () => {
   const f = fixture();
@@ -92,6 +92,20 @@ it("creates no launch or guest authorization without an active approval", async 
   const event = { preventDefault: vi.fn() };
   f.owner.emit("will-attach-webview", event, {}, { src: "http://127.0.0.1:43000/bootstrap" });
   expect(event.preventDefault).toHaveBeenCalledOnce();
+});
+// dohc's tab session is the only one that credits a person's click, so main opens it only for a window's own page.
+it("opens dohc's tab session only for a workspace window's own page, never for an app's view or a frame inside one", async () => {
+  const f = fixture();
+  const request = { action: "open", workspaceId: "w", appRoot: "app", viewId: "one", colorScheme: "dark" };
+  const guest = Object.assign(new EventEmitter(), { id: nextId++, isDestroyed: () => false, send: vi.fn() });
+  vi.mocked(BrowserWindow.fromWebContents).mockReturnValueOnce(null);
+  await expect(f.invoke(request, guest)).rejects.toThrow("Open this app from its workspace window.");
+  vi.mocked(BrowserWindow.fromWebContents).mockReturnValueOnce(f.window as unknown as Electron.BrowserWindow);
+  await expect(f.invoke(request, guest)).rejects.toThrow("Open this app from its workspace window.");
+  expect(f.activePublication).not.toHaveBeenCalled();
+  expect(f.launches).toHaveLength(0);
+  expect(await f.open()).toMatchObject({ kind: "opened", viewId: "one" });
+  expect(f.launches).toHaveLength(1);
 });
 it("refuses a launch URL issued to another owning window", async () => {
   const first = fixture();

@@ -528,11 +528,13 @@ describe("mcp tools operate on allowed paths", () => {
           asked.push(request.verb);
           expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
           if (request.verb === "liveKeptEdits") return { ok: true, keptEdits };
+          if (request.verb === "sharedFilesHeld") return { ok: true, heldFiles: null };
           if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
           return { ok: true, waiting };
         } });
         expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting, keptEdits });
-        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits"]);
+        expect(status).not.toHaveProperty("heldFiles");
+        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits", "sharedFilesHeld"]);
       }
       const unanswered = await workspaceStatus({ ...ctx, request: async () => ({ ok: false, reason: "engine stopped" }) });
       expect(unanswered).toMatchObject({ synced: true });
@@ -542,10 +544,26 @@ describe("mcp tools operate on allowed paths", () => {
       const asked: string[] = [];
       const shared = await workspaceStatus({ ...ctx, shareAccess: "edit", request: async (request) => {
         asked.push(request.verb);
-        return { ok: true, waiting: false };
+        return request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: true, waiting: false };
       } });
       expect(shared).not.toHaveProperty("keptEdits");
-      expect(asked).toEqual(["collectionsWaiting"]);
+      expect(asked).toEqual(["collectionsWaiting", "sharedFilesHeld"]);
+    });
+  });
+
+  it("workspace_status names shared files held back and the step for each, as the desktop answers", async () => {
+    await withWorkspace(async (ctx) => {
+      const heldFiles = {
+        count: 1,
+        files: [{ path: "mine.md", reason: "local-collision" }],
+        message: "mine.md already has a file from this machine. Move or rename this file to receive the shared file.",
+      };
+      const status = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
+        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles } : { ok: false, reason: "not asked" } });
+      expect(status).toMatchObject({ heldFiles });
+      const none = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
+        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: false, reason: "not asked" } });
+      expect(none).not.toHaveProperty("heldFiles");
     });
   });
 

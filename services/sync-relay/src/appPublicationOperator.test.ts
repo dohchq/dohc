@@ -8,6 +8,8 @@ import { startPublicationOperator } from "./appPublicationOperator";
 import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { requestPublicationTakedown } from "./appPublicationOperatorClient";
 import { notFound } from "./errors";
+import type { SyncRelayStorage } from "./storage";
+import { TAKEDOWN_LISTED_COPIES } from "./storage/publications";
 
 let root: string;
 const cleanups: (() => Promise<void>)[] = [];
@@ -72,6 +74,23 @@ it("lifts a publishing hold through one exact request shape", async () => {
   expect(await requestPublicationTakedown(path, lift, secret)).toMatchObject({code: 0, publicationId: lift.publicationId, message: expect.stringContaining("The publication stays disabled.")});
   expect(await requestPublicationTakedown(path, {...lift, publicationId: "b".repeat(64)}, secret)).toMatchObject({code: 3, message: expect.stringContaining("No app publishing hold matches")});
   expect(disableAppPublication).not.toHaveBeenCalled();
+});
+
+it("lists the owner's other active copies in a takedown reply that fits the client's limit", async () => {
+  const publicationIds = Array.from({length: TAKEDOWN_LISTED_COPIES}, (_, index) => index.toString(16).padStart(64, "c"));
+  const disableAppPublication = vi.fn((input: {publicationId: string; reason: string; nowMs: number}) => ({
+    publicationId: input.publicationId, authorityRevision: 2, operatorTakedown: {actor: "operator" as const, disabledAtMs: input.nowMs, reason: input.reason},
+    otherActiveCopies: {publicationIds, total: TAKEDOWN_LISTED_COPIES + 1},
+  }) as ReturnType<SyncRelayStorage["disableAppPublication"]>);
+  const path = operatorSocketPath({SYNC_RELAY_DB_PATH: join(root, "copies.sqlite")});
+  const operator = await startPublicationOperator({disableAppPublication, liftAppPublishingHold: unusedLift}, path, join(root, "copies", "operator.secret"));
+  cleanups.push(() => operator.close());
+  const secret = await readFile(join(root, "copies", "operator.secret"), "utf8");
+  const result = await requestPublicationTakedown(path, {type: "disable-publication", publicationId: "a".repeat(64), reason: "Malware"}, secret);
+  expect(result).toMatchObject({code: 0, otherActiveCopies: {publicationIds, total: TAKEDOWN_LISTED_COPIES + 1}});
+  expect(result.message).toContain(`The owner has ${TAKEDOWN_LISTED_COPIES + 1} other active publications of this app.`);
+  expect(result.message).toContain(`\n${publicationIds.join("\n")}\n`);
+  expect(result.message).toContain(`These are the first ${TAKEDOWN_LISTED_COPIES}.`);
 });
 
 it("times out a client whose connected relay never responds", async () => {

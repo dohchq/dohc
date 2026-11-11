@@ -115,23 +115,10 @@ describe("Overlay", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("stays open on a press outside its panel", () => {
+  it("closes on a press outside its panel, not on a press inside", () => {
     const onClose = vi.fn();
     render(
       <Overlay onClose={onClose}>
-        <input aria-label="Name" />
-      </Overlay>,
-    );
-
-    pressBackdrop();
-
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it("closes a picker on a press outside its panel", () => {
-    const onClose = vi.fn();
-    render(
-      <Overlay onClose={onClose} closeOnBackdrop>
         <button type="button">Result</button>
       </Overlay>,
     );
@@ -143,11 +130,11 @@ describe("Overlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a picker open when the press began inside its panel", async () => {
+  it("stays open when the press began inside its panel", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
-      <Overlay onClose={onClose} closeOnBackdrop>
+      <Overlay onClose={onClose}>
         <input aria-label="Name" defaultValue="Selected text" />
       </Overlay>,
     );
@@ -164,7 +151,7 @@ describe("Overlay", () => {
   it("stays open on a press outside while a field holds what it can't save, and focuses it", () => {
     const onClose = vi.fn();
     render(
-      <Overlay onClose={onClose} closeOnBackdrop>
+      <Overlay onClose={onClose}>
         <button type="button">First</button>
         <input aria-label="Held" data-unsaved />
       </Overlay>,
@@ -210,7 +197,7 @@ describe("Overlay", () => {
     function Dialog() {
       const [menuOpen, setMenuOpen] = useState(false);
       return (
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
             items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
         </Overlay>
@@ -226,6 +213,83 @@ describe("Overlay", () => {
     expect(onClose).not.toHaveBeenCalled();
     await user.click(backdrop());
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("stays open on a press outside while it passes no onClose", () => {
+    render(
+      <Overlay>
+        <button type="button">Saving</button>
+      </Overlay>,
+    );
+
+    pressBackdrop();
+
+    expect(backdrop()).toBeTruthy();
+  });
+
+  // The inner dialog opens after the outer one, as it does in the app.
+  function Nested(props: { onCloseOuter: () => void; inner?: { onClose?: () => void } }) {
+    return (
+      <Overlay onClose={props.onCloseOuter}>
+        <button type="button">Outer</button>
+        {props.inner ? <Overlay onClose={props.inner.onClose}><button type="button">Inner</button></Overlay> : null}
+      </Overlay>
+    );
+  }
+
+  it("closes only the topmost of two nested overlays on a press outside", () => {
+    const onCloseOuter = vi.fn();
+    const onCloseInner = vi.fn();
+    const { rerender } = render(<Nested onCloseOuter={onCloseOuter} />);
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{ onClose: onCloseInner }} />);
+    const [outer, inner] = document.querySelectorAll<HTMLElement>('[data-dohc-modal="true"]');
+
+    fireEvent.pointerDown(inner!);
+    fireEvent.click(inner!);
+
+    expect(onCloseInner).toHaveBeenCalledTimes(1);
+    expect(onCloseOuter).not.toHaveBeenCalled();
+    rerender(<Nested onCloseOuter={onCloseOuter} />);
+    fireEvent.pointerDown(outer!);
+    fireEvent.click(outer!);
+    expect(onCloseOuter).toHaveBeenCalledTimes(1);
+  });
+
+  // A finished pop-in keeps a transform on the outer panel, so the inner
+  // backdrop covers only that panel and a press beside it lands on the outer
+  // backdrop. It still closes only the inner dialog, and not while it is busy.
+  it("gives a press on the outer backdrop to the nested overlay on top", () => {
+    const onCloseOuter = vi.fn();
+    const onCloseInner = vi.fn();
+    const { rerender } = render(<Nested onCloseOuter={onCloseOuter} />);
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{}} />);
+    const outer = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+
+    fireEvent.pointerDown(outer());
+    fireEvent.click(outer());
+    expect(onCloseOuter).not.toHaveBeenCalled();
+
+    rerender(<Nested onCloseOuter={onCloseOuter} inner={{ onClose: onCloseInner }} />);
+    fireEvent.pointerDown(outer());
+    fireEvent.click(outer());
+    expect(onCloseInner).toHaveBeenCalledTimes(1);
+    expect(onCloseOuter).not.toHaveBeenCalled();
+  });
+
+  it("frees the titlebar for a press outside while any overlay is open", () => {
+    const root = document.documentElement;
+    const { rerender, unmount } = render(
+      <Overlay onClose={vi.fn()}>
+        <Overlay onClose={vi.fn()}>Inner</Overlay>
+      </Overlay>,
+    );
+    expect(root.hasAttribute("data-modal-open")).toBe(true);
+
+    rerender(<Overlay onClose={vi.fn()}>Outer</Overlay>);
+    expect(root.hasAttribute("data-modal-open")).toBe(true);
+
+    unmount();
+    expect(root.hasAttribute("data-modal-open")).toBe(false);
   });
 
   it("closes only the topmost of two nested overlays on Escape", () => {
@@ -376,16 +440,16 @@ describe("Overlay with toasts above it", () => {
   });
 });
 
-function FocusDialog({ removeOpener = false, picker = false }: { removeOpener?: boolean; picker?: boolean }) {
+function FocusDialog({ removeOpener = false }: { removeOpener?: boolean }) {
   const [open, setOpen] = useState(false);
   return <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
     {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
-    {open && <Overlay onClose={() => setOpen(false)} closeOnBackdrop={picker}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
+    {open && <Overlay onClose={() => setOpen(false)}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
   </section>;
 }
 
 it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (action) => {
-  render(<StrictMode><FocusDialog picker={action === "backdrop"} /></StrictMode>);
+  render(<StrictMode><FocusDialog /></StrictMode>);
   const opener = screen.getByText("Open dialog");
   opener.focus();
   fireEvent.click(opener);

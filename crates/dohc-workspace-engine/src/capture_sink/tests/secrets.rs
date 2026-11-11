@@ -221,6 +221,11 @@ fn missing_key_over_existing_secret_state_fails_closed_instead_of_reminting() {
     write_file(scratch.path(), ".env", b"TOKEN=changed");
     let err = ingest(&mut fresh, ".env").expect_err("must not mint over live secret state");
     assert_eq!(err.reason, "workspace secret key unavailable");
+    assert_eq!(
+        fresh.secret_key_health(),
+        SecretKeyHealth::Unavailable(SecretKeyFailure::Missing)
+    );
+    assert_eq!(SecretKeyFailure::Missing.code(), Some("key-missing"));
     assert!(
         !scratch.path().join(".dohc/engine/secret.key").exists(),
         "no fresh key was minted over the orphaned history"

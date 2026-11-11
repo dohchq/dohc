@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -40,6 +40,8 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_list_automation_runs",
   "dohc_read_automation_run",
   "dohc_retry_automation_run",
+  // Only the computer that ran a request runs it again.
+  "dohc_retry_chat_run",
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
@@ -246,6 +248,27 @@ describe("parseArgs", () => {
 
 
 describe("MCP tool results", () => {
+  it("refuses an argument a tool does not take, and names the ones it does", async () => {
+    const request = vi.fn();
+    const { client, names } = await connectedToolNames({ root: "/workspace", home: "/home", request });
+    const refusal = async (name: string, args: Record<string, unknown>) => {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError, name).toBe(true);
+      return (result.content as { text: string }[])[0]!.text;
+    };
+    // `file` for `path` would otherwise list the whole workspace's history as a success.
+    expect(await refusal("dohc_list_changes", { file: "notes/plan.md", limit: 5 }))
+      .toContain('Unknown argument "file". This tool takes sinceMs, limit, includeFiles, path.');
+    expect(await refusal("dohc_list_groups", { group: "general", kind: "dm" }))
+      .toContain('Unknown arguments "group", "kind". This tool takes no arguments.');
+    for (const name of names) expect(await refusal(name, { notAnArgument: 1 }), name).toContain('Unknown argument "notAnArgument".');
+    for (const [name, args] of [
+      ["dohc_delete_retained_copies", { copies: [{ id: 1, revision: 1, force: true }], acceptLateWriteRisk: true }],
+      ["dohc_query_collection", { collectionPath: "tasks", filter: { field: "status", operator: "equals", value: "done", not: true } }],
+      ["dohc_query_collection", { collectionPath: "tasks", sort: [{ field: "status", direction: "asc", nulls: "last" }] }],
+    ] as const) expect(await refusal(name, args), name).toContain("Unrecognized key");
+    expect(request).not.toHaveBeenCalled();
+  });
   it("marks partial form creation as an error and preserves structured facts", async () => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
       retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };
@@ -648,6 +671,26 @@ describe("share copy profile admission", () => {
   it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
     const request = vi.fn(async () => details);
     expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("live documents profile admission", () => {
+  const page = { ok: true, documents: [{ path: "plan.md", objectId: "object-plan", status: "retired", canResume: true }], nextCursor: null };
+  it("advertises and calls dohc_list_live_documents only for the owner profile, with only the cursor", async () => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain("dohc_list_live_documents");
+    expect((await client.callTool({ name: "dohc_list_live_documents", arguments: { cursor: "notes/old.md" } })).structuredContent).toEqual(page);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "liveDocuments", door: "mcp", args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("does not offer the list to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    expect(names).not.toContain("dohc_list_live_documents");
+    expect(await client.callTool({ name: "dohc_list_live_documents", arguments: {} })).toMatchObject({ isError: true });
+    expect(await listLiveDocuments({ root: "/workspace", home: "/state", shareAccess, request }, {}))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
     expect(request).not.toHaveBeenCalled();
   });
 });

@@ -1037,6 +1037,17 @@ it("decodes outside writes waiting for an open document", () => {
   }
 });
 
+it("decodes why protected files wait on the secret key", () => {
+  const status = { running: true, degraded: true, terminal: false, phase: "ready",
+    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+    heldFiles: [], retainedCopies: { count: 0, bytes: 0 }, deferredWrites: [],
+    secretKeyUnavailable: "volume-shares-new-files" };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
+  for (const secretKeyUnavailable of [null, "", 1]) {
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, secretKeyUnavailable })).toThrow(ProtocolShapeError);
+  }
+});
+
 const heldFile = {
   workspaceId: "workspace",
   sourceVersionId: "main",

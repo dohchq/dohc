@@ -3,7 +3,7 @@ import {MessageChannel as NodeMessageChannel, type MessagePort as NodeMessagePor
 import {once} from 'node:events';
 import {attachAppCollectionBroker} from '@dohc/app-browser/broker';
 
-function harness(send:(body:unknown,signal:AbortSignal)=>Promise<Response> = async body=>Response.json(body)) {
+function harness(send:(body:unknown,signal:AbortSignal,request:{activated:boolean})=>Promise<Response> = async body=>Response.json(body)) {
   vi.stubGlobal('MessageChannel',NodeMessageChannel);
   const frame=new EventTarget();let port!:NodeMessagePort;
   Object.assign(frame,{contentWindow:{postMessage(message:unknown,target:string,ports:NodeMessagePort[]){expect(message).toEqual({kind:'dohc-app-channel',version:1});expect(target).toBe('*');expect(ports).toHaveLength(1);port=ports[0]!;}}});
@@ -17,6 +17,18 @@ it('forwards collection list/create and returns data without session material',a
     expect((await f.request({id:'create',op:'collection.create',idempotencyKey:'vote',fields:{destination:'Tokyo'}})).ok).toBe(true);
     expect(await f.request({id:'fetch',op:'fetch',url:'https://private'})).toEqual({id:'fetch',ok:false,status:400});
     expect(await f.request({id:'extra',op:'collection.list',limit:1,authorityRevision:99})).toEqual({id:'extra',ok:false,status:400});expect(calls).toHaveLength(2);
+  }finally{f.close();}
+});
+it('reports the bootstrap window activation and refuses one the app sends',async()=>{
+  // The page opened already activated, as a browser can open it.
+  let isActive=true;vi.stubGlobal('navigator',{userActivation:{get isActive(){return isActive;}}});
+  const seen:unknown[]=[];const f=harness(async(_body,_signal,request)=>{seen.push(request);return Response.json({});});
+  try{
+    expect((await f.request({id:'opened',op:'collection.list',limit:1})).ok).toBe(true);
+    isActive=false;expect((await f.request({id:'idle',op:'collection.list',limit:1})).ok).toBe(true);
+    isActive=true;expect((await f.request({id:'pressed',op:'collection.list',limit:1})).ok).toBe(true);
+    isActive=false;expect((await f.request({id:'claimed',op:'collection.create',idempotencyKey:'vote',fields:{destination:'Tokyo'},activated:true})).status).toBe(400);
+    expect(seen).toEqual([{activated:false},{activated:false},{activated:true}]);
   }finally{f.close();}
 });
 it('forwards backend operations, uploads, and file reads while rejecting supplied authority',async()=>{

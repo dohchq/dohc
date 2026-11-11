@@ -25,7 +25,7 @@
 
 use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, CarriedPass, DeferredWrites, FIRST_IMPORT_SUMMARY,
-    PolicyState, SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
+    PolicyState, SecretKeyHealth, SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
 };
 use crate::{
     CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
@@ -971,6 +971,9 @@ pub(crate) struct DriverStatus {
     deferred_writes: std::sync::Mutex<DeferredWrites>,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
+    /// Why protected files can't be captured, as a stable code, until a run
+    /// loads the key or finishes clean.
+    secret_key_unavailable: std::sync::Mutex<Option<&'static str>>,
 }
 
 /// The files layer (actor + watcher + loop) is up and driving.
@@ -1056,6 +1059,27 @@ pub(crate) struct StatusSnapshot {
 impl DriverStatus {
     pub(crate) fn deferred_writes(&self) -> Vec<String> {
         crate::lock(&self.deferred_writes).keys().cloned().collect()
+    }
+
+    pub(crate) fn secret_key_unavailable(&self) -> Option<&'static str> {
+        *crate::lock(&self.secret_key_unavailable)
+    }
+
+    /// Keep the reason from a failed key load until a run loads the key, or
+    /// a clean run shows that no protected file is waiting on it. A busy
+    /// store says nothing new about the key, so it keeps the last reason.
+    fn record_secret_key(&self, health: SecretKeyHealth, clean: bool) {
+        let mut reason = crate::lock(&self.secret_key_unavailable);
+        match health {
+            SecretKeyHealth::Unavailable(failure) => {
+                if let Some(code) = failure.code() {
+                    *reason = Some(code);
+                }
+            }
+            SecretKeyHealth::Loaded => *reason = None,
+            SecretKeyHealth::Untried if clean => *reason = None,
+            SecretKeyHealth::Untried => {}
+        }
     }
 
     /// One load; all flags decoded from the same word.
@@ -3123,6 +3147,7 @@ struct CaptureThreadOutcome {
     result: CaptureApplyResult,
     deferred_writes: DeferredWrites,
     policy_held: bool,
+    secret_key: SecretKeyHealth,
     collections: Option<Result<bool, CollectionReconcileFailure>>,
     collection_release_generation: u64,
     /// Automation claims the ordinary file captures committed.
@@ -3679,6 +3704,7 @@ async fn apply_bound_run_with_handle(
                 result,
                 deferred_writes: sink.take_deferred_writes(),
                 policy_held: sink.policy_held(),
+                secret_key: sink.secret_key_health(),
                 collections,
                 collection_release_generation,
                 automation_claims: sink.take_automation_claims(),
@@ -3700,6 +3726,7 @@ async fn apply_bound_run_with_handle(
         mut result,
         mut deferred_writes,
         policy_held: sink_policy_held,
+        secret_key,
         collections: collection_result,
         collection_release_generation,
         automation_claims,
@@ -3903,6 +3930,7 @@ async fn apply_bound_run_with_handle(
         status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
+    status.record_secret_key(secret_key, clean);
     // One event per settled batch/reconcile pass that settled anything. The
     // domain writes are already durable here, so the announce happens even if
     // the files-layer ack below fails — the renderer must never stay stale over bookkeeping.

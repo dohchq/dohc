@@ -21,6 +21,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 
 A tool or command that cannot do what was asked returns `{ ok: false, reason }`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
 
+A desktop MCP tool refuses an argument it does not take. The error names that argument and lists the ones the tool takes.
+
 Partial form creation returns `{ kind: "partial", created, failedStage, reason, retry }`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
@@ -102,7 +104,7 @@ Report whether this workspace is local-only or cloud-synced. In the owning works
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, heldFiles?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. These fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -352,6 +354,16 @@ Changes the workspace, so a shared view does not offer it.
 - `incident`: `string`. Required.
 
 Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
+
+### `dohc_list_live_documents`
+
+List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.
+
+Live editing belongs to the owner's sharing. Shared profiles do not offer this read.
+
+- `cursor`: `string`
+
+Returns `{ ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor } | { ok: false, reason }`.
 
 ### `dohc_list_retained_copies`
 
@@ -662,6 +674,16 @@ Changes the workspace, so a shared view does not offer it.
 - `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
+
+### `dohc_retry_chat_run`
+
+Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `threadId`: `string`. Required.
+
+Returns `{ ok: true, status: "queued", threadId } | { ok: false, reason }`.
 
 ### `dohc_query_collection`
 
@@ -980,7 +1002,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -1133,6 +1155,20 @@ Take the incident from kept-edits. Accepts a recovery of not-written or stopping
 
 With `--json`, prints `{ schemaVersion, ok: true, path, keptEdits }`.
 
+#### `dohc document live`
+
+```sh
+dohc document live [options]
+```
+
+List this workspace's live documents, with each one's state and why.
+
+status is ready, preparing, paused, unavailable, or retired once live editing stopped. reason says why a document is not live. canResume is true when Resume in Live documents can start it again. document-unavailable: The file moved or was removed on this computer. Review it in Live documents. workspace-changed: The workspace changed while live editing ran. Review it in Live documents. session-host-refused: The server stopped live editing. The file and its history are unchanged. Resume tries again. session-host-diverged: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. live-document-without-lineage: Live editing can't start until the document is opened once in dohc. Open it, then Resume. live-edit-unadmitted: The server hasn't applied an edit. Resume tries again. conflict-parent-withheld: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits. quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server. Pass nextCursor as --cursor until it is null.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor }`.
+
 ### `dohc chat`
 
 Read and post in Groups and threads.
@@ -1257,6 +1293,18 @@ Use - as the body to read it from stdin. With --work, the thread shows a Work ca
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
+
+#### `dohc chat retry`
+
+```sh
+dohc chat retry <thread> [options]
+```
+
+Run an agent's stopped request in a conversation again, as Try again does.
+
+dohc chat show reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.
+
+With `--json`, prints `{ schemaVersion, ok: true, status: "queued", threadId }` or `{ schemaVersion, ok: false, reason }`.
 
 #### `dohc chat react`
 

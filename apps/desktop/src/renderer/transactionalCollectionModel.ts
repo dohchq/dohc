@@ -62,8 +62,30 @@ export function supportsInput(field: TransactionalField): boolean { return field
 export function supportsSort(field: TransactionalField): boolean {
   return field.type !== "attachment" && field.type !== "multi-select" && !field.relation?.many;
 }
+/** What a field's stored values mean: two definitions with one shape read the same values the same way. A rename or `required` keeps it. */
+export function fieldShape(field: TransactionalField): string {
+  return JSON.stringify([field.type, field.options ?? null, field.relation ?? null]);
+}
+/**
+ * Whether a value typed under one definition of a field can't be saved under
+ * its definition now, or at all once the field is gone. An empty value fits
+ * any field, and a choice fits while it is still one of the options.
+ */
+export function cannotTake(typedUnder: TransactionalField, now: TransactionalField | undefined, value: AppBackendJson): boolean {
+  if (isEmptyValue(value)) return false;
+  if (!now || now.type !== typedUnder.type || JSON.stringify(now.relation ?? null) !== JSON.stringify(typedUnder.relation ?? null)) return true;
+  if (now.type !== "select" && now.type !== "multi-select") return false;
+  return (Array.isArray(value) ? value : [value]).some(option => typeof option !== "string" || !now.options?.includes(option));
+}
 export function initialValue(field: TransactionalField): AppBackendJson {
-  return field.default ?? (field.type === "checkbox" ? false : field.type === "multi-select" || field.relation?.many ? [] : null);
+  return field.default ?? emptyValue(field);
+}
+/** The value a field holds when nothing is chosen or typed. */
+export function emptyValue(field: TransactionalField): AppBackendJson {
+  return field.type === "checkbox" ? false : field.type === "multi-select" || field.relation?.many ? [] : null;
+}
+export function isEmptyValue(value: AppBackendJson): boolean {
+  return value === null || value === "" || (Array.isArray(value) && value.length === 0);
 }
 export function inputProblem(field: TransactionalField, value: AppBackendJson): string | null {
   if (value === null || value === "") return field.required ? `Enter ${field.name}.` : null;

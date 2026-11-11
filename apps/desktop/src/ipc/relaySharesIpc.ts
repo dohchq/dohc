@@ -174,6 +174,9 @@ export function createOwnerLiveDocumentActions<
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: OwnerLiveDocumentActionDependencies<Workspace>) {
   const {remoteForWorkspace, currentCredentialGeneration, relayShareJsonWithCredentials} = dependencies;
+  const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
+    remoteForWorkspace, credentialGeneration: currentCredentialGeneration,
+  });
   const changed = () => new Error("This document changed. Open Live documents to check it.");
   // A Stop reports "recovered" only when the engine says settlement wrote the
   // refused edits into the file. Otherwise they stay kept: in their queue, or
@@ -289,17 +292,17 @@ export function createOwnerLiveDocumentActions<
       const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
       let released: OwnerLiveStop | undefined;
-      await unchanged();
       try {
+        await unchanged();
         released=await dependencies.ownerLiveStop(operation.workspace,local.binding ? "release" : "retired",document.currentPath,local.binding ?? local.document,response.acceptedCursor);
       } catch (error) {
-        // The server already stopped live editing. A release that did not
-        // commit kept the queue, and Stop reconciliation tries it again; one
-        // that committed left a record that the file still needs the edits.
-        if (!quarantined) throw error;
+        // The server already stopped live editing, so the Stop did. A release
+        // that did not run or commit kept its Stop row, and Stop reconciliation
+        // sends it again; one that committed left a record that the file still
+        // needs the edits. A file deleted outside dohc refuses the release's write.
         operation.assertCurrent();
-        console.error("[desktop] owner live release kept the refused edits:",error);
-        return {keptEdits:"kept"};
+        console.error("[desktop] owner live release failed after the server stopped live editing:",error);
+        return {keptEdits:quarantined || onServer ? "kept" : "none"};
       }
       operation.assertCurrent();
       return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released)};
@@ -329,7 +332,51 @@ export function createOwnerLiveDocumentActions<
       operation.assertCurrent();
     });
   };
+  /** The Live documents list: the server's documents with this computer's Stops and kept edits, for the window and agents alike. */
+  const list = async (input: {retiredAfter?: string}, operation: Operation): Promise<OwnerLiveDocumentsResult> => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
+      const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
+      const after = input.retiredAfter === undefined ? "" : `&after=${encodeURIComponent(input.retiredAfter)}`;
+      const [active, retired] = await session.run(() => Promise.all([
+        relayShareJsonWithCredentials<unknown>(credentials, path),
+        relayShareJsonWithCredentials<unknown>(credentials, `${path}?retired=1${after}`),
+      ]));
+      const current = activeLiveDocuments.parse(active);
+      const stopped = retiredLiveDocuments.parse(retired);
+      const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
+      operation.assertCurrent();
+      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.lastPath ||
+        stopped.nextCursor === input.retiredAfter)) {
+        throw new Error("The live document list changed. Refresh the list and try again.");
+      }
+      // Concurrent list reads may see a document in both sets. The current
+      // enrollment wins; all bindings and server-only credentials stay in main.
+      // Resume is also how the owner tries again a document the server refused,
+      // one it could not start until the owner opened it, or one whose server
+      // copy is missing an owner edit: Resume retires the held session so the
+      // edit can apply.
+      const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
+        ...document, canResume: ownerLiveDocumentCanResume(document),
+      }]));
+      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
+      const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
+      for (const row of documents.values()) {
+        // Each row speaks for the server's document, never for another that had or has its path.
+        const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
+        if (deferred) Object.assign(row, {deferredStop: deferred,
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
+        // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
+        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
+        const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
+          ...(quarantine.earlier ? {earlier: true} : {})});
+      }
+      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
+        nextCursor: stopped.nextCursor});
+    }, assertOriginalWorkspace);
+  };
   return {
+    list,
     /** A Stop, or with `again` a Stop again of that row's document only, for the window and agents alike. */
     stop,
     resume,
@@ -388,49 +435,6 @@ export function createRelaySharesIpcHandlers<
       sharesChanged(workspaceId);
       return result;
     };
-  const listOwnerLiveDocuments: Handlers["listOwnerLiveDocuments"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
-      const after = input.retiredAfter === undefined ? "" : `&after=${encodeURIComponent(input.retiredAfter)}`;
-      const [active, retired] = await session.run(() => Promise.all([
-        relayShareJsonWithCredentials<unknown>(credentials, path),
-        relayShareJsonWithCredentials<unknown>(credentials, `${path}?retired=1${after}`),
-      ]));
-      const current = activeLiveDocuments.parse(active);
-      const stopped = retiredLiveDocuments.parse(retired);
-      const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
-      operation.assertCurrent();
-      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.lastPath ||
-        stopped.nextCursor === input.retiredAfter)) {
-        throw new Error("The live document list changed. Refresh the list and try again.");
-      }
-      // Concurrent list reads may see a document in both sets. The current
-      // enrollment wins; all bindings and server-only credentials stay in main.
-      // Resume is also how the owner tries again a document the server refused,
-      // one it could not start until the owner opened it, or one whose server
-      // copy is missing an owner edit: Resume retires the held session so the
-      // edit can apply.
-      const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
-        ...document, canResume: ownerLiveDocumentCanResume(document),
-      }]));
-      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
-      const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
-      for (const row of documents.values()) {
-        // Each row speaks for the server's document, never for another that had or has its path.
-        const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
-        if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
-        // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
-        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
-        const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
-          ...(quarantine.earlier ? {earlier: true} : {})});
-      }
-      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
-        nextCursor: stopped.nextCursor});
-    }, assertOriginalWorkspace);
-  };
-
   const listOwnerLiveRefusals: Handlers["listOwnerLiveRefusals"] = async (input, { operation }) => {
     return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const after = input.after === undefined ? "" : `&after=${encodeURIComponent(input.after)}`;
@@ -1251,7 +1255,7 @@ export function createRelaySharesIpcHandlers<
 
   return {
     ownerRestore,
-    listOwnerLiveDocuments,
+    listOwnerLiveDocuments: (input, { operation }) => ownerLiveDocuments.list(input, operation),
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
     stopOwnerLiveDocument: async (input, { operation }) => {

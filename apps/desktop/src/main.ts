@@ -57,7 +57,7 @@ import {
 } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
-import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
+import { registerStopAndRestoreIpc, watchReleaseOutsideFile } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
 import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
 import { collectionPlace, createBackgroundDatasetRouter, finishedTransfer, movedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
@@ -73,6 +73,7 @@ import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { localCollectionAuthor } from "./workspaces/localCollectionApps";
 import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
@@ -457,6 +458,7 @@ import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
+import { readOwnerDraftState } from "./workspaces/ownerDraftRead";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -568,6 +570,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
+import { runLogKeepDays } from "./agents/runLogRetention";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
 import { createPersonalAgentRoster } from "./agents/personalAgentRoster";
@@ -2762,6 +2765,7 @@ const activity = {
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+      ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
@@ -3652,6 +3656,8 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  readRunLogKeepDays: async () =>
+    runLogKeepDays(await readCachedUserSettingsFile(stateDir())),
   agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,
@@ -5001,10 +5007,10 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
               return result.value;
             } });
         },
-        collectionAuthor: async () => {
+        collectionAuthor: async (activated) => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
           if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
-          return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
+          return localCollectionAuthor(run, activated, localPerson);
         },
       });
       slot.pending = pending;
@@ -5042,6 +5048,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
+let ownerLiveDocumentsForCli: ((operation: DesktopWorkspaceOperation, input: { retiredAfter?: string }) => Promise<import("./ipc/bridgeContract").OwnerLiveDocumentsResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -5109,6 +5116,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
       if (!ownerLiveStopAgainForCli) throw new Error("Live editing is not ready. Try again.");
       return ownerLiveStopAgainForCli(operation, kept);
     },
+  },
+  // The Live documents list, as the dialog reads it.
+  ownerLiveDocuments: (operation, input) => {
+    if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
+    return ownerLiveDocumentsForCli(operation, input);
   },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
@@ -5204,6 +5216,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  shareProjection: ownedShareProjection,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   localPerson,
@@ -5232,6 +5245,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
+  onLiveEditsPaused: (workspaceId, path) => desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,
@@ -5248,6 +5262,12 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
   },
   isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
+  ownerDraftState: (workspace, path) => requireEngineSessions().run(workspace, async session => {
+    const client = desktopEngine.daemon?.currentClient();
+    if (!(client instanceof EngineClient)) throw new Error("dohc could not read this note. Restart dohc and try again.");
+    return readOwnerDraftState(client, session.workspace, path, async () =>
+      (await withEngineAdapter(workspace, adapter => adapter.getActiveVersion({ workspaceId: workspace.workspaceId })))?.id ?? "main");
+  }),
   sharedCaptureFor: async (workspace) => {
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
@@ -5888,23 +5908,24 @@ async function ensureOwnedProjectionCurrent(
   });
 }
 
-async function syncStatusWithOwnedProjection(
+async function ownedShareProjection(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-  status: SyncStatusResult,
-): Promise<SyncStatusResult> {
-  if (!shareViewIsPresent(workspace.shareView)) return status;
+): Promise<SyncStatusResult["shareProjection"]> {
+  if (!shareViewIsPresent(workspace.shareView)) return undefined;
   const projection = await shareViewFiles.projectionStatus({
     kind: "standalone",
     workspaceId: workspace.workspaceId,
   });
-  if (projection.state === "unavailable") return status;
-  return {
-    ...status,
-    shareProjection:
-      projection.state === "current"
-        ? { state: "current" }
-        : projection,
-  };
+  if (projection.state === "unavailable") return undefined;
+  return projection.state === "current" ? { state: "current" } : projection;
+}
+
+async function syncStatusWithOwnedProjection(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  status: SyncStatusResult,
+): Promise<SyncStatusResult> {
+  const shareProjection = await ownedShareProjection(workspace);
+  return shareProjection ? { ...status, shareProjection } : status;
 }
 
 // Main and the test runner share the OS monotonic clock, including across processes.
@@ -6886,6 +6907,7 @@ function registerIpcHandlers(): void {
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
   };
+  ownerLiveDocumentsForCli = (operation, input) => agentOwnerLiveDocuments.list(input, operation);
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
@@ -7484,17 +7506,11 @@ function registerIpcHandlers(): void {
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
     localPerson,
-    // Stop and restore removes the page next, so a release that left edits
-    // outside the file, deferred or with its Markdown write held, counts as kept.
     stopLiveEditing: async (operation, path, objectId) => {
-      let outsideFile = false;
+      const release = watchReleaseOutsideFile(ownerLiveDocumentDependencies.ownerLiveStop);
       const actions = createOwnerLiveDocumentActions<DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
         ...ownerLiveDocumentDependencies,
-        ownerLiveStop: async (...args) => {
-          const stop = await ownerLiveDocumentDependencies.ownerLiveStop(...args);
-          if (args[1] === "release" && (stop?.deferred || stop?.settlementReason)) outsideFile = true;
-          return stop;
-        },
+        ownerLiveStop: release.ownerLiveStop,
       });
       const workspaceId = operation.workspace.workspaceId;
       const document = await ownerLiveDocumentDependencies.liveDocument(operation.workspace, {path});
@@ -7503,7 +7519,7 @@ function registerIpcHandlers(): void {
       if (document?.objectId !== objectId) throw new Error(`"${path}" changed. Open Live documents to check it.`);
       const result = await actions.stop({workspaceId, path, objectId}, operation);
       sendRendererActivity({workspaceId, liveDocumentStopped: objectId});
-      return outsideFile ? {keptEdits: "kept"} : result;
+      return release.outsideFile() ? {keptEdits: "kept"} : result;
     },
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
     syncNow: (workspaceId) => activity.syncNow(workspaceId),

@@ -773,7 +773,7 @@ export interface SyncRelayStorage {
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
   listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
-  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationState;
+  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationTakedownResult;
   liftAppPublishingHold(publicationId: string): boolean;
   reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
   authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
@@ -954,6 +954,8 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  /** Whether `fetchLogPage` with `limit: count` would report `hasMore`, without reading the rows. */
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean;
   fetchLogPageDescending(input: {
     workspaceId: string;
     beforeRelaySeq: number | null;

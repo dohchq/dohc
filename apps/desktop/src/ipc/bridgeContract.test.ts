@@ -3422,6 +3422,8 @@ describe("sync status IPC contract", () => {
       pendingPaths: ["notes/one.md", "notes/two.md"],
       collisionPathCount: 0,
       collisionPaths: [],
+      heldPathCount: 0,
+      heldPaths: [],
       pullInFlight: false,
     };
     const statusWithPendingProjection = SyncStatusResult.parse({

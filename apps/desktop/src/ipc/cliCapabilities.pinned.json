@@ -33,6 +33,9 @@
     "reply": [
       "chat.reply"
     ],
+    "chatRetry": [
+      "agent.run.retry"
+    ],
     "react": [
       "chat.react"
     ],
@@ -90,6 +93,9 @@
     "collectionsWaiting": [
       "workspace.status"
     ],
+    "sharedFilesHeld": [
+      "workspace.status"
+    ],
     "saveKeptCopy": [
       "file.kept.save"
     ],
@@ -116,6 +122,9 @@
     ],
     "stopAgain": [
       "share.live.document.stop"
+    ],
+    "liveDocuments": [
+      "share.live.documents.list"
     ],
     "documentEdit": [
       "document.edit"
@@ -284,6 +293,7 @@
     "document set-fields": "collection.record.edit",
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
+    "document live": "share.live.documents.list",
     "chat groups": "group.list",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",
@@ -292,6 +302,7 @@
     "chat show": "chat.show",
     "chat post": "chat.post",
     "chat reply": "chat.reply",
+    "chat retry": "agent.run.retry",
     "chat react": "chat.react",
     "chat grep": "chat.search",
     "chat export": "chat.export",

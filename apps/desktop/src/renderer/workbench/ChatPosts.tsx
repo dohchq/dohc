@@ -393,7 +393,10 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
       </span>
       <span className="grid gap-1">
         <span className="text-[11px] text-muted">Log</span>
-        <span className="flex min-w-0 items-center gap-1.5">
+        {props.run.logRemoved ? (
+          // dohc removed it after the time the settings file keeps run logs.
+          <span data-testid="chats-run-log-removed" className="text-[11px] text-ink">Removed</span>
+        ) : <span className="flex min-w-0 items-center gap-1.5">
           <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
             {props.run.logPath ?? "No log path"}
           </code>
@@ -406,7 +409,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
               getText={() => props.run.logPath ?? null}
             />
           ) : null}
-        </span>
+        </span>}
       </span>
     </>
   );

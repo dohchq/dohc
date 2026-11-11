@@ -588,20 +588,31 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn concurrent_readers_release_checkpoint_locks() {
-        reader_checkpoint_race(false);
+        reader_checkpoint_race(false, false);
     }
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "upstream SQLite UNC misdetection leaks SHM locks for raw verbatim drive paths"]
-    fn raw_verbatim_readers_pin_checkpoint_locks() {
-        reader_checkpoint_race(true);
+    fn raw_verbatim_readers_release_checkpoint_locks() {
+        reader_checkpoint_race(true, false);
+    }
+
+    /// #2338: a store deeper than `MAX_PATH` keeps its verbatim path.
+    #[cfg(windows)]
+    #[test]
+    fn readers_in_a_deep_folder_release_checkpoint_locks() {
+        reader_checkpoint_race(false, true);
     }
 
     #[cfg(windows)]
-    fn reader_checkpoint_race(raw: bool) {
+    fn reader_checkpoint_race(raw: bool, deep: bool) {
         let scratch = ScratchDir::new().unwrap();
-        let path = scratch.path().join("reader-race.db");
+        let folder = if deep {
+            crate::sqlite_path::deep_folder(scratch.path(), 300)
+        } else {
+            scratch.path().to_path_buf()
+        };
+        let path = folder.join("reader-race.db");
         std::fs::File::create(&path).unwrap();
         let path = std::fs::canonicalize(path).unwrap();
         let writer = if raw {

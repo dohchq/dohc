@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
+  isOwnerOutboxFrozenRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
@@ -137,11 +138,16 @@ interface EngineYDocSessionIpcOptions {
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
   sharedCaptureFor?: (workspace: EngineYDocWorkspace) => Promise<EngineYDocSessionCapture | null>;
+  // A shared note's current text when no editor holds it, edits still on
+  // their way to the server included. Null for a note that is not shared.
+  ownerDraftState?: (workspace: EngineYDocWorkspace, path: string) => Promise<Uint8Array | null>;
   resolveDocumentPath: (
     workspace: EngineYDocWorkspace,
     path: string,
   ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
+  /** dohc refused an edit to `path` because its queue for the server takes no more. */
+  onLiveEditsPaused?: (workspaceId: string, path: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
 }
@@ -480,10 +486,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
   readonly #sharedCaptureFor: EngineYDocSessionIpcOptions["sharedCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
+  readonly #ownerDraftState: EngineYDocSessionIpcOptions["ownerDraftState"];
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
     "resolveDocumentPath"
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
+  readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
   readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
@@ -504,8 +512,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
     this.#sharedCaptureFor = options.sharedCaptureFor;
+    this.#ownerDraftState = options.ownerDraftState;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
+    this.#onLiveEditsPaused = options.onLiveEditsPaused;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
@@ -740,7 +750,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             assertRecordWritable: () => {
               if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
             },
-            onEditRefused: (requestId, message) => {
+            onEditRefused: (requestId, message, paused) => {
+              if (paused) this.#onLiveEditsPaused?.(workspace.workspaceId, canonicalPath);
               publish(() => emit({
                 state: "error", seq: saveSeq.dirtySeq,
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
@@ -1037,8 +1048,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   /**
    * A live document for a main-side door, such as the CLI socket that MCP
    * also uses. The editor session that holds the document answers with its
-   * encoded Y.Doc; `state` is null when no editor holds it, and the caller
-   * reads the settled file at `path`.
+   * encoded Y.Doc. With no editor, a shared note answers with its current
+   * draft, since its file waits for the server. `state` is null for any other
+   * note, and the caller reads the settled file at `path`.
    */
   async readDocument(
     input: { workspaceId: string; path: string },
@@ -1048,10 +1060,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       authority.assertCurrent();
       const path = await this.#markdownDocumentPath(authority.workspace, input.path);
       authority.assertCurrent();
-      const held = this.#isSharedView(authority.workspace)
-        ? undefined
-        : this.#owner.documentSession(authority.workspace.attachmentId, path);
-      return { path, state: held ? Y.encodeStateAsUpdate(held.session.provider.doc) : null };
+      if (this.#isSharedView(authority.workspace)) return { path, state: null };
+      const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
+      if (held) return { path, state: Y.encodeStateAsUpdate(held.session.provider.doc) };
+      const state = await this.#ownerDraftState?.(authority.workspace, path) ?? null;
+      authority.assertCurrent();
+      return { path, state };
     } finally {
       authority.release();
     }
@@ -1079,7 +1093,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         .catch(() => undefined)
         .then(async () => {
           authority.assertCurrent();
-          return await this.#editResolved(workspace, path, input);
+          try {
+            return await this.#editResolved(workspace, path, input);
+          } catch (error) {
+            if (!isOwnerOutboxFrozenRefusal(error)) throw error;
+            this.#onLiveEditsPaused?.(workspace.workspaceId, path);
+            // The editor's words for the same refusal.
+            throw new Error(`dohc could not save this edit to "${path}". Live editing is paused for this file. Notices in dohc says why and how to resume.`, { cause: error });
+          }
         });
       this.#documentEdits.set(key, turn);
       try {
