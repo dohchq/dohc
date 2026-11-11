@@ -851,7 +851,7 @@ export function SettingsDialog(props: {
                 })
               }
               {...(!props.sharedView
-                ? { trust: { trusted: workspaceTrust.trusted, onOpen: () => setActiveSection("privacy") } }
+                ? { trust: { trusted: workspaceTrust.trusted, onOpen: () => { setQuery(""); setActiveSection("privacy"); } } }
                 : {})}
               pinned={pinnedAppsFor(userSettings, props.workspaceId)}
               {...(props.onSetAppPinned ? { onSetPinned: props.onSetAppPinned } : {})}

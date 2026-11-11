@@ -3021,7 +3021,7 @@ describe("SettingsDialog", () => {
       workspaceId: "ws-1",
       patch: { sites: { defaultPreviewMode: "static" } },
     });
-    await waitFor(() => expect(row.textContent).toContain("Runs no commands on this computer."));
+    await waitFor(() => expect(row.textContent).toContain("Shows each app's files without running commands."));
     await waitFor(() => expect(row.textContent).toContain("Modified"));
     await user.click(within(row).getByRole("button", { name: "Reset" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
@@ -3045,9 +3045,10 @@ describe("SettingsDialog", () => {
     }
   });
 
-  it("sends the Apps page's trust button to Privacy", async () => {
+  it("sends the Apps page's trust button to Privacy, even from a search", async () => {
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="apps" onClose={() => {}} />);
+    await user.type(await screen.findByTestId(desktopPins.settingsSearch), "preview");
     const trust = await screen.findByTestId("settings-row-apps-trust");
     await waitFor(() => expect(within(trust).getByTestId("apps-trust-state").textContent).toBe("Restricted Mode"));
     await user.click(within(trust).getByRole("button", { name: "Change" }));

@@ -24,9 +24,9 @@ import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 
 const DEFAULT_DESCRIPTIONS: Record<WorkspacePreviewMode, string> = {
   auto: "Dev when an app has a dev script. Otherwise Build for a package, or Static.",
-  dev: "Runs each app's dev script on this computer.",
-  build: "Shows each app's build output. Runs its build script first when it has one.",
-  static: "Shows each app's files as they are. Runs no commands on this computer.",
+  dev: "Runs each app's dev script on this computer. An app that cannot start this way uses Auto.",
+  build: "Shows each app's build output. Runs its build script first when it has one. An app that cannot start this way uses Auto.",
+  static: "Shows each app's files without running commands. An app that cannot start this way uses Auto.",
 };
 
 const SOURCE_WORDS: Record<StartingModeSource, string> = {
