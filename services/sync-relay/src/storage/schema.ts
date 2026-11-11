@@ -486,10 +486,12 @@ function rebuildTables(db: SqliteDb, tables: readonly string[], sqlFor: (table: 
   }
   for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
   for (const sql of dependents) db.exec(sql);
-  for (const {name, seq} of sequences) {
-    db.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(name);
-    db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(name, seq);
+  // The copy back can write a position even for an empty table, so each
+  // table's position returns exactly as it was, or stays absent.
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get()) {
+    db.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${marks})`).run(...tables);
   }
+  for (const {name, seq} of sequences) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(name, seq);
 }
 
 function assertSessionHostControlSchema(db: SqliteDb): void {
