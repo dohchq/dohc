@@ -305,10 +305,10 @@ function RowTitle(props: { title: ReactNode; testId: string; onOpen?: () => void
   );
 }
 
-// A row's top-right corner: when it happened, or Opening… while the row
-// opens, then its dismiss ×. The × takes that word's place while the pointer
-// or focus is on the row, so a list at rest shows only when. A row with no
-// time shows its × at rest.
+// A row's top-right corner: when it happened, then its dismiss ×. The ×
+// takes the time's place while the pointer or focus is on the row, so a list
+// at rest shows only when. A row with no time shows its × at rest, and a row
+// that is opening shows Opening… beside it.
 function RowCorner(props: {
   timeMs?: number;
   busy?: boolean;
@@ -326,17 +326,24 @@ function RowCorner(props: {
       <X size={11} aria-hidden />
     </button>
   ) : null;
-  if (!props.busy && props.timeMs === undefined) return dismiss;
-  const wordClass = `whitespace-nowrap text-[12px] tabular-nums text-subtle${dismiss ? " group-hover/row:invisible group-focus-within/row:invisible" : ""}`;
+  const wordClass = "whitespace-nowrap text-[12px] tabular-nums text-subtle";
+  if (props.busy) {
+    return (
+      <span className="flex h-6 items-center gap-1">
+        <span data-testid={`${props.testId}-opening`} className={wordClass}>Opening…</span>
+        {dismiss}
+      </span>
+    );
+  }
+  if (props.timeMs === undefined) return dismiss;
   return (
     <span className="relative flex h-6 items-center">
-      {props.busy || props.timeMs === undefined ? (
-        <span data-testid={`${props.testId}-opening`} className={wordClass}>Opening…</span>
-      ) : (
-        <time dateTime={new Date(props.timeMs).toISOString()} className={wordClass}>
-          {cornerTime(props.timeMs)}
-        </time>
-      )}
+      <time
+        dateTime={new Date(props.timeMs).toISOString()}
+        className={`${wordClass}${dismiss ? " group-hover/row:invisible group-focus-within/row:invisible" : ""}`}
+      >
+        {cornerTime(props.timeMs)}
+      </time>
       {dismiss ? (
         <span className="absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100">
           {dismiss}

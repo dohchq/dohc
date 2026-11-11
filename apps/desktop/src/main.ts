@@ -3654,6 +3654,7 @@ const chatDispatchService = createChatDispatchService({
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
+    syncing: (workspaceId) => findWorkspace(workspaceId)?.remote !== undefined,
   },
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,

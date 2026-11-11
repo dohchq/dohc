@@ -107,16 +107,21 @@ function runNoticeTitle(what: string, place: RunPlace): string {
 }
 
 const REPLY_EXCERPT_MAX_CHARS = 160;
+const REPLY_EXCERPT_READ_CHARS = 2000;
 // The reply's opening words as one plain line, the body of its notice.
-// Markdown marks, code blocks and link targets go; their words stay. A
-// heading ends with a colon, so "## Booked" leads what follows it.
+// Markdown marks, code blocks and link targets go; their words stay, and
+// inline code stays as written. A heading ends with a colon, so "## Booked"
+// leads what follows it. Only the reply's start is read, so a long reply
+// costs no more than a short one.
 export function replyExcerpt(markdown: string): string {
   const text = markdown
+    .slice(0, REPLY_EXCERPT_READ_CHARS)
+    .replace(/[\uD800-\uDBFF]$/, "")
     .replace(/```[^\n]*\n?[\s\S]*?(?:```|$)/gu, " ")
     .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/gu, "$1")
     .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*?)[ \t#]*$/gmu, (_, heading: string) => /[.:!?]$/u.test(heading) ? heading : `${heading}:`)
     .replace(/^[ \t]{0,3}(?:>[ \t]?|[-*+][ \t]+(?:\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gmu, "")
-    .replace(/\*\*|__|~~|`/gu, "")
+    .replace(/(`+)([^\n]*?)\1|\*\*|__|~~|`/gu, (_, ticks?: string, code?: string) => ticks ? code ?? "" : "")
     .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
     .trim();
   return cutText(text, REPLY_EXCERPT_MAX_CHARS);
@@ -273,6 +278,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   runNotices?: {
     post(input: PostNoticeInput): Promise<void>;
     owed: OwedRunNotices;
+    // Whether the workspace syncs now, rather than having its sync paused.
+    syncing(workspaceId: string): boolean;
   };
 }
 
@@ -959,6 +966,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       title: runNoticeTitle(words.lead, await runPlace(workspace, run.threadId)),
       body,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
+      // A workspace whose sync is paused keeps its replies on this computer,
+      // so their notices and words stay here too.
+      ...(options.runNotices.syncing(workspaceId) ? {} : { onlyHere: true as const }),
     });
   }
 

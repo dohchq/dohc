@@ -2654,11 +2654,13 @@ describe("notices sent to you", () => {
 
     it("says it is opening and ignores a second click", async () => {
       const { answers, onOpenSentNotice } = waitingOpen();
-      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
+      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, onDismissSentNotice: vi.fn() });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
       const open = screen.getByTestId("sent-notice-a-open-row");
+      // Focus stays on the row, so the word must not hide for its ×.
       expect(screen.getByTestId("sent-notice-a-opening").textContent).toBe("Opening…");
+      expect(screen.getByTestId("sent-notice-a-opening").className).not.toContain("invisible");
       expect(open.getAttribute("aria-busy")).toBe("true");
       await userEvent.click(open);
       expect(onOpenSentNotice).toHaveBeenCalledOnce();

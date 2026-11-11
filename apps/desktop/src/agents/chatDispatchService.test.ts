@@ -154,6 +154,8 @@ interface FixtureOptions {
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
   // Each post of a run notice takes the next error, if any, and fails.
   noticeFailures?: Error[];
+  // The workspace's sync is paused.
+  syncPaused?: boolean;
   // Each record of an owed notice takes the next error, if any, and fails.
   owedAddFailures?: Error[];
   // The workspace starts in Restricted Mode.
@@ -694,6 +696,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         if (failure) throw failure;
         if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
       },
+      syncing: () => options.syncPaused !== true,
       owed: {
         ...owedRunNotices,
         add: async (workspaceId, runId) => {
@@ -950,6 +953,7 @@ describe("chatDispatchService", () => {
       runNotices: {
         post: async (notice) => { fixture.notices.push(notice); },
         owed: createOwedRunNotices(() => fixture.owedRunNoticesPath),
+        syncing: () => true,
       },
     });
     vi.unstubAllEnvs();
@@ -2622,9 +2626,24 @@ describe("chatDispatchService", () => {
     ["> Quoted\n1. First\n2) Second", "Quoted First Second"],
     ["Run this:\n```sh\npnpm build\n```\nThen ![chart](a.png) shows it.", "Run this: Then chart shows it."],
     ["```\nonly code\n```", ""],
+    ["Updated `__init__.py` and ``a`b``.", "Updated __init__.py and a`b."],
+    [`# Done ${" #".repeat(20000)}x`, "Done:"],
     [`Long ${"word ".repeat(60)}`, `Long ${"word ".repeat(30)}word…`],
   ])("keeps a reply's words as one plain line: %j", (markdown, excerpt) => {
     expect(replyExcerpt(markdown)).toBe(excerpt);
+  });
+
+  it("keeps a reply's notice on this computer while the workspace's sync is paused", async () => {
+    const fixture = await createFixture({ syncPaused: true });
+    await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, claim.run.threadId, claim.run.runId, "Booked.");
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toEqual([expect.objectContaining({ body: "Booked.", onlyHere: true })]);
   });
 
   it("reads where a run answered from its thread, and names no place when that read fails", async () => {
@@ -3689,7 +3708,7 @@ describe("chatDispatchService", () => {
       const posted: typeof fixture.notices = [];
       fixture.service = createChatDispatchService({
         ...fixture.serviceOptions,
-        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices },
+        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices, syncing: () => true },
       });
 
       await activate(fixture);
