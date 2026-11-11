@@ -61,11 +61,15 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await page.getByTestId(activityPin("chats")).click();
     const card = main.getByTestId("chats-post-card").filter({ hasText: "Plans live in" });
     const thread = main.getByTestId("chats-thread-view");
+    // Notes shows its feed, or the thread its tab last had open; Back
+    // leaves another thread for the feed.
     const openPost = async () => {
       await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
-      await expect(main.getByTestId("chats-channel-title")).toHaveText("Notes");
-      await card.click();
-      await expect(thread).toContainText("Plans live in");
+      await expect(async () => {
+        if (await card.isVisible()) await card.click();
+        else if (!(await thread.textContent())?.includes("Plans live in")) await main.getByRole("button", { name: "Back" }).click();
+        await expect(thread).toContainText("Plans live in", { timeout: 1_000 });
+      }).toPass();
     };
 
     // The post card names each link; the card stays the one button.
