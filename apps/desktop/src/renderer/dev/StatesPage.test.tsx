@@ -56,6 +56,8 @@ describe("states page", () => {
           expect(within(notice).getByRole("button", { name: "Open externally" })).toBeTruthy();
           expect(within(notice).getByRole("button", { name: "Edit anyway" })).toBeTruthy();
         }
+        expect(within(notices[0]!).queryByRole("button", { name: "Show change" })).toBeNull();
+        expect(within(notices[1]!).getByRole("button", { name: "Show change" })).toBeTruthy();
       }
     } finally {
       vi.unstubAllGlobals();

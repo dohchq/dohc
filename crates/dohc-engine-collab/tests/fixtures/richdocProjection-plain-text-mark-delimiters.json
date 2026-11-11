@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-plain-text-mark-delimiters",
  "updates": [
-  "AQOWve2QCAAHAQRib2R5AwlwYXJhZ3JhcGgHAJa97ZAIAAYEAJa97ZAIASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+fgA=",
-  "AQGWve2QCCIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcacGxhaW4tdGV4dC1tYXJrLWRlbGltaXRlcnMA"
+  "AQPxhZWADgAHAQRib2R5AwlwYXJhZ3JhcGgHAPGFlYAOAAYEAPGFlYAOASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+fgA=",
+  "AQHxhZWADiIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcacGxhaW4tdGV4dC1tYXJrLWRlbGltaXRlcnMA"
  ],
- "mergedUpdateB64": "AQSWve2QCAAHAQRib2R5AwlwYXJhZ3JhcGgHAJa97ZAIAAYEAJa97ZAIASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+figBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxpwbGFpbi10ZXh0LW1hcmstZGVsaW1pdGVycwA=",
- "stateVectorB64": "AZa97ZAIIw==",
+ "mergedUpdateB64": "AQTxhZWADgAHAQRib2R5AwlwYXJhZ3JhcGgHAPGFlYAOAAYEAPGFlYAOASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+figBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxpwbGFpbi10ZXh0LW1hcmstZGVsaW1pdGVycwA=",
+ "stateVectorB64": "AfGFlYAOIw==",
  "coverage": {
   "nodes": [
    "doc",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "*stars* _underscores_ ~~tildes~~"
+  "markdown": "*stars* _underscores_ ~~tildes~~\n"
  }
 }

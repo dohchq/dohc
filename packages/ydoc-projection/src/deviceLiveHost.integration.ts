@@ -151,7 +151,7 @@ syncBuiltinESMExports();\n`);
     const registration = createLiveMarkdownRegistrationValidator(policy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
     const e = registration.evidence;
-    const markdown = Buffer.from("Hello");
+    const markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(e.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,

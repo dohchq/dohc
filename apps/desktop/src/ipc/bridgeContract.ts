@@ -2,6 +2,7 @@ import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-li
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
+import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -2348,6 +2349,25 @@ export const SendChatMessageResult = z.union([
   SavedChatMessage.extend({ resolveFailure: z.string().optional() }),
 ]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
+
+// Marks a question or poll answered with a reply that already saved, after
+// the answer failed. It posts nothing. The reply must be one this person
+// wrote from a window on this device, in the question's thread.
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: OPAQUE_ID,
+  // The question or poll.
+  messageId: OPAQUE_ID,
+  // The reply that answers it.
+  resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
+}).strict();
+export type ResolveChatDecisionPayload = z.infer<typeof ResolveChatDecisionPayload>;
+
+export const ResolveChatDecisionResult = z.object({
+  resolved: ChatDecisionRecord,
+}).strict();
+export type ResolveChatDecisionResult = z.infer<typeof ResolveChatDecisionResult>;
 
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -7815,6 +7835,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof updateDownloadOperations>,

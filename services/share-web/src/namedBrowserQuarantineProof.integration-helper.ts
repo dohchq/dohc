@@ -177,7 +177,7 @@ export async function createNamedBrowserQuarantineProof(input: {relayUrl: string
     },
     async recover(peer: {page: Page; editor: Locator}, settle: () => Promise<unknown>) {
       expect(peer.page.url()).toBe(draftUrl); expect(await peer.editor.innerText()).toBe(draftText);
-      expect(noPendingAdmission("after-owner-restore").markdown).toBe("Hello");
+      expect(noPendingAdmission("after-owner-restore").markdown).toBe("Hello\n");
       await peer.page.getByRole("button", {name: "Retry connection", exact: true}).click();
       await browserExpect(peer.page.getByRole("status")).toHaveText("Editing stopped. Review your draft before opening the current file.", {timeout: timeoutMs});
       await until(() => connections.length === oldConnectionCount + 1 && connections.at(-1)!.closed);
@@ -210,7 +210,7 @@ export async function createNamedBrowserQuarantineProof(input: {relayUrl: string
       await peer.page.screenshot({path: join(root, "browser-current-restored.png"), fullPage: true});
       await peer.editor.click(); await peer.page.keyboard.press("Control+End"); await peer.page.keyboard.insertText(excerpt);
       await browserExpect(peer.page.getByRole("status")).toHaveText("Changes saved", {timeout: timeoutMs});
-      await settle(); const after = noPendingAdmission("fresh-text-reapplied"); expect(after.markdown).toBe("Hello" + excerpt);
+      await settle(); const after = noPendingAdmission("fresh-text-reapplied"); expect(after.markdown).toBe("Hello" + excerpt + "\n");
       expect(fresh.submissions).toHaveLength(1); const submitted = fresh.submissions[0]!;
       expect(submitted.forwarded).toBe(true); expect(submitted.digest).not.toBe(captured!.sha256);
       expect(after.history.find(row => row.delivery_id === submitted.deliveryId)).toMatchObject({update_digest: submitted.digest,

@@ -2166,7 +2166,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     }
   }
 
-  const expected = "# Solo\n\nStart over here. PERSON\n\n## Added";
+  const expected = "# Solo\n\nStart over here. PERSON\n\n## Added\n";
   expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe(expected);
   await expect.poll(async () => {
     const read = await ipc.readDocument({ workspaceId: WORKSPACE_ID, path: PATH });

@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-task-lists",
  "updates": [
-  "AQ/JyYz8AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAycmM/AMBAwh0YXNrSXRlbQcAycmM/AMCAwlwYXJhZ3JhcGgHAMnJjPwDAwYEAMnJjPwDBAVvcGVuIIbJyYz8AwkEYm9sZAJ7fYTJyYz8AwoEdGFza4bJyYz8Aw4EYm9sZARudWxsKADJyYz8AwIHY2hlY2tlZAF5h8nJjPwDAgMIdGFza0l0ZW0HAMnJjPwDEQMJcGFyYWdyYXBoBwDJyYz8AxIGBADJyYz8AxMOY29tcGxldGVkIHRhc2soAMnJjPwDEQdjaGVja2VkAXgA",
-  "AQHJyYz8AyMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA="
+  "AQ+e1OfsBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAntTn7AYBAwh0YXNrSXRlbQcAntTn7AYCAwlwYXJhZ3JhcGgHAJ7U5+wGAwYEAJ7U5+wGBAVvcGVuIIae1OfsBgkEYm9sZAJ7fYSe1OfsBgoEdGFza4ae1OfsBg4EYm9sZARudWxsKACe1OfsBgIHY2hlY2tlZAF5h57U5+wGAgMIdGFza0l0ZW0HAJ7U5+wGEQMJcGFyYWdyYXBoBwCe1OfsBhIGBACe1OfsBhMOY29tcGxldGVkIHRhc2soAJ7U5+wGEQdjaGVja2VkAXgA",
+  "AQGe1OfsBiMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA="
  ],
- "mergedUpdateB64": "ARDJyYz8AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAycmM/AMBAwh0YXNrSXRlbQcAycmM/AMCAwlwYXJhZ3JhcGgHAMnJjPwDAwYEAMnJjPwDBAVvcGVuIIbJyYz8AwkEYm9sZAJ7fYTJyYz8AwoEdGFza4bJyYz8Aw4EYm9sZARudWxsKADJyYz8AwIHY2hlY2tlZAF5h8nJjPwDAgMIdGFza0l0ZW0HAMnJjPwDEQMJcGFyYWdyYXBoBwDJyYz8AxIGBADJyYz8AxMOY29tcGxldGVkIHRhc2soAMnJjPwDEQdjaGVja2VkAXgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA=",
- "stateVectorB64": "AcnJjPwDJA==",
+ "mergedUpdateB64": "ARCe1OfsBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAntTn7AYBAwh0YXNrSXRlbQcAntTn7AYCAwlwYXJhZ3JhcGgHAJ7U5+wGAwYEAJ7U5+wGBAVvcGVuIIae1OfsBgkEYm9sZAJ7fYSe1OfsBgoEdGFza4ae1OfsBg4EYm9sZARudWxsKACe1OfsBgIHY2hlY2tlZAF5h57U5+wGAgMIdGFza0l0ZW0HAJ7U5+wGEQMJcGFyYWdyYXBoBwCe1OfsBhIGBACe1OfsBhMOY29tcGxldGVkIHRhc2soAJ7U5+wGEQdjaGVja2VkAXgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA=",
+ "stateVectorB64": "AZ7U5+wGJA==",
  "coverage": {
   "nodes": [
    "doc",
@@ -21,6 +21,6 @@
   ]
  },
  "expected": {
-  "markdown": "- [ ] open **task**\n- [x] completed task"
+  "markdown": "- [ ] open **task**\n- [x] completed task\n"
  }
 }

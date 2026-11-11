@@ -160,7 +160,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const evidence = registration.evidence, markdown = Buffer.from("Hello");
+    const evidence = registration.evidence, markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
@@ -350,9 +350,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const prepared = OwnerRestoreActionResponse.prepare.parse(await ownerRequest(prefix + "/prepare", {})); expect(prepared.result.kind).toBe("prepared");
     const reviewed = OwnerRestoreActionResponse.review.parse(await ownerRequest(prefix + "/review", {}));
     if (!reviewed.result || "kind" in reviewed.result) throw new Error("Exact owner restore review missing.");
-    expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown); expect(reviewed.result.content.restoredMarkdown).toBe("Hello");
+    expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown); expect(reviewed.result.content.restoredMarkdown).toBe("Hello\n");
     const restored = OwnerRestoreActionResponse.confirm.parse(await ownerRequest(prefix + "/confirm", {proposalDigest: reviewed.result.proposalDigest}));
-    expect(restored.result.kind).toBe("resumed"); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
+    expect(restored.result.kind).toBe("resumed"); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
     const obsolete = await wire.connect(first.context, oldTicket, "old-unused-ticket"); expect(await obsolete.status).toBe(404); await obsolete.close();
     for (const peer of peers.slice(1)) await browserExpect(peer.editor).toHaveAttribute("contenteditable", "false");
     const revokedTicketCapacity = assertTicketCapacity(grantId);
@@ -365,7 +365,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       } finally {database.close();}
     }
     results.restore = {admittedConcurrency: capacity.admittedConcurrency, stalePartialRefused: true, oldTicketRefused: true, oldGrantRefused: true,
-      revokedTicketCapacity, exactBefore: settledMarkdown, exactAfter: "Hello", proposalDigest: reviewed.result.proposalDigest};
+      revokedTicketCapacity, exactBefore: settledMarkdown, exactAfter: "Hello\n", proposalDigest: reviewed.result.proposalDigest};
     // Restore retires the stopped share grant. Create the replacement from the
     // current selector rather than trying to add a grant to that retired share.
     const freshLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/a.md"], access: "edit"});

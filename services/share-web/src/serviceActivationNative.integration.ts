@@ -156,7 +156,7 @@ it("resumes a real configured service activation after a lost native adoption re
   const root = mkdtempSync(join(resolve(output), "service-activation-")), workspace = join(root, "service"), ownerRoot = join(root, "owner");
   harness.tracePath = join(root, "service-rpc-trace.json");
   mkdirSync(workspace); mkdirSync(ownerRoot);
-  mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello");
+  mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello\n");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
   const admin = new Client({connectionString, connectionTimeoutMillis: 5000});
   const pool = new Pool({connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000});
@@ -226,11 +226,11 @@ it("resumes a real configured service activation after a lost native adoption re
       throw new Error("Owner push exceeded its eight-page bound.");
     }
     results.ownerEnrollmentPush = await push();
-    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api"}, randomUUID());
+    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello\n", origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
     expect(typeof objectId).toBe("string");
     const editor = await rpc("ydoc.open", {versionId: mainVersionId, path: "docs/a.md", expectedObjectId: objectId, contentKind: "richdoc"});
-    expect(editor.seedContent).toBe("Hello");
+    expect(editor.seedContent).toBe("Hello\n");
     const baseline = Y.encodeStateAsUpdate(ownerDoc), lineageClaimId = hash(baseline), document = {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId};
     const seeded = await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     const vector = Y.encodeStateVector(ownerDoc); ownerDoc.getMap("frontmatter").set("beforeActivation", "ordinary-owner");

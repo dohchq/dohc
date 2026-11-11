@@ -7,6 +7,9 @@ type SyncFailureNotice = { title?: string; message: string; detail: string; toas
 
 const COPY_FAILURE = "OutsideWriteCopyError: ";
 const PATH_OCCUPIED = "DaemonRefusalError: sync-path-occupied: ";
+// Windows: the engine refuses to replace a file whose own permissions it
+// cannot read, rather than give the new copy the folder's.
+const PERMISSIONS_NOT_KEPT = /^Error: Could not update (.+) on disk: permissions-not-kept$/;
 
 // Neither message vouches for this machine's copy: a failed sync pass does
 // not prove local writes are healthy, and each document shows its own save.
@@ -15,6 +18,13 @@ const PATH_OCCUPIED = "DaemonRefusalError: sync-path-occupied: ";
 // A pull that stops at a file names it; the file is on this machine.
 export function syncFailureNotice(failure: SyncFailure): { title?: string; message: string } {
   if (failure.cause === "claim-refused") return { message: failure.detail };
+  const unreadPermissions = PERMISSIONS_NOT_KEPT.exec(failure.detail)?.[1];
+  if (unreadPermissions) {
+    return {
+      title: "dohc could not sync this workspace",
+      message: `dohc could not read the permissions of ${unreadPermissions}, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.`,
+    };
+  }
   if (failure.detail.startsWith(COPY_FAILURE)) {
     const [title = "", next = "", left = ""] = failure.detail.slice(COPY_FAILURE.length).split("\n");
     return { title, message: `${next}\n${left.replace(/\.$/, "")} and sync waits.` };

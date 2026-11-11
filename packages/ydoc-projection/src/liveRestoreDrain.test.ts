@@ -1350,7 +1350,7 @@ it.each(["service", "device"] as const)("resolves the selected owner restore poi
     expect(capture.checkpoint.cursor).toBe(0);
     expect(capture.events).toHaveLength(1);
     const point = resolveLiveRestorePoint(capture, policy);
-    const expected = "---\npoint: point\n---\n\nHello";
+    const expected = "---\npoint: point\n---\n\nHello\n";
     expect(point).toEqual({...capture.point, markdownDigest: hash(Buffer.from(expected)), projectionDigest: hash(Buffer.from(expected))});
     expect(point.markdownDigest).not.toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
     expect(f.journalRows()).toEqual(before);
@@ -1366,7 +1366,7 @@ it("resolves a baseline restore point after native bootstrap fencing", () => {
     expect(capture.binding.selectorPaths).toEqual(["docs/a.md"]);
     expect(capture.events).toHaveLength(0);
     expect(resolveLiveRestorePoint(capture, policy)).toEqual({journalCursor: 0, receiptDigest: f.intent.restorePointReceiptDigest,
-      markdownDigest: hash(Buffer.from("Hello")), projectionDigest: hash(Buffer.from("Hello"))});
+      markdownDigest: hash(Buffer.from("Hello\n")), projectionDigest: hash(Buffer.from("Hello\n"))});
   } finally {f.close();}
 });
 

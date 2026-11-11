@@ -208,7 +208,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
   let workspace = hostRoot;
   harness.tracePath = join(root, "service-rpc-trace.json");
   mkdirSync(workspace); mkdirSync(ownerRoot);
-  mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello");
+  mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello\n");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
   // The full gate once timed out a 2 s connect to a healthy Postgres (#1217).
   const admin = new Client({connectionString, connectionTimeoutMillis: 30_000});
@@ -287,11 +287,11 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       throw new Error("Owner push exceeded its eight-page bound.");
     }
     results.ownerEnrollmentPush = await push();
-    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api"}, randomUUID());
+    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello\n", origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
     expect(typeof objectId).toBe("string");
     const editor = await rpc("ydoc.open", {versionId: mainVersionId, path: "docs/a.md", expectedObjectId: objectId, contentKind: "richdoc"});
-    expect(editor.seedContent).toBe("Hello");
+    expect(editor.seedContent).toBe("Hello\n");
     const baseline = Y.encodeStateAsUpdate(ownerDoc), lineageClaimId = hash(baseline), document = {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId};
     const seeded = await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     const vector = Y.encodeStateVector(ownerDoc); ownerDoc.getMap("frontmatter").set("beforeActivation", "ordinary-owner");
@@ -760,7 +760,7 @@ async function openSelfHostProof(name: string) {
     const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
-      // The owner's Y.Doc, as its engine holds it.
+      // The owner's Y.Doc, as its engine holds it. It records no source, so `text` is in the engine's form, with its final newline.
       const doc = markdownToYDoc(text), baseline = Y.encodeStateAsUpdate(doc);
       closes.push(async () => doc.destroy());
       const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array) => {
@@ -785,7 +785,7 @@ async function openSelfHostProof(name: string) {
       return {path, objectId, document: {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId: hash(baseline)},
         markdown: () => yDocToMarkdown(doc), edit: (change: (doc: Y.Doc) => void) => edit(change), open};
     };
-    const first = await ownerDocument("docs/a.md", "Hello"), objectId = first.objectId;
+    const first = await ownerDocument("docs/a.md", "Hello\n"), objectId = first.objectId;
     storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: Date.now()},
       grant: {grantId: "grant", shareId: "share", principalKind: "user", principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}});
     const identity = storage.getWorkspaceBootstrap("workspace").identity;
@@ -980,7 +980,7 @@ it("parks a stopped document in its store and resumes it as a successor activati
   const journal = proof.journal(), accepted = await proof.liveEdit("beforeStop", "live");
   const saved = proof.activation()!, before = await proof.hostState(), stores = readdirSync(proof.hostRoot);
   expect([...stores].sort()).toEqual([".recovery", basename(proof.store)].sort());
-  expect(before.markdown).toBe("---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello");
+  expect(before.markdown).toBe("---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello\n");
   const waiting = proof.unpushed();
   expect(waiting.map(row => row.op_kind)).toEqual(["ydoc.update", "live.audit.application"]);
   const unsettled = proof.settlement();
@@ -1139,7 +1139,7 @@ const bothReady = (proof: SelfHostProof) => vi.waitFor(async () => expect(await 
 // A stopped document's own output is pushed before it parks, so the write
 // here is its sibling's.
 it("pushes a write the host accepted before it reconnected, while another document resumes as a successor", () => withSelfHostProof("self-host-reconnect", async proof => {
-  const second = await proof.ownerDocument("docs/b.md", "Second");
+  const second = await proof.ownerDocument("docs/b.md", "Second\n");
   await bothReady(proof);
   const saved = proof.activation()!;
   await stopLiveEditing(proof);
@@ -1161,7 +1161,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
     expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
   }, {timeout: 30000});
   expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
-  expect((await proof.hostState()).markdown).toBe("---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello");
+  expect((await proof.hostState()).markdown).toBe("---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello\n");
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   // The write still waits first, as it was written.
   expect(proof.unpushed().slice(0, waiting.length)).toEqual(waiting);
@@ -1181,7 +1181,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
 // device, and Resume activates a successor that holds that edit and takes the
 // collaborator's live edit.
 it("retires a stopped document while another stays live, then resumes it as a successor", () => withSelfHostProof("self-host-successor", async proof => {
-  const second = await proof.ownerDocument("docs/b.md", "Second");
+  const second = await proof.ownerDocument("docs/b.md", "Second\n");
   await bothReady(proof);
   const predecessor = proof.activation()!, P = predecessor.activationId, journal = proof.journal(), secondJournal = proof.journal(second.objectId);
   const enrollment = (hostDrainedAtMs: unknown) => ({workspaceId: "workspace", objectId: proof.objectId, path: "docs/a.md", ownerUserId: proof.ownerUserId,
@@ -1231,7 +1231,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   const afterRestart = await proof.liveEdit("afterRestart", "live", second.document);
   await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: afterRestart.journalCursor}], applied: afterRestart.journalCursor, settled: afterRestart.journalCursor}), {timeout: 30000});
   expect(proof.journal(second.objectId)).toEqual([...secondJournal, journaled(during), journaled(afterRestart)]);
-  const secondMarkdown = "---\nafterRestart: live\nbeforeActivation: ordinary-owner\nduringRetirement: live\n---\n\nSecond";
+  const secondMarkdown = "---\nafterRestart: live\nbeforeActivation: ordinary-owner\nduringRetirement: live\n---\n\nSecond\n";
   // The settlement commits before the engine writes the file.
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(secondMarkdown), {timeout: 10000});
   expect(proof.activations()).toEqual([retiring]);
@@ -1262,7 +1262,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   expect(proof.unpushed()).toEqual([]);
   expect(proof.relayed(waiting)).toEqual(waiting.map(row => row.op_kind));
   expect(proof.journal()).toEqual([...journal, journaled(accepted)]);
-  const stopped = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello";
+  const stopped = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\n---\n\nHello\n";
   expect(readdirSync(join(proof.store, "docs"))).toEqual(["b.md"]);
   expect(proof.serviceRead(engine => engine.prepare("SELECT blob_sha256 FROM hosted_parked_snapshots WHERE workspace_id='workspace' AND object_id=?")
     .all(proof.objectId))).toEqual([{blob_sha256: hash(Buffer.from(stopped))}]);
@@ -1274,7 +1274,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]), {timeout: 30000});
   const successor = proof.activation()!, S = successor.activationId, resumed = await proof.hostState();
-  const markdown = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\nwhileStopped: ordinary-owner\n---\n\nHello";
+  const markdown = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\nwhileStopped: ordinary-owner\n---\n\nHello\n";
   expect(resumed).toEqual({digest: successor.source.fullStateDigest, markdown});
   expect(S).not.toBe(P); expect(successor.completed).toBe(true);
   expect(successor.source).toEqual({...predecessor.source, committedCursor: expect.any(Number), sourceMomentId: expect.stringMatching(/^moment-ydoc-apply-[0-9a-f]{64}$/),
@@ -1305,7 +1305,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
     expect(proof.ownerTips()).toEqual({current: [{tip_cursor: collaborated.journalCursor}], retired: [{activation_id: P, tip_cursor: accepted.journalCursor}]});
     expect(proof.settlement()).toEqual({applied: collaborated.journalCursor, settled: collaborated.journalCursor});
   }, {timeout: 30000});
-  const edited = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\ncollaborator: named\nwhileStopped: ordinary-owner\n---\n\nHello";
+  const edited = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\ncollaborator: named\nwhileStopped: ordinary-owner\n---\n\nHello\n";
   expect((await proof.hostState()).markdown).toBe(edited);
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(edited), {timeout: 10000});
   expect(proof.activations()).toEqual([retired, current]);
@@ -1319,7 +1319,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
 it("converges on the next pull after the reply to a hosted commit is lost, and applies nothing twice", () => withSelfHostProof("self-host-commit", async proof => {
   // The host pulls docs/b.md only once its owner wrote all of it.
   harness.unreachable.add("sync.pullHosted");
-  const second = await proof.ownerDocument("docs/b.md", "Second"), objectId = second.objectId;
+  const second = await proof.ownerDocument("docs/b.md", "Second\n"), objectId = second.objectId;
   let commit: Record<string, any> | undefined;
   // The engine commits the pass that writes docs/b.md, and the reply never arrives.
   harness.withhold = {method: "sync.commitCursor", held: result => {commit = result;},
@@ -1365,7 +1365,7 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   // One capture, in the store it parked in, starts a successor holding the edit.
   expect(attempts()).toBe(before + 1);
   expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
-  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello";
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello\n";
   expect((await proof.hostState()).markdown).toBe(markdown);
   // The settlement commits before the engine writes the file.
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
@@ -1433,7 +1433,7 @@ it("retires a paused document's activation at once, and Resume starts a successo
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
   expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
   const successor = proof.activation()!, S = successor.activationId, resumed = await proof.hostState();
-  const markdown = "---\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello";
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello\n";
   expect(resumed).toEqual({digest: successor.source.fullStateDigest, markdown});
   expect(S).not.toBe(P); expect(successor.completed).toBe(true); expect(successor.source.predecessorActivationId).toBe(P);
   // Its full state holds the owner's edit.
@@ -1461,7 +1461,7 @@ it("retires a paused document's activation at once, and Resume starts a successo
   // A later live edit settles through the successor.
   const later = await proof.liveEdit("afterResume", "live");
   await vi.waitFor(() => expect(proof.settlement()).toEqual({applied: later.journalCursor, settled: later.journalCursor}), {timeout: 30000});
-  const settled = "---\nafterResume: live\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello";
+  const settled = "---\nafterResume: live\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello\n";
   expect((await proof.hostState()).markdown).toBe(settled);
   // The settlement commits before the engine writes the file.
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(settled), {timeout: 10000});

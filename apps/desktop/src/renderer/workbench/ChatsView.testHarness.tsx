@@ -152,6 +152,7 @@ export const bridgeMock = {
   listChatThreadAttachments: vi.fn(),
   chatRunRecordsForThread: vi.fn(),
   sendChatMessage: vi.fn(),
+  resolveChatDecision: vi.fn(),
   markChatThreadRead: vi.fn(),
   setChatArchived: vi.fn(),
   getUserSettings: vi.fn(),
