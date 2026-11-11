@@ -113,6 +113,9 @@ Workers and aggregates do not wait for confinement. Only the final verdict waits
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
 The Rust gate builds one test archive, runs its complete inventory across 12 shards, and checks policy separately.
+Ordinary Rust tests use nextest's `hash:N/12` partitions. Shard 5 also runs the reader proofs, beside its lighter ordinary workload.
+The completed verdict requires those proofs exactly once on that shard.
+Rust test jobs wait for JavaScript reporting to finish to limit overlap with JavaScript workers.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.
