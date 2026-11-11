@@ -947,19 +947,43 @@ fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
     }
 }
 
+/// An adopted delivery with no snapshot keeps an unknown author only when
+/// the relay saw it change content, as the relay's author window does.
 #[test]
 fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
-    let mut f = Fixture::new();
-    f.edit(true);
-    f.adopt().unwrap();
-    let authors = f
-        .store
-        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
-        .unwrap();
-    assert_eq!(
-        authors.moment_json().unwrap(),
-        r#"[{"kind":"unattributed"}]"#
-    );
+    for changed in [true, false] {
+        let mut f = Fixture::new();
+        let before = f.doc.state_vector();
+        f.edit(true);
+        if changed {
+            let mut first_seen: Vec<_> = f
+                .doc
+                .state_vector()
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = before.get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
+            assert!(!first_seen.is_empty());
+            f.cut.events[0].metadata.first_seen = first_seen;
+        }
+        f.adopt().unwrap();
+        let authors = f
+            .store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap();
+        assert_eq!(
+            authors.moment_json().as_deref(),
+            changed.then_some(r#"[{"kind":"unattributed"}]"#),
+            "changed: {changed}"
+        );
+    }
 }
 
 #[test]

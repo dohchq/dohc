@@ -1784,6 +1784,7 @@ pub fn adopt_owner_committed(
         crate::author_coverage::fold_in(tx, &key, i64::MAX)?;
         if cut.events.iter().any(|event| {
             event.metadata.author_snapshot.as_ref().is_none_or(Vec::is_empty)
+                && event.metadata.adds_content()
         }) {
             crate::author_coverage::admit_accepted_in(tx, &key, &[])?;
         }
