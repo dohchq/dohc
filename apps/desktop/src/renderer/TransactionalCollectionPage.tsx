@@ -232,6 +232,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const currentQuery = useRef(query); currentQuery.current = query;
   const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
+  // Which edit is open. A change to the fields that only drops values from its record keeps it, and its focus.
+  const opened = editor === null ? null : editor.kind === "create" ? `create:${editor.operation.operationId}` : JSON.stringify([editor.row.id, editor.field.fieldId, editor.operation.operationId]);
   useLayoutEffect(() => {
     const first = editor ? (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button") : null;
     first?.focus();
@@ -239,7 +241,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (first instanceof HTMLInputElement && (first.type === "text" || first.type === "url")) first.setSelectionRange(first.value.length, first.value.length);
     // An edit the page opened again has no opener, so focus returns to the field's own button beside its input.
     if (editor && trigger.current === null) trigger.current = editorForm.current?.closest("td, dd")?.querySelector<HTMLElement>(":scope > button[hidden]") ?? null;
-  }, [editor]);
+  }, [opened]);
   // The field of the cell open for editing, read when a save answers after this render.
   const openCell = useRef<string | null>(null), cellSave = useRef<HTMLButtonElement>(null);
 

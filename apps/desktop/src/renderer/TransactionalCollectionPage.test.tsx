@@ -1279,4 +1279,14 @@ describe("when the Collection's fields change", () => {
     await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
     expect(result.invoke.mock.calls.find(([request]) => request.operationId === create)![0]).toMatchObject({ revision: 2, input: { values: { [name]: "Bob", [secret]: null } } });
   });
+
+  it("leaves the caret where it is in a field being edited when another field changes", async () => {
+    const result = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    const input = screen.getByLabelText<HTMLInputElement>("Name");
+    input.setSelectionRange(1, 1);
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(amount, "text"))} />);
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(1);
+  });
 });

@@ -372,4 +372,22 @@ describe("when the Collection's rules change",()=>{
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
     await waitFor(()=>expect(within(details).getByText("Todo")).toBeTruthy());
   });
+  it("keeps Try again working when a later read fails too after the rules change",async()=>{
+    let failing=false;
+    const refusal=Error("The read action changed.");
+    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ if(failing)throw refusal; return answer(request,request.revision===2?"Second task":"First task"); });
+    const result=setup(invoke);
+    await screen.findByText("First task");
+    failing=true;
+    const next=revision(2,[...dataset.tables[0]!.fields,notes]);
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={next}/>);
+    await waitFor(()=>expect(result.props.onError).toHaveBeenCalledTimes(1));
+    const calls=invoke.mock.calls.length;
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={next} recordsChanged={1}/>);
+    await waitFor(()=>expect(invoke.mock.calls.length).toBeGreaterThan(calls));
+    await act(async()=>undefined);
+    failing=false;
+    fireEvent.click(screen.getByRole("button",{name:"Try again"}));
+    expect(await screen.findByText("Second task")).toBeTruthy();
+  });
 });

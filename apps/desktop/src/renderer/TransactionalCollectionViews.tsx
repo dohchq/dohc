@@ -144,8 +144,8 @@ export function TransactionalCollectionViews(props: Props) {
       latest.current.onLoaded();
       latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows));
     }, error => {
+      // Until a read under the new rules succeeds, each failed one says so, with its own Try again.
       if (!newRules || request!==current.current || abort.signal.aborted) return;
-      rulesSeen.current = rules;
       setLoaded(null);
       latest.current.onError("dohc could not open this view.", error, () => { if (request===current.current) setAttempt(value => value + 1); });
     });
