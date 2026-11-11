@@ -9,10 +9,9 @@ export const LiveDocumentStatus = z.enum(["ready", "preparing", "paused", "retir
 export type LiveDocumentStatus = z.infer<typeof LiveDocumentStatus>;
 
 const AtMs = z.number().int().nonnegative();
-export const LastLiveChange = z.object({
+const LastLiveChange = z.object({
   action: LiveChangeAction, path: z.string().min(1), atMs: AtMs, author: ChangeAuthor,
 }).strict();
-export type LastLiveChange = z.infer<typeof LastLiveChange>;
 export const PendingLiveChange = LastLiveChange.extend({ changeId: z.string().min(1) });
 export type PendingLiveChange = z.infer<typeof PendingLiveChange>;
 export const LiveDocumentChanges = z.object({
