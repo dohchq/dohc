@@ -3548,6 +3548,49 @@ describe("owner live documents", () => {
     expect(within(center).queryByText(LIVE_STOP_WAITING)).toBeNull();
     expect(within(center).queryByText(`Stopping live editing for ${LIVE_ROW.path}`)).toBeNull();
   });
+  // Try again takes the notice at once, so a Stop that waits again after Live
+  // documents closes must report itself, as a refused one does.
+  it("reports a waiting Stop again when its notice's Try again waits after Live documents closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), again = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(waitingStop()).mockReturnValueOnce(again.promise);
+    const title = `Stopping live editing for ${LIVE_ROW.path}`;
+    const user = userEvent.setup(); renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    const toast = (await screen.findByText(title)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
+    await user.click(within(toast).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await act(async () => again.reject(waitingStop()));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = await screen.findByTestId("notice-center");
+    await waitFor(() => expect(within(center).getAllByText(title)).toHaveLength(1));
+    const notice = within(center).getByText(title).closest("li")!;
+    expect(within(notice).getByText(LIVE_STOP_WAITING)).toBeTruthy();
+    expect(within(notice).getByRole("button", {name: "Try again"})).toBeTruthy();
+  });
+  // The dialog now reports a wait after it closes, which a workspace switch also does.
+  it("keeps a waiting Stop from one workspace out of another's Notices", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    const view = render(shell(WORKSPACE)), user = userEvent.setup();
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledOnce());
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
+    await act(async () => stopping.reject(waitingStop()));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = await screen.findByTestId("notice-center");
+    expect(within(center).queryByText(`Stopping live editing for ${LIVE_ROW.path}`)).toBeNull();
+    expect(screen.queryByText(LIVE_STOP_WAITING)).toBeNull();
+  });
   it("keeps the Stopping row as it was when its Try again waits again", async () => {
     const bridge = makeBridge(Promise.resolve(null)), again = deferred<StopOwnerLiveDocumentResult>();
     bridge.getSyncStatus.mockResolvedValue(stoppingStatus());
