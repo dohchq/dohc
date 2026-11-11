@@ -1289,33 +1289,8 @@ async fn outside_reader_fold_preserves_existing_history_undo_refusal() {
 // preparing it would start the reader for nothing.
 #[tokio::test]
 async fn outside_reader_fold_skips_a_note_waiting_for_a_switch_write() {
-    let (scratch, mut store, _) = fixture(false);
+    let (scratch, store, _) = fixture(false);
     let waiting = input("**Strong**");
-    let content = dohc_engine_storage::hex_sha256(b"the switch's version");
-    let job = crate::actor::versions::switch_projection_job_id(
-        "w",
-        "main",
-        "note.md",
-        dohc_engine_storage::MaterializationOperation::Write,
-        &content,
-        false,
-    );
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO materialization_jobs(job_id,target_path,content_sha256,
-                     preimage_present,preimage_sha256,target_generation,status,created_at_ms,
-                     operation,workspace_id)
-                 VALUES(?1,'note.md',?2,1,?3,1,'pending',1,'write','w')",
-                rusqlite::params![
-                    job,
-                    content,
-                    dohc_engine_storage::hex_sha256(waiting.text.as_bytes())
-                ],
-            )
-            .map_err(StorageError::corrupt_public)
-        })
-        .unwrap();
     std::fs::write(scratch.path().join("note.md"), &waiting.text).unwrap();
     let db = store.database_path().to_owned();
     drop(store);
@@ -1328,6 +1303,47 @@ async fn outside_reader_fold_skips_a_note_waiting_for_a_switch_write() {
         )))
         .await
         .unwrap();
+    // With no switch waiting, the note goes to the reader.
+    prepare(
+        &actor,
+        Arc::from([waiting.clone()]),
+        scratch.path(),
+        &mut None,
+    )
+    .await;
+    assert_eq!(reader.dispatch_count(), 1, "the reader was not asked");
+    // The switch commits its job after the actor opened, so nothing replays it.
+    let preimage = dohc_engine_storage::hex_sha256(waiting.text.as_bytes());
+    actor
+        .run(move |store, _| {
+            let text = "the switch's version";
+            let content = dohc_engine_storage::hex_sha256(text.as_bytes());
+            let job = crate::actor::versions::switch_projection_job_id(
+                "w",
+                "main",
+                "note.md",
+                dohc_engine_storage::MaterializationOperation::Write,
+                &content,
+                false,
+            );
+            Ok(store.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
+                    rusqlite::params![content, text.len() as i64, text],
+                )
+                .map_err(StorageError::corrupt_public)?;
+                tx.execute(
+                    "INSERT INTO materialization_jobs(job_id,target_path,content_sha256,
+                         preimage_present,preimage_sha256,target_generation,status,created_at_ms,
+                         operation,workspace_id)
+                     VALUES(?1,'note.md',?2,1,?3,1,'pending',1,'write','w')",
+                    rusqlite::params![job, content, preimage],
+                )
+                .map_err(StorageError::corrupt_public)
+            })?)
+        })
+        .await
+        .unwrap();
     assert!(
         prepare(&actor, Arc::from([waiting]), scratch.path(), &mut None)
             .await
@@ -1335,7 +1351,7 @@ async fn outside_reader_fold_skips_a_note_waiting_for_a_switch_write() {
     );
     assert_eq!(
         reader.dispatch_count(),
-        0,
+        1,
         "the reader read a note that capture refuses"
     );
     supervisor.close(&db).unwrap();
