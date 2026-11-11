@@ -2410,25 +2410,39 @@ impl EngineService {
         let now = now_ms()?;
         let self_writes = Arc::new(self.self_writes.scoped(&open.root));
         let events = self.events.clone();
+        // The drain can replace the note's lineage, so it runs only under the
+        // note's lease. A session that reopened the note drains at its own
+        // close; until then the retry only replays the writes owed.
+        let lease = match self
+            .leases
+            .scoped(&open.root)
+            .acquire_internal(&unfinished.key)
+        {
+            Ok(lease) => Some(lease),
+            Err(CollabError::LeaseHeld) => None,
+            Err(other) => return Err(map_runtime(RuntimeError::Collab(other))),
+        };
         let retry = tokio::spawn(async move {
             let _serial = serial;
             let materialization = || YdocCloseMaterialization {
                 root_dir: open.root.clone(),
                 self_writes: self_writes.clone(),
             };
-            let record_facts = open
-                .actor
-                .ydoc_close_drain(
-                    unfinished.key.clone(),
-                    Some(materialization()),
-                    now,
-                    Arc::new(NoFaults),
-                    CancellationToken::new(),
-                )
-                .await
-                .map_err(map_runtime)?;
-            for facts in &record_facts {
-                emit_record_events(&events, &open.workspace_id, facts);
+            if lease.is_some() {
+                let record_facts = open
+                    .actor
+                    .ydoc_close_drain(
+                        unfinished.key.clone(),
+                        Some(materialization()),
+                        now,
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .map_err(map_runtime)?;
+                for facts in &record_facts {
+                    emit_record_events(&events, &open.workspace_id, facts);
+                }
             }
             if let Some(head) = unfinished.head {
                 let state = open
