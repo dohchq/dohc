@@ -8,7 +8,8 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "..
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
@@ -2087,13 +2088,90 @@ describe("CLI socket server", () => {
       expect(await send("threads", { group: "general" })).toMatchObject({ ok: true });
       expect(await send("inbox", {})).toMatchObject({ ok: true });
     });
+
+    // The rule reads the folder a link leads to, as choosing the workspace does.
+    it("refuses from a link outside shared-with-me that leads into a share's folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      Object.assign(context, { stopSync: reached, dataset: reached });
+      const outside = await mkdtemp(join(tmpdir(), "dohc-link-"));
+      try {
+        // Windows makes a junction without privilege; elsewhere it is a symlink.
+        const links = [join(workspaceRoot, "into-share"), join(outside, "into-share")];
+        for (const link of links) await symlink(inShare, link, "junction");
+        const linked = join(outside, "linked-into-share");
+        try { await symlink(inShare, linked, "dir"); links.push(linked); } catch (error) {
+          // Windows makes a folder symlink only with Developer Mode or as an administrator.
+          if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+        }
+        for (const cwd of links) {
+          expect(await send("stopSync", { cwd, actor: "human" }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("dataset", { cwd, request: { action: "list", workspaceId: WORKSPACE_ID } }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send("watch", { cwd, timeoutMs: 0 }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("runs from a link in a share's folder that leads to your own folder, as from that folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      context.stopSync = reached;
+      const own = join(workspaceRoot, "own");
+      await mkdir(own, { recursive: true });
+      const link = join(inShare, "to-own");
+      await symlink(own, link, "junction");
+      expect(await send("stopSync", { cwd: link, actor: "human" })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" });
+      expect(reached).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it("refuses a chat wait in a read-only shared view", async () => {
+  it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
-    await expect(invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 }))
-      .rejects.toThrow("chats are not available in a read-only shared view");
+    const reached = vi.fn(async () => { throw new Error("reached"); });
+    Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: new Proxy({}, { get: () => reached }),
+      ownerAppResponses: reached, dataset: reached, appPublication: reached });
+    const folder = join(workspaceRoot, "notes", "deeper");
+    await mkdir(folder, { recursive: true });
+    const send = (cwd: string, verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd, actor: "agent", ...args } });
+    const ownerCommands: Array<[CliVerb, Record<string, unknown>, string]> = [
+      ["stopSync", { actor: "human" }, "Open the owning workspace to stop its sync."],
+      ["shareCopy", { shareId: "share", grantId: "grant" }, "Share copy details require the owning workspace."],
+      ["shareAgents", { shareId: "share", grantId: "grant" }, "Open the owning workspace to list a link's agents."],
+      ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }, "Open the owning workspace to disconnect a link's agent."],
+      ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }, "App responses require the owning workspace."],
+      ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }, "Collections require the owning workspace."],
+      ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } },
+        "App publication requires the owning workspace."],
+    ];
+    const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+      ["groupCreate", { name: "needs-ice" }],
+      ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+      ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+      ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+      ["chatRetry", { thread: "thread-1" }],
+      ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+      ["show", { target: "general", peek: false }],
+      ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+      ["watch", { timeoutMs: 0 }],
+    ];
+    for (const cwd of [workspaceRoot, folder]) {
+      for (const [verb, args, error] of ownerCommands) {
+        expect(await send(cwd, verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: `dohc: ${error}` });
+      }
+      for (const [verb, args] of chatCommands) {
+        expect(await send(cwd, verb, args), verb)
+          .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: chats are not available in a read-only shared view" });
+      }
+    }
+    expect(reached).not.toHaveBeenCalled();
   });
 
   it("requires owner-local authority and refuses all automation publication actions", async () => {

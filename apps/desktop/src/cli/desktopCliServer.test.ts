@@ -570,6 +570,15 @@ describe("desktop CLI workspace context", () => {
       // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
       expect(await mcp("versionList")).toEqual({ ok: false, reason: "Versions belong to the owning workspace. Open it to continue." });
+      // Nor the kept and old copies of files; those stay with the owning workspace.
+      const agent = (verb: "keptCopies" | "saveKeptCopy" | "retainedCopies" | "deleteRetainedCopies", args: Record<string, unknown> = {}) =>
+        send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
+      const kept = { ok: false, reason: "kept copies are not available in this workspace" };
+      const old = { ok: false, reason: "Old file copies are kept only in the owning workspace. Open it to continue." };
+      expect(await agent("keptCopies")).toEqual(kept);
+      expect(await agent("saveKeptCopy", { id: 1 })).toEqual(kept);
+      expect(await agent("retainedCopies")).toEqual(old);
+      expect(await agent("deleteRetainedCopies", { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true })).toEqual(old);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
