@@ -14,6 +14,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {WORKER_LIVE_VALIDATION_POLICY} from "./liveValidationPolicy.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
+import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { policy, hash, cleanupLiveDeliveryFixtures, restore } from "./liveCommittedDeliveryTestSupport.js";
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
@@ -947,20 +948,46 @@ it("refuses bootstrap initiation when a durable owner origin already exists",()=
   const f=fixture();try{f.adopt();expect(()=>f.fence()).toThrow();expect(f.storage.getShareGrant("grant")?.status).toBe("active");}finally{f.close();}
 });
 
-it("refuses an existing owner origin with a different share binding before revocation",()=>{
+// The owner's binding is the lineage's, not a share's, so stopping any share
+// that covers the note keeps the owner's adoption under its own binding.
+it("keeps the owner's adopted binding when another share's Edit grant stops",()=>{
   const f=fixture("owner");try{
     f.adopt();
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('other-share','workspace','owner',?,0)")
       .run(JSON.stringify({paths:["docs/a.md"],versionId:null}));
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('other-grant','other-share','user','other-reader',NULL,'edit',4,'active',0,NULL,NULL)");
     const intent={...f.intent,shareId:"other-share",grantId:"other-grant"};
-    const before={usage:f.journalRows().usage,owner:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all()};
-    expect(()=>beginStopRestore(f.context,intent,40)).toThrow();
-    expect(f.storage.getShareGrant("other-grant")?.status).toBe("active");
+    const origin=JSON.parse(String(f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!.origin_json));
+    expect(beginStopRestore(f.context,intent,40).basis.ownerBinding).toEqual(origin.originalBinding);
+    expect(f.storage.getShareGrant("other-grant")?.status).toBe("revoked");
     expect(f.storage.getShareGrant("grant")?.status).toBe("active");
-    expect(readStopRestore(f.context,f.lookup)).toBeNull();
-    expect(f.raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toEqual({admission_state:"open",restore_fence_generation:1});
-    expect({usage:f.journalRows().usage,owner:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all()}).toEqual(before);
+  }finally{f.close();}
+});
+
+// Proves: an owner device that adopted a note under the folder share `docs`
+// before this relay stopped reading shares, and never activated it, recorded
+// that share's selector. The owner keeps it: owner delivery opens with the
+// `["docs"]` binding, and the owner's draft delivers. Without the adoption's
+// record the binding would be the note's path alone, which the adoption
+// doesn't match. An adoption that names another path, or that can't be read,
+// refuses that document and throws nothing.
+it("opens owner delivery for a note adopted under a folder share before any activation, with its adopted binding",()=>{
+  const f=fixture("owner");try{
+    f.adopt();
+    const origin=JSON.parse(String(f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!.origin_json));
+    const record=(binding:unknown)=>f.raw.prepare("UPDATE sync_relay_live_delivery_owners SET origin_json=?").run(JSON.stringify({...origin,originalBinding:binding,
+      bindingDigest:createHash("sha256").update(JSON.stringify(parseLiveObjectBinding(binding))).digest("hex")}));
+    const adopted=parseLiveObjectBinding({...origin.originalBinding,selectorPaths:["docs"]});
+    expect(origin.originalBinding.selectorPaths).toEqual(["docs/a.md"]);
+    record(adopted);
+    const owner={document:f.document,actor:f.actor};
+    expect(f.storage.resolveCurrentLiveDocumentBinding(owner)).toMatchObject({kind:"current",binding:adopted});
+    expect(f.store.openOwnerDelivery({...owner,host:f.coordinate}).binding).toEqual(adopted);
+    expect(f.add("draft").journalCursor).toBeGreaterThan(0);
+    record({...adopted,currentPath:"docs/b.md"});
+    expect(f.storage.resolveCurrentLiveDocumentBinding(owner)).toEqual({kind:"refused",reason:"stale-document"});
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.originalBinding','damaged')");
+    expect(f.storage.resolveCurrentLiveDocumentBinding(owner)).toEqual({kind:"refused",reason:"stale-document"});
   }finally{f.close();}
 });
 

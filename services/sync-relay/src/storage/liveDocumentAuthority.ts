@@ -5,6 +5,8 @@ import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
 import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
 import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 import { allowsServiceActivation, readServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import type {
   CurrentLiveBindingRequest,
   LiveDocumentBaselineRegistrationInput,
@@ -717,18 +719,33 @@ type StoredLiveBinding = Pick<StoredLiveDocumentAuthority, "binding" | "current"
 type LiveBindingRefusal = Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
 /**
- * The owner's binding of a stored lineage: the one its first activation
- * recorded, or the baseline's before any activation, at `current`'s restore
- * generation. No share is read. Null when the activation records another
- * document or path.
+ * The owner's binding of a stored lineage, at `current`'s restore generation:
+ * the one its first activation recorded; before any activation, the one this
+ * host's owner adoption recorded; else the baseline's. No share is read.
+ * Null when the record names another document or path, or can't be read.
  */
 export function recordedOwnerBinding(storage: StorageContext, document: LiveDocumentKey, current: LiveObjectBinding): LiveObjectBinding | null {
   const activation = readServiceActivation(storage, document);
-  if (!activation) return current;
-  const recorded = parseLiveObjectBinding(JSON.parse(String(activation.binding_json)));
-  if (recorded.workspaceId !== current.workspaceId || recorded.objectId !== current.objectId || recorded.lineageClaimId !== current.lineageClaimId ||
-    recorded.currentPath !== current.currentPath) return null;
+  const adoption = activation ? undefined : adoptedOwnerOrigin(storage, document);
+  if (!activation && adoption === undefined) return current;
+  let recorded: LiveObjectBinding;
+  // A damaged record refuses its own document, not the request or pass that reached it.
+  try { recorded = parseLiveObjectBinding(activation ? JSON.parse(String(activation.binding_json)) : JSON.parse(adoption!).originalBinding); }
+  catch { return null; }
+  if (recorded.workspaceId !== current.workspaceId || recorded.mainVersionId !== current.mainVersionId || recorded.objectId !== current.objectId ||
+    recorded.lineageClaimId !== current.lineageClaimId || recorded.currentPath !== current.currentPath) return null;
   return parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: current.restoreFenceGeneration });
+}
+
+// This host's owner adoption of the lineage. One made while owners took a
+// share's selector recorded that selector, so the owner keeps it.
+function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey): string | undefined {
+  const namespace = attachedLiveJournalHistoryNamespace(storage), host = readLiveHostControl(storage.db);
+  if (namespace === undefined || host === null) return undefined;
+  const row = storage.db.prepare(`SELECT origin_json FROM ${LIVE_DELIVERY_OWNERS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=?
+    AND object_id=? AND lineage_claim_id=? AND host_id=?`)
+    .get(namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, host.configuredHostId);
+  return row === undefined ? undefined : String(row.origin_json);
 }
 
 function bindOwnedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null):
