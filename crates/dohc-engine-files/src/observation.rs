@@ -1,7 +1,10 @@
 //! Settled filesystem facts, independent of capture ownership and history.
 
+mod folder;
+
 use crate::floor;
 use crate::scan::FailedPath;
+use folder::{Child, Folder, Kind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -136,12 +139,22 @@ impl ObservationWalker {
                 state.racy.keys().cloned().collect::<BTreeSet<_>>(),
             )
         };
+        let content = ContentRule {
+            started_ms,
+            previous_racy,
+            max_file_bytes: self.bounds.max_file_bytes,
+        };
+        let root_error = |error: &std::io::Error| {
+            crate::FilesError::scan_io(root, root.to_string_lossy().into_owned(), error)
+        };
+        let root_folder = Folder::root(root).map_err(|error| root_error(&error))?;
         let mut listing = Vec::with_capacity(previous_len);
         let mut failed = Vec::new();
-        let mut stack = vec![(root.to_path_buf(), String::new())];
+        let mut digests = BTreeMap::new();
+        let mut stack: Vec<(Option<Pending>, String)> = vec![(None, String::new())];
         let folds = self.folds_names(root);
         let mut entries = 0;
-        while let Some((dir, relative)) = stack.pop() {
+        while let Some((pending, relative)) = stack.pop() {
             if listing.len() + failed.len() > self.bounds.max_files {
                 self.feed.resync();
                 return Ok(true);
@@ -149,18 +162,20 @@ impl ObservationWalker {
             if token.is_cancelled() {
                 return Ok(false);
             }
-            let children = match std::fs::read_dir(&dir) {
-                Ok(children) => children,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound && dir != root => {
-                    continue;
+            let opened = match &pending {
+                None => Ok(root_folder.clone()),
+                Some(pending) => {
+                    before_open(&relative);
+                    pending.open()
                 }
-                Err(error) if dir == root => {
-                    return Err(crate::FilesError::scan_io(
-                        &dir,
-                        dir.to_string_lossy().into_owned(),
-                        &error,
-                    ));
-                }
+            };
+            let (dir, children) = match opened.and_then(|dir| {
+                let children = dir.list()?;
+                Ok((dir, children))
+            }) {
+                Ok(listed) => listed,
+                Err(error) if relative.is_empty() => return Err(root_error(&error)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
                     failed.push(FailedPath {
                         path: relative,
@@ -175,6 +190,7 @@ impl ObservationWalker {
             } else {
                 String::new()
             };
+            let mut folders = Vec::new();
             for child in children {
                 if token.is_cancelled() {
                     return Ok(false);
@@ -196,8 +212,7 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                let name = child.file_name();
-                let name = name.to_string_lossy();
+                let name = child.name();
                 let normalized = floor::normalize_segment(&name);
                 if floor::segment_is_ignored(&normalized) {
                     continue;
@@ -207,7 +222,7 @@ impl ObservationWalker {
                 } else {
                     format!("{relative}/{name}")
                 };
-                let kind = match child.file_type() {
+                let kind = match dir.kind(&child) {
                     Ok(kind) => kind,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => {
@@ -218,15 +233,15 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                if kind.is_dir() {
-                    stack.push((child.path(), path));
+                if kind == Kind::Folder {
+                    folders.push((path, child));
                     continue;
                 }
-                if !(kind.is_file() || kind.is_symlink()) || editor_noise(&normalized) {
+                if !matches!(kind, Kind::File | Kind::Symlink) || editor_noise(&normalized) {
                     continue;
                 }
-                let metadata = match child.metadata() {
-                    Ok(metadata) => metadata,
+                let facts = match dir.facts(&child) {
+                    Ok(facts) => facts,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => {
                         failed.push(FailedPath {
@@ -236,12 +251,7 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                #[cfg(unix)]
-                let changed = {
-                    use std::os::unix::fs::MetadataExt;
-                    (metadata.ctime(), metadata.ctime_nsec())
-                };
-                listing.push(ObservedEntry {
+                let mut entry = ObservedEntry {
                     #[cfg(any(windows, target_vendor = "apple"))]
                     key: if !folds {
                         path.clone()
@@ -251,36 +261,158 @@ impl ObservationWalker {
                         format!("{relative_key}/{normalized}")
                     },
                     path,
-                    symlink: metadata.file_type().is_symlink(),
-                    size: metadata.len(),
-                    modified: metadata.modified().ok(),
+                    symlink: facts.symlink,
+                    size: facts.size,
+                    modified: facts.modified,
                     #[cfg(unix)]
-                    changed,
-                });
+                    changed: facts.changed,
+                };
+                if let Some(check) = content.check(&dir, &child, &mut entry) {
+                    digests.insert(entry.path.clone(), check);
+                }
+                listing.push(entry);
+            }
+            // Subfolders open in name order, so a walk keeps folders open the
+            // same way on every volume.
+            folders.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+            let siblings = folders.len() > 1;
+            for (path, child) in folders {
+                let next = Pending::under(&dir, pending.as_ref(), siblings, child);
+                stack.push((Some(next), path));
             }
         }
-        observe_visibility_policy(root, &mut listing, &mut failed);
-        // Git's racy-clean rule (#2904): a file written this recently, or
-        // last read while it was, is read again, since a second write in the
-        // same clock step keeps its size and times.
-        let mut digests = BTreeMap::new();
-        for entry in &listing {
-            let recent = entry.racy(started_ms);
-            if entry.symlink
-                || entry.size > self.bounds.max_file_bytes
-                || !(recent || previous_racy.contains(&entry.path))
-            {
-                continue;
-            }
-            if token.is_cancelled() {
-                return Ok(false);
-            }
-            let digest = content_digest(&root.join(&entry.path), self.bounds.max_file_bytes);
-            digests.insert(entry.path.clone(), ContentCheck { recent, digest });
-        }
+        observe_visibility_policy(
+            &root_folder,
+            &content,
+            &mut listing,
+            &mut failed,
+            &mut digests,
+        );
         self.feed
             .publish(listing, digests, &failed, self.bounds.max_files, folds)?;
         Ok(true)
+    }
+}
+
+/// Which files a scan reads, by Git's racy-clean rule (#2904): a file written
+/// this recently, or last read while it was, is read again, since a second
+/// write in the same clock step keeps its size and times.
+struct ContentRule {
+    started_ms: i64,
+    previous_racy: BTreeSet<String>,
+    max_file_bytes: u64,
+}
+
+impl ContentRule {
+    /// Reads `child` if the rule calls for it. The entry then takes the size
+    /// and times of the file that was read.
+    fn check(
+        &self,
+        folder: &Folder,
+        child: &Child,
+        entry: &mut ObservedEntry,
+    ) -> Option<ContentCheck> {
+        if entry.symlink
+            || entry.size > self.max_file_bytes
+            || !(entry.racy(self.started_ms) || self.previous_racy.contains(&entry.path))
+        {
+            return None;
+        }
+        let read = folder.read(child, self.max_file_bytes);
+        if let Some(facts) = read.facts {
+            entry.symlink = facts.symlink;
+            entry.size = facts.size;
+            entry.modified = facts.modified;
+            #[cfg(unix)]
+            {
+                entry.changed = facts.changed;
+            }
+        }
+        Some(ContentCheck {
+            recent: entry.racy(self.started_ms),
+            digest: read.digest,
+        })
+    }
+}
+
+/// How many folders a walk keeps open for subfolders still waiting their turn.
+/// Past this, a folder opens one name at a time from the deepest one kept, so
+/// a deep tree with a subfolder waiting at every level can't use up the
+/// engine's file handles.
+const KEPT_FOLDERS: usize = 64;
+
+/// A folder waiting to be listed.
+struct Pending {
+    /// The open folder its names start from.
+    from: Folder,
+    /// Its own name, after the names of its ancestors below `from`.
+    names: std::rc::Rc<Names>,
+    /// Folders kept open for this one and its ancestors.
+    kept: usize,
+    /// Its parent, past the budget, when it is the only subfolder and so
+    /// opens next. A waiting sibling holds only `from`.
+    parent: Option<Folder>,
+}
+
+struct Names {
+    parent: Option<std::rc::Rc<Names>>,
+    child: Child,
+}
+
+impl Drop for Names {
+    // A long chain would otherwise drop one nested call per name.
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(names) = parent {
+            parent = std::rc::Rc::into_inner(names).and_then(|mut names| names.parent.take());
+        }
+    }
+}
+
+impl Pending {
+    /// `child` of the folder `dir`, which opened from `pending`, or is the
+    /// root when that is `None`. Once the walk keeps its share, `dir` stays
+    /// open only until an only subfolder opens, and every descendant can
+    /// reopen from `from` by name.
+    fn under(dir: &Folder, pending: Option<&Pending>, siblings: bool, child: Child) -> Self {
+        let kept = pending.map_or(0, |pending| pending.kept);
+        match pending {
+            Some(pending) if kept >= KEPT_FOLDERS => Self {
+                from: pending.from.clone(),
+                names: std::rc::Rc::new(Names {
+                    parent: Some(pending.names.clone()),
+                    child,
+                }),
+                kept,
+                parent: (!siblings).then(|| dir.clone()),
+            },
+            _ => Self {
+                from: dir.clone(),
+                names: std::rc::Rc::new(Names {
+                    parent: None,
+                    child,
+                }),
+                // An only subfolder opens next, and `dir` closes after it.
+                kept: kept + usize::from(siblings),
+                parent: None,
+            },
+        }
+    }
+
+    fn open(&self) -> std::io::Result<Folder> {
+        if let Some(parent) = &self.parent {
+            return parent.open(&self.names.child);
+        }
+        let mut names = vec![&self.names.child];
+        let mut parent = self.names.parent.as_deref();
+        while let Some(next) = parent {
+            names.push(&next.child);
+            parent = next.parent.as_deref();
+        }
+        names
+            .into_iter()
+            .rev()
+            .try_fold(self.from.clone(), |folder, child| folder.open(child))
     }
 }
 
@@ -293,64 +425,18 @@ pub(crate) struct ContentCheck {
     digest: Option<[u8; 32]>,
 }
 
-fn content_digest(path: &std::path::Path, cap: u64) -> Option<[u8; 32]> {
-    use sha2::Digest;
-    use std::io::Read;
-    // An ordinary open of a FIFO waits for a writer and would stall the feed,
-    // so the open doesn't block and only a regular file is read.
-    #[cfg(unix)]
-    let file = {
-        use rustix::fs::{Mode, OFlags};
-        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        rustix::fs::open(path, flags, Mode::empty()).map(std::fs::File::from)
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path);
-    let mut file = file.ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut hasher = sha2::Sha256::new();
-    let mut buffer = vec![0; 64 * 1024];
-    let mut bytes = 0u64;
-    loop {
-        let read = match file.read(&mut buffer) {
-            Ok(0) => {
-                let mut digest = [0; 32];
-                digest.copy_from_slice(&hasher.finalize());
-                return Some(digest);
-            }
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        };
-        bytes = bytes.saturating_add(read as u64);
-        if bytes > cap {
-            return None;
-        }
-        hasher.update(&buffer[..read]);
-    }
-}
-
 // The listing needs policy edits even though ordinary observation excludes .dohc.
-// Read metadata for this one path without entering or following the metadata directory.
+// Read this one file without entering or following a link in the metadata folder's place.
 fn observe_visibility_policy(
-    root: &std::path::Path,
+    root: &Folder,
+    content: &ContentRule,
     listing: &mut Vec<ObservedEntry>,
     failed: &mut Vec<FailedPath>,
+    digests: &mut BTreeMap<String, ContentCheck>,
 ) {
     let path = ".dohc/visibility.toml";
-    let metadata = (|| {
-        let parent = std::fs::symlink_metadata(root.join(".dohc"))?;
-        if parent.is_dir() && !parent.file_type().is_symlink() {
-            std::fs::symlink_metadata(root.join(path))
-        } else {
-            // A refused parent still changes the policy verdict. Never follow it.
-            Ok(parent)
-        }
-    })();
-    let metadata = match metadata {
-        Ok(metadata) => metadata,
+    let (facts, file) = match root.policy() {
+        Ok(policy) => policy,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
             failed.push(FailedPath {
@@ -360,21 +446,21 @@ fn observe_visibility_policy(
             return;
         }
     };
-    #[cfg(unix)]
-    let changed = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.ctime(), metadata.ctime_nsec())
-    };
-    listing.push(ObservedEntry {
+    let mut entry = ObservedEntry {
         path: path.to_owned(),
-        symlink: metadata.file_type().is_symlink(),
-        size: metadata.len(),
-        modified: metadata.modified().ok(),
+        symlink: facts.symlink,
+        size: facts.size,
+        modified: facts.modified,
         #[cfg(unix)]
-        changed,
+        changed: facts.changed,
         #[cfg(any(windows, target_vendor = "apple"))]
         key: path.to_owned(),
-    });
+    };
+    if let Some(check) = file.and_then(|(folder, child)| content.check(&folder, &child, &mut entry))
+    {
+        digests.insert(path.to_owned(), check);
+    }
+    listing.push(entry);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,6 +868,29 @@ pub(crate) fn sidecar_base(path: &str) -> Option<&str> {
         .then_some(base)
     })
 }
+
+/// A test's swap, and the path that runs it.
+#[cfg(test)]
+type Swap = (String, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_OPEN: std::cell::RefCell<Option<Swap>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a test's swap after the walk has seen `relative` and before it opens
+/// it. Builds other than tests do nothing here.
+#[cfg(test)]
+fn before_open(relative: &str) {
+    let hook = BEFORE_OPEN
+        .with_borrow_mut(|hook| hook.take_if(|(at, _)| at == relative).map(|(_, run)| run));
+    if let Some(run) = hook {
+        run();
+    }
+}
+
+#[cfg(not(test))]
+fn before_open(_: &str) {}
 
 /// Matches editor noise on the normalized leaf only. Ancestors use the floor.
 fn editor_noise(name: &str) -> bool {
@@ -1425,6 +1534,129 @@ mod tests {
         );
     }
 
+    /// Runs `swap` once, when the walk has seen `relative` and is about to
+    /// open it.
+    #[cfg(unix)]
+    fn swap_before_open(relative: &str, swap: impl FnOnce() + 'static) {
+        BEFORE_OPEN.set(Some((relative.to_owned(), Box::new(swap))));
+    }
+
+    /// Moves `folder` to `aside` and puts a link to `target` in its place.
+    #[cfg(unix)]
+    fn link_in_place_of(
+        folder: std::path::PathBuf,
+        aside: std::path::PathBuf,
+        target: std::path::PathBuf,
+    ) -> impl FnOnce() {
+        move || {
+            std::fs::rename(&folder, aside).unwrap();
+            std::os::unix::fs::symlink(target, &folder).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-swap-outside").unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside").unwrap();
+        f.write("notes/inside.md", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        swap_before_open(
+            "notes",
+            link_in_place_of(
+                f.root.path().join("notes"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        let facts = f.scan(&cursor);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
+        assert!(
+            facts.iter().all(|fact| !fact.path.contains("secret")),
+            "{facts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-parent-outside").unwrap();
+        std::fs::create_dir(outside.path().join("deeper")).unwrap();
+        std::fs::write(outside.path().join("deeper/secret.md"), "outside").unwrap();
+        f.write("notes/deeper/inside.md", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        // `notes` was listed already, and `notes/deeper` is opened next.
+        swap_before_open(
+            "notes/deeper",
+            link_in_place_of(
+                f.root.path().join("notes"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        let facts = f.scan(&cursor);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
+        assert!(
+            facts.iter().all(|fact| !fact.path.contains("secret")),
+            "{facts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_folder_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-policy-swap").unwrap();
+        std::fs::write(outside.path().join("visibility.toml"), "outside and longer").unwrap();
+        f.write(".dohc/visibility.toml", "in");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        swap_before_open(
+            ".dohc",
+            link_in_place_of(
+                f.root.path().join(".dohc"),
+                outside.path().join("aside"),
+                outside.path().to_path_buf(),
+            ),
+        );
+        assert_eq!(f.scan(&cursor), vec![]);
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_tree_with_a_waiting_subfolder_at_every_level_keeps_few_folders_open() {
+        let f = Fixture::new();
+        let mut deep = String::new();
+        let mut files = 1;
+        // Every level waits on a subfolder up to past the budget, then every
+        // other level has only one subfolder.
+        for level in 0..KEPT_FOLDERS + 120 {
+            if level < KEPT_FOLDERS + 40 || level % 2 == 0 {
+                // `d` opens before `side`, which waits while `d` is walked.
+                f.write(&format!("{deep}side/file.md"), "s");
+                files += 1;
+            }
+            deep.push_str("d/");
+        }
+        f.write(&format!("{deep}deepest.md"), "x");
+        folder::OPEN.set((folder::OPEN.get().0, 0));
+        f.scan(&f.cursor());
+        let (_, most) = folder::OPEN.get();
+        assert!(most <= KEPT_FOLDERS + 4, "{most} folders open at once");
+        let listing = f.feed.state.lock().unwrap().listing.clone();
+        assert_eq!(listing.len(), files);
+        assert!(
+            listing
+                .iter()
+                .any(|entry| entry.path == format!("{deep}deepest.md"))
+        );
+    }
+
     #[test]
     fn observation_indeterminate_paths_retain_last_known_presence() {
         let feed = ObservationFeed::new();
@@ -1610,6 +1842,35 @@ mod tests {
             start.elapsed().as_secs_f64() * 10.0,
             memory,
             memory as f64 / 10000.0
+        );
+    }
+
+    #[test]
+    #[ignore = "manual deep, narrow tree cost measurement"]
+    fn observation_deep_workspace_cost() {
+        const DEPTH: usize = 400;
+        let f = Fixture::new();
+        let mut folder = String::new();
+        for depth in 0..DEPTH {
+            folder.push_str("d/");
+            f.write(&format!("{folder}file-{depth}.md"), "abc");
+        }
+        let cursor = f.cursor();
+        f.scan(&cursor);
+        f.scan(&cursor);
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let start = std::time::Instant::now();
+            f.scanner
+                .observe(f.root.path(), &CancellationToken::new())
+                .unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        assert_eq!(f.feed.state.lock().unwrap().listing.len(), DEPTH);
+        eprintln!(
+            "OBSERVATION_DEEP_COST folders={DEPTH} files={DEPTH} observed_scan_median_ms={:.3}",
+            times[10].as_secs_f64() * 1000.0,
         );
     }
 }

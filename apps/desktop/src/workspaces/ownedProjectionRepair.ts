@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { unjournalablePathMessages, type UnjournalablePath } from "./shareViewRecords";
+import { isHeldSharePath } from "./shareViewFiles";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
@@ -12,12 +13,9 @@ import { workspacePathKey } from "./workspacePathKey";
 type ProjectionOwner = Pick<ShareViewFiles, "projectionStatus" | "reconcile">;
 type RepairOutcome = Extract<ShareViewReconcileOutcome, { kind: "repair" }>;
 
-// A held file waits on a person, not on repair: a local file in its way, or
-// another shared spelling that owns its file on this disk (#2416). Its disk
-// file is not the share's copy, so reads skip it instead of failing the view.
-function isHold(entry: UnjournalablePath): boolean {
-  return entry.reason === "local-collision" || entry.reason === "spelling-collision";
-}
+// A held file's disk file is not the share's copy, so reads skip it instead
+// of failing the view.
+const isHold = isHeldSharePath;
 
 export function createOwnedProjectionRepairer(files: ProjectionOwner) {
   /** Resolves with the share-relative paths held back from the folder. */

@@ -384,6 +384,79 @@ async fn real_reader_settles_without_edits_and_revalidates_after_restart() {
     }
 }
 
+/// A note past the reader's capacity used to fill its 512 MB heap, crash it
+/// and be asked again seven times (#3575). The reader now refuses it before
+/// its heap fills, and the engine hears capacity once and does not ask again.
+#[tokio::test]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
+async fn real_reader_refuses_a_note_over_its_capacity_once_without_a_crash() {
+    let (scratch, db, key, source, claim) = seed();
+    let mut store = EngineStore::open(&db, 4).unwrap();
+    let doc = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap()
+        .doc;
+    // Each paragraph weighs three structs and one block element, so 40,000
+    // weigh 360,000 against the reader's 280,000.
+    for paragraph in 0..40_000 {
+        doc.richdoc_append_paragraph(&format!("Paragraph {paragraph}"));
+    }
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_update_in_tx(
+                tx,
+                &key,
+                &doc.encode_full_state(),
+                None,
+                None,
+                5,
+            )
+        })
+        .unwrap();
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = Arc::new(Reader::new(Some(config)));
+    let resolver = Arc::new(ReaderResolver::new(reader.clone()));
+    actor
+        .configure_reader_resolver(resolver.clone())
+        .await
+        .unwrap();
+    // Every path answers with the code the desktop and share page word, not a
+    // corrupt store or a retry.
+    let refused = |result: Result<_, dohc_engine_runtime::RuntimeError>| match result {
+        Err(error) => assert_eq!(error.code(), "document-too-dense", "{error:?}"),
+        Ok(_) => panic!("a note over the reader's capacity settled"),
+    };
+    for _ in 0..2 {
+        refused(settle(&actor, scratch.path(), &key, &source, &claim).await);
+        // One request, answered with a refusal rather than a crash, and not
+        // asked again for the same note.
+        assert_eq!(reader.dispatch_count(), 1);
+    }
+    supervisor.close(&db).unwrap();
+    // Once the note changes, it is asked again.
+    let mut store = EngineStore::open(&db, 4).unwrap();
+    let update = doc.richdoc_append_paragraph("One more");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 5)
+        })
+        .unwrap();
+    drop(store);
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    actor.configure_reader_resolver(resolver).await.unwrap();
+    refused(settle(&actor, scratch.path(), &key, &source, &claim).await);
+    assert_eq!(reader.dispatch_count(), 2);
+    supervisor.close(&db).unwrap();
+    assert_eq!(
+        std::fs::read(scratch.path().join("note.md")).unwrap(),
+        source.as_bytes()
+    );
+}
+
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn real_reader_expires_body_sources_across_settles_and_restart() {

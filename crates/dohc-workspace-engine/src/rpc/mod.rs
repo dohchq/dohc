@@ -7,10 +7,12 @@ pub(crate) mod configured_live_host;
 pub(super) mod conflicts;
 pub(super) mod dispatch;
 pub(super) mod error;
+pub(super) mod held_change;
 pub(super) mod held_documents;
 pub(super) mod history;
 pub(super) mod kept_copies;
 pub(crate) mod live_application;
+pub(super) mod live_changes;
 pub(super) mod markdown_recovery;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
@@ -39,3 +41,6 @@ mod test_common;
 
 pub(super) mod files;
 pub(super) mod links;
+
+#[cfg(test)]
+mod held_change_tests;

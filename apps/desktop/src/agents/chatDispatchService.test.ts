@@ -8,8 +8,8 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { delimiter, join, resolve } from "node:path";
+import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { delimiter, dirname, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
   type ChatDispatch,
@@ -25,6 +25,7 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchFrom, type AgentLaunchProfile } from "./agentToolCatalog";
+import { markRunLogEnded } from "./runLogRetention";
 import { testAgent } from "../testing/agentSettings";
 import type { Agent } from "../settings/userSettings";
 
@@ -43,6 +44,7 @@ import {
   CHAT_DISPATCH_BUDGET_MAX,
   CHAT_DISPATCH_PUMP_MS,
   CHAT_DISPATCH_RECOVERY_BACKOFF_MS,
+  RUN_LOG_SWEEP_MS,
   RUNNER_SELF_TEST_TIMEOUT_MS,
   RUNNER_OUTLIVED_STOP,
   SELF_TEST_RESTRICTED_DETAIL,
@@ -1213,6 +1215,45 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
   });
 
+  it("removes run logs that ended longer ago than the settings file keeps them when it starts", async () => {
+    const fixture = await createFixture();
+    const logs = join(fixture.stateRoot, "run-logs");
+    await mkdir(logs, { recursive: true });
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    for (const runId of ["run-old", "run-recent", "run-unended"]) await writeFile(join(logs, `${runId}.log`), "output");
+    await markRunLogEnded(join(logs, "run-old.log"), old.getTime());
+    await markRunLogEnded(join(logs, "run-recent.log"), Date.now());
+    await utimes(join(logs, "run-unended.log"), old, old);
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions, nowMs: () => Date.now(), readRunLogKeepDays: async () => 30,
+    });
+    service.start();
+    try {
+      await vi.waitFor(async () => expect((await readdir(logs)).sort()).toEqual(["run-recent.log", "run-recent.log.ended", "run-unended.log"]));
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("counts a quiet run's log from when the run ended, not its last write", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Take your time.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    const log = join(fixture.stateRoot, "run-logs", `${claim.run.runId}.log`);
+    // Its last write was 40 days before it ended.
+    const ended = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(ended - 40 * 24 * 60 * 60 * 1000);
+    await utimes(log, lastWrite, lastWrite);
+    fixture.now.value = ended;
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(async () => expect(await readFile(`${log}.ended`, "utf8")).toBe(`${ended}
+`));
+  });
+
   it("reports each pause and resume once, wherever it came from", async () => {
     const fixture = await createFixture();
     const onPausedChanged = vi.fn<(paused: boolean) => void>();
@@ -1648,6 +1689,11 @@ describe("chatDispatchService", () => {
       detail: `Runner self-test could not start. ${reason}`,
       logPath: expect.any(String),
     });
+    // Both failed launches left a log, and each records its end so cleanup can remove it.
+    const logs = (await readdir(join(fixture.stateRoot, "run-logs"))).sort();
+    expect(logs.filter((name) => name.endsWith(".log")).map((name) => `${name}.ended`))
+      .toEqual(logs.filter((name) => name.endsWith(".ended")));
+    expect(logs).toHaveLength(4);
   });
 
   it("releases the live slot when the final run-message lookup rejects", async () => {
@@ -3001,9 +3047,19 @@ describe("chatDispatchService", () => {
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
     if (!interrupted) throw new Error("Expected an interrupted run.");
+    // Quiet for 40 days before dohc stopped; cleanup counts from the recorded end.
+    const log = join(fixture.stateRoot, "run-logs", `${interrupted.run.runId}.log`);
+    await mkdir(dirname(log), { recursive: true });
+    await writeFile(log, "started");
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 40 * 24 * 60 * 60 * 1000);
+    await utimes(log, lastWrite, lastWrite);
+    fixture.now.value = restarted;
 
     await activate(fixture);
 
+    expect(await readFile(`${log}.ended`, "utf8")).toBe(`${restarted}
+`);
     expect(await fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
       failureHandled: true,
       failureReason: "app restart during run",
@@ -3015,6 +3071,144 @@ describe("chatDispatchService", () => {
       noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
       title: "Nova didn't reply in \"Resume this after restart.\"",
     })]);
+  });
+
+  it("records an interrupted run's end before startup cleanup reads it", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Keep my log.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId, agentId: "default",
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default", command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    const logs = join(fixture.stateRoot, "run-logs");
+    const log = join(logs, `${interrupted.run.runId}.log`);
+    await mkdir(logs, { recursive: true });
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 40 * 24 * 60 * 60 * 1000);
+    for (const file of [log, join(logs, "run-old.log")]) {
+      await writeFile(file, "started");
+      await utimes(file, lastWrite, lastWrite);
+    }
+    fixture.now.value = restarted;
+    // Recovery is slow: it waits until the test lets it read open runs.
+    let recover!: () => void;
+    const recovering = new Promise<void>((resolve) => { recover = resolve; });
+    const dispatch = fixture.serviceOptions.dispatchStoreFor(fixture.workspace);
+    const openRuns = dispatch.openRuns.bind(dispatch);
+    vi.spyOn(dispatch, "openRuns").mockImplementation(async (...args) => {
+      await recovering;
+      return openRuns(...args);
+    });
+    const endWhenRead: string[] = [];
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      listOpenWorkspaces: () => [fixture.workspace],
+      readRunLogKeepDays: async () => {
+        endWhenRead.push(await readFile(`${log}.ended`, "utf8").catch(() => "none"));
+        return 30;
+      },
+    });
+    service.start();
+    recover();
+    try {
+      await vi.waitFor(() => expect(endWhenRead).toEqual([`${restarted}
+`]));
+      expect((await readdir(logs)).sort()).toEqual(["run-old.log", `${interrupted.run.runId}.log`, `${interrupted.run.runId}.log.ended`]);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("keeps an interrupted run's old log through startup and daily cleanup when recovery fails", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Keep my log.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId, agentId: "default",
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default", command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    const logs = join(fixture.stateRoot, "run-logs");
+    const log = join(logs, `${interrupted.run.runId}.log`);
+    await mkdir(logs, { recursive: true });
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 400 * 24 * 60 * 60 * 1000);
+    await writeFile(log, "started");
+    await utimes(log, lastWrite, lastWrite);
+    // Runs that did end show each cleanup has run: one ended past the limit
+    // at startup, the other only by the next day's cleanup.
+    const day = 24 * 60 * 60 * 1000;
+    for (const [runId, endedDaysAgo] of [["run-done", 31], ["run-done-later", 29.5]] as const) {
+      await writeFile(join(logs, `${runId}.log`), "output");
+      await markRunLogEnded(join(logs, `${runId}.log`), restarted - endedDaysAgo * day);
+    }
+    fixture.now.value = restarted;
+    const dispatch = fixture.serviceOptions.dispatchStoreFor(fixture.workspace);
+    vi.spyOn(dispatch, "openRuns").mockRejectedValue(new Error("engine unavailable"));
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      listOpenWorkspaces: () => [fixture.workspace],
+      readRunLogKeepDays: async () => 30,
+    });
+    service.start();
+    try {
+      await vi.waitFor(async () => expect((await readdir(logs)).sort()).toEqual([
+        "run-done-later.log", "run-done-later.log.ended", `${interrupted.run.runId}.log`,
+      ]));
+      fixture.now.value = restarted + RUN_LOG_SWEEP_MS;
+      await vi.advanceTimersByTimeAsync(RUN_LOG_SWEEP_MS);
+      await vi.waitFor(async () => expect(await readdir(logs)).toEqual([`${interrupted.run.runId}.log`]));
+      expect((await fixture.dispatch.getRunRecord(interrupted.run.runId))?.endedAtMs).toBeUndefined();
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("keeps an interrupted run's old log until its workspace opens and recovery records the end", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Keep my log.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId, agentId: "default",
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default", command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    const logs = join(fixture.stateRoot, "run-logs");
+    const log = join(logs, `${interrupted.run.runId}.log`);
+    await mkdir(logs, { recursive: true });
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 400 * 24 * 60 * 60 * 1000);
+    await writeFile(log, "started");
+    await utimes(log, lastWrite, lastWrite);
+    // A run that did end shows the startup cleanup has run.
+    await writeFile(join(logs, "run-done.log"), "output");
+    await markRunLogEnded(join(logs, "run-done.log"), restarted - 31 * 24 * 60 * 60 * 1000);
+    fixture.now.value = restarted;
+    // Its workspace isn't open when dohc starts.
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      listOpenWorkspaces: () => [],
+      readRunLogKeepDays: async () => 30,
+    });
+    service.start();
+    try {
+      await vi.waitFor(async () => expect(await readdir(logs)).toEqual([`${interrupted.run.runId}.log`]));
+      // Opening it later runs recovery, which records the end as now.
+      await service.scanWorkspace(WORKSPACE_ID);
+      expect(await readFile(`${log}.ended`, "utf8")).toBe(`${restarted}\n`);
+      fixture.now.value = restarted + RUN_LOG_SWEEP_MS;
+      await vi.advanceTimersByTimeAsync(RUN_LOG_SWEEP_MS);
+      expect((await readdir(logs)).sort()).toEqual([`${interrupted.run.runId}.log`, `${interrupted.run.runId}.log.ended`]);
+    } finally {
+      await service.stop();
+    }
   });
 
   it("retries a failed local-only scan after the daemon recovers", async () => {
@@ -3757,6 +3951,21 @@ describe("chatDispatchService", () => {
     });
     expect(messages.some((message) => message.body.includes("app quit during run"))).toBe(false);
     expect(fixture.notices).toEqual([]);
+  });
+
+  it("records a running self-test's end when dohc quits", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture();
+    const result = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const log = join(fixture.stateRoot, "run-logs", `${fixture.spawnCalls[0]!.options.env.DOHC_RUN_ID}.log`);
+
+    const stopping = fixture.service.stop();
+    await vi.advanceTimersByTimeAsync(APP_QUIT_KILL_GRACE_MS);
+    await stopping;
+
+    await expect(result).resolves.toMatchObject({ ok: false });
+    expect(await readFile(`${log}.ended`, "utf8")).toBe(`${fixture.now.value}\n`);
   });
 
   it("terminates an app-quit runner when persisting its failure rejects", async () => {
@@ -4557,6 +4766,9 @@ describe("chatDispatchService", () => {
 
     await expect(resultPromise).resolves.toMatchObject({ ok: true });
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 2 });
+    // Its end is recorded, so cleanup can remove its log in time.
+    const log = join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log`);
+    await vi.waitFor(async () => expect(await readFile(`${log}.ended`, "utf8")).toBe(`${fixture.now.value}\n`));
   });
 
   it("checks the agent it is asked about", async () => {

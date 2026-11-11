@@ -28,6 +28,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  "document held-change": ["note.md"],
   "links edges": [],
   "links in": ['{"path":"a.md"}'],
   "links resolve": ["a.md", '[{"kind":"wikilink","literal":"b"}]'],
@@ -50,10 +51,11 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document set-fields": ["board/launch.md", "--field", "Status=Blocked"],
   "document retry-kept-edits": ["Notes/a.md", "outbox:delivery:0"],
   "document stop-again": ["Notes/a.md", "release:a:0"],
+  "document live": [],
   "chat file-mentions": [],
   "chat links": ["general"],
   "chat groups": [], "chat create-group": ["needs-ice"], "chat threads": ["group"], "chat watch": [], "chat inbox": [], "chat show": ["thread"],
-  "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],
+  "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat retry": ["thread"], "chat react": ["message", "thumbsup"],
   "chat grep": ["pattern"], "chat export": ["--out", "exports"],
   "file duplicate": ["Notes/a.md"],
   "history operation": ["dohc-operation:11111111-1111-4111-8111-111111111111"], "history undo": ["dohc-operation:11111111-1111-4111-8111-111111111111"],

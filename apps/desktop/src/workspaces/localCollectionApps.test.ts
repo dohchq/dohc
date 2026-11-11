@@ -16,7 +16,7 @@ import { compileClosedApp } from "./closedAppCompiler";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalAppLaunchHost, LocalAppUnavailableError } from "./localAppLaunch";
-import { LocalCollectionRefusal, LOCAL_APP_WITHDRAW_TIMEOUT_MS, MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
+import { LocalCollectionRefusal, LOCAL_APP_WITHDRAW_TIMEOUT_MS, MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, localCollectionAuthor, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
 import { createLocalDatasetHost, reconcileExistingLocalCollectionApps, type LocalDatasetHost } from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { unguardedCollections } from "../testing/collectionsHolder";
@@ -83,7 +83,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: "00000000-0
     { fieldId: "00000000-0000-4000-8000-000000000004", name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
   ] }], operations: [{ operationId: "00000000-0000-4000-8000-000000000006", name: "submit", label: "Submit", tableId: "00000000-0000-4000-8000-000000000002", kind: "create", access: "link", readOnly: false, fieldIds: ["00000000-0000-4000-8000-000000000004"] }] };
 
-async function fixture(options: { workspaceRoot?: string; engine?: Engine; author?: () => Promise<MomentWriteAuthor>; readFields?: string[] } = {}) {
+async function fixture(options: { workspaceRoot?: string; engine?: Engine; author?: (activated: boolean) => Promise<MomentWriteAuthor>; readFields?: string[] } = {}) {
   const workspaceRoot = options.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-collection-app-"));
   if (!options.workspaceRoot) roots.push(workspaceRoot);
   const engine = options.engine ?? fakeEngine();
@@ -110,8 +110,8 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
   };
   const prepared = await collectionApp();
   const published = await host.apps.activate(prepared, signal());
-  const create = (fields: Record<string, unknown>, idempotencyKey = "response-1", target = host, revision = published.authorityRevision) =>
-    target.apps.request(published.publicationId, "create", { authorityRevision: revision, idempotencyKey, fields }) as Promise<{ kind: "accepted"; acceptanceId: string; objectId: string; path: string; momentId: string; acceptedAtMs: number }>;
+  const create = (fields: Record<string, unknown>, idempotencyKey = "response-1", target = host, revision = published.authorityRevision, activated?: boolean) =>
+    target.apps.request(published.publicationId, "create", { authorityRevision: revision, idempotencyKey, fields }, undefined, activated) as Promise<{ kind: "accepted"; acceptanceId: string; objectId: string; path: string; momentId: string; acceptedAtMs: number }>;
   const list = (input: { limit: number; afterPath?: string } = { limit: 50 }, target = host, revision = published.authorityRevision) =>
     target.apps.request(published.publicationId, "list", { authorityRevision: revision, ...input }) as Promise<{ records: Array<{ path: string; recordId: string | null; fields: Record<string, unknown> }>; nextPath: string | null }>;
   const inspect = <T>(work: (db: DatabaseSync) => T) => { const db = new DatabaseSync(join(workspaceRoot, ".dohc/local/datasets/state.sqlite")); try { return work(db); } finally { db.close(); } };
@@ -216,6 +216,7 @@ describe("local document Collection apps", () => {
       await expect(f.create(fields, `invalid-${index}`)).rejects.toThrow(/collection/i);
     }
     await expect(f.host.apps.request(f.published.publicationId, "create", { authorityRevision: f.published.authorityRevision, idempotencyKey: "k", fields: { destination: "Tokyo" }, path: "elsewhere.md" })).rejects.toThrow(/Invalid collection request/);
+    await expect(f.host.apps.request(f.published.publicationId, "create", { authorityRevision: f.published.authorityRevision, idempotencyKey: "k", fields: { destination: "Tokyo" }, activated: true })).rejects.toThrow(/Invalid collection request/);
     expect(f.engine.state.writes).toEqual([]);
     f.inspect(db => expect(db.prepare("SELECT count(*) AS n FROM local_collection_creates").get()!.n).toBe(0));
   });
@@ -235,6 +236,16 @@ describe("local document Collection apps", () => {
     expect(JSON.parse(text.split("\n")[1]!)).toEqual({ destination: "Tokyo", name: "Ana", id: expect.stringMatching(/^rec_[a-z2-7]{26}$/), created_at: first.acceptedAtMs, acceptance_id: first.acceptanceId });
     await expect(f.create({ destination: "Manila" })).rejects.toThrow(/already used for another response/);
     expect((await f.list()).records).toEqual([{ path: first.path, recordId: expect.stringMatching(/^rec_/), fields: { destination: "Tokyo", name: "Ana" } }]);
+  });
+
+  it("credits a create a person's click started during a run to the person, and any other create to the run", async () => {
+    const run = { agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: "run-1", depth: 1 };
+    const f = await fixture({ author: activated => localCollectionAuthor(run, activated, async () => person) });
+    await f.create({ destination: "Tokyo" }, "clicked", undefined, undefined, true);
+    await f.create({ destination: "Manila" }, "unclicked", undefined, undefined, false);
+    await f.create({ destination: "Tokyo", name: "Ana" }, "unstated");
+    const agent = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: "run-1", depth: 1 };
+    expect(f.engine.state.writes.map(write => write.author)).toEqual([person, agent, agent]);
   });
 
   it("keeps a reservation through an engine outage and completes it on restart without a second write", async () => {

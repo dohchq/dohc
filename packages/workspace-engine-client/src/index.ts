@@ -14,6 +14,7 @@ export {
   isFileLockedRefusal,
   isVolumeSharesNewFilesRefusal,
   isIdempotencyKeyReuseRefusal,
+  isOwnerOutboxFrozenRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,
@@ -87,3 +88,5 @@ export {
   type OwnerYDocOutboxEntry,
   type OwnerYDocOutboxRecovery,
 } from "./ydoc/ownerYDocOutbox";
+
+export type { HeldNoteChangeInput, HeldNoteChangeResult } from "./workspace/workspaceWireContract";

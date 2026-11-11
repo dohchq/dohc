@@ -1,14 +1,13 @@
 import {test,expect,chromium} from '@playwright/test';
 import https from 'node:https';
-import {createHash,X509Certificate} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {writeFileSync,mkdirSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 import {tripPollProductFixture} from './tripPollProductFixture';
+import {testCertificate} from './testCertificate';
 
 test('production viewer discovers and launches compiled trip poll with real shared responses',async({},testInfo)=>{
-  test.skip(process.platform!=='win32','This HTTPS certificate fixture uses PowerShell on Windows.');
   test.setTimeout(120000);
   const evidence=testInfo.outputPath('product-proof');mkdirSync(evidence,{recursive:true});
   const packageRoot=fileURLToPath(new URL('..',import.meta.url)),viewerAssetsDir=join(evidence,'viewer');
@@ -17,18 +16,8 @@ test('production viewer discovers and launches compiled trip poll with real shar
   const events:Array<{path:string;status:number;origin:string|null;contentType:string|null}>=[],errors:string[]=[];
   try{
   fixture=await tripPollProductFixture(evidence,viewerAssetsDir);
-  const certificateScript=`$rsa=[System.Security.Cryptography.RSA]::Create(2048)
-$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-app-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net')
-$req.CertificateExtensions.Add($san.Build())
-$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
-[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
-[Convert]::ToBase64String($cert.RawData)
-$cert.Dispose();$rsa.Dispose()`;
-  const [pfxText,certText]=execFileSync('pwsh.exe',['-NoProfile','-NonInteractive','-Command',certificateScript],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/);
-  const cert=new X509Certificate(Buffer.from(certText!,'base64')),spki=createHash('sha256').update(cert.publicKey.export({type:'spki',format:'der'})).digest('base64');
-  server=https.createServer({pfx:Buffer.from(pfxText!,'base64'),passphrase:''},async(req,res)=>{
+  const {tls, spki} = testCertificate('dohc-app-test', ['viewer.example.com', '*.example.net']);
+  server=https.createServer(tls,async(req,res)=>{
     try{
       const headers=new Headers();for(const [name,value]of Object.entries(req.headers))if(value!==undefined)headers.set(name,Array.isArray(value)?value.join(','):value);
       const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
@@ -52,9 +41,9 @@ $cert.Dispose();$rsa.Dispose()`;
     const first=await open('light',1000);await expect(first.child.getByText('No responses yet. Send yours above.')).toBeVisible();
     await first.child.getByLabel('Name (optional)').fill('Sam');await first.child.getByLabel('Destination',{exact:true}).selectOption('Manila');
     await first.child.getByRole('button',{name:'Send response',exact:true}).click();await expect(first.child.getByText('Response saved.',{exact:true})).toBeVisible();
-    await expect(first.child.getByRole('listitem')).toHaveCount(1);await expect(first.child.getByRole('listitem')).toHaveText('IceManila');
+    await expect(first.child.getByRole('listitem')).toHaveCount(1);await expect(first.child.getByRole('listitem')).toHaveText('SamManila');
     await first.page.screenshot({path:evidence+'/p5-trip-product-light.png'});
-    const second=await open('dark',390);await expect(second.child.getByRole('listitem')).toHaveCount(1);await expect(second.child.getByRole('listitem')).toHaveText('IceManila');
+    const second=await open('dark',390);await expect(second.child.getByRole('listitem')).toHaveCount(1);await expect(second.child.getByRole('listitem')).toHaveText('SamManila');
     await second.child.getByLabel('Name (optional)').fill('Alex');await second.child.getByRole('button',{name:'Send response',exact:true}).click();await expect(second.child.getByText('Response saved.',{exact:true})).toBeVisible();
     const principals=fixture.principalEvidence();expect(principals).toHaveLength(2);expect(new Set(principals.map(row=>row.principal_id)).size).toBe(2);expect(new Set(principals.map(row=>row.public_principal_id)).size).toBe(2);expect(principals.every(row=>row.grant_id==='g')).toBe(true);
     await first.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(first.child.getByRole('listitem')).toHaveCount(2);

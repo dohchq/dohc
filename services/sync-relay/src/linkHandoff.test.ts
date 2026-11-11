@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkHandoffCode as hashHandoffCode, LINK_HANDOFF_CODES_PER_GRANT_LIMIT } from "./linkSecurity";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
 import {
   closeTestStorages,
   inspectDatabase,
@@ -797,6 +799,34 @@ describe("single-use authenticated link handoff", () => {
       }
     },
   );
+
+  it("refuses a handoff when the redeeming account's deletion starts before the storage commit", async () => {
+    const state = await setup();
+    const minted = await mint(state);
+    const deletionKey = "link-handoff-deletion-key-at-least-32-bytes";
+    initializeAccountDeletion(state.storage as StorageContext, deletionKey);
+    let armed = true;
+    const racedStorage = interceptStorage(state.storage, {
+      redeemLinkHandoffCode: (target, input) => {
+        if (armed) {
+          armed = false;
+          fenceAccount(target as StorageContext, deletionKey, RECIPIENT, `${RECIPIENT}@example.test`);
+        }
+        return target.redeemLinkHandoffCode(input);
+      },
+    });
+    const racedHandler = handler(state.storage, {
+      storage: racedStorage,
+      nowMs: () => state.now.value,
+      newGrantId: () => "deleted-account-dependent",
+    });
+
+    await expectGeneric(await racedHandler(redeemRequest(RECIPIENT, minted.code)));
+    expect(armed).toBe(false);
+    const database = inspect(state.dbPath, true);
+    expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toEqual([]);
+    expect(codeCount(database)).toBe(0);
+  });
 
   it("caps active dependents at the owner mutation boundary without blocking an existing account", async () => {
     const state = await setup();

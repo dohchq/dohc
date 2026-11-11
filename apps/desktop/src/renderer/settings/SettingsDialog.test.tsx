@@ -118,6 +118,7 @@ const bridge = {
   requestAccessRefresh: vi.fn(async () => undefined),
   listSharingAccess: vi.fn(async ({ lane }: { workspaceId: string; lane: "granted" | "received" }) => sharingAnswer(lane)),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+  listSites: vi.fn(async (_payload: { workspaceId: string }) => ({ sites: [] as unknown[] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
@@ -290,7 +291,7 @@ describe("SettingsDialog", () => {
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
   });
 
-  it.each(["agents", "files", "workbench", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
+  it.each(["agents", "files", "apps", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
     const onError = vi.fn();
     const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection, onClose: vi.fn(), onError, onOpenSharing: vi.fn() };
     const view = render(<SettingsDialog {...props} workspaceIsReady={false} />);
@@ -299,6 +300,7 @@ describe("SettingsDialog", () => {
     expect(bridge.getMcpConfig).not.toHaveBeenCalled();
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
     expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    expect(bridge.listSites).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: initialSection } });
     expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
     expect(bridge.listSharingAccess).not.toHaveBeenCalled();
@@ -339,7 +341,7 @@ describe("SettingsDialog", () => {
       "settings-nav-agents",
       "settings-row-current-workspace",
       "settings-nav-files",
-      "settings-nav-workbench",
+      "settings-nav-apps",
       "settings-nav-privacy",
       "settings-nav-cloud",
       "hairline",
@@ -450,7 +452,7 @@ describe("SettingsDialog", () => {
     const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
     const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
       render(
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
         </Overlay>,
       );
@@ -542,7 +544,7 @@ describe("SettingsDialog", () => {
         const [open, setOpen] = useState(true);
         const close = () => setOpen(false);
         return open ? (
-          <Overlay onClose={close} closeOnBackdrop>
+          <Overlay onClose={close}>
             <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
           </Overlay>
         ) : null;
@@ -718,7 +720,7 @@ describe("SettingsDialog", () => {
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
-    pushOverlay(higherOverlay);
+    pushOverlay(higherOverlay, () => undefined);
     try {
       const tab = new KeyboardEvent("keydown", {
         key: "Tab",
@@ -1018,10 +1020,10 @@ describe("SettingsDialog", () => {
 
   it("drops the History rail and Current workspace rows", async () => {
     const view = render(
-      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="apps" onClose={() => {}} />,
     );
-    const workbench = await screen.findByTestId(settingsSectionPin("workbench"));
-    expect(workbench.textContent).not.toContain("History rail");
+    const apps = await screen.findByTestId(settingsSectionPin("apps"));
+    expect(apps.textContent).not.toContain("History rail");
     view.unmount();
 
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
@@ -1046,7 +1048,7 @@ describe("SettingsDialog", () => {
     await user.clear(search);
     await user.type(search, "sidebar");
     expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid))
-      .toEqual(["settings-nav-appearance", "settings-nav-keyboard", "settings-nav-workbench"]);
+      .toEqual(["settings-nav-appearance", "settings-nav-keyboard"]);
 
     // A search that found the page by its own words shows every shortcut.
     await user.clear(search);
@@ -2997,35 +2999,60 @@ describe("SettingsDialog", () => {
     expect(examplePath("global-folder")).toBe("media/photo.png");
   });
 
-  it("saves and resets the default site preview mode", async () => {
+  it("saves and resets the default app preview mode, and says what each mode does", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
-        initialSection="workbench"
+        initialSection="apps"
         onClose={() => {}}
       />,
     );
 
-    const select = await screen.findByTestId("site-preview-mode-select");
-    expect(
-      Array.from((select as HTMLSelectElement).options).map((option) => option.value),
-    ).toEqual(["auto", "static", "dev", "build"]);
+    const control = await screen.findByTestId("site-preview-mode-control");
+    expect(within(control).getAllByRole("radio").map((radio) => radio.textContent))
+      .toEqual(["Auto", "Dev", "Build", "Static"]);
+    const row = screen.getByTestId("settings-row-site-preview-mode");
+    expect(row.textContent).toContain("Dev when an app has a dev script.");
 
-    await user.selectOptions(select, "build");
+    await user.click(within(control).getByRole("radio", { name: "Static" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      patch: { sites: { defaultPreviewMode: "build" } },
+      patch: { sites: { defaultPreviewMode: "static" } },
     });
-
-    const row = screen.getByTestId("settings-row-site-preview-mode");
+    await waitFor(() => expect(row.textContent).toContain("Shows each app's files without running commands."));
     await waitFor(() => expect(row.textContent).toContain("Modified"));
-    await user.click(screen.getByRole("button", { name: "Reset" }));
+    await user.click(within(row).getByRole("button", { name: "Reset" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
       patch: { sites: { defaultPreviewMode: "auto" } },
     });
+  });
+
+  it("finds the Apps page by its words, not by layout words it has no setting for", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    const nav = screen.getByTestId("settings-sidebar").querySelector("nav")!;
+    const found = () => [...nav.querySelectorAll("button")].map((item) => item.dataset.testid);
+    await user.type(search, "preview");
+    expect(found()).toEqual(["settings-nav-apps"]);
+    for (const word of ["tabs", "history", "layout"]) {
+      await user.clear(search);
+      await user.type(search, word);
+      expect(found()).not.toContain("settings-nav-apps");
+    }
+  });
+
+  it("sends the Apps page's trust button to Privacy, even from a search", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="apps" onClose={() => {}} />);
+    await user.type(await screen.findByTestId(desktopPins.settingsSearch), "preview");
+    const trust = await screen.findByTestId("settings-row-apps-trust");
+    await waitFor(() => expect(within(trust).getByTestId("apps-trust-state").textContent).toBe("Restricted Mode"));
+    await user.click(within(trust).getByRole("button", { name: "Change" }));
+    expect(await screen.findByTestId(settingsSectionPin("privacy"))).toBeTruthy();
   });
 
   // Over a settings file dohc cannot read, the dialog's resolved copy is the

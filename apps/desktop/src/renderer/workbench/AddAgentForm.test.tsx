@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 describe("AddAgentForm", () => {
-  it("renders inside an overlay that Escape dismisses while idle and a press outside does not", () => {
+  it("renders inside an overlay that Escape and a press outside dismiss while idle", () => {
     const onCancel = vi.fn();
     render(
       <AddAgentForm
@@ -59,8 +59,9 @@ describe("AddAgentForm", () => {
     expect(screen.getByRole("dialog", { name: "Add an agent" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(backdrop());
     fireEvent.click(backdrop());
-    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onCancel).toHaveBeenCalledTimes(2);
   });
 
   it("blocks Escape while the save is held, then allows it", async () => {

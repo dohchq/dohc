@@ -89,6 +89,29 @@ impl MarkdownConversionConsent {
         ))
     }
 
+    pub fn revoke(&self) {
+        self.consumed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Revoke in-flight clones and retain the same session's unconsumed consent for a refused reset.
+    pub fn revoke_with_replacement(&self) -> Option<Self> {
+        if self
+            .consumed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(Self::new(
+            self.key.clone(),
+            self.session_id.clone(),
+            self.lineage_claim_id.clone(),
+            self.restore_generation,
+            self.source_sha256.clone(),
+            self.head_sha256.clone(),
+        ))
+    }
+
     pub fn committed(&self) {
         self.consumed
             .store(true, std::sync::atomic::Ordering::Release);
@@ -197,6 +220,7 @@ impl WitnessChecks {
                     if matches!(
                         failure,
                         Failure::Crashed
+                            | Failure::NotStarted
                             | Failure::TimedOut
                             | Failure::Overloaded
                             | Failure::Superseded
@@ -321,6 +345,41 @@ mod tests {
     }
 
     #[test]
+    fn refused_reset_replaces_only_unconsumed_session_consent_without_reviving_old_clones() {
+        let key = DocKey::new("w", "main", "object").unwrap();
+        let consent = Arc::new(MarkdownConversionConsent::new(
+            key.clone(),
+            "session".into(),
+            Some("claim".into()),
+            Some(4),
+            "source".into(),
+            Some("head".into()),
+        ));
+        let in_flight = consent.clone();
+        let replacement = consent.revoke_with_replacement().unwrap();
+        assert!(in_flight.is_consumed());
+        assert!(replacement.permits(
+            &key,
+            "session",
+            Some("claim"),
+            Some(4),
+            Some("source"),
+            Some("head")
+        ));
+        assert!(!replacement.permits(
+            &key,
+            "other",
+            Some("claim"),
+            Some(4),
+            Some("source"),
+            Some("head")
+        ));
+        assert!(consent.revoke_with_replacement().is_none());
+        replacement.committed();
+        assert!(replacement.revoke_with_replacement().is_none());
+    }
+
+    #[test]
     fn unsafe_witness_holds_only_an_absent_or_matching_head() {
         let unsafe_witness = MarkdownWriteSafety::UnsafeWitness;
         assert!(holds(&unsafe_witness, Some("source"), None));
@@ -398,6 +457,7 @@ mod tests {
         let reader = Arc::new(Reader::new(None));
         for failure in [
             Failure::Crashed,
+            Failure::NotStarted,
             Failure::TimedOut,
             Failure::Overloaded,
             Failure::Superseded,

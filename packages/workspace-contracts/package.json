@@ -6,6 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./workspace-sync": "./src/workspaceSync.ts",
+    "./change-author": "./src/changeAuthor.ts",
+    "./live-changes": "./src/liveChanges.ts",
     "./actor-presentation": "./src/actorPresentation.ts",
     "./workspace-ref": "./src/workspaceRef.ts",
     "./actor-identity": "./src/actorIdentity.ts",

@@ -110,6 +110,12 @@ export interface OwnerYDocOutboxHead extends Omit<OwnerYDocOutboxPending, "entri
   readonly entry: OwnerYDocOutboxEntry | null;
 }
 
+/** The first pending update's identity, read without its bytes. */
+export interface OwnerYDocOutboxHeadKey {
+  readonly appendKey: string;
+  readonly updateDigest: string;
+}
+
 export type OwnerYDocOutboxDeliveryHead = Omit<OwnerYDocOutboxHead, "baseUpdate"> & {
   /**
    * Whether the queue holds its lineage's refused adoption seed, with no Try
@@ -394,10 +400,15 @@ export class OwnerYDocOutbox {
     return { ...pending, entry: entries[0] ?? null };
   }
 
+  /** Names the first pending update without reading its bytes, for a check that needs only its key. */
+  async readDeliveryHeadKey(outboxId: string, binding: LiveObjectBinding): Promise<OwnerYDocOutboxHeadKey | null> {
+    return (await this.readSnapshot(outboxId, "key", parseLiveObjectBinding(binding))).headKey ?? null;
+  }
+
   private readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending>;
   private readSnapshot(outboxId: string, headOnly: false, deliveryBinding: undefined, withCheckpoint: true): Promise<OwnerYDocOutboxPending & {checkpoint?: Uint8Array; checkpointDigest: string | null}>;
-  private readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {frozenAtRefusedSeed: boolean; checkpointDigest: string | null; recoveryCheckpointDigest: string | null}>;
-  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding, withCheckpoint = false): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array; checkpoint?: Uint8Array; checkpointDigest?: string | null; frozenAtRefusedSeed?: boolean; recoveryCheckpointDigest?: string | null}> {
+  private readSnapshot(outboxId: string, headOnly: boolean | "key", deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {frozenAtRefusedSeed: boolean; checkpointDigest: string | null; recoveryCheckpointDigest: string | null; headKey?: OwnerYDocOutboxHeadKey}>;
+  private async readSnapshot(outboxId: string, headOnly: boolean | "key", deliveryBinding?: LiveObjectBinding, withCheckpoint = false): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array; checkpoint?: Uint8Array; checkpointDigest?: string | null; frozenAtRefusedSeed?: boolean; recoveryCheckpointDigest?: string | null; headKey?: OwnerYDocOutboxHeadKey}> {
     this.assertLive();
     let next: ReadCursor | null | undefined;
     let snapshot: string | undefined;
@@ -491,6 +502,7 @@ export class OwnerYDocOutbox {
     }
     next = firstEntryCursor;
     const entries: OwnerYDocOutboxEntry[] = [];
+    let headKey: OwnerYDocOutboxHeadKey | undefined;
     let lastSequence = 0;
     let remaining = pendingBytes;
     const readCount = headOnly ? Math.min(count, 1) : count;
@@ -508,6 +520,10 @@ export class OwnerYDocOutbox {
       const byteLength = wireInteger(entry, "byteLength", 1);
       if (byteLength > remaining) throw new TypeError("Owner outbox entry exceeds pending bytes.");
       const updateDigest = digestField(entry, "updateDigest");
+      if (headOnly === "key") {
+        headKey = {appendKey: stringField(entry, "appendKey"), updateDigest};
+        break;
+      }
       const update = await readPart("update", sequence, byteLength, updateDigest);
       if (Object.hasOwn(entry, "agentDeclaration") && Object.hasOwn(entry, "automationDeclaration")) throw new TypeError("Owner draft declares two author kinds.");
       if (Object.hasOwn(entry, "personEdit") && entry.personEdit !== true) throw new TypeError("Invalid owner person marker.");
@@ -531,7 +547,9 @@ export class OwnerYDocOutbox {
       remaining -= byteLength;
       lastSequence = sequence;
     }
-    if (readCount === count) {
+    if (headKey !== undefined) {
+      // The key read stops before the head's update bytes.
+    } else if (readCount === count) {
       if (remaining !== 0 || next !== null) throw new TypeError("Owner outbox snapshot is incomplete.");
     } else {
       const cursor = next as ReadCursor | null | undefined;
@@ -558,6 +576,7 @@ export class OwnerYDocOutbox {
     }
     const observed = raw.observedBinding;
     return {
+      ...(headKey === undefined ? {} : {headKey}),
       ...(checkpoint === undefined ? {} : {checkpoint}),
       ...(named ? {checkpointDigest} : {}),
       ...(deliveryBinding === undefined ? {} : {frozenAtRefusedSeed: raw.frozenAtRefusedSeed as boolean, recoveryCheckpointDigest}),

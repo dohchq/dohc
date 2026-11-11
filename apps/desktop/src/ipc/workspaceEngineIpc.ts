@@ -293,22 +293,23 @@ export function createWorkspaceEngineIpc<
     });
   }
 
+  // Your agents use the Settings name of their id, as record History does, with or without a run.
+  // Another person's runs show as "Agent". Their other agents use their handshake label,
+  // or "Agent" when a character in it could hide or reorder text.
+  function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
+    return {
+      agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : shownAgentName(author.agentId) ?? "Agent",
+      person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
+      automation: (automationId) => automationAuthor(workspaceId, automationId),
+      presentations,
+      ...namedAuthorLabels(workspaceId, sender),
+    };
+  }
+
   function registerHistory(): void {
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
-    // Your agents use the Settings name of their id, as record History does, with or without a run.
-    // Another person's runs show as "Agent". Their other agents use their handshake label,
-    // or "Agent" when a character in it could hide or reorder text.
-    function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
-      return {
-        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : shownAgentName(author.agentId) ?? "Agent",
-        person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
-        automation: (automationId) => automationAuthor(workspaceId, automationId),
-        presentations,
-        ...namedAuthorLabels(workspaceId, sender),
-      };
-    }
 
     // How one History read draws its authors, and the check it makes after each await.
     // The read stops when its window, server, or shared view changes; the operation itself
@@ -781,5 +782,5 @@ export function createWorkspaceEngineIpc<
     });
   }
 
-  return { registerCollections, registerHistory, registerStatusAndRepair, registerYDoc };
+  return { authorNames, registerCollections, registerHistory, registerStatusAndRepair, registerYDoc };
 }

@@ -564,7 +564,13 @@ export function createChatWrites(dependencies: {
     return decision;
   }
 
-  return { createFileThread, sendMessage, answer, answerWith, startThread, setReaction };
+  // Throws unless a message to this thread would be admitted now: the checks
+  // a write makes, without writing.
+  async function assertMayPost(place: ChatWritePlace, threadId: string): Promise<void> {
+    await admit(place, { threadId });
+  }
+
+  return { createFileThread, sendMessage, answer, answerWith, startThread, setReaction, assertMayPost };
 }
 
 // Use captured admission credentials, including for a DM's opening message.

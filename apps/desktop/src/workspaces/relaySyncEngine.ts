@@ -82,8 +82,10 @@ export interface CloudSyncEngineOptions {
   // receives another device's edits, including into a document it has open,
   // without polling. A rejection backs the next wait off. The engine aborts
   // `signal` when it no longer needs the answer, and waits for the promise to
-  // settle before it waits again or stops.
-  waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
+  // settle before it waits again or stops. `known` counts the rows this
+  // desktop's own uploads added past `since`, which are no change to pull.
+  // `holdMs: 0` asks for an answer at once.
+  waitForChange?: (since: number, signal: AbortSignal, known?: number, holdMs?: number) => Promise<RelayLogChange>;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -201,9 +203,25 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let watchedDirty = false;
   let watchedPushPaused = false;
   let lastWatchedStart = -Infinity;
+  // Rows the relay confirmed this desktop's watched uploads added past the
+  // cursor the wait starts from. Each new cursor starts it again at zero. A
+  // row it misses, such as one whose response was lost, wakes one pull.
+  let ownAppended = 0;
+  // Pulls 30 s after the first counted row, so a count that is wrong can hide
+  // another device's row for no longer than that.
+  let ownAppendedTimer: ReturnType<typeof setTimeout> | undefined;
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
     wait: options.waitForChange,
+    // On the pass chain, so no upload runs while the relay counts.
+    ownAppends: { known: () => ownAppended, recheck: (since, signal) => {
+      const result = chain.then(() => {
+        signal.throwIfAborted();
+        return options.waitForChange!(since, signal, ownAppended, 0);
+      });
+      chain = result.then(() => undefined, () => undefined);
+      return result;
+    } },
     initialDelayMs: initialBackoffMs,
     maxDelayMs: maxBackoffMs,
     watched: setWatched,
@@ -237,6 +255,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   function clearTimers(): Promise<void> {
     setWatched(false);
     clearPassTimers();
+    forgetOwnAppends();
     return watch?.stop() ?? Promise.resolve();
   }
 
@@ -321,9 +340,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           push: () => operations.push(),
           claim,
         });
+        countOwnAppends(pushed.pushed);
         watchedDirty ||= pushed.pushed > 0 && pushed.hasMore;
         watchedPushPaused = pushed.pushed === 0 && !watchedDirty;
-        sharingDeclined = mergeSharingDeclined([...sharingDeclined, ...pushed.sharingDeclined]);
+        // A push reports every decline that stands, so one it leaves out has cleared.
+        sharingDeclined = mergeSharingDeclined(pushed.sharingDeclined);
         ownerAdmissionPending = pushed.ownerAdmissionPending;
         if (ownerAdmissionPending.length > 0 && !pushed.hasMore) scheduleBackoff();
       } catch (error) {
@@ -346,7 +367,23 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // reported change and did not move past it would see the same change at
   // once, so that wait backs off instead of turning into a loop of passes.
   function watchPast(cursor: number, servedChange: number | undefined): void {
+    forgetOwnAppends();
     watch?.watchPast(cursor, servedChange !== undefined && cursor <= servedChange);
+  }
+
+  function countOwnAppends(rows: number): void {
+    if (!watch || rows <= 0 || stopped) return;
+    ownAppended += rows;
+    ownAppendedTimer ??= setTimeout(() => {
+      ownAppendedTimer = undefined;
+      queuePull();
+    }, 30_000);
+  }
+
+  function forgetOwnAppends(): void {
+    ownAppended = 0;
+    if (ownAppendedTimer !== undefined) clearTimeout(ownAppendedTimer);
+    ownAppendedTimer = undefined;
   }
 
   // A pull that records no local change, so it cannot show "Local changes".

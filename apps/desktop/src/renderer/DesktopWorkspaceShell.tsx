@@ -194,7 +194,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -705,6 +705,8 @@ export function DesktopWorkspaceShell(props: {
   >(null);
   // The document a notice opened the list for, so the list shows that row.
   const [liveDocumentsReveal, setLiveDocumentsReveal] = useState<string | null>(null);
+  // The list's Stop until it answers, so the list shows it again after a reopen.
+  const liveStopRunning = useRef<LiveDocumentStopRunning | null>(null);
   const openLiveDocuments = useCallback((id: string, reveal: string | null = null) => {
     setLiveDocumentsReveal(reveal);
     setLiveDocumentsWorkspaceId(id);
@@ -3309,6 +3311,19 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  const documentReports = useMemo(() => {
+    const owner = workspaceId;
+    const current = () => workspaceIdRef.current === owner;
+    const whileCurrent = (run?: (() => void) | null) => run && (() => { if (current()) run(); });
+    return {
+      onError: (message: string, error: unknown, retry: (() => void) | null, identity?: string) => {
+        if (current()) reportButtonError(message, error, whileCurrent(retry) ?? null, identity);
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (current()) showSuccessNotice(message, whileCurrent(undo) ?? undefined);
+      },
+    };
+  }, [workspaceId, reportButtonError, showSuccessNotice]);
   // The Explorer's notices and failures, held to their workspace rather than
   // to the Explorer, which the side panel unmounts while the workspace stays
   // open. Undo and Try again run only while that workspace is open here.
@@ -7120,8 +7135,8 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 appFolder={appEntries.get(tabPath) ?? null}
                 onRunApp={openAppTab}
-                onButtonError={reportButtonError}
-                onButtonNotice={showSuccessNotice}
+                onButtonError={documentReports.onError}
+                onButtonNotice={documentReports.onNotice}
                 onClosePath={closePathTabs}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
@@ -7760,7 +7775,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
         // places itself against the window. `!` outranks the unlayered class.
-        <Overlay onClose={closeSettings} closeOnBackdrop panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
+        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
@@ -7782,6 +7797,11 @@ export function DesktopWorkspaceShell(props: {
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
             {...(settingsAgent ? { openAgent: settingsAgent } : {})}
             onClose={closeSettings}
+            onOpenApp={(appRoot) => {
+              closeSettings();
+              openAppTab(appRoot);
+            }}
+            onSetAppPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
             cloud={settingsCloud}
             onOpenSharing={(target) => {
               closeSettings();
@@ -7810,6 +7830,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
           onStopPending={reportPendingLiveStop}
+          stopRunning={liveStopRunning}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
           setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}

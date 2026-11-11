@@ -3668,9 +3668,23 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_work_report.sql"),
         sets_user_version: None,
     },
-    // A live update applies under a personal agent's own authority.
+    // A merged path compares against what was last merged there.
     Migration {
         ordinal: 93,
+        id: "v2-merge-bases",
+        sql: include_str!("merge_bases.sql"),
+        sets_user_version: None,
+    },
+    // Who last stopped or resumed live editing of each owner document.
+    Migration {
+        ordinal: 94,
+        id: "v2-live-document-changes",
+        sql: include_str!("live_document_changes.sql"),
+        sets_user_version: None,
+    },
+    // A live update applies under a personal agent's own authority.
+    Migration {
+        ordinal: 95,
         id: "v2-live-personal-authority",
         sql: include_str!("live_personal_authority.sql"),
         sets_user_version: None,
@@ -5700,6 +5714,14 @@ mod tests {
                 "90b7a240622af011c5d7a9a9ab24feb41db0acc2089fddfd74bbae19c4f3eea4",
             ),
             (
+                "v2-merge-bases",
+                "3ea47abe3fbbb37351f430d6d9eb299af3f9c23bda34407a6653357ea3752122",
+            ),
+            (
+                "v2-live-document-changes",
+                "a2b983ef5ce31429bcf7e2ea3ac488deec15f3ba3afe07022e464003025e84dd",
+            ),
+            (
                 "v2-live-personal-authority",
                 "00536edaa3f05c210affce630f2332e76630dc67ac94fbb4f0d5ebd01bf6b1ff",
             ),
@@ -6158,8 +6180,8 @@ mod tests {
             .expect("enable foreign keys");
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-live-personal-authority");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 92);
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 93);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 94);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 95);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         let digest = crate::blob::put_binary_blob(&conn, &[0, 0]).unwrap();
         let application = |delivery: &str, cursor: i64, authority: &str| {

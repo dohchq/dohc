@@ -449,7 +449,7 @@ fn startup_crashes_allow_a_fresh_fenced_retry() {
     let (_dir, config) = fixture("startup-crash");
     let mut reader = Reader::new(Some(config));
     for _ in 0..2 {
-        fail(run(reader.request(request("ok"))), Failure::Crashed);
+        fail(run(reader.request(request("ok"))), Failure::NotStarted);
     }
     assert_eq!(reader.shared.state.lock().unwrap().lifecycle.0, 2);
     finish(&mut reader);

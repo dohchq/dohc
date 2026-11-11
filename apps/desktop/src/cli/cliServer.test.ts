@@ -12,7 +12,7 @@ import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, retryChatRun, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import {
@@ -2558,6 +2558,79 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
+  // Try again from the CLI and MCP runs through the chat's own service, which
+  // keeps the two-attempt limit, and only for a caller who may post here.
+  describe("chat retry", () => {
+    function stoppedRun(retryable: boolean): string[] {
+      const retried: string[] = [];
+      serverOptions.chatRuns = {
+        dispatchStateForThread: async () => ({
+          liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false,
+          failedRun: {
+            runId: "run-stopped", triggerMessageId: "message-asked", retryable,
+            words: "Nova didn't reply. Its run ended with an error.",
+            ...(retryable ? {} : { nextStep: { kind: "message" as const, agentId: "default", name: "Nova", handle: "nova" } }),
+          },
+        }),
+        async retryStoppedRun(workspaceId, threadId, runId) {
+          retried.push(`${workspaceId}/${threadId}/${runId}`);
+          return true;
+        },
+      };
+      return retried;
+    }
+
+    async function conversation() {
+      if (!store) throw new Error("Store is not available");
+      const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const started = await store.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
+        author: { kind: "human", displayName: "Sam" }, body: "@nova summarize this",
+      });
+      return { channelId: general.id, threadId: started.thread.id };
+    }
+
+    it("runs a stopped request again for someone who may post", async () => {
+      const { threadId } = await conversation();
+      const retried = stoppedRun(true);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .resolves.toEqual({ ok: true, status: "queued", threadId: cliThreadId(threadId) });
+      expect(retried).toEqual([`${WORKSPACE_ID}/${threadId}/run-stopped`]);
+      expect(calls.writes).toBe(1);
+    });
+
+    it("says why a request that had its attempts can't run again", async () => {
+      const { threadId } = await conversation();
+      const retried = stoppedRun(false);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "human", thread: threadId })).resolves.toEqual({
+        ok: false,
+        reason: "Nova didn't reply. Its run ended with an error. It can't run again. Mention @nova to ask again.",
+      });
+      expect(retried).toEqual([]);
+    });
+
+    it("refuses someone who may only read the conversation, before any retry", async () => {
+      const { channelId, threadId } = await conversation();
+      const retried = stoppedRun(true);
+      await makeChannelReadOnly(channelId);
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("You can only read this.");
+      chatRow.sharedChannels = [];
+      chatRow.shareView = {
+        shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
+        grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
+      };
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("Chats are read-only in this shared view.");
+      registryWorkspace = { ...registryWorkspace, readOnly: true };
+      context.readOnly = true;
+      await expect(invoke("chatRetry", { cwd: workspaceRoot, actor: "agent", thread: threadId }))
+        .rejects.toThrow("chats are not available in a read-only shared view");
+      expect(retried).toEqual([]);
+      expect(calls.writes).toBe(0);
+    });
+  });
+
   it("keeps MCP chat reads available in read-only workspaces while refusing writes", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -3213,6 +3286,17 @@ describe("CLI socket server", () => {
     })).resolves.toEqual(unavailable);
   });
 
+  it("names the shared files held back with the step for each", async () => {
+    context.sharedFilesHeld = async () => ({ count: 1, files: [{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }] });
+    await expect(invoke("sharedFilesHeld", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({ ok: true, heldFiles: {
+      count: 1,
+      files: [{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }],
+      message: "This machine treats Plan.md and plan.md as the same name. Ask the person who shared the files to rename one of them.",
+    } });
+    context.sharedFilesHeld = async () => ({ count: 0, files: [] });
+    await expect(invoke("sharedFilesHeld", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({ ok: true, heldFiles: null });
+  });
+
   it("answers whether Collection updates wait with the engine's own answer", async () => {
     const answers = [true, false];
     context.daemonReads.collectionsWaiting = async () => {
@@ -3228,10 +3312,37 @@ describe("CLI socket server", () => {
       .resolves.toMatchObject({ ok: false });
   });
 
+  it("says why sync stopped in the person's words, with the engine's detail", async () => {
+    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
+    const failures = [{ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }, null];
+    context.syncFailure = () => failures.shift() ?? null;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: { code: "conflict-wait-limit", message: sentences, detail } });
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: null });
+    // Only the original workspace reads its sync, as with kept edits and
+    // History: a received share's folder, any folder in it, and a shared view.
+    const refused = { ok: false, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+    const read = vi.fn(() => ({ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }));
+    context.syncFailure = read;
+    await mkdir(join(workspaceRoot, "shared-with-me", "received", "notes"), { recursive: true });
+    for (const cwd of [join(workspaceRoot, "shared-with-me"), join(workspaceRoot, "shared-with-me", "received", "notes")]) {
+      await expect(invoke("syncFailure", { cwd, actor: "agent" })).resolves.toEqual(refused);
+    }
+    context.readOnly = true;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(refused);
+    context.readOnly = false;
+    expect(read).not.toHaveBeenCalled();
+    // The desktop's own check for a shared view's marker refuses too.
+    context.syncFailure = () => { throw new Error("This is a shared view — only the original workspace can be shared."); };
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toMatchObject({ ok: false });
+  });
+
   it("passes a conflict's waiting version through to version conflicts and a resolve's remaining page", async () => {
     const waiting = {
       code: "resolve-existing-conflict" as const,
-      message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+      message: "A newer version of notes.md from another computer is waiting. It comes in after this conflict is resolved.",
       objectId: "notes-object",
       originId: "computer-d",
       originSeq: 4,
@@ -3727,6 +3838,10 @@ describe("CLI socket server", () => {
     await expect(startGroupChat(ctx, { group: "general", body: "Publish the trip app." })).resolves.toEqual({
       ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
     });
+    // Nor does it run a stopped request there again.
+    await expect(retryChatRun(ctx, { threadId: "thread-1" })).resolves.toEqual({
+      ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
+    });
     expect(calls.openWorkspace).toBe(opened);
   });
 
@@ -4159,6 +4274,30 @@ describe("CLI socket server", () => {
     expect(await invoke("fileChatStart", corrected)).toEqual(started);
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
       .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
+  });
+
+  it("lets a local agent review, drop, and undo through the shared held operation", async () => {
+    const token = "a".repeat(64);
+    let waiting = true;
+    const calls: unknown[] = [];
+    context.heldNoteChange = async input => {
+      calls.push(input);
+      if (input.action === "drop") waiting = false;
+      if (input.action === "undo") waiting = true;
+      return {path: input.path, token, authors: [], held: waiting, historyMomentId: "history"};
+    };
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md"};
+    expect(await invoke("heldNoteChange", {...args, action: "review"})).toMatchObject({ok: true, held: true, token});
+    expect(await invoke("heldNoteChange", {...args, action: "drop", token})).toMatchObject({ok: true, held: false});
+    expect(await invoke("heldNoteChange", {...args, action: "undo", token})).toMatchObject({ok: true, held: true});
+    expect(calls.slice(1)).toEqual(["drop", "undo"].map(action => ({path: "tracked.md", action, token,
+      author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local"}})));
+    expect(await invoke("heldNoteChange", {...args, actor: "human", action: "drop", token})).toMatchObject({ok: false});
+    expect(waiting).toBe(true);
+    context.readOnly = true;
+    registryWorkspace.readOnly = true;
+    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("read-only shared view");
+    expect(waiting).toBe(true);
   });
 
   it("returns a pending document edit as success and replays it without another edit", async () => {

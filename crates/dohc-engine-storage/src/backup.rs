@@ -106,6 +106,7 @@ const COMPARED_TABLES: &[&str] = &[
     "path_aliases",
     "snapshots",
     "fork_base_snapshots",
+    "merge_bases",
     "moments",
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",
@@ -136,6 +137,7 @@ const COMPARED_TABLES: &[&str] = &[
     "owner_ydoc_outbox_entries",
     "owner_ydoc_outbox_refusals",
     "owner_live_stops",
+    "live_document_changes",
     "sync_identity",
     "replication_log",
     "hosted_replicas",
@@ -446,11 +448,8 @@ fn restore_test(
     backup_path: &Path,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
-    let copy = Connection::open_with_flags(
-        crate::sqlite_path(backup_path),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(StorageError::backup)?;
+    let copy = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(StorageError::backup)?;
 
     let check: String = copy
         .pragma_query_value(None, "integrity_check", |row| row.get(0))

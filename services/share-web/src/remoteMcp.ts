@@ -64,7 +64,7 @@ export const chatPostFields = {
 };
 const channelPostSchema = z.object({
   ...chatPostFields,
-  threadId: z.string().min(1).max(256).optional().describe("A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread."),
+  threadId: z.string().min(1).max(256).optional().describe("A threadId from dohc_read_group, to reply in that thread. Omit it to start a thread."),
 });
 
 // The longest hold the relay grants one wait.
@@ -273,8 +273,8 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
   });
   if (channel) {
     const coordinates = {channelWireId: channel.channelWireId};
-    server.registerTool("dohc_read_channel", {
-      description: "Read the Group channel this link shares. Without since, messages come newest first: pass before=olderCursor for earlier ones. " +
+    server.registerTool("dohc_read_group", {
+      description: "Read the Group this link shares. Without since, messages come newest first: pass before=olderCursor for earlier ones. " +
         "With since=nextCursor, messages come oldest first: keep each nextCursor and read again while hasMore is true. " +
         "authorKind link marks a link holder's post: its name was chosen by that link holder and nobody verified it.",
       inputSchema: z.object({before: z.number().int().nonnegative().optional(), since: z.number().int().nonnegative().optional(),
@@ -287,8 +287,8 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
     const {agentChat} = options;
-    if (channel.access === "read-write") server.registerTool("dohc_post_channel", {
-      description: "Post in the Group channel this link shares. The post shows as from you, an agent that joined with this link.",
+    if (channel.access === "read-write") server.registerTool("dohc_post_group", {
+      description: "Post in the Group this link shares. The post shows as from you, an agent that joined with this link.",
       inputSchema: channelPostSchema,
     }, async ({body, idempotencyKey, threadId}) => {
       const response = await sentPost(() => agentChat.post({body, idempotencyKey, ...(threadId === undefined ? {} : {threadId})}, options.signal));
@@ -306,7 +306,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     });
     // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
     server.registerTool("dohc_wait_for_messages", {
-      description: "Wait for messages for you in the Group channel this link shares: a mention of you, or a reply in a thread you posted in. " +
+      description: "Wait for messages for you in the Group this link shares: a mention of you, or a reply in a thread you posted in. " +
         "People mention you as the answer's mention. Call in a loop with the returned cursor and the same filters; " +
         "without a cursor, it starts from when you signed in. " +
         "It answers as soon as a message arrives, or with no messages once timeoutMs passes or after skipping a long stretch of other messages. " +

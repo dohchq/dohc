@@ -29,6 +29,31 @@ it("stops sync through main without a caller-supplied workspace or identity", as
   expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
 });
 
+it("lists live documents with each state and reason, and pages with the list's cursor", async () => {
+  const live = { ok: true, nextCursor: "notes/old.md", documents: [
+    { path: "plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "release:a:0" },
+    { path: "held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
+    { path: "old.md", objectId: "object-old", status: "retired", canResume: true, deferredStop: { unsentEdits: 1, editable: false } },
+  ] };
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => live);
+  expect(await executeCli({ argv: ["document", "live"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: [
+      "plan.md · live · kept edits stopping",
+      "held.md · can't resume",
+      "old.md · stopped · can resume · Stop waits for 1 unsent edit",
+      "More documents; use --cursor notes/old.md",
+    ].join("\n") + "\n", stderr: "" });
+  expect((await executeCli({ argv: ["document", "live", "--cursor", "notes/old.md"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
+  expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
+    ["liveDocuments", { cwd: WORKSPACE, actor: "agent" }],
+    ["liveDocuments", { cwd: WORKSPACE, actor: "agent", cursor: "notes/old.md" }],
+  ]);
+  expect((await executeCli({ argv: ["document", "live", "extra"], env: {}, request })).exitCode).toBe(1);
+  expect(await executeCli({ argv: ["document", "live", "--json"], env: {},
+    request: async () => ({ ok: false, reason: "Live documents are listed only in the original workspace. Open it to continue." }) }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Live documents are listed only in the original workspace. Open it to continue.\n" });
+});
+
 it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
   const kept = { ok: true, keptEdits: [
     { path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" },
@@ -163,6 +188,29 @@ describe("executeCli", () => {
       },
     ]);
     expect(result.stdout).toBe("replied th_8f2k1c msg_new\n");
+  });
+
+  // The server refuses a run's retry outside the run's own workspace, so the
+  // run's id goes with it, and a refusal exits with its reason.
+  it("sends the run's id with chat retry and exits on a refusal", async () => {
+    const requests: CliRequestWithoutToken[] = [];
+    const answers = [{ ok: true, status: "queued", threadId: "th_8f" }, { ok: false, reason: "No agent request in this conversation has stopped." }];
+    const retry = () => executeCli({
+      argv: ["chat", "retry", "th_8f", "--as-agent"],
+      cwd: "/workspace/project",
+      env: { DOHC_RUN_ID: "run_ambient" },
+      request: async (request) => {
+        requests.push(request);
+        return answers.shift();
+      },
+    });
+    expect(await retry()).toMatchObject({ exitCode: 0 });
+    expect(await retry()).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("No agent request in this conversation has stopped.") });
+    expect(requests[0]).toEqual({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "chatRetry",
+      args: { cwd: PROJECT, actor: "agent", runId: "run_ambient", thread: "th_8f" },
+    });
   });
 
   it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {

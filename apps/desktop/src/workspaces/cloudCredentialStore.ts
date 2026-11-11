@@ -109,7 +109,9 @@ export function createCloudCredentialStore(options: {
       } else {
         return null;
       }
-      if (!nonEmptyString(token)) return null;
+      // A key that changed (the app's rename) can decrypt to garbage without
+      // failing. A real token is visible ASCII, as a request header needs.
+      if (!/^[\x21-\x7e]+$/u.test(token)) return null;
       return {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),

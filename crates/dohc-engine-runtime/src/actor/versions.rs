@@ -282,29 +282,7 @@ fn projection_matches(state: &ProjectionTargetState, desired_sha256: &str) -> bo
     )
 }
 
-pub(super) fn switch_projection_job_id(
-    workspace_id: &str,
-    version_id: &str,
-    path: &str,
-    operation: MaterializationOperation,
-    content_sha256: &str,
-    secret: bool,
-) -> String {
-    let operation = match operation {
-        MaterializationOperation::Write => "write",
-        MaterializationOperation::Delete => "delete",
-    };
-    let identity = format!(
-        "{workspace_id}\0{version_id}\0{path}\0{operation}\0{content_sha256}\0{}",
-        if secret { "secret" } else { "plain" }
-    );
-    let prefix = if secret {
-        "version-switch-secret-mat_"
-    } else {
-        "version-switch-mat_"
-    };
-    format!("{prefix}{}", hex_sha256(identity.as_bytes()))
-}
+pub(super) use dohc_engine_domain::switch_projection_job_id;
 
 /// `path`'s segments as a disk that ignores case or normalization names them.
 fn path_key(path: &str) -> Vec<String> {

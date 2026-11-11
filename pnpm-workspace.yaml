@@ -71,6 +71,14 @@ overrides:
   prosemirror-model: "1.25.11"
   prosemirror-view: "1.42.2"
 
+# mermaid's types import type-fest, which it lists only as a devDependency.
+# Without this, the import reaches whichever type-fest pnpm hoists, and
+# type-fest 0.7.1 adds the esnext lib (scripts/check-type-libs.mjs).
+packageExtensions:
+  mermaid:
+    dependencies:
+      type-fest: ^4.41.0
+
 patchedDependencies:
   '@legendapp/list@3.3.11': patches/@legendapp__list@3.3.11.patch
   app-builder-lib@26.15.3: patches/app-builder-lib@26.15.3.patch

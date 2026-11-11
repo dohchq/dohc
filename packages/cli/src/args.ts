@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -42,7 +42,9 @@ type CliCommandBody =
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
+  | { verb: "liveDocuments"; cursor?: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
+  | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -109,6 +111,7 @@ type CliCommandBody =
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
+  | { verb: "chatRetry"; thread: string }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
       verb: "automationPress";
@@ -346,6 +349,29 @@ const DOCUMENT_VERBS = {
     notes: ["Prints null when nothing is held for the file."],
     parse: input => ({ verb: "documentHeld", path: parsePath(input, "document held") }),
   },
+  "held-change": {
+    capabilityId: "document.held.change",
+    summary: "Review, drop, or undo a held change on the owner's computer.",
+    operands: "<path>",
+    flags: [{name: "--action", value: "review|drop|undo", text: "Review returns the token needed for Drop."},
+      {name: "--token", value: "token", text: "Use the review token for Drop or the Drop token for Undo."}],
+    notes: [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ],
+    parse: (input: VerbInput): CliCommandBody => {
+      const path = parsePath(input, "document held-change");
+      const action = lastValue(input, "--action") ?? "review";
+      const token = lastValue(input, "--token");
+      if (action !== "review" && action !== "drop" && action !== "undo") fail("--action must be review, drop, or undo");
+      if (action !== "review" && !token) fail("Drop and Undo require --token");
+      if (token !== undefined && !/^[0-9a-f]{64}$/u.test(token)) fail("--token must be the 64-character token returned by Review or Drop");
+      return {verb: "heldNoteChange", path, action, ...(token ? {token} : {})};
+    },
+  },
   edit: {
     capabilityId: "document.edit",
     summary: "Replace matching text or append Markdown through the live document.",
@@ -492,6 +518,23 @@ const DOCUMENT_VERBS = {
       if (!path || !incident) fail("stop-again requires a path and an incident");
       noExtraArgs(extra, "document stop-again");
       return { verb: "stopAgain", path, incident };
+    },
+  },
+  live: {
+    capabilityId: "share.live.documents.list",
+    summary: "List this workspace's live documents, with each one's state and why.",
+    operands: "",
+    notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
+      "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
+      ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
+      "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
+      "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
+      "Pass nextCursor as --cursor until it is null."],
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+    parse: input => {
+      noExtraArgs(input.operands, "document live");
+      const cursor = lastValue(input, "--cursor");
+      return { verb: "liveDocuments", ...(cursor ? { cursor } : {}) };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -681,6 +724,21 @@ const CHAT_VERBS = {
         body,
         ...chatAgent(input),
       };
+    },
+  },
+  retry: {
+    capabilityId: "agent.run.retry",
+    summary: "Run an agent's stopped request in a conversation again, as Try again does.",
+    operands: "<thread>",
+    notes: [
+      "dohc chat show reports a stopped run under dispatch.lastRun.",
+      "Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.",
+    ],
+    parse: ({ operands }) => {
+      const [thread, ...extra] = operands;
+      if (!thread) fail("retry requires a thread id");
+      noExtraArgs(extra, "retry");
+      return { verb: "chatRetry", thread };
     },
   },
   react: {
@@ -1423,7 +1481,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

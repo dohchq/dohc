@@ -17,6 +17,7 @@ import {
   readChange,
   readChat,
   replyToChat,
+  retryChatRun,
   startGroupChat,
   type ToolContext,
 } from "./tools";
@@ -341,6 +342,21 @@ describe("desktop CLI proxy", () => {
         ok: false,
         reason: "dohc: message is not an open decision: msg_1",
       });
+    });
+  });
+
+  it("runs a stopped request again by thread, and passes on the desktop's refusal", async () => {
+    await withWorkspace(async (base) => {
+      const requests: CliRequestWithoutToken[] = [];
+      let answer: CliResultByVerb["chatRetry"] = { ok: true, status: "queued", threadId: "th_1" };
+      const ctx: ToolContext = { ...base, request: async (request) => { requests.push(request); return answer; } };
+
+      await expect(retryChatRun(ctx, { threadId: thread.id }))
+        .resolves.toEqual({ ok: true, status: "queued", threadId: "thread-1" });
+      answer = { ok: false, reason: "No agent request in this conversation has stopped." };
+      await expect(retryChatRun(ctx, { threadId: thread.id })).resolves.toEqual(answer);
+      const sent = { verb: "chatRetry", args: { cwd: base.root, actor: "agent", thread: "thread-1" } };
+      expect(requests.map(({ verb, args }) => ({ verb, args }))).toEqual([sent, sent]);
     });
   });
 

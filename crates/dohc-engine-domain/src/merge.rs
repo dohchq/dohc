@@ -506,63 +506,51 @@ impl VersionedTextStore<'_> {
         })?;
         self.store.read_with(|conn| {
             validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
-            let mut stmt = conn
-                .prepare_cached(COMPARE_VERSION_FILES_PAGE_SQL)
-                .map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        workspace_id,
-                        target_version_id,
-                        source_version_id,
-                        after_path.unwrap_or(""),
-                        limit_i64
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                            row.get::<_, Option<String>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
-                        ))
-                    },
-                )
-                .map_err(DomainError::sql_corrupt)?;
+            let after_path = after_path.unwrap_or("");
+            let target =
+                compare_side_page(conn, workspace_id, target_version_id, after_path, limit_i64)?;
+            let source =
+                compare_side_page(conn, workspace_id, source_version_id, after_path, limit_i64)?;
+            // Merge the two path-ordered sides. Each merged row takes at least
+            // one row from a side, so the first `limit` rows of each side hold
+            // the first `limit` paths of both.
+            let (mut target, mut source) =
+                (target.into_iter().peekable(), source.into_iter().peekable());
             let mut entries = Vec::new();
-            let mut rows_fetched = 0usize;
+            let mut rows_merged = 0usize;
             let mut last_scanned_path = None;
-            for row in rows {
-                let (t_path, t_kind, t_blob, t_bin, s_path, s_kind, s_blob, s_bin) =
-                    row.map_err(DomainError::sql_corrupt)?;
-                rows_fetched += 1;
-                let path =
-                    t_path
-                        .as_ref()
-                        .or(s_path.as_ref())
-                        .ok_or(DomainError::StateCorrupt {
-                            reason: "version comparison row has no path",
-                        })?;
-                last_scanned_path = Some(path.clone());
-                let entry = match (&t_path, &s_path) {
-                    (None, Some(_)) => Some(VersionFileChangeEntry {
-                        path: path.clone(),
-                        status: VersionFileChangeStatus::Added,
-                        binary: s_kind.as_deref() == Some("binary"),
-                    }),
-                    (Some(_), None) => Some(VersionFileChangeEntry {
-                        path: path.clone(),
-                        status: VersionFileChangeStatus::Deleted,
-                        binary: t_kind.as_deref() == Some("binary"),
-                    }),
-                    (Some(_), Some(_)) => {
-                        let same = t_kind == s_kind
-                            && match t_kind.as_deref() {
-                                Some("text") => t_blob == s_blob,
-                                Some("binary") => t_bin == s_bin,
+            while rows_merged < limit {
+                let (t, s) = match (target.peek(), source.peek()) {
+                    (None, None) => break,
+                    (Some(t), Some(s)) if t.path == s.path => (target.next(), source.next()),
+                    (Some(t), Some(s)) if t.path < s.path => (target.next(), None),
+                    (Some(_), None) => (target.next(), None),
+                    (_, Some(_)) => (None, source.next()),
+                };
+                rows_merged += 1;
+                let entry = match (t, s) {
+                    (None, Some(s)) => {
+                        last_scanned_path = Some(s.path.clone());
+                        Some(VersionFileChangeEntry {
+                            binary: s.kind == "binary",
+                            path: s.path,
+                            status: VersionFileChangeStatus::Added,
+                        })
+                    }
+                    (Some(t), None) => {
+                        last_scanned_path = Some(t.path.clone());
+                        Some(VersionFileChangeEntry {
+                            binary: t.kind == "binary",
+                            path: t.path,
+                            status: VersionFileChangeStatus::Deleted,
+                        })
+                    }
+                    (Some(t), Some(s)) => {
+                        last_scanned_path = Some(t.path.clone());
+                        let same = t.kind == s.kind
+                            && match t.kind.as_str() {
+                                "text" => t.blob == s.blob,
+                                "binary" => t.bin == s.bin,
                                 _ => {
                                     return Err(DomainError::StateCorrupt {
                                         reason: "snapshot has an invalid content kind",
@@ -570,10 +558,9 @@ impl VersionedTextStore<'_> {
                                 }
                             };
                         (!same).then(|| VersionFileChangeEntry {
-                            path: path.clone(),
+                            binary: t.kind == "binary" || s.kind == "binary",
+                            path: t.path,
                             status: VersionFileChangeStatus::Modified,
-                            binary: t_kind.as_deref() == Some("binary")
-                                || s_kind.as_deref() == Some("binary"),
                         })
                     }
                     (None, None) => unreachable!(),
@@ -584,7 +571,7 @@ impl VersionedTextStore<'_> {
             }
             Ok(VersionFileChangePage {
                 entries,
-                next_after_path: (rows_fetched == limit)
+                next_after_path: (rows_merged == limit)
                     .then_some(last_scanned_path)
                     .flatten(),
             })
@@ -592,29 +579,52 @@ impl VersionedTextStore<'_> {
     }
 }
 
-/// One page of a version comparison: each target row with the source row at
-/// its path, then the source rows with no target row, in path order. No index
-/// covers `snapshots.path`, so each side is materialized first and SQLite
-/// builds an automatic index on path for the join and the `NOT IN`. A
-/// `FULL OUTER JOIN` of the two sides compared every pair of rows on each
-/// page, about a second a page at 5,000 files.
-const COMPARE_VERSION_FILES_PAGE_SQL: &str = "WITH t AS MATERIALIZED ( \
-        SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
-        WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?4), \
-     s AS MATERIALIZED ( \
-        SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
-        WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4) \
-     SELECT t_path, t_kind, t_blob, t_bin, s_path, s_kind, s_blob, s_bin FROM ( \
-        SELECT t.path AS k, t.path AS t_path, t.content_kind AS t_kind, \
-               t.blob_sha256 AS t_blob, t.binary_sha256 AS t_bin, \
-               s.path AS s_path, s.content_kind AS s_kind, \
-               s.blob_sha256 AS s_blob, s.binary_sha256 AS s_bin \
-        FROM t LEFT JOIN s ON s.path = t.path \
-        UNION ALL \
-        SELECT s.path, NULL, NULL, NULL, NULL, \
-               s.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
-        FROM s WHERE s.path NOT IN (SELECT path FROM t)) \
-     ORDER BY k LIMIT ?5";
+/// One file of one side of a version comparison.
+struct CompareSideRow {
+    path: String,
+    kind: String,
+    blob: Option<String>,
+    bin: Option<String>,
+}
+
+/// The next `limit` files of one version after `after_path`, in path order.
+/// `snapshots` has no path index, so the page walks the path key of
+/// `path_aliases` and reads each file's head by its object. Reading the rest
+/// of both versions and sorting it on every page took 33 s to compare two
+/// 50,000-file versions in pages of 200 (#3240).
+fn compare_side_page(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    after_path: &str,
+    limit: i64,
+) -> Result<Vec<CompareSideRow>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(COMPARE_SIDE_PAGE_SQL)
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, version_id, after_path, limit],
+            |row| {
+                Ok(CompareSideRow {
+                    path: row.get(0)?,
+                    kind: row.get(1)?,
+                    blob: row.get(2)?,
+                    bin: row.get(3)?,
+                })
+            },
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    rows.collect::<rusqlite::Result<_>>()
+        .map_err(DomainError::sql_corrupt)
+}
+
+const COMPARE_SIDE_PAGE_SQL: &str = "SELECT a.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
+     FROM path_aliases a JOIN snapshots s \
+       ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
+      AND s.object_id = a.object_id AND s.path = a.path \
+     WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path > ?3 \
+     ORDER BY a.path LIMIT ?4";
 
 fn validate_compare_versions(
     conn: &Connection,
@@ -649,6 +659,32 @@ where
     F: Fn(&Transaction<'_>, &MergeTextFileResult) -> Result<(), DomainError>,
 {
     after(tx, &result)?;
+    // The version's side reached the target, so its next merge of this path
+    // starts from here. Source unchanged and a conflict move nothing.
+    let merged = match &result {
+        MergeTextFileResult::Write { comparison, write } => Some((
+            comparison,
+            Some(("text", write.snapshot.blob_sha256.as_str())),
+        )),
+        MergeTextFileResult::BinaryWrite { comparison, write } => Some((
+            comparison,
+            Some(("binary", write.head.snapshot.blob_sha256.as_str())),
+        )),
+        MergeTextFileResult::Delete { comparison, .. } => Some((comparison, None)),
+        // A version unchanged since its base brings nothing; recording it
+        // would overwrite the row that detects an undo of the last merge.
+        MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::AlreadySame,
+            comparison,
+            ..
+        } if !comparison_sides_equal(&comparison.incoming, &comparison.base) => {
+            Some((comparison, content_identity(&comparison.current)))
+        }
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
+    };
+    if let Some((comparison, target_after)) = merged {
+        record_merge_base(tx, comparison, target_after)?;
+    }
     let result_seq = match &result {
         MergeTextFileResult::Write { write, .. } => write.moment.moment_order,
         MergeTextFileResult::BinaryWrite { write, .. } => write.moment.moment_order,
@@ -891,19 +927,19 @@ fn compare_text_file_versions_in_db(
     {
         return Err(DomainError::ForkBaseNotFound);
     }
-    let base = select_snapshot(
-        conn,
-        "fork_base_snapshots",
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-    )?;
     let current = select_snapshot(
         conn,
         "snapshots",
         &input.workspace_id,
         &input.target_version_id,
         &input.path,
+    )?;
+    let base = select_merge_base(
+        conn,
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.path,
+        &current,
     )?;
     let incoming = select_snapshot(
         conn,
@@ -936,6 +972,275 @@ fn select_snapshot(
     version_id: &str,
     path: &str,
 ) -> Result<Option<ComparisonSide>, DomainError> {
+    let sql = format!(
+        "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
+         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
+         s.binary_sha256, bb.byte_length FROM {table} s \
+         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
+    );
+    select_side(conn, &sql, workspace_id, version_id, path)
+}
+
+/// What a side holds: its content kind and content address, or `None` when
+/// the path holds no file.
+pub(crate) type ContentIdentity<'a> = Option<(&'static str, &'a str)>;
+
+fn content_identity(side: &Option<ComparisonSide>) -> ContentIdentity<'_> {
+    side.as_ref().map(|side| {
+        let kind = if side.binary { "binary" } else { "text" };
+        (kind, side.snapshot.blob_sha256.as_str())
+    })
+}
+
+/// The base a merge of `path` from a named version compares against: what
+/// the version last merged at that path, or its fork point if it never has.
+/// When the target holds what it held just before that merge, and not what
+/// the merge left, the merge was undone there; the base is then the one that
+/// merge itself used, so merging again applies the version's change again.
+fn select_merge_base(
+    conn: &Connection,
+    workspace_id: &str,
+    source_version_id: &str,
+    path: &str,
+    current: &Option<ComparisonSide>,
+) -> Result<Option<ComparisonSide>, DomainError> {
+    type MergeBaseRow = (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<MergeBaseRow> = conn
+        .query_row(
+            "SELECT base_exists, prior_exists, target_before_kind, target_before_sha256, \
+             target_after_kind, target_after_sha256 FROM merge_bases \
+             WHERE workspace_id = ?1 AND source_version_id = ?2 AND path = ?3",
+            params![workspace_id, source_version_id, path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((base_exists, prior_exists, before_kind, before_sha, after_kind, after_sha)) = row
+    else {
+        return select_snapshot(
+            conn,
+            "fork_base_snapshots",
+            workspace_id,
+            source_version_id,
+            path,
+        );
+    };
+    let held = content_identity(current);
+    let before = before_kind.as_deref().zip(before_sha.as_deref());
+    let after = after_kind.as_deref().zip(after_sha.as_deref());
+    let (side, exists) = if held == before && held != after {
+        ("prior", prior_exists)
+    } else {
+        ("base", base_exists)
+    };
+    if exists == 0 {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT m.{side}_object_id, m.path, b.sha256, m.{side}_blob_sha256, \
+         m.{side}_updated_at_ms, m.{side}_latest_moment_id, m.{side}_metadata_origin, \
+         m.{side}_metadata_summary, m.{side}_metadata_correlation_id, \
+         m.{side}_content_kind, m.{side}_binary_sha256, bb.byte_length FROM merge_bases m \
+         LEFT JOIN blobs b ON b.sha256 = m.{side}_blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = m.{side}_binary_sha256 \
+         WHERE m.workspace_id = ?1 AND m.source_version_id = ?2 AND m.path = ?3"
+    );
+    select_side(conn, &sql, workspace_id, source_version_id, path)
+}
+
+/// Record that `comparison.path` of a named version reached its fork parent:
+/// the incoming side becomes the path's merge base, the base the comparison
+/// used becomes its prior, and the target's content before (`current`) and
+/// after (`target_after`) tell a later merge whether this one was undone.
+fn record_merge_base(
+    tx: &Transaction<'_>,
+    comparison: &VersionedTextComparison,
+    target_after: ContentIdentity<'_>,
+) -> Result<(), DomainError> {
+    use rusqlite::types::Value;
+    fn text(value: &str) -> Value {
+        Value::Text(value.to_owned())
+    }
+    fn optional(value: &Option<String>) -> Value {
+        value.as_deref().map_or(Value::Null, text)
+    }
+    fn side(side: &Option<ComparisonSide>) -> [Value; 10] {
+        let Some(side) = side else {
+            return [
+                Value::Integer(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ];
+        };
+        let snapshot = &side.snapshot;
+        let (kind, blob, binary) = if side.binary {
+            ("binary", Value::Null, text(&snapshot.blob_sha256))
+        } else {
+            ("text", text(&snapshot.blob_sha256), Value::Null)
+        };
+        [
+            Value::Integer(1),
+            text(&snapshot.object_id),
+            text(kind),
+            blob,
+            binary,
+            Value::Integer(snapshot.updated_at_ms),
+            text(&snapshot.latest_moment_id),
+            text(&snapshot.metadata_origin),
+            optional(&snapshot.metadata_summary),
+            optional(&snapshot.metadata_correlation_id),
+        ]
+    }
+    fn identity(identity: ContentIdentity<'_>) -> [Value; 2] {
+        identity.map_or([Value::Null, Value::Null], |(kind, sha)| {
+            [text(kind), text(sha)]
+        })
+    }
+    let mut values = vec![
+        text(&comparison.workspace_id),
+        text(&comparison.source_version_id),
+        text(&comparison.path),
+    ];
+    values.extend(side(&comparison.incoming));
+    values.extend(side(&comparison.base));
+    values.extend(identity(content_identity(&comparison.current)));
+    values.extend(identity(target_after));
+    tx.execute(
+        "INSERT OR REPLACE INTO merge_bases (workspace_id, source_version_id, path, \
+         base_exists, base_object_id, base_content_kind, base_blob_sha256, \
+         base_binary_sha256, base_updated_at_ms, base_latest_moment_id, base_metadata_origin, \
+         base_metadata_summary, base_metadata_correlation_id, \
+         prior_exists, prior_object_id, prior_content_kind, prior_blob_sha256, \
+         prior_binary_sha256, prior_updated_at_ms, prior_latest_moment_id, \
+         prior_metadata_origin, prior_metadata_summary, prior_metadata_correlation_id, \
+         target_before_kind, target_before_sha256, target_after_kind, target_after_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+        rusqlite::params_from_iter(values),
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// Record a resolved merge conflict as merged, whatever the resolution kept,
+/// as Git does. A sync conflict, or a resolution that wrote another path,
+/// records nothing.
+pub(crate) fn record_resolved_merge_conflict(
+    tx: &Transaction<'_>,
+    conflict: &TextConflict,
+    target_after: Option<ContentIdentity<'_>>,
+) -> Result<(), DomainError> {
+    let Some(target_after) = target_after else {
+        return Ok(());
+    };
+    let source: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT kind, fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![conflict.workspace_id, conflict.source_version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((kind, fork_version_id)) = source else {
+        return Ok(());
+    };
+    if VersionKind::from_db(&kind)? != VersionKind::Named
+        || fork_version_id.as_deref() != Some(conflict.target_version_id.as_str())
+    {
+        return Ok(());
+    }
+    let side = |state: &ConflictFileState| conflict_state_side(conflict, state);
+    let (Some(base), Some(current), Some(incoming)) = (
+        side(&conflict.base),
+        side(&conflict.current),
+        side(&conflict.incoming),
+    ) else {
+        return Ok(());
+    };
+    let comparison = VersionedTextComparison {
+        workspace_id: conflict.workspace_id.clone(),
+        path: conflict.path.clone(),
+        target_version_id: conflict.target_version_id.clone(),
+        source_version_id: conflict.source_version_id.clone(),
+        status: comparison_status(&base, &current, &incoming),
+        base,
+        current,
+        incoming,
+    };
+    record_merge_base(tx, &comparison, target_after)
+}
+
+/// A conflict side as a comparison side; `None` when a binary side lacks
+/// the head identity a merge conflict always records.
+fn conflict_state_side(
+    conflict: &TextConflict,
+    state: &ConflictFileState,
+) -> Option<Option<ComparisonSide>> {
+    if let Some(snapshot) = &state.snapshot {
+        return Some(Some(ComparisonSide {
+            byte_length: snapshot.text.len() as i64,
+            snapshot: snapshot.clone(),
+            binary: false,
+        }));
+    }
+    let Some(binary_sha256) = &state.binary_sha256 else {
+        return Some(None);
+    };
+    Some(Some(ComparisonSide {
+        snapshot: TextSnapshot {
+            workspace_id: conflict.workspace_id.clone(),
+            version_id: String::new(),
+            object_id: state.binary_object_id.clone()?,
+            path: state.path.clone(),
+            text: String::new(),
+            blob_sha256: binary_sha256.clone(),
+            updated_at_ms: state.binary_updated_at_ms?,
+            latest_moment_id: state.binary_latest_moment_id.clone()?,
+            // A binary conflict side keeps no origin of its own.
+            metadata_origin: conflict.metadata.origin.clone(),
+            metadata_summary: state.metadata_summary.clone(),
+            metadata_correlation_id: state.metadata_correlation_id.clone(),
+        },
+        binary: true,
+        byte_length: state.binary_byte_length.unwrap_or(0),
+    }))
+}
+
+/// Read one comparison side with `sql`, which selects `select_snapshot`'s
+/// columns for `(workspace_id, version_id, path)`.
+fn select_side(
+    conn: &Connection,
+    sql: &str,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<ComparisonSide>, DomainError> {
     type SideRow = (
         String,
         String,
@@ -950,17 +1255,8 @@ fn select_snapshot(
         Option<String>,
         Option<i64>,
     );
-    let sql = format!(
-        "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
-         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
-         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
-         s.binary_sha256, bb.byte_length FROM {table} s \
-         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
-         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
-    );
     let row: Option<SideRow> = conn
-        .query_row(&sql, params![workspace_id, version_id, path], |row| {
+        .query_row(sql, params![workspace_id, version_id, path], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -1290,7 +1586,12 @@ mod tests {
             WHERE NOT (v.id = 'feat' AND n.i = 7);
         INSERT INTO snapshots (workspace_id, version_id, object_id, path, blob_sha256,
                                updated_at_ms, latest_moment_id, metadata_origin)
-            VALUES ('ws', 'feat', 'object-added', 'docs/added.md', 'same', 1, 'moment', 'user');";
+            VALUES ('ws', 'feat', 'object-added', 'docs/added.md', 'same', 1, 'moment', 'user');
+        INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+            SELECT workspace_id, version_id, path, object_id FROM snapshots;
+        -- An alias with no head, as a refused recreation leaves, is not a file.
+        INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+            VALUES ('ws', 'feat', 'docs/d00/f007.md', 'object-7');";
 
     fn compare_walk(
         vt: &VersionedTextStore<'_>,
@@ -1316,11 +1617,10 @@ mod tests {
         }
     }
 
-    /// The full outer join this query replaced compared every pair of files on
-    /// each page: about 18 s for these two versions on a desktop. With and
-    /// without statistics, the whole walk now stays within a budget, pages of
-    /// 200 find the same changes as one page, and the join uses an automatic
-    /// index on path.
+    /// With and without statistics, the whole walk stays within a budget,
+    /// pages of 200 find the same changes as one page, and each page reads
+    /// its side by key without sorting. A page that sorted the rest of both
+    /// versions made the walk grow with the square of the file count (#3240).
     #[test]
     fn comparing_two_large_versions_stays_fast_and_exact() {
         use dohc_engine_storage::{EngineStore, NoFaults};
@@ -1375,28 +1675,24 @@ mod tests {
 
             let plan = store
                 .read_with(|conn| {
-                    conn.prepare(&format!(
-                        "EXPLAIN QUERY PLAN {COMPARE_VERSION_FILES_PAGE_SQL}"
-                    ))?
-                    .query_map(params!["ws", "main", "feat", "", 200], |row| {
-                        row.get::<_, String>(3)
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {COMPARE_SIDE_PAGE_SQL}"))?
+                        .query_map(params!["ws", "main", "", 200], |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()
                 })
                 .expect("query plan");
+            // A page reads the path key from its start and stops at the
+            // limit: no scan of the version and no sort of the rest of it.
             assert!(
-                plan.iter().any(
-                    |step| step == "SEARCH s USING AUTOMATIC COVERING INDEX (path=?) LEFT-JOIN"
-                ),
+                plan.iter().any(|step| step.starts_with("SEARCH a USING ")
+                    && step.ends_with("(workspace_id=? AND version_id=? AND path>?)")),
                 "{statistics}: {plan:?}"
             );
-            // Each side may be read by a scan or by the key, as statistics
-            // suggest. The join must never scan one side for each row of the
-            // other, as the full outer join did.
             assert!(
                 !plan
                     .iter()
-                    .any(|step| step.contains("RIGHT-JOIN") || step == "SCAN s LEFT-JOIN"),
+                    .any(|step| step.starts_with("SCAN") || step.contains("TEMP B-TREE")),
                 "{statistics}: {plan:?}"
             );
         }
