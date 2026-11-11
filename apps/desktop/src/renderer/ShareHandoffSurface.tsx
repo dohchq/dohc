@@ -10,6 +10,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { inputCount } from "./ui/inputCount";
 
 const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
@@ -28,7 +29,9 @@ type ReceivedShareState =
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
-  | { kind: "chats"; shareId: string }
+  // `inputs` counts input before the lookup, so a click elsewhere during it
+  // keeps Join from taking focus.
+  | { kind: "chats"; shareId: string; inputs: number }
   | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
 
 function HandoffCard(props: {
@@ -64,7 +67,7 @@ export function ShareHandoffSurface(props: {
   ownWorkspace?: boolean;
   // Shows Chats at a Group invitation or message request, where it waits
   // with Join or Accept. Without it, the card says where to find it.
-  openInChats?: (shareId: string) => void;
+  openInChats?: (invitation: { shareId: string; inputs: number }) => void;
   mountInto?: {
     workspaceId: string;
     onMounted: (label: string, access: ShareAccess | null) => void;
@@ -91,6 +94,7 @@ export function ShareHandoffSurface(props: {
       };
     }
 
+    const inputs = inputCount();
     setReceivedShare({ kind: "loading", shareId });
     void bridge()
       .getRelayReceivedShare({ shareId })
@@ -100,7 +104,7 @@ export function ShareHandoffSurface(props: {
           !result.found
             ? { kind: "missing", shareId }
             : "chats" in result
-              ? { kind: "chats", shareId }
+              ? { kind: "chats", shareId, inputs }
               : { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) },
         );
       })
@@ -114,12 +118,14 @@ export function ShareHandoffSurface(props: {
     };
   }, [lookupAttempt, shareId]);
 
-  const opensInChats = receivedShare.kind === "chats" && receivedShare.shareId === shareId && props.openInChats !== undefined;
+  const chatsInvitation = receivedShare.kind === "chats" && receivedShare.shareId === shareId && props.openInChats !== undefined
+    ? receivedShare : null;
+  const opensInChats = chatsInvitation !== null;
   const openInChats = useRef(props.openInChats);
   openInChats.current = props.openInChats;
   useEffect(() => {
-    if (opensInChats && shareId !== null) openInChats.current?.(shareId);
-  }, [opensInChats, shareId]);
+    if (chatsInvitation) openInChats.current?.({ shareId: chatsInvitation.shareId, inputs: chatsInvitation.inputs });
+  }, [chatsInvitation]);
 
   if (props.status.status === "idle") return null;
 

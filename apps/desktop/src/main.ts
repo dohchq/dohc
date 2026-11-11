@@ -1313,6 +1313,11 @@ const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
     }),
   publishStatus: publishShareHandoffStatus,
 });
+// When the window that took a handoff closes, the next workspace window takes
+// it, so each window hears again whether it shows the handoff.
+app.on("browser-window-created", (_event, window) => {
+  window.once("closed", () => setImmediate(() => publishShareHandoffStatus(shareHandoffRedemption.status())));
+});
 
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>

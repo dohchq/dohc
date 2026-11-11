@@ -2476,10 +2476,10 @@ describe("notices sent to you", () => {
   describe("from a link to a Group or a message request", () => {
     const DONE: ShareHandoffStatus = { status: "done", statusId: "status-1", shareId: "share-1" };
     const VIEW: Workspace = { ...WORKSPACE, workspaceId: "ws-view", shareView: { shareId: "share-2", granterEmail: "owner@dohc.test", access: "view" } };
-    function handoffBridge() {
-      return Object.assign(makeBridge(Promise.resolve(null)), {
+    function handoffBridge(uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null)) {
+      return Object.assign(makeBridge(uiState), {
         listChatChannelShares: vi.fn(async () => INVITATION_LISTING),
-        getRelayReceivedShare: vi.fn(async () => ({ found: true as const, chats: true as const })),
+        getRelayReceivedShare: vi.fn(async (): Promise<{ found: true; chats: true }> => ({ found: true, chats: true })),
       });
     }
     // DesktopRoot's part: the handoff ends once the shell says it opened.
@@ -2513,6 +2513,29 @@ describe("notices sent to you", () => {
       const join = await screen.findByTestId("chats-join-shared");
       await waitFor(() => expect(document.activeElement).toBe(join));
       expect(screen.queryByTestId("handoff-opens-in-chats")).toBeNull();
+    });
+
+    it("opens Chats once the saved layout applies, so the layout can't replace it", async () => {
+      let restore!: (state: WorkspaceUiState) => void;
+      const { onOpened } = renderHandoff(handoffBridge(new Promise((resolve) => { restore = resolve; })), WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      act(() => restore(STORED_STATE));
+      await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+      expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    });
+
+    it("keeps Join from taking focus after a click during the lookup", async () => {
+      const bridge = handoffBridge();
+      let found!: (answer: { found: true; chats: true }) => void;
+      bridge.getRelayReceivedShare.mockImplementation(() => new Promise((resolve) => { found = resolve; }));
+      const latest: Workspace = { ...WORKSPACE, workspaceId: "ws-latest", lastOpenedAt: 2 };
+      const before = inputCount();
+      const { onSwitchWorkspace } = renderHandoff(bridge, VIEW, [VIEW, latest]);
+      await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
+      fireEvent.pointerDown(window);
+      act(() => found({ found: true, chats: true }));
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { to: "chats-invitation", shareId: "share-1", inputs: before }));
+      expect(inputCount()).toBeGreaterThan(before);
     });
 
     it("opens it from a shared view in the workspace of their own they opened last", async () => {

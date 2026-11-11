@@ -232,7 +232,7 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
-import { countInput, inputCount } from "./ui/inputCount";
+import { countInput } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -3258,16 +3258,6 @@ export function DesktopWorkspaceShell(props: {
     openChatsNavigator();
   }, [openChatsNavigator]);
   const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
-  // A link to a Group or a message request opens Chats at it, here or, from a
-  // shared view, in the workspace of this person's own they opened last.
-  const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
-  const openHandoffInChats = (shareId: string) => {
-    if (ownWorkspaceForChats === null) return;
-    const invitation = { shareId, inputs: inputCount() };
-    if (ownWorkspaceForChats.workspaceId === workspaceId) openChatsInvitation(invitation);
-    else props.onSwitchWorkspace(ownWorkspaceForChats, { to: "chats-invitation", ...invitation });
-    props.onShareHandoffOpened?.();
-  };
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -3293,6 +3283,18 @@ export function DesktopWorkspaceShell(props: {
     setOpenedFromLink(null);
     setPendingOpen(openedFromLink);
   }, [openedFromLink, workbenchRestored]);
+  // A link to a Group or a message request opens Chats at it, here or, from a
+  // shared view, in the workspace of this person's own they opened last.
+  // Here it waits for the saved layout, as a work link does, so the layout
+  // cannot replace Chats.
+  const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
+  const openHandoffInChats = (invitation: ChatsInvitation) => {
+    if (ownWorkspaceForChats === null) return;
+    const target = { to: "chats-invitation", ...invitation } as const;
+    if (ownWorkspaceForChats.workspaceId === workspaceId) setOpenedFromLink(target);
+    else props.onSwitchWorkspace(ownWorkspaceForChats, target);
+    props.onShareHandoffOpened?.();
+  };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link clicked in a chat or a document opens its message here, or
   // in the workspace on this computer that holds it. A link none holds, or
