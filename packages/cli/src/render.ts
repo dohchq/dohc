@@ -373,7 +373,7 @@ const LIVE_REASON_WORDS = {
   "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume",
   "document-too-dense": "too large to edit live", "unrecognized": "needs a newer dohc",
 } as const;
-const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
+const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped", unrecognized: "needs a newer dohc" } as const;
 
 function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { ok: true }>): string {
   if (page.documents.length === 0 && page.nextCursor === null) return "No document has live editing.";

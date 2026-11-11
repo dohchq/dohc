@@ -526,7 +526,7 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.documents.list",
     summary: "List this workspace's live documents, with each one's state and why.",
     operands: "",
-    notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
+    notes: ["status is ready, preparing, paused, unavailable, retired once live editing stopped, or unrecognized when this version of dohc doesn't know the server's status.",
       "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
