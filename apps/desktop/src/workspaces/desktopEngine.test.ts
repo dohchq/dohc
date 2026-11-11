@@ -1425,6 +1425,31 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
   });
 
+  it("tells the renderer when a paused note takes edits again while another pauses during its pass", async () => {
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}]);
+    quarantineMock.read.mockResolvedValue([]);
+    ownerDeliveryMock.pass.mockImplementation(async options => {
+      const paused = f.engine.ownerLivePausedPaths("owner");
+      if (options.document.binding.currentPath !== "notes/plan.md" || !paused.includes("notes/plan.md")) return "retry";
+      // Another note's queue fills while this pass waits on the server.
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/other.md");
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
+      return "empty";
+    });
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      while (f.engine.ownerLivePausedPaths("owner").includes("notes/plan.md")) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      }
+      await vi.waitFor(() => expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/other.md"]));
+      await vi.waitFor(() => expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({workspaceId: "owner"}));
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
   it("leaves a note the server refused to its own notice", async () => {
     const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
     quarantineMock.read.mockResolvedValue([]);
