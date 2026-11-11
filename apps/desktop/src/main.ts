@@ -568,6 +568,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
+import { runLogKeepDays } from "./agents/runLogRetention";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
 import { createPersonalAgentRoster } from "./agents/personalAgentRoster";
@@ -3652,6 +3653,8 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  readRunLogKeepDays: async () =>
+    runLogKeepDays(await readCachedUserSettingsFile(stateDir())),
   agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,

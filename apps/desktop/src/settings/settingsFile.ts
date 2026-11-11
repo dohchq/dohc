@@ -6,7 +6,7 @@ import { z } from "zod";
 // names the key. A save changes only the keys it changed, so dohc never
 // rewrites a person's file to drop what it does not understand.
 
-const MAX_IGNORED_SETTINGS = 50;
+export const MAX_IGNORED_SETTINGS = 50;
 const MAX_IGNORED_KEY_CHARS = 200;
 
 export const IgnoredSetting = z.object({

@@ -2408,6 +2408,8 @@ export const ChatRunRecord = z.object({
   endedAtMs: z.number().optional(),
   exitCode: z.number().int().optional(),
   logPath: PATH_STRING.optional(),
+  // dohc removed the finished run's log after the time the settings file keeps it.
+  logRemoved: z.literal(true).optional(),
 });
 export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
 
