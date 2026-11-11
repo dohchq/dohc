@@ -6170,9 +6170,26 @@ async fn close_preserves_divergent_deferred_lineages_for_review_before_returning
     assert_close_drains_deferred_winning_lineage("winner from A", true).await;
 }
 
-async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_conflict: bool) {
-    const WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
-    const PATH: &str = "notes/shared.md";
+const CLOSE_WINNER_WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
+const CLOSE_WINNER_PATH: &str = "notes/shared.md";
+
+/// A settled note whose lineage another device replaced while its session
+/// was open: that device's base and an edit on it wait behind the session.
+struct QueuedWinner {
+    scratch: ScratchDir,
+    transport: InProcessTransport<EngineService>,
+    handle: WorkspaceHandle,
+    connection: rusqlite::Connection,
+    db_path: std::path::PathBuf,
+    session_id: String,
+    key: DocKey,
+    winner: Ydoc,
+    winner_claim: String,
+}
+
+async fn queue_winning_lineage_behind_session(winner_seed: &str) -> QueuedWinner {
+    const WORKSPACE_ID: &str = CLOSE_WINNER_WORKSPACE_ID;
+    const PATH: &str = CLOSE_WINNER_PATH;
 
     let scratch = ScratchDir::new().expect("scratch");
     let service = Arc::new(EngineService::new());
@@ -6316,7 +6333,33 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
         } if result.deferred && refusals.is_empty() && sharing_declined.is_empty()
     ));
     drop(store);
+    QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id: session_id.to_owned(),
+        key,
+        winner,
+        winner_claim,
+    }
+}
 
+async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_conflict: bool) {
+    const WORKSPACE_ID: &str = CLOSE_WINNER_WORKSPACE_ID;
+    const PATH: &str = CLOSE_WINNER_PATH;
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id,
+        key,
+        winner,
+        winner_claim,
+    } = queue_winning_lineage_behind_session(winner_seed).await;
     call(
         &transport,
         &handle,
@@ -6381,6 +6424,42 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
             "close must materialize the winning lineage and its edit before it returns"
         );
     }
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+/// #2813. A close commits, then the write its drain owes the file fails
+/// because the file was changed outside dohc. The close reports that, and a
+/// retried close must report it too: it must not read the session's absence
+/// as a clean close while the file is behind the note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_close_reports_the_write_the_first_one_could_not_make() {
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        session_id,
+        ..
+    } = queue_winning_lineage_behind_session("loser from B").await;
+    let file = scratch.path().join(CLOSE_WINNER_PATH);
+    std::fs::write(&file, "changed outside dohc").expect("outside edit");
+
+    let close = json!({ "sessionId": session_id, "settle": false });
+    let first = call_error(&transport, &handle, 5, "ydoc.close", close.clone()).await;
+    let retried = call_error(&transport, &handle, 6, "ydoc.close", close).await;
+    assert_ne!(
+        retried.message, "ydoc-session-not-found",
+        "the retry must not read as a clean close"
+    );
+    assert_eq!(
+        (retried.code, retried.message),
+        (first.code, first.message),
+        "the retry reports the same failure"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "changed outside dohc",
+        "the outside edit stays"
+    );
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
