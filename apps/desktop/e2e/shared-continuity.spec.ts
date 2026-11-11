@@ -428,6 +428,25 @@ async function recipientCredit(page: Page, workspaceId: string, text: string, hu
   }, { workspaceId, rows, text, humanId });
 }
 
+/**
+ * Every moment of the document whose change left `text` in it, with the
+ * authors its list row and its detail report and the end of its text.
+ */
+async function momentsLeaving(page: Page, workspaceId: string, text: string) {
+  const rows = await readHistoryMoments(page, workspaceId, PATH);
+  if (rows === null) return null;
+  return page.evaluate(async ({ workspaceId, rows, text }) => {
+    const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+    const found: { id: string; momentOrder: number; listed: Authors; authors: Authors; ends: string }[] = [];
+    for (const row of rows.sort((a, b) => a.momentOrder - b.momentOrder)) {
+      const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
+      if (!moment?.afterText?.includes(text) || moment.afterText === moment.beforeText) continue;
+      found.push({ id: row.id, momentOrder: row.momentOrder, listed: row.authors, authors: moment.authors, ends: moment.afterText.slice(-60) });
+    }
+    return found;
+  }, { workspaceId, rows, text });
+}
+
 test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
   test.setTimeout(900_000);
   const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
@@ -703,6 +722,13 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       expect(credit!.listed).toEqual(credit!.authors);
       expect(credit!.label).toBe(recipientAccount.name);
+      // Every version of the recipient's typing names them, including one
+      // History wrote only once the owner's live feed caught up with it.
+      const typing = await momentsLeaving(page, workspace.workspaceId, `${H1} ${R1.slice(0, 1)}`);
+      await testInfo.attach("owner History recipient typing", { contentType: "application/json",
+        body: JSON.stringify(typing, null, 2) }).catch(() => undefined);
+      expect(typing).not.toBeNull();
+      expect(typing!.filter(moment => !moment.authors?.some(author => author.kind === "human" && author.humanId === recipientUserId))).toEqual([]);
       // The recipient's credit leaves the hosted agent's credit in place.
       expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       await openHistoryView(page);
