@@ -963,6 +963,7 @@ export function makeBridge(
         fileThreads: FileChatThreadRecord[];
       }> => ({ channels: [], fileThreads: [] }),
     ),
+    listChatUnread: vi.fn(async (): Promise<{ chats: Array<{ channelId: string; unreadCount: number }> }> => ({ chats: [] })),
     listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
     listChatChannelShares: vi.fn(async () => {

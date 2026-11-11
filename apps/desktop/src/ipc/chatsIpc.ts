@@ -17,6 +17,7 @@ import {
   ListChatThreadDecisionsResult,
   ListChatThreadAttachmentsResult,
   ListChatChannelsResult,
+  ListChatUnreadResult,
   ListChatFollowsResult,
   SetChatFollowResult,
   ListPersonalChatFeedResult,
@@ -653,6 +654,18 @@ export function registerChatsIpcHandlers<
     });
   };
 
+  // Local rows only, without the shared-channel pass or General's creation:
+  // the tab strip asks after every workspace change.
+  const listChatUnread: ChatHandler<"listChatUnread"> = async (input, { operation }) => {
+    const { workspace, store } = await requireChatScope(operation.workspace.workspaceId);
+    operation.assertCurrent();
+    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
+    operation.assertCurrent();
+    return ListChatUnreadResult.parse({
+      chats: channels.map((channel) => ({ channelId: channel.id, unreadCount: channel.unreadCount })),
+    });
+  };
+
   function chatFollowForIpc(follow: {
     targetKind: "person" | "agent" | "channel" | "thread";
     targetId: string;
@@ -1046,6 +1059,7 @@ export function registerChatsIpcHandlers<
     listChatThreadDecisions,
     listChatThreadAttachments,
     listChatChannels,
+    listChatUnread,
     listChatFollows,
     setChatFollow,
     markPersonalChatFeedSeen,
