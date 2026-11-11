@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import vectors from "../vectors/live-update-admission-vectors.json";
+import type { LiveAuthorEntry } from "./liveAuthorship.js";
 import {
+  admitsLiveAuthorship,
   AGENT_DECLARATION_MAX_DEPTH,
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   LIVE_UPDATE_REFUSAL_VALUES,
@@ -382,6 +384,42 @@ describe("server-derived authority", () => {
           grantGeneration: 1,
         }),
       ).toMatchObject({ principalKind, grantGeneration: 1 });
+    }
+  });
+
+  it("accepts a personal agent without a grant and refuses one with a grant", () => {
+    const personal = {
+      principalKind: "personal",
+      principalId: "p-agent-1",
+      grantId: null,
+      grantGeneration: null,
+    };
+    expect(parseServerDerivedLiveUpdateAuthority(personal)).toEqual(personal);
+    for (const value of [
+      { ...personal, grantId: "grant-1", grantGeneration: 1 },
+      { ...personal, grantId: "grant-1" },
+      { ...personal, grantGeneration: 1 },
+      { ...personal, principalId: "agent-1" },
+    ]) {
+      expect(() => parseServerDerivedLiveUpdateAuthority(value)).toThrow(TypeError);
+    }
+  });
+
+  it("admits a new personal update that credits only its own agent, and no personal agent under other authority", () => {
+    const agent = (agentId: string, onBehalfOf?: string): LiveAuthorEntry =>
+      ({ kind: "agent", agentId, ...(onBehalfOf === undefined ? {} : { onBehalfOf }) });
+    const personal = parseServerDerivedLiveUpdateAuthority({ principalKind: "personal", principalId: "p-agent-1", grantId: null, grantGeneration: null });
+    expect(admitsLiveAuthorship(personal, [agent("p-agent-1", "owner-1")])).toBe(true);
+    const refused: LiveAuthorEntry[][] = [[], [agent("p-agent-2", "owner-1")], [agent("p-agent-1")],
+      [{ kind: "human", humanId: "owner-1", humanName: "Owner" }, agent("p-agent-1", "owner-1")]];
+    for (const authors of refused) expect(admitsLiveAuthorship(personal, authors)).toBe(false);
+    for (const authority of [
+      { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null },
+      { principalKind: "named", principalId: "owner-1", grantId: "grant-1", grantGeneration: 1 },
+      { principalKind: "link", principalId: "owner-1", grantId: "grant-1", grantGeneration: 1 },
+    ].map(parseServerDerivedLiveUpdateAuthority)) {
+      expect(admitsLiveAuthorship(authority, [agent("agent-1", "owner-1")])).toBe(true);
+      expect(admitsLiveAuthorship(authority, [agent("p-agent-1", "owner-1")])).toBe(false);
     }
   });
 

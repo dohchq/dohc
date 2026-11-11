@@ -232,6 +232,10 @@ pub enum ServerDerivedLiveUpdateAuthority {
     Owner {
         principal_id: String,
     },
+    /// The relay authenticated this personal agent; it holds no grant.
+    Personal {
+        principal_id: String,
+    },
     Named {
         principal_id: String,
         grant_id: String,
@@ -247,6 +251,7 @@ impl ServerDerivedLiveUpdateAuthority {
     fn fields(&self) -> (&'static str, &str, Option<&str>, Option<i64>) {
         match self {
             Self::Owner { principal_id } => ("owner", principal_id, None, None),
+            Self::Personal { principal_id } => ("personal", principal_id, None, None),
             Self::Named {
                 principal_id,
                 grant_id,
@@ -270,10 +275,10 @@ impl ServerDerivedLiveUpdateAuthority {
         }
     }
     /// The person the owner shared with, or the Edit share link, this
-    /// authority names; none for the owner.
+    /// authority names; none for the owner or a personal agent.
     fn shared_author(&self) -> Option<dohc_engine_domain::SharedChangeAuthor> {
         match self {
-            Self::Owner { .. } => None,
+            Self::Owner { .. } | Self::Personal { .. } => None,
             Self::Named {
                 principal_id,
                 grant_id,
@@ -297,6 +302,11 @@ impl ServerDerivedLiveUpdateAuthority {
     fn validate(&self) -> Result<(), ApplicationError> {
         let (_, principal, grant, generation) = self.fields();
         identifier(principal, 512)?;
+        if matches!(self, Self::Personal { .. })
+            && !principal.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX)
+        {
+            return Err(invalid("personal authority must name a personal agent"));
+        }
         if let Some(grant) = grant {
             identifier(grant, 512)?;
         }
@@ -323,11 +333,13 @@ impl<'de> Deserialize<'de> for ServerDerivedLiveUpdateAuthority {
             grant_generation: Value,
         }
         let raw = Raw::deserialize(decoder)?;
-        let authority = if raw.principal_kind == "owner"
-            && raw.grant_id.is_null()
-            && raw.grant_generation.is_null()
-        {
+        let no_grant = raw.grant_id.is_null() && raw.grant_generation.is_null();
+        let authority = if no_grant && raw.principal_kind == "owner" {
             Self::Owner {
+                principal_id: raw.principal_id,
+            }
+        } else if no_grant && raw.principal_kind == "personal" {
+            Self::Personal {
                 principal_id: raw.principal_id,
             }
         } else {
@@ -3502,6 +3514,51 @@ mod tests {
             .unwrap()
             .push(LiveAuthorEntry::from(declared("agent").unwrap()));
         assert!(metadata.validate_extensions().is_err());
+    }
+
+    /// The relay stored updates naming a personal agent before it refused
+    /// them, so committed history decodes one under any authority. New updates
+    /// meet the personal rule where they enter.
+    #[test]
+    fn committed_history_decodes_a_personal_agent_under_any_authority() {
+        let agent = |agent_id: &str| LiveAuthorEntry::Agent {
+            agent_id: agent_id.into(),
+            agent_name: None,
+            on_behalf_of: Some("owner-1".into()),
+            depth: None,
+        };
+        let mut update = event("personal", 1, Ydoc::wire().plaintext_insert(0, "x"));
+        update.metadata.canonical_version = Some(2);
+        update.metadata.first_seen_deletes = Some(vec![]);
+        for authority in [
+            ServerDerivedLiveUpdateAuthority::Personal {
+                principal_id: "p-agent-1".into(),
+            },
+            ServerDerivedLiveUpdateAuthority::Owner {
+                principal_id: "owner-1".into(),
+            },
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+        ] {
+            update.metadata.accepted.authority = authority;
+            for agent_id in ["p-agent-1", "p-agent-2"] {
+                update.metadata.author_snapshot = Some(vec![agent(agent_id)]);
+                let committed = AdmittedLiveUpdate::from_committed_metadata(
+                    serde_json::to_value(&update.metadata).unwrap(),
+                    update.update_bytes.clone(),
+                )
+                .unwrap();
+                assert_eq!(committed.metadata, update.metadata);
+            }
+        }
     }
 
     fn warm_cache(store: &mut EngineStore, cache: &mut WriterDocCache) {
