@@ -195,7 +195,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
-import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -1202,7 +1202,9 @@ export function DesktopWorkspaceShell(props: {
         if (next) {
           refusal = next;
           report();
-        } else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+        // Try again took the row, so a Stop that waits says so as Live documents does.
+        } else if (isLiveStopWaiting(error)) reportShellFailure({identity, title: `Stopping live editing for ${path}`, message: LIVE_STOP_WAITING, retry});
+        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
       });
     };
     report();
@@ -1237,6 +1239,9 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
+        // The document's "Stopping live editing" row already says it waits, and keeps its actions.
+        const rows = shownQuarantines.current;
+        if (rows.workspaceId === failedFor && rows.shown.get(`owner-live-quarantine:${failedFor}:${waiting.objectId}`)?.startsWith("stopping")) return;
         // Copy details keeps what the error said. A plain relay error has words and no cause.
         const {cause, words} = readError(error);
         const said = cause ?? words;
@@ -2327,7 +2332,8 @@ export function DesktopWorkspaceShell(props: {
                 const answer=await readLiveStopRefusalForRow(workspaceId,row.objectId,refusal);
                 if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
                 reportPendingLiveStop(workspaceId,row.path,row.objectId,answer.refusal,answer.path);
-              } else {
+              } else if (!isLiveStopWaiting(error)) {
+                // A Stop that still waits leaves the row, which says so and keeps Save recovery copy.
                 reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
               }
             }).finally(() => {
@@ -2354,6 +2360,8 @@ export function DesktopWorkspaceShell(props: {
         continue;
       }
       if (row.recovery==="stopping") {
+        // It says the Stop waits, so the dialog's notice of that wait goes.
+        clearIdentity(`live-stop-waiting:${workspaceId}:${row.objectId}`);
         reportShellFailure({title:`Stopping live editing for ${row.path}`,tone:"warning",quiet:true,
           message:"dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.",details,retry:stopAgain,action:save,target,identity});
         continue;
