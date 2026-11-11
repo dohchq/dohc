@@ -1,7 +1,10 @@
 //! Settled filesystem facts, independent of capture ownership and history.
 
+mod folder;
+
 use crate::floor;
 use crate::scan::FailedPath;
+use folder::{Child, Folder, Kind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -136,12 +139,25 @@ impl ObservationWalker {
                 state.racy.keys().cloned().collect::<BTreeSet<_>>(),
             )
         };
+        let content = ContentRule {
+            started_ms,
+            previous_racy,
+            max_file_bytes: self.bounds.max_file_bytes,
+        };
+        let root_error = |error: &std::io::Error| {
+            crate::FilesError::scan_io(root, root.to_string_lossy().into_owned(), error)
+        };
+        let root_folder = Folder::root(root).map_err(|error| root_error(&error))?;
         let mut listing = Vec::with_capacity(previous_len);
         let mut failed = Vec::new();
-        let mut stack = vec![(root.to_path_buf(), String::new())];
+        let mut digests = BTreeMap::new();
+        // A pending folder holds its parent open and opens from it. A parent
+        // closes once its last pending child opens, so the open folders are
+        // at most the current path's.
+        let mut stack: Vec<(Option<(Folder, Child)>, String)> = vec![(None, String::new())];
         let folds = self.folds_names(root);
         let mut entries = 0;
-        while let Some((dir, relative)) = stack.pop() {
+        while let Some((pending, relative)) = stack.pop() {
             if listing.len() + failed.len() > self.bounds.max_files {
                 self.feed.resync();
                 return Ok(true);
@@ -149,21 +165,21 @@ impl ObservationWalker {
             if token.is_cancelled() {
                 return Ok(false);
             }
-            if !relative.is_empty() {
-                before_open(&relative);
-            }
-            let children = match std::fs::read_dir(&dir) {
-                Ok(children) => children,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound && dir != root => {
-                    continue;
+            let opened = match &pending {
+                None => Ok(root_folder.clone()),
+                Some((parent, child)) => {
+                    before_open(&relative);
+                    parent.open(child)
                 }
-                Err(error) if dir == root => {
-                    return Err(crate::FilesError::scan_io(
-                        &dir,
-                        dir.to_string_lossy().into_owned(),
-                        &error,
-                    ));
-                }
+            };
+            drop(pending);
+            let (dir, children) = match opened.and_then(|dir| {
+                let children = dir.list()?;
+                Ok((dir, children))
+            }) {
+                Ok(listed) => listed,
+                Err(error) if relative.is_empty() => return Err(root_error(&error)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
                     failed.push(FailedPath {
                         path: relative,
@@ -199,8 +215,7 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                let name = child.file_name();
-                let name = name.to_string_lossy();
+                let name = child.name();
                 let normalized = floor::normalize_segment(&name);
                 if floor::segment_is_ignored(&normalized) {
                     continue;
@@ -210,7 +225,7 @@ impl ObservationWalker {
                 } else {
                     format!("{relative}/{name}")
                 };
-                let kind = match child.file_type() {
+                let kind = match dir.kind(&child) {
                     Ok(kind) => kind,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => {
@@ -221,15 +236,15 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                if kind.is_dir() {
-                    stack.push((child.path(), path));
+                if kind == Kind::Folder {
+                    stack.push((Some((dir.clone(), child)), path));
                     continue;
                 }
-                if !(kind.is_file() || kind.is_symlink()) || editor_noise(&normalized) {
+                if !matches!(kind, Kind::File | Kind::Symlink) || editor_noise(&normalized) {
                     continue;
                 }
-                let metadata = match child.metadata() {
-                    Ok(metadata) => metadata,
+                let facts = match dir.facts(&child) {
+                    Ok(facts) => facts,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => {
                         failed.push(FailedPath {
@@ -239,12 +254,7 @@ impl ObservationWalker {
                         continue;
                     }
                 };
-                #[cfg(unix)]
-                let changed = {
-                    use std::os::unix::fs::MetadataExt;
-                    (metadata.ctime(), metadata.ctime_nsec())
-                };
-                listing.push(ObservedEntry {
+                let mut entry = ObservedEntry {
                     #[cfg(any(windows, target_vendor = "apple"))]
                     key: if !folds {
                         path.clone()
@@ -254,36 +264,69 @@ impl ObservationWalker {
                         format!("{relative_key}/{normalized}")
                     },
                     path,
-                    symlink: metadata.file_type().is_symlink(),
-                    size: metadata.len(),
-                    modified: metadata.modified().ok(),
+                    symlink: facts.symlink,
+                    size: facts.size,
+                    modified: facts.modified,
                     #[cfg(unix)]
-                    changed,
-                });
+                    changed: facts.changed,
+                };
+                if let Some(check) = content.check(&dir, &child, &mut entry) {
+                    digests.insert(entry.path.clone(), check);
+                }
+                listing.push(entry);
             }
         }
-        observe_visibility_policy(root, &mut listing, &mut failed);
-        // Git's racy-clean rule (#2904): a file written this recently, or
-        // last read while it was, is read again, since a second write in the
-        // same clock step keeps its size and times.
-        let mut digests = BTreeMap::new();
-        for entry in &listing {
-            let recent = entry.racy(started_ms);
-            if entry.symlink
-                || entry.size > self.bounds.max_file_bytes
-                || !(recent || previous_racy.contains(&entry.path))
-            {
-                continue;
-            }
-            if token.is_cancelled() {
-                return Ok(false);
-            }
-            let digest = content_digest(&root.join(&entry.path), self.bounds.max_file_bytes);
-            digests.insert(entry.path.clone(), ContentCheck { recent, digest });
-        }
+        observe_visibility_policy(
+            &root_folder,
+            &content,
+            &mut listing,
+            &mut failed,
+            &mut digests,
+        );
         self.feed
             .publish(listing, digests, &failed, self.bounds.max_files, folds)?;
         Ok(true)
+    }
+}
+
+/// Which files a scan reads, by Git's racy-clean rule (#2904): a file written
+/// this recently, or last read while it was, is read again, since a second
+/// write in the same clock step keeps its size and times.
+struct ContentRule {
+    started_ms: i64,
+    previous_racy: BTreeSet<String>,
+    max_file_bytes: u64,
+}
+
+impl ContentRule {
+    /// Reads `child` if the rule calls for it. The entry then takes the size
+    /// and times of the file that was read.
+    fn check(
+        &self,
+        folder: &Folder,
+        child: &Child,
+        entry: &mut ObservedEntry,
+    ) -> Option<ContentCheck> {
+        if entry.symlink
+            || entry.size > self.max_file_bytes
+            || !(entry.racy(self.started_ms) || self.previous_racy.contains(&entry.path))
+        {
+            return None;
+        }
+        let read = folder.read(child, self.max_file_bytes);
+        if let Some(facts) = read.facts {
+            entry.symlink = facts.symlink;
+            entry.size = facts.size;
+            entry.modified = facts.modified;
+            #[cfg(unix)]
+            {
+                entry.changed = facts.changed;
+            }
+        }
+        Some(ContentCheck {
+            recent: entry.racy(self.started_ms),
+            digest: read.digest,
+        })
     }
 }
 
@@ -296,65 +339,18 @@ pub(crate) struct ContentCheck {
     digest: Option<[u8; 32]>,
 }
 
-fn content_digest(path: &std::path::Path, cap: u64) -> Option<[u8; 32]> {
-    use sha2::Digest;
-    use std::io::Read;
-    // An ordinary open of a FIFO waits for a writer and would stall the feed,
-    // so the open doesn't block and only a regular file is read.
-    #[cfg(unix)]
-    let file = {
-        use rustix::fs::{Mode, OFlags};
-        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        rustix::fs::open(path, flags, Mode::empty()).map(std::fs::File::from)
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path);
-    let mut file = file.ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut hasher = sha2::Sha256::new();
-    let mut buffer = vec![0; 64 * 1024];
-    let mut bytes = 0u64;
-    loop {
-        let read = match file.read(&mut buffer) {
-            Ok(0) => {
-                let mut digest = [0; 32];
-                digest.copy_from_slice(&hasher.finalize());
-                return Some(digest);
-            }
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        };
-        bytes = bytes.saturating_add(read as u64);
-        if bytes > cap {
-            return None;
-        }
-        hasher.update(&buffer[..read]);
-    }
-}
-
 // The listing needs policy edits even though ordinary observation excludes .dohc.
-// Read metadata for this one path without entering or following the metadata directory.
+// Read this one file without entering or following a link in the metadata folder's place.
 fn observe_visibility_policy(
-    root: &std::path::Path,
+    root: &Folder,
+    content: &ContentRule,
     listing: &mut Vec<ObservedEntry>,
     failed: &mut Vec<FailedPath>,
+    digests: &mut BTreeMap<String, ContentCheck>,
 ) {
     let path = ".dohc/visibility.toml";
-    let metadata = (|| {
-        let parent = std::fs::symlink_metadata(root.join(".dohc"))?;
-        if parent.is_dir() && !parent.file_type().is_symlink() {
-            before_open(".dohc");
-            std::fs::symlink_metadata(root.join(path))
-        } else {
-            // A refused parent still changes the policy verdict. Never follow it.
-            Ok(parent)
-        }
-    })();
-    let metadata = match metadata {
-        Ok(metadata) => metadata,
+    let (facts, file) = match root.policy() {
+        Ok(policy) => policy,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
             failed.push(FailedPath {
@@ -364,21 +360,21 @@ fn observe_visibility_policy(
             return;
         }
     };
-    #[cfg(unix)]
-    let changed = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.ctime(), metadata.ctime_nsec())
-    };
-    listing.push(ObservedEntry {
+    let mut entry = ObservedEntry {
         path: path.to_owned(),
-        symlink: metadata.file_type().is_symlink(),
-        size: metadata.len(),
-        modified: metadata.modified().ok(),
+        symlink: facts.symlink,
+        size: facts.size,
+        modified: facts.modified,
         #[cfg(unix)]
-        changed,
+        changed: facts.changed,
         #[cfg(any(windows, target_vendor = "apple"))]
         key: path.to_owned(),
-    });
+    };
+    if let Some(check) = file.and_then(|(folder, child)| content.check(&folder, &child, &mut entry))
+    {
+        digests.insert(path.to_owned(), check);
+    }
+    listing.push(entry);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -800,10 +796,8 @@ thread_local! {
 /// it. Builds other than tests do nothing here.
 #[cfg(test)]
 fn before_open(relative: &str) {
-    let hook = BEFORE_OPEN.with_borrow_mut(|hook| {
-        hook.take_if(|(at, _)| at == relative)
-            .map(|(_, run)| run)
-    });
+    let hook = BEFORE_OPEN
+        .with_borrow_mut(|hook| hook.take_if(|(at, _)| at == relative).map(|(_, run)| run));
     if let Some(run) = hook {
         run();
     }
