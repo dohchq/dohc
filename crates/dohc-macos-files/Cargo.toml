@@ -9,7 +9,7 @@ description = "Safe wrappers that create a file without its folder's inherited A
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 libc = "0.2"
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
