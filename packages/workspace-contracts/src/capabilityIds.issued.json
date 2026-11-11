@@ -280,5 +280,7 @@
   "crash.mark",
   "chat.archive.set",
   "agent.personal.read",
-  "agent.personal.change"
+  "agent.personal.change",
+  "document.held.read",
+  "document.held.change"
 ]

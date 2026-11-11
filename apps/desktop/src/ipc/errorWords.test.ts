@@ -32,6 +32,8 @@ import {
   isGroupNameTaken,
   isChatMentionPageChanged,
   isDatasetServerNotFound,
+  datasetOwnerOnlyError,
+  isDatasetOwnerOnly,
   markDatasetServerNotFound,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
@@ -70,7 +72,7 @@ vi.mock("../atomicReplaceFile", async (importOriginal) => {
 
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file\'s exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.');
 });
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -95,9 +97,29 @@ it("keeps a server Collection's not found code across Electron, with the words o
   expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
 });
 
+it("keeps a shared view's owner-only refusal code across Electron, with its words", () => {
+  const error = acrossIpc(datasetOwnerOnlyError(), "desktop:dataset");
+  expect(isDatasetOwnerOnly(error)).toBe(true);
+  expect(isDatasetServerNotFound(error)).toBe(false);
+  expect(readError(error).words).toBe("Open the original workspace to manage this Collection.");
+  expect(isDatasetOwnerOnly(acrossIpc(new Error("Open the original workspace to manage this Collection."), "desktop:dataset"))).toBe(false);
+});
+
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
+
+it.each([
+  ["held-change-shared-owner", "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing."],
+  ["held-change-stale", "The note or its file changed. Choose Drop again to review the waiting edits."],
+  ["held-change-missing", "There is no held change to drop. Open the note again."],
+  ["held-change-conflict", "The note has a conflict. Resolve it before using Drop."],
+  ["held-change-undo-stale", "The note changed after Drop. Open History to find the waiting text."],
+])("shows %s across Electron without offering a futile retry", (reason, words) => {
+  const received = acrossIpc(refusal("INVALID_PARAMS", reason), "desktop:held-note-change");
+  expect(readError(received)).toMatchObject({words, canRetry: false});
+  expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
+});
 
 it("keeps the taken group name signal across IPC without matching its words", () => {
   const error = new Error("A group with that name already exists.");

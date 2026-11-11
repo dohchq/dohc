@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "../workspace/workspaceWireContract";
 import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult, HistoryLinkRewriteResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
@@ -67,6 +68,7 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
+  type HeldChange,
   type KeptCopiesListResult,
   type KeptCopySaveResult,
   type RetainedCopiesDeleteResult,
@@ -1492,6 +1494,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return result.waiting;
   }
 
+  /** The held save at `path`: the file on disk beside what saving would write. */
+  async heldChange(path: string): Promise<HeldChange | null> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.ydocHeldChange, { path })).change;
+  }
+
   async writeSecretFile(input: {
     workspaceId: string;
     versionId: string;
@@ -1723,6 +1730,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async saveKeptCopy(id: number): Promise<KeptCopySaveResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
+  }
+
+  async heldNoteChange(input: HeldNoteChangeInput): Promise<HeldNoteChangeResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.heldNoteChange, input);
   }
 
   async listRetainedCopies(): Promise<RetainedCopiesListResult> {

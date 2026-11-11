@@ -40,7 +40,7 @@ const person = { kind: "human", humanId: "local:delete-recovery" } as const;
 it.skipIf(engine.missing)("workspace-engine-history rewrites three linking documents, one open, and undoes through IPC", async () => {
   const rootPath = await createTestScratch("dohc-link-rewrite-engine-");
   await writeFile(join(rootPath, "old.md"), "target\n");
-  for (const name of ["one.md", "two.md", "open.md"]) await writeFile(join(rootPath, name), "[[old#part|label]]" + (name === "open.md" ? "" : "\n"));
+  for (const name of ["one.md", "two.md", "open.md"]) await writeFile(join(rootPath, name), "[[old#part|label]]\n");
   const workspace = {workspaceId: "link-rewrites-engine", rootPath, attachmentId: Symbol("link-rewrites")};
   const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0});
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
@@ -91,7 +91,7 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites three linking docum
       await writeFile(join(process.env.DOHC_LINK_REWRITE_EVIDENCE_DIR, "ipc-timings.json"), JSON.stringify(timings));
     }
     for (const name of ["one.md", "two.md", "open.md"]) {
-      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[old#part|label]]" + (name === "open.md" ? "" : "\n"));
+      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[old#part|label]]\n");
     }
     expect(await readFile(join(rootPath, "old.md"), "utf8")).toBe("target\n");
     await expect.poll(() => session.doc.getXmlFragment("body").toString(), {timeout: REAL_DAEMON_DEADLINE_MS}).toContain('target="old#part"');
@@ -285,7 +285,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     };
     await rm(join(rootPath, "folder/node_modules"), { recursive: true });
     for (const name of ["one.md", "two.md", "open.md"]) {
-      await writeFile(join(rootPath, name), "[[folder/tracked.txt#part|label]]" + (name === "open.md" ? "" : "\n"));
+      await writeFile(join(rootPath, name), "[[folder/tracked.txt#part|label]]\n");
       await waitForPathMoments(capture, name, 1);
     }
     await expect.poll(() => history.incomingLinks({subject: {path: "folder/tracked.txt"}}), {timeout: REAL_DAEMON_DEADLINE_MS})
@@ -303,7 +303,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const agentUndo = () => mcpUndoOperation({root: rootPath, home: socketHome}, {operationId}, "dohc-mcp");
     await expect.poll(agentUndo, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 4 } });
     for (const name of ["one.md", "two.md", "open.md"]) {
-      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[folder/tracked.txt#part|label]]" + (name === "open.md" ? "" : "\n"));
+      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[folder/tracked.txt#part|label]]\n");
     }
     expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
     expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe("typed after move\n");

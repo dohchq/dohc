@@ -2166,7 +2166,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     }
   }
 
-  const expected = "# Solo\n\nStart over here. PERSON\n\n## Added";
+  const expected = "# Solo\n\nStart over here. PERSON\n\n## Added\n";
   expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe(expected);
   await expect.poll(async () => {
     const read = await ipc.readDocument({ workspaceId: WORKSPACE_ID, path: PATH });
@@ -2271,7 +2271,7 @@ it("reports exactly one notice when local typing reuses a key with other content
 
   expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
   expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"));
+  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"), false);
   expect(replacements).toHaveBeenCalledTimes(1);
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
   expect(journalMarkdown()).not.toContain("Refused typing.");

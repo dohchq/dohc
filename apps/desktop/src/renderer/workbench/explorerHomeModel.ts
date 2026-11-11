@@ -9,7 +9,7 @@ import { collectionTabPath, parseTab, siteTabPath, transactionalCollectionTabPat
 // a page's name is its file name, which dohc takes from the title a person
 // gave it when the page was made.
 
-export type HomeSectionId = "pinned" | "pages" | "collections" | "apps" | "other";
+export type HomeSectionId = "pinned" | "pages" | "sketches" | "collections" | "apps" | "other";
 
 // What a row draws before its name: a tab's mark, or a folder.
 export type HomeGlyph = TabMark | { glyph: "folder"; open: boolean };
@@ -32,7 +32,7 @@ export type HomeRowModel = {
   // Pages folders fold; everything else is a leaf.
   folder: boolean;
   expanded: boolean;
-  // Muted text at the end of the row, such as an Other file's folder.
+  // Muted text at the end of the row, such as a sketch's or an Other file's folder.
   detail?: string;
   // Why the row cannot open, as the sentence that says what to fix. It is the
   // row's tooltip and description.
@@ -68,16 +68,28 @@ function ownedBy(path: string, owners: ReadonlySet<string>): boolean {
   return owners.has(path);
 }
 
-export const OTHER_FILES_SHOWN = 20;
+export const FILES_SHOWN = 20;
 
-// `others` holds only the first OTHER_FILES_SHOWN by name; `otherCount` counts them all.
-export type HomeKinds = { pages: WorkspaceFileEntry[]; others: WorkspaceFileEntry[]; otherCount: number };
+// The first FILES_SHOWN files by name, and how many there are in all.
+export type FirstFiles = { shown: WorkspaceFileEntry[]; count: number };
 
-const compareOthers = (a: WorkspaceFileEntry, b: WorkspaceFileEntry) =>
+export type HomeKinds = { pages: WorkspaceFileEntry[]; sketches: FirstFiles; others: FirstFiles };
+
+const compareByName = (a: WorkspaceFileEntry, b: WorkspaceFileEntry) =>
   collator.compare(basenameOf(a.path), basenameOf(b.path)) || collator.compare(a.path, b.path);
 
+function keepFirst(list: FirstFiles, file: WorkspaceFileEntry): void {
+  list.count += 1;
+  const { shown } = list;
+  if (shown.length === FILES_SHOWN && compareByName(file, shown[FILES_SHOWN - 1]!) >= 0) return;
+  let at = shown.length;
+  while (at > 0 && compareByName(file, shown[at - 1]!) < 0) at -= 1;
+  shown.splice(at, 0, file);
+  if (shown.length > FILES_SHOWN) shown.pop();
+}
+
 // One pass over the listing. A dataset's folder holds its dataset.json.
-// Other files are never sorted whole: Home shows only the first few.
+// Sketches and other files are never sorted whole: Home shows only the first few.
 export function classifyFiles(
   files: readonly WorkspaceFileEntry[],
   collectionFolders: ReadonlySet<string>,
@@ -88,22 +100,15 @@ export function classifyFiles(
     if (basenameOf(file.path) === "dataset.json") owners.add(dirnameOf(file.path));
   }
   const pages: WorkspaceFileEntry[] = [];
-  const others: WorkspaceFileEntry[] = [];
-  let otherCount = 0;
+  const sketches: FirstFiles = { shown: [], count: 0 };
+  const others: FirstFiles = { shown: [], count: 0 };
   for (const file of files) {
     if (ownedBy(file.path, owners)) continue;
-    if (file.kind === "file" && fileKindForPath(file.path).displayKind === "markdown") {
-      pages.push(file);
-      continue;
-    }
-    otherCount += 1;
-    if (others.length === OTHER_FILES_SHOWN && compareOthers(file, others[OTHER_FILES_SHOWN - 1]!) >= 0) continue;
-    let at = others.length;
-    while (at > 0 && compareOthers(file, others[at - 1]!) < 0) at -= 1;
-    others.splice(at, 0, file);
-    if (others.length > OTHER_FILES_SHOWN) others.pop();
+    const kind = file.kind === "file" ? fileKindForPath(file.path).displayKind : null;
+    if (kind === "markdown") pages.push(file);
+    else keepFirst(kind === "drawing" ? sketches : others, file);
   }
-  return { pages, others, otherCount };
+  return { pages, sketches, others };
 }
 
 type PageFolder = { path: string; folders: Map<string, PageFolder>; pages: WorkspaceFileEntry[] };
@@ -160,10 +165,15 @@ export function pageRows(tree: PageFolder, expanded: ReadonlySet<string>): HomeR
   return out;
 }
 
-export function otherRows(others: readonly WorkspaceFileEntry[], files: ReadonlyMap<string, WorkspaceFileEntry>): HomeRowModel[] {
-  return others.map((file) => ({
-    key: `other:${file.path}`, section: "other", parentKey: "other", depth: 1,
-    label: basenameOf(file.path), glyph: tabMark(file.path, files), open: file.path,
+// A Sketches or Other files row: the file's name, then its folder.
+export function fileRows(
+  section: "sketches" | "other",
+  files: readonly WorkspaceFileEntry[],
+  lookup: ReadonlyMap<string, WorkspaceFileEntry>,
+): HomeRowModel[] {
+  return files.map((file) => ({
+    key: `${section}:${file.path}`, section, parentKey: section, depth: 1,
+    label: basenameOf(file.path), glyph: tabMark(file.path, lookup), open: file.path,
     menu: { path: file.path, kind: "file" }, folder: false, expanded: false,
     ...(dirnameOf(file.path) ? { detail: dirnameOf(file.path) } : {}),
   }));

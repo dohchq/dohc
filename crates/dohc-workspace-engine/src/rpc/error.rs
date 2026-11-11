@@ -639,6 +639,14 @@ fn map_domain(error: &DomainError) -> WireError {
         } => {
             return WireError::new(InvalidParams, format!("invalid-input: {reason}"));
         }
+        DomainError::InvalidInput {
+            reason:
+                reason @ ("held-change-stale"
+                | "held-change-missing"
+                | "held-change-conflict"
+                | "held-change-undo-stale"
+                | "held-change-shared-owner"),
+        } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
         DomainError::Storage(_) => (Internal, "persist-failed"),
@@ -807,6 +815,23 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn held_change_refusals_preserve_stable_reasons() {
+        for reason in [
+            "held-change-shared-owner",
+            "held-change-stale",
+            "held-change-missing",
+            "held-change-conflict",
+            "held-change-undo-stale",
+        ] {
+            let wire =
+                super::map_runtime(dohc_engine_domain::DomainError::InvalidInput { reason }.into());
+            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::InvalidParams);
+            assert_eq!(wire.message, reason);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
+        }
+    }
+
     #[test]
     fn undo_refusal_wire_text_keeps_the_domain_prefix() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(

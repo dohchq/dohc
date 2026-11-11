@@ -73,7 +73,7 @@ it.skipIf(engine.missing).each(["quit", "workspace close"] as const)(
       const siblings = (await readdir(rootPath)).filter(name => name.startsWith("note (recovered ") && name.endsWith(".md"));
       const recovered = await Promise.all(siblings.map(name => readFile(join(rootPath, name), "utf8")));
       expect(await readFile(join(rootPath, path), "utf8")).toBe(outside);
-      expect(recovered).toEqual([`# Note\n\nBase paragraph.${human}`]);
+      expect(recovered).toEqual([`# Note\n\nBase paragraph.${human}\n`]);
     } finally {
       acknowledge.resolve();
       editor.destroy();

@@ -33,7 +33,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
   if (options.loadScenario) {
     manifest.inputs = [manifest.entryPath];
-    manifest.dataset = {kind: "dataset", datasetId: definition.datasetId, revision: 1, revisionSha256: revision.revisionSha256,
+    manifest.dataset = {kind: "dataset", datasetPath: "fundraiser/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
       operationIds: definition.operations.map(operation => operation.operationId)};
     manifestBytes = Buffer.from(JSON.stringify(manifest));
   }
@@ -41,7 +41,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   // app.publish.json paths are relative to the app folder.
   for (const path of manifest.inputs as string[]) sources.set(`fundraiser/${path}`, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/fundraiser/${path}`, import.meta.url)));
   // The manifest names its Collection by this file, so publishing reads it.
-  sources.set("fundraiser/dataset.json", readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url)));
+  sources.set("fundraiser/dataset.json", options.loadScenario ? Buffer.from(JSON.stringify(definition)) : readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,

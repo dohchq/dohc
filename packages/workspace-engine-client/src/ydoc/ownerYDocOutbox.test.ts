@@ -652,6 +652,26 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(run.requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader","update"]);
   });
 
+  // #2982: a check that needs only the head's key reads none of its update bytes.
+  it("names the delivery head without reading its update", async () => {
+    const result = pendingResult(); result.binding.lineageClaimId = result.baseUpdateDigest;
+    result.entries.push({...result.entries[0]!,sequence: 2,appendKey: "append-2",deliveryId: "delivery-2"});
+    result.pendingBytes = 6;
+    const requests: Request[] = [];
+    const responses = pages(result,4096);
+    const client = outbox({async sendRequest(request) {
+      requests.push(request);
+      const cursor = (request.params as {cursor?: {part: string; sequence: number; offset: number}}).cursor;
+      const page = cursor === undefined ? responses[0] : responses.find(page => page.part === cursor.part && page.sequence === cursor.sequence && page.offset === cursor.offset);
+      return {id: request.id,result: page!};
+    }});
+    expect(await client.readDeliveryHeadKey("outbox-1",result.binding)).toEqual({appendKey: "append-1",updateDigest: result.entries[0]!.updateDigest});
+    expect(requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader"]);
+    const empty = {...pendingResult(),pendingBytes: 0,entries: []}; empty.binding.lineageClaimId = empty.baseUpdateDigest;
+    const emptyPages = pages(empty,4096);
+    expect(await outbox({async sendRequest(request) {return {id: request.id,result: emptyPages[0]!};}}).readDeliveryHeadKey("outbox-1",empty.binding)).toBeNull();
+  });
+
   it("reports whether a delivery head is a seed frozen at its generation, with the checkpoint a copy reads, and refuses a header without them", async () => {
     const frozen = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64),
       recoveryCheckpointDigest: "c".repeat(64) as string | null};

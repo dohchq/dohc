@@ -5,7 +5,7 @@ import { agentHandle, type Agent, type AgentSettings, type DesktopUserSettings }
 import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
-import { Menu, MENU_SEPARATOR } from "../ui/Menu";
+import { Menu } from "../ui/Menu";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { HueControl, SwitchControl } from "./SettingRow";
 
@@ -250,8 +250,6 @@ export function AgentPage(props: {
               ? [{ id: "automations", label: "Use for automations", icon: <Workflow size={14} aria-hidden />, onSelect: props.onUseForAutomations }]
               : []),
             { id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: props.onRename },
-            MENU_SEPARATOR,
-            { id: "remove", label: "Remove", icon: <Trash2 size={14} aria-hidden />, danger: true, onSelect: props.onRemove },
           ]}
         />
       </div>
@@ -392,6 +390,17 @@ export function AgentPage(props: {
         ) : (
           <PageRow label="Reaches"><span className={VALUE}>Every workspace dohc opens on this computer</span></PageRow>
         )}
+      </div>
+
+      <div className={`${BOX} mt-5`}>
+        <PageRow icon={<Trash2 size={14} />} label="Remove agent">
+          <span className={VALUE}>
+            <SecondaryButton data-testid="agent-remove" size="row" className="text-danger"
+              aria-label={`Remove ${agent.name}…`} onClick={props.onRemove}>
+              Remove…
+            </SecondaryButton>
+          </span>
+        </PageRow>
       </div>
     </section>
   );

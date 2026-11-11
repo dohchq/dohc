@@ -917,6 +917,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return accountWorkspaceStorage.setShowOnPhone(this, input);
   }
 
+  endAccountReasonsOfHiddenOrDisownedCopies() {
+    accountWorkspaceStorage.endAccountReasonsOfHiddenOrDisownedCopies(this);
+  }
+
   accountFeedStanding(workspaceId: string) {
     return accountFeedStorage.accountFeedStanding(this, workspaceId);
   }
@@ -1605,6 +1609,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     limit: number;
   }): FetchLogPageResult {
     return logStorage.fetchLogPage(this, input);
+  }
+
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean {
+    return logStorage.logHasMoreThan(this, input);
   }
 
   hasRefusedSettlement(input: Parameters<SyncRelayStorage["hasRefusedSettlement"]>[0]): boolean {

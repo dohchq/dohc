@@ -319,18 +319,18 @@ test("attachment location setting persists across reopen", async () => {
     await desktop.page.getByTestId(settingsNavPin("files")).click();
     await expect(desktop.page.getByTestId(settingsSectionPin("files"))).toBeVisible();
 
-    const select = desktop.page.getByTestId("attachment-location-select");
-    // The folder-name row is present for the default (per-document) location.
-    await expect(desktop.page.getByTestId("attachment-folder-input")).toBeVisible();
-    await select.selectOption("same-folder");
-    // same-folder hides the (meaningless) folder-name row.
-    await expect(desktop.page.getByTestId("attachment-folder-input")).toHaveCount(0);
+    // The folder name can be edited for the default (per-document) location.
+    await expect(desktop.page.getByTestId("attachment-folder-input")).toBeEnabled();
+    await desktop.page.getByTestId("attachment-location-same-folder").click();
+    // Beside the document uses no folder, so its name cannot be edited.
+    await expect(desktop.page.getByTestId("attachment-folder-input")).toBeDisabled();
 
     await closeSettings(desktop.page);
     await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("files")).click();
-    await expect(desktop.page.getByTestId("attachment-location-select")).toHaveValue(
-      "same-folder",
+    await expect(desktop.page.getByTestId("attachment-location-same-folder")).toHaveAttribute(
+      "aria-checked",
+      "true",
     );
     expect(fatalLogs(desktop)).toEqual([]);
   } finally {
@@ -384,6 +384,34 @@ test("settings remains usable down to the minimum supported renderer viewport", 
       await expect(closeButton).toBeInViewport({ ratio: 1 });
       await closeSettings(desktop.page);
     }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("a press outside closes the dialog on top, then Settings", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    const page = desktop.page;
+    await openSettings(page);
+    await page.getByTestId(settingsNavPin("agents")).click();
+    await page.getByTestId("agent-add").click();
+    const addSheet = page.getByTestId("agent-add-sheet");
+    await expect(addSheet).toBeVisible();
+    // The bottom-left corner of the window: outside both panels.
+    const pressOutside = async () => page.mouse.click(8, await page.evaluate(() => innerHeight) - 8);
+
+    await pressOutside();
+    await expect(addSheet).toBeHidden();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
+    await expect(page.locator(":root[data-modal-open]")).toHaveCount(1);
+
+    await pressOutside();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
+    await expect(page.locator(":root[data-modal-open]")).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

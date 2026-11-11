@@ -1069,6 +1069,29 @@ impl VersionedTextStore<'_> {
                 }
             };
 
+            // What the target holds at the conflict's path now; `None` when
+            // the resolution wrote elsewhere (a divergent move).
+            let target_after = if let Some(written) = &binary_write {
+                (written.path == conflict.path)
+                    .then_some(Some(("binary", written.binary_sha256.as_str())))
+            } else if let Some(written) = &write {
+                (written.snapshot.path == conflict.path)
+                    .then_some(Some(("text", written.snapshot.blob_sha256.as_str())))
+            } else if deletion.is_some() {
+                Some(None)
+            } else if let Some(snapshot) = &conflict.current.snapshot {
+                Some(Some(("text", snapshot.blob_sha256.as_str())))
+            } else {
+                Some(
+                    conflict
+                        .current
+                        .binary_sha256
+                        .as_deref()
+                        .map(|sha| ("binary", sha)),
+                )
+            };
+            crate::merge::record_resolved_merge_conflict(tx, &conflict, target_after)?;
+
             let update = ConflictRowUpdate {
                 status: ConflictStatus::Resolved,
                 chosen_from: choice,

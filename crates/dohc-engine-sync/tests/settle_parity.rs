@@ -55,11 +55,13 @@ fn every_retained_vector_matches_current_owner_settlement_without_a_snapshot() {
 }
 #[test]
 fn nested_list_source_remains_preserved_without_the_owners_snapshot() {
-    let source = "---\nid: rec\n---\n\n- parent\n  - nested\n";
+    // Without its final line break, so only the kept source writes these bytes.
+    let source = "---\nid: rec\n---\n\n- parent\n  - nested";
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
         .unwrap();
     let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+    assert_ne!(canonical, source);
     assert_eq!(
         doc.preserved_markdown_source(&canonical),
         Some(source.to_owned())

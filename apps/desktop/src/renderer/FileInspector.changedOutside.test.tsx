@@ -112,6 +112,8 @@ function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"],
 function makeBridge(): DohcDesktopBridge {
   return {
     onWorkspaceActivity: vi.fn(() => () => undefined),
+    onNoticesChanged: vi.fn(() => () => undefined),
+    readHeldChange: vi.fn(async () => ({ change: null })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Plan\n", truncated: false, contentHash: "sha256:test" })),
     writeWorkspaceText: vi.fn(async () => ({ status: "written" as const, contentHash: "sha256:test" })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" as const }], folders: [] })),
@@ -310,7 +312,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
       ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
       : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
     expect(isLossyMarkdown(versionB)).toBe(lossy);
-    expect(versionB).not.toBe(`${yDocToMarkdown(markdownToYDoc(versionB))}\n`);
+    expect(versionB).not.toBe(yDocToMarkdown(markdownToYDoc(versionB)));
     expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const hashA = createHash("sha256").update(versionA).digest("hex");
     const hashB = createHash("sha256").update(versionB).digest("hex");

@@ -17,6 +17,8 @@ import { useShownAfter } from "./ui/useShownAfter";
 import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import { SAVE_STATE } from "./ui/StateMark";
 import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
+import { HeldChangeDialog } from "./heldChangeReview";
+import { HeldNoteDrop } from "./HeldNoteDrop";
 
 // A file view's actions, at the right end of its editor group's tab row: the
 // tab already names the file, so no header repeats it above the page. They
@@ -332,10 +334,12 @@ export function LossyNoteNotice(props: {
   // has no Edit anyway.
   tooLarge?: boolean;
   onError?: ReportButtonError;
+  onNotice?: (message: string, undo?: () => void) => void;
   // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const onEditAnyway = props.tooLarge ? undefined : props.onEditAnyway;
   // Each opening of the warning asks History again: capture can record an
   // outside edit after the note opened.
@@ -367,6 +371,12 @@ export function LossyNoteNotice(props: {
     <>
       <LossyNoteNoticeView held={props.held} tooLarge={props.tooLarge}>
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
+        {props.held ? (
+          <button type="button" data-testid="lossy-note-show-change" onClick={() => setReviewing(true)} className="whitespace-nowrap text-muted hover:text-ink">
+            Show change
+          </button>
+        ) : null}
+        {props.held && onEditAnyway ? <HeldNoteDrop workspaceId={props.workspaceId} path={props.path} onError={props.onError} onNotice={props.onNotice} /> : null}
         {onEditAnyway ? (
           <button
             type="button"
@@ -381,6 +391,7 @@ export function LossyNoteNotice(props: {
           </button>
         ) : null}
       </LossyNoteNoticeView>
+      {reviewing && props.held ? <HeldChangeDialog workspaceId={props.workspaceId} path={props.path} onClose={() => setReviewing(false)} /> : null}
       {confirming && onEditAnyway ? (
         <ConfirmDialog
           icon={FilePenLine}

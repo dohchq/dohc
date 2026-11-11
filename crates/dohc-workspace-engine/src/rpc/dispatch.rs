@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "workReferences.make"
                 | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
+                | "documents.heldChange"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -534,6 +535,10 @@ impl EngineService {
                 ))
                 .await?
             }
+            "documents.heldChange" => {
+                self.held_note_change(request.workspace, request.params)
+                    .await?
+            }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
             }
@@ -633,6 +638,10 @@ impl EngineService {
             }
             "ydoc.settle" => {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.heldChange" => {
+                self.ydoc_held_change(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.close" => {
@@ -1298,6 +1307,12 @@ impl EngineService {
                     "received shares do not open live document sessions",
                 ));
             }
+            if method == "ydoc.heldChange" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares hold no saves",
+                ));
+            }
             if method == "liveApplication.provisionOwner" {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
@@ -1475,6 +1490,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "documents.heldChange",
             "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
@@ -1732,6 +1748,7 @@ mod tests {
             "conflicts.open",
             "conflicts.resolve",
             "documents.keepRetainedVersion",
+            "documents.heldChange",
             "engine.ping",
             "files.replace",
             "history.page",
@@ -1814,6 +1831,7 @@ mod tests {
             "ydoc.adoptCollectionRecord",
             "ydoc.close",
             "ydoc.evict",
+            "ydoc.heldChange",
             "ydoc.open",
             "ydoc.recordUpdate",
             "ydoc.resync",

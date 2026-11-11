@@ -1,3 +1,4 @@
+use super::super::markdown_recovery::{HeldChangeUnavailable, HeldMarkdownChange};
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dohc_engine_collab::{LeaseRegistry, Ydoc, reader_resolver};
@@ -205,6 +206,13 @@ impl Fixture {
                 )
                 .await
         }
+    }
+
+    async fn held_change(&self, path: &str) -> Option<HeldMarkdownChange> {
+        self.actor
+            .held_markdown_change("w".into(), path.into(), self.scratch.path().to_owned())
+            .await
+            .unwrap()
     }
 
     async fn unchanged(&self) {
@@ -529,6 +537,161 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
             .unwrap();
         f.supervisor.close(&f.db).unwrap();
     }
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed() {
+    let f = Fixture::new().await;
+    assert_eq!(f.held_change("note.md").await, None);
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.actor
+        .run(|store, _| {
+            let notices = dohc_engine_sync::list_refusal_notices(store, "w")?;
+            assert_eq!(notices.len(), 1);
+            dohc_engine_sync::dismiss_refusal_notice(
+                store,
+                "w",
+                &notices[0].notice_id,
+                &notices[0].refusal_coordinates,
+                &NoFaults,
+            )?;
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Dismissing the Notice deleted nothing: the save is still held.
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a dismissed Notice must leave its held change readable");
+    };
+    assert_eq!(file.as_deref(), Some(f.source.as_str()));
+    assert_ne!(held, f.source);
+    assert!(held.contains("Accepted text remains available"));
+    assert_eq!(f.held_change("other.md").await, None);
+    f.unchanged().await;
+    // What the review showed is exactly what consenting writes.
+    assert!(
+        f.settle(false, Some(f.consent()))
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        held
+    );
+    assert_eq!(f.held_change("note.md").await, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_compares_against_the_file_on_disk() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // An outside edit capture has not taken in: History still holds the source.
+    let outside = "Edited outside dohc.\n";
+    std::fs::write(f.scratch.path().join("note.md"), outside).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
+        panic!("a held change over readable text must be shown");
+    };
+    assert_eq!(file.as_deref(), Some(outside));
+    assert!(held.contains("Accepted text remains available"));
+    // Bytes that are not text can't be compared.
+    std::fs::write(f.scratch.path().join("note.md"), [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::FileUnreadable,
+        })
+    );
+    std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+    let Some(HeldMarkdownChange::Ready { file, .. }) = f.held_change("note.md").await else {
+        panic!("a deleted file leaves the held change readable");
+    };
+    assert_eq!(file, None);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_held_change_waits_for_a_missing_dependency_like_the_save() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let remote = Ydoc::wire();
+            remote.apply(
+                &dohc_engine_collab::load_persisted(store, &key)?
+                    .unwrap()
+                    .doc
+                    .encode_full_state(),
+            )?;
+            remote.richdoc_append_paragraph("Not yet received");
+            let waiting = remote.richdoc_append_paragraph("Waits for the paragraph above");
+            match store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_update_in_tx(tx, &key, &waiting, None, None, 6)
+            })? {
+                TxnOutcome::Committed(_) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::WaitingForSync,
+        })
+    );
+    // The save refuses for the same reason, so the review shows no text it won't write.
+    assert!(matches!(
+        f.settle(false, Some(f.consent())).await,
+        Err(RuntimeError::Collab(CollabError::MissingDependencies))
+    ));
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_adopted_owner_held_change_is_not_previewed() {
+    let mut f = Fixture::with_reader_source(true).await;
+    f.adopt().await;
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+    let (_owner, host) = f.audited_host().await;
+    assert!(matches!(
+        f.audited_settle(&host, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    // The save writes only what the relay accepted, and only the live host
+    // knows that prefix, so the review refuses rather than show another text.
+    assert_eq!(
+        f.held_change("note.md").await,
+        Some(HeldMarkdownChange::Unavailable {
+            path: "note.md".into(),
+            unavailable: HeldChangeUnavailable::Unsupported,
+        })
+    );
+    assert!(
+        f.audited_settle(&host, Some(f.consent()))
+            .await
+            .unwrap()
+            .materialized
+    );
+    assert_eq!(f.held_change("note.md").await, None);
+    f.supervisor.close(&f.db).unwrap();
 }
 
 #[tokio::test]
@@ -2489,51 +2652,11 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         .unwrap()
         .remove(0)
         .obligation;
-    let key = f.key.clone();
-    let next_claim = f
-        .actor
-        .run(move |store, cache| {
-            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
-            store.write_with(&NoFaults, |tx| {
-                dohc_engine_collab::record_base_coordinate_in_tx(
-                    tx,
-                    dohc_engine_collab::BaseCoordinateRecord {
-                        key: &key,
-                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
-                        origin_id: "old-base",
-                        origin_seq: 0,
-                        relay_seq: Some(20),
-                        now_ms: 20,
-                    },
-                )
-            })?;
-            let doc = dohc_engine_collab::load_persisted(store, &key)?
-                .unwrap()
-                .doc;
-            doc.richdoc_append_paragraph("A replacement lineage edit");
-            let base = doc.encode_full_state();
-            let result = dohc_engine_collab::claim_base_at_relay(
-                store,
-                &key,
-                ContentKind::Richdoc,
-                &base,
-                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
-                &NoFaults,
-                21,
-            )?;
-            assert!(matches!(
-                result,
-                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
-            ));
-            cache.remove(&key);
-            Ok(dohc_engine_collab::read_marker(store, &key)?
-                .unwrap()
-                .lineage_claim_id
-                .unwrap())
-        })
-        .await
-        .unwrap();
+    let next_claim = replace_lineage(&f).await;
     assert_ne!(next_claim, f.claim);
+    // Recovery retires the old row without writing, so the review shows no
+    // held change rather than the replacement lineage's document.
+    assert_eq!(f.held_change("note.md").await, None);
     assert!(matches!(
         f.settle(false, Some(grant.clone())).await,
         Err(RuntimeError::Collab(CollabError::LineageWriteStale { .. }))
@@ -2636,6 +2759,92 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         saved.contains("Accepted text remains available")
             && saved.contains("A replacement lineage edit")
     );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+/// Replaces the note's lineage with a relay base that adds a paragraph, and
+/// returns the new lineage's claim.
+async fn replace_lineage(f: &Fixture) -> String {
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, cache| {
+            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+            store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_base_coordinate_in_tx(
+                    tx,
+                    dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
+                        origin_id: "old-base",
+                        origin_seq: 0,
+                        relay_seq: Some(20),
+                        now_ms: 20,
+                    },
+                )
+            })?;
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            doc.richdoc_append_paragraph("A replacement lineage edit");
+            let base = doc.encode_full_state();
+            let result = dohc_engine_collab::claim_base_at_relay(
+                store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?,
+                &NoFaults,
+                21,
+            )?;
+            assert!(matches!(
+                result,
+                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
+            ));
+            cache.remove(&key);
+            Ok(dohc_engine_collab::read_marker(store, &key)?
+                .unwrap()
+                .lineage_claim_id
+                .unwrap())
+        })
+        .await
+        .unwrap()
+}
+
+// A replaced lineage's row can still wait beside a new hold under the
+// current lineage; the review shows the current one, which a save writes.
+#[tokio::test]
+async fn markdown_hold_review_shows_the_current_lineage_hold_beside_a_retiring_one() {
+    let f = Fixture::new().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let next_claim = replace_lineage(&f).await;
+    let root = f.scratch.path().to_owned();
+    assert!(matches!(
+        f.actor
+            .ydoc_settle(
+                root,
+                f.key.clone(),
+                "note.md".into(),
+                ContentKind::Richdoc,
+                Some(next_claim),
+                Some(hex_sha256(f.source.as_bytes())),
+                "owner-session".into(),
+                Arc::new(()),
+                23,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+                None
+            )
+            .await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let Some(HeldMarkdownChange::Ready { held, .. }) = f.held_change("note.md").await else {
+        panic!("the current lineage's hold must be reviewable");
+    };
+    assert!(held.contains("A replacement lineage edit"));
     f.supervisor.close(&f.db).unwrap();
 }
 
@@ -2798,4 +3007,946 @@ async fn markdown_hold_owner_only_debt_survives_restart_at_an_already_settled_te
         .await
         .unwrap();
     f.supervisor.close(&f.db).unwrap();
+}
+
+impl Fixture {
+    async fn held_action(
+        &self,
+        action: crate::actor::HeldChangeAction,
+    ) -> Result<crate::actor::HeldChangeResult, RuntimeError> {
+        self.held_action_as(action, r#"[{"kind":"human","humanId":"drop-owner"}]"#)
+            .await
+    }
+
+    async fn held_action_as(
+        &self,
+        action: crate::actor::HeldChangeAction,
+        author_json: &str,
+    ) -> Result<crate::actor::HeldChangeResult, RuntimeError> {
+        self.actor
+            .held_note_change(
+                self.key.clone(),
+                "note.md".into(),
+                self.scratch.path().to_owned(),
+                action,
+                Some(author_json.to_owned()),
+                40,
+            )
+            .await
+    }
+
+    async fn hold_and_review(&self) -> crate::actor::HeldChangeResult {
+        self.actor
+            .run(|store, _| {
+                dohc_engine_sync::create_claim_identity(
+                    store,
+                    "w",
+                    "drop-owner",
+                    "epoch",
+                    "stream",
+                    8,
+                    &NoFaults,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            self.settle(false, None).await,
+            Err(RuntimeError::MarkdownWriteHeld { .. })
+        ));
+        self.held_action(crate::actor::HeldChangeAction::Review)
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn held_drop_resets_live_state_and_completes_obligations_without_a_file_write() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let path = f.scratch.path().join("note.md");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    assert!(!dropped.held);
+    let settled = f.settle(false, None).await.unwrap().settled().unwrap();
+    assert!(settled.materialized);
+    assert_eq!(settled.moment_id, "source");
+    assert_eq!(settled.sha256, hex_sha256(f.source.as_bytes()));
+    let key = f.key.clone();
+    let source = f.source.clone();
+    f.actor
+        .run(move |store, _| {
+            assert!(
+                store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .is_empty()
+            );
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            assert!(
+                !doc.project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Accepted text remains available")
+            );
+            let projection = doc.project(ContentKind::Richdoc)?.content;
+            assert_eq!(
+                doc.settled_markdown_source(&projection, || Ok::<_, RuntimeError>(Some(
+                    source.clone()
+                )))?,
+                Some(source.clone())
+            );
+            assert_eq!(
+                VersionedTextStore::new(store)
+                    .read_text("w", "main", "note.md")?
+                    .unwrap()
+                    .text,
+                source
+            );
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            assert_eq!(store.table_row_count("moments")?, 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), f.source);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_keeps_waiting_text_in_history_before_resetting_the_doc() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let expected_correlation = format!("held-change:drop:{}", review.token);
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    let moment = dropped.history_moment_id.unwrap();
+    f.actor
+        .run(move |store, _| {
+            let moment = VersionedTextStore::new(store)
+                .get_moment("w", &moment)?
+                .unwrap();
+            assert!(
+                moment
+                    .before_text
+                    .unwrap()
+                    .contains("Accepted text remains available")
+            );
+            assert_eq!(
+                moment.metadata_summary.as_deref(),
+                Some("Dropped held change")
+            );
+            assert_eq!(moment.metadata_correlation_id, Some(expected_correlation));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                    .unwrap(),
+                serde_json::json!([{"kind":"human","humanId":"drop-owner"}])
+            );
+            let credit: (String, String) =
+                store.read_with(|conn| {
+                    conn.query_row(
+                "SELECT actor_origin_id,actor_kind FROM ydoc_updates ORDER BY seq DESC LIMIT 1", [],
+                |row| Ok((row.get(0)?,row.get(1)?))).map_err(StorageError::corrupt_public)
+                })?;
+            assert_eq!(credit, ("drop-owner".into(), "human".into()));
+            assert!(
+                store
+                    .read_with(|conn| dohc_engine_domain::capture_recoveries_in(conn, "w"))?
+                    .is_empty()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_undo_restores_waiting_text_and_holds_again_without_consent() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    let expected_correlation = format!("held-change:undo:{}", dropped.token);
+    let restored = f
+        .held_action_as(
+            HeldChangeAction::Undo {
+                token: dropped.token,
+            },
+            r#"[{"kind":"agent","agentId":"restore-agent","onBehalfOf":"drop-owner"}]"#,
+        )
+        .await
+        .unwrap();
+    assert!(restored.held);
+    let moment_id = restored.history_moment_id.unwrap();
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        let moment = VersionedTextStore::new(store).get_moment("w", &moment_id)?.unwrap();
+        assert_eq!(moment.metadata_summary.as_deref(), Some("Restored held change"));
+        assert_eq!(moment.metadata_correlation_id, Some(expected_correlation));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+            serde_json::json!([{"kind":"agent","agentId":"restore-agent","onBehalfOf":"drop-owner"}]));
+        let credit: (String, String, String) = store.read_with(|conn| conn.query_row(
+            "SELECT actor_origin_id,actor_kind,on_behalf_of FROM ydoc_updates ORDER BY seq DESC LIMIT 1", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(StorageError::corrupt_public))?;
+        assert_eq!(credit, ("restore-agent".into(),"agent".into(),"drop-owner".into()));
+        let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(),1);
+        assert_eq!(owed[0].retry_inputs["headUpdateSeq"], marker.head_update_seq);
+        Ok(())
+    }).await.unwrap();
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            assert!(
+                doc.project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Accepted text remains available")
+            );
+            assert!(
+                !store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .is_empty()
+            );
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        f.source
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_refuses_a_stale_review_or_changed_disk_without_discarding() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            let delta = doc.richdoc_append_paragraph("A later edit changes the reviewed head");
+            store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_update_in_tx(tx, &key, &delta, None, None, 30)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        f.held_action(HeldChangeAction::Drop {
+            token: review.token.clone()
+        })
+        .await
+        .is_err()
+    );
+    f.unchanged().await;
+    std::fs::write(f.scratch.path().join("note.md"), "Changed outside dohc").unwrap();
+    assert!(
+        f.held_action(HeldChangeAction::Drop {
+            token: review.token
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        "Changed outside dohc"
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_undo_survives_restart_and_refuses_a_later_edit() {
+    use crate::actor::HeldChangeAction;
+    let mut f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 50).unwrap().actor;
+    assert!(
+        f.held_action(HeldChangeAction::Undo {
+            token: dropped.token.clone()
+        })
+        .await
+        .unwrap()
+        .held
+    );
+    let review = f.held_action(HeldChangeAction::Review).await.unwrap();
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            let delta = doc.richdoc_append_paragraph("Later work must survive a stale Undo");
+            store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::record_update_in_tx(tx, &key, &delta, None, None, 60)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        f.held_action(HeldChangeAction::Undo {
+            token: dropped.token
+        })
+        .await
+        .is_err()
+    );
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            assert!(
+                dohc_engine_collab::load_persisted(store, &key)?
+                    .unwrap()
+                    .doc
+                    .project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Later work must survive")
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        f.source
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_refuses_an_open_conflict_without_discarding() {
+    use crate::actor::HeldChangeAction;
+    use dohc_engine_domain::{
+        ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
+        insert_text_conflict_if_absent,
+    };
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    f.actor
+        .run(|store, _| {
+            let head = VersionedTextStore::new(store).read_text("w", "main", "note.md")?;
+            let conflict = TextConflict {
+                conflict_id: "held-conflict".into(),
+                workspace_id: "w".into(),
+                path: "note.md".into(),
+                target_version_id: "main".into(),
+                source_version_id: "main".into(),
+                created_at_ms: 20,
+                updated_at_ms: 20,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("sync"),
+                base: ConflictFileState::text("note.md", head.clone()),
+                current: ConflictFileState::text("note.md", head.clone()),
+                incoming: ConflictFileState::text("note.md", head),
+            };
+            store.write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.held_action(HeldChangeAction::Drop {
+            token: review.token.clone()
+        })
+        .await,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "held-change-conflict"
+        }))
+    ));
+    assert!(matches!(
+        f.held_action(HeldChangeAction::Undo {
+            token: review.token
+        })
+        .await,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "held-change-undo-stale"
+        }))
+    ));
+    f.unchanged().await;
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_cancels_an_already_queued_recovery_attempt() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    let owed = f
+        .actor
+        .markdown_recovery_candidates("w".into())
+        .await
+        .unwrap()
+        .remove(0)
+        .obligation;
+    f.held_action(HeldChangeAction::Drop {
+        token: review.token,
+    })
+    .await
+    .unwrap();
+    let root = f.scratch.path().to_owned();
+    assert!(
+        f.actor
+            .recover_markdown_write(
+                owed,
+                root.clone(),
+                Arc::new(RecoveryRoot(root)),
+                LeaseRegistry::new(),
+                Arc::new(()),
+                50,
+                CancellationToken::new()
+            )
+            .await
+            .unwrap()
+    );
+    f.actor
+        .run(|store, _| {
+            assert!(
+                store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .is_empty()
+            );
+            assert_eq!(store.table_row_count("moments")?, 2);
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        f.source
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_does_not_bypass_the_adopted_owner_audit() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    f.adopt().await;
+    for action in [
+        HeldChangeAction::Drop {
+            token: review.token.clone(),
+        },
+        HeldChangeAction::Undo {
+            token: review.token,
+        },
+    ] {
+        assert!(matches!(
+            f.held_action(action).await,
+            Err(RuntimeError::Domain(DomainError::InvalidInput {
+                reason: "held-change-shared-owner"
+            }))
+        ));
+    }
+    f.unchanged().await;
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_undo_prechecks_use_history_refusal_after_disk_path_or_document_changes() {
+    use crate::actor::HeldChangeAction;
+    for changed in ["disk", "path", "document"] {
+        let mut f = Fixture::new().await;
+        let review = f.hold_and_review().await;
+        let dropped = f
+            .held_action(HeldChangeAction::Drop {
+                token: review.token,
+            })
+            .await
+            .unwrap();
+        let original_key = f.key.clone();
+        match changed {
+            "disk" => std::fs::write(f.scratch.path().join("note.md"), "Outside edit").unwrap(),
+            "path" => f
+                .actor
+                .run(|store, _| {
+                    store.write_with(&NoFaults, |tx| {
+                        tx.execute("UPDATE ydoc_docs SET path='moved.md'", [])
+                            .map_err(StorageError::persist_public)
+                    })?;
+                    Ok(())
+                })
+                .await
+                .unwrap(),
+            "document" => f.key = DocKey::new("w", "main", "replacement").unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            f.held_action(HeldChangeAction::Undo {
+                token: dropped.token
+            })
+            .await,
+            Err(RuntimeError::Domain(DomainError::InvalidInput {
+                reason: "held-change-undo-stale"
+            }))
+        ));
+        f.actor
+            .run(move |store, _| {
+                let doc = dohc_engine_collab::load_persisted(store, &original_key)?
+                    .unwrap()
+                    .doc;
+                assert!(
+                    !doc.project(ContentKind::Richdoc)?
+                        .content
+                        .contains("Accepted text remains available")
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+            if changed == "disk" {
+                "Outside edit"
+            } else {
+                &f.source
+            }
+        );
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
+
+impl Fixture {
+    async fn hold_peer_delta(&self) {
+        let key = self.key.clone();
+        let op = self.actor.run(move |store, _| {
+            dohc_engine_sync::create_claim_identity(store, "w", "drop-owner", "epoch", "stream", 8, &NoFaults)?;
+            let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            let delta = doc.richdoc_append_paragraph("Waiting peer edit");
+            let sha = store.put_binary_blob(&delta)?;
+            Ok(dohc_engine_sync::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: "w".into(), origin_id: "held-peer".into(), origin_seq: 0,
+                relay_seq: Some(1), op_kind: "ydoc.update".into(), recorded_at_ms: 9,
+                payload: serde_json::json!({"versionId":"main", "objectId":"note", "path":"note.md",
+                    "contentKind":"richdoc", "lineageClaimId":marker.lineage_claim_id.unwrap(),
+                    "updateBlobSha256":sha, "isBaseState":false}),
+            })
+        }).await.unwrap();
+        loop {
+            let op = op.clone();
+            match self
+                .actor
+                .run(move |store, cache| {
+                    Ok(dohc_engine_sync::apply_ydoc_envelope(
+                        store,
+                        cache,
+                        &op,
+                        &NoFaults,
+                        &dohc_engine_sync::NoLiveLeases,
+                    )?)
+                })
+                .await
+            {
+                Ok(outcome) => {
+                    assert!(
+                        matches!(outcome.primary, dohc_engine_sync::ApplyDisposition::Refused(
+                        dohc_engine_sync::ReplicationRefusal {reason: dohc_engine_sync::RefusalReason::InvalidInput {ref reason}, ..}
+                    ) if reason == "markdown-write-held")
+                    );
+                    break;
+                }
+                Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::MarkdownWitnessCheckPending { pending, .. },
+                )) => pending.resolve().await,
+                Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(
+                    pending,
+                ))) => pending.resolve().await,
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        self.actor
+            .run(|store, _| {
+                let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+                assert_eq!(owed.len(), 1);
+                assert_eq!(owed[0].kind, WriteObligationKind::SyncProjection);
+                assert!(owed[0].held_checkpoint_sha256.is_some());
+                assert_eq!(store.table_row_count("replication_pending_refusals")?, 1);
+                assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn prepend_held_obligation(&self, kind: WriteObligationKind) {
+        self.actor
+            .run(move |store, _| {
+                let mut row = store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .into_iter()
+                    .find(|row| row.kind == WriteObligationKind::Session)
+                    .unwrap();
+                row.kind = kind;
+                row.operation_id = "earlier-obligation".into();
+                row.held_checkpoint_sha256 = None;
+                if kind == WriteObligationKind::AuditedSettle {
+                    let retry = write_obligations::AuditedRetry {
+                        namespace: "relay".into(),
+                        binding: dohc_engine_collab::live_object_binding::LiveObjectBinding {
+                            workspace_id: row.key.workspace_id.clone(),
+                            main_version_id: row.key.version_id.clone(),
+                            object_id: row.key.object_id.clone(),
+                            lineage_claim_id: row.lineage_claim_id.clone(),
+                            current_path: row.path.clone(),
+                            selector_paths: vec![row.path.clone()],
+                            restore_fence_generation: 0,
+                        },
+                        terminal_cursor: 7,
+                        head_update_seq: 1,
+                    };
+                    row.operation_id = retry.operation_id();
+                    row.retry_inputs = serde_json::to_value(retry).unwrap();
+                } else {
+                    row.retry_inputs =
+                        serde_json::json!({"expectedHeadSha256":row.held_head_sha256});
+                }
+                store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+                    write_obligations::record_in(tx, &row, 30)?;
+                    tx.execute(
+                        "UPDATE markdown_write_obligations SET obligation_order=0 WHERE kind=?1",
+                        [kind.as_str()],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn held_drop_and_undo_work_with_only_a_sync_projection_hold() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    f.hold_peer_delta().await;
+    let key = f.key.clone();
+    let peer_checkpoint = f
+        .actor
+        .run(move |store, _| {
+            Ok(dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc
+                .encode_full_state())
+        })
+        .await
+        .unwrap();
+    let path = f.scratch.path().join("note.md");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let review = f.held_action(HeldChangeAction::Review).await.unwrap();
+    let token = review.token.clone();
+    let dropped = f
+        .held_action(HeldChangeAction::Drop {
+            token: review.token,
+        })
+        .await
+        .unwrap();
+    assert!(!dropped.held);
+    let key = f.key.clone();
+    let drop_moment = dropped.history_moment_id.unwrap();
+    let expected_correlation = format!("held-change:drop:{token}");
+    let claim = f.claim.clone();
+    f.actor
+        .run(move |store, _| {
+            assert!(
+                store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .is_empty()
+            );
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            assert!(
+                !doc.project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Waiting peer edit")
+            );
+            assert_eq!(
+                dohc_engine_collab::read_marker(store, &key)?
+                    .unwrap()
+                    .lineage_claim_id,
+                Some(claim)
+            );
+            let moment = VersionedTextStore::new(store)
+                .get_moment("w", &drop_moment)?
+                .unwrap();
+            assert!(moment.before_text.unwrap().contains("Waiting peer edit"));
+            assert_eq!(moment.metadata_correlation_id, Some(expected_correlation));
+            let outbound: Vec<u8> = store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.bytes FROM replication_log r JOIN binary_blobs b \
+             ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
+             WHERE r.workspace_id=?1 AND r.imported=0 AND r.op_kind='ydoc.update' \
+             AND json_extract(r.payload_json,'$.objectId')=?2 ORDER BY r.origin_seq DESC LIMIT 1",
+                    params![key.workspace_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })?;
+            let peer = Ydoc::wire();
+            peer.apply(&peer_checkpoint)?;
+            assert!(
+                peer.project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Waiting peer edit")
+            );
+            peer.apply(&outbound)?;
+            assert!(
+                !peer
+                    .project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Waiting peer edit")
+            );
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let restored = f
+        .held_action(HeldChangeAction::Undo {
+            token: dropped.token,
+        })
+        .await
+        .unwrap();
+    assert!(restored.held);
+    let undo_moment = restored.history_moment_id.unwrap();
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            assert!(
+                doc.project(ContentKind::Richdoc)?
+                    .content
+                    .contains("Waiting peer edit")
+            );
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert!(owed[0].held_checkpoint_sha256.is_some());
+            assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            let moment = VersionedTextStore::new(store)
+                .get_moment("w", &undo_moment)?
+                .unwrap();
+            assert_eq!(
+                moment.metadata_correlation_id,
+                Some(format!("held-change:undo:{token}"))
+            );
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), f.source);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_clears_peer_lineage_notice_with_a_session_hold() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    f.hold_peer_delta().await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.actor
+        .run(|store, _| {
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert!(
+                owed.iter()
+                    .any(|row| row.kind == WriteObligationKind::Session)
+            );
+            assert!(
+                owed.iter()
+                    .any(|row| row.kind == WriteObligationKind::SyncProjection)
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let review = f.held_action(HeldChangeAction::Review).await.unwrap();
+    let modified = std::fs::metadata(f.scratch.path().join("note.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    f.held_action(HeldChangeAction::Drop {
+        token: review.token,
+    })
+    .await
+    .unwrap();
+    f.actor
+        .run(|store, _| {
+            assert!(
+                store
+                    .read_with(|conn| write_obligations::pending_in(conn, "w"))?
+                    .is_empty()
+            );
+            assert_eq!(store.table_row_count("replication_pending_refusals")?, 0);
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        f.source
+    );
+    assert_eq!(
+        std::fs::metadata(f.scratch.path().join("note.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_refuses_pending_audited_settlement_without_corrupting_its_retry() {
+    use crate::actor::HeldChangeAction;
+    let f = Fixture::new().await;
+    let review = f.hold_and_review().await;
+    f.prepend_held_obligation(WriteObligationKind::AuditedSettle)
+        .await;
+    assert!(matches!(
+        f.held_action(HeldChangeAction::Drop {
+            token: review.token
+        })
+        .await,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "held-change-conflict"
+        }))
+    ));
+    f.unchanged().await;
+    f.actor
+        .run(|store, _| {
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 2);
+            let audit = owed
+                .iter()
+                .find(|row| row.kind == WriteObligationKind::AuditedSettle)
+                .unwrap();
+            assert!(
+                serde_json::from_value::<write_obligations::AuditedRetry>(
+                    audit.retry_inputs.clone()
+                )
+                .is_ok()
+            );
+            store.write_with(&NoFaults, |tx| {
+                write_obligations::record_audited_in(tx, audit, 50)
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn held_drop_stores_undo_on_the_held_session_instead_of_an_earlier_obligation() {
+    use crate::actor::HeldChangeAction;
+    for kind in [
+        WriteObligationKind::OwnerStop,
+        WriteObligationKind::SyncProjection,
+        WriteObligationKind::LinkBaseline,
+    ] {
+        let f = Fixture::new().await;
+        let review = f.hold_and_review().await;
+        f.prepend_held_obligation(kind).await;
+        let dropped = f
+            .held_action(HeldChangeAction::Drop {
+                token: review.token,
+            })
+            .await
+            .unwrap();
+        f.actor.run(move |store, _| {
+            let saved_kind: String = store.read_with(|conn| conn.query_row(
+                "SELECT kind FROM markdown_write_obligations WHERE json_type(retry_inputs_json,'$.heldDrop')='object'", [],
+                |row| row.get(0)).map_err(StorageError::corrupt_public))?;
+            assert_eq!(saved_kind, "session");
+            let other_has_undo: bool = store.read_with(|conn| conn.query_row(
+                "SELECT json_type(retry_inputs_json,'$.heldDrop') IS NOT NULL FROM markdown_write_obligations WHERE kind=?1",
+                [kind.as_str()], |row| row.get(0)).map_err(StorageError::corrupt_public))?;
+            assert!(!other_has_undo);
+            Ok(())
+        }).await.unwrap();
+        assert!(
+            f.held_action(HeldChangeAction::Undo {
+                token: dropped.token
+            })
+            .await
+            .unwrap()
+            .held
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+            f.source
+        );
+        f.supervisor.close(&f.db).unwrap();
+    }
 }

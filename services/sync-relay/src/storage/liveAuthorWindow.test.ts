@@ -1,3 +1,4 @@
+import {readFileSync} from "node:fs";
 import {expect, it} from "vitest";
 import {
   liveAuthorIdentity,
@@ -48,6 +49,26 @@ it("credits new structs and deletion-only edits, including unnamed content, but 
     {author: {kind: "unattributed"}, structRanges: [range(4)], deletionRanges: []},
   ]);
   expect(assessLiveAuthorWindow([], candidate([], [range(4)])).identityCount).toBe(1);
+});
+
+it("credits a delivery's authors on the engine's rule", () => {
+  // The engine's History reads the same vectors.
+  const vectors = JSON.parse(readFileSync(new URL("../../../../packages/live-session-contract/vectors/live-author-credit-vectors.json", import.meta.url), "utf8")) as {
+    deliveries: {case: string; canonicalVersion?: 1; authorSnapshot: LiveAuthorSnapshot; firstSeen: LiveUpdateStructRange[]; firstSeenDeletes: LiveUpdateStructRange[]; credits: LiveAuthorEntry[]}[];
+  };
+  expect(vectors.deliveries.length).toBeGreaterThan(0);
+  for (const row of vectors.deliveries) {
+    // A v1 row has no author snapshot or deletion ranges.
+    const prior: AdmittedLiveUpdateMetadata = row.canonicalVersion === 1
+      ? {accepted: {} as AdmittedLiveUpdateMetadata["accepted"], firstSeen: row.firstSeen}
+      : admitted(row.authorSnapshot, row.firstSeen, row.firstSeenDeletes);
+    if (row.canonicalVersion !== 1) {
+      const window = assessLiveAuthorWindow([], candidate(row.authorSnapshot, row.firstSeen, row.firstSeenDeletes));
+      expect(window.coverage.map(entry => entry.author), row.case).toEqual(row.credits);
+    }
+    const admittedWindow = assessLiveAuthorWindow([prior], candidate([], [], []));
+    expect(admittedWindow.coverage.map(entry => entry.author), row.case).toEqual(row.credits);
+  }
 });
 
 it("unions and normalizes ranges without changing admitted rows", () => {

@@ -141,8 +141,9 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
+  read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
+  live: "liveDocuments",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -176,6 +177,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
     ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
     ["chat", "reply", "th_1", "--as-agent", "--work", "done", "--link", "https://example.com/pull/7", "Opened", "a", "pull", "request"],
   ],
+  retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
   export: [
@@ -200,7 +202,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.",
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, heldFiles?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. These fields are absent when the dohc app cannot answer.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },
@@ -220,11 +222,14 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },
+  dohc_list_live_documents: { cli: "liveDocuments" },
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
+  dohc_read_held_change: { cli: "documentHeld" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
+  dohc_held_note_change: { cli: "heldNoteChange" },
   dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
   dohc_write_file: "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
   dohc_create_directory: "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
@@ -253,6 +258,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
+  dohc_retry_chat_run: { cli: "chatRetry" },
   dohc_press_button: { cli: "automationPress" },
   dohc_inspect_buttons: { cli: "automationButtons" },
 };
@@ -421,12 +427,14 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_live_documents: "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
   dohc_list_versions: "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_compare_version: "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_list_version_conflicts: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
@@ -486,6 +494,7 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   links: "chatLinks",
   "file-mentions": "chatFileMentions",
   "create-group": "groupCreate",
+  retry: "chatRetry",
 };
 
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's
@@ -609,6 +618,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 - The CLI and the app must be the same build. Otherwise the CLI stops with \`CLI/app version mismatch — restart the app\`.
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
+
+A desktop MCP tool refuses an argument it does not take. The error names that argument and lists the ones the tool takes.
 
 Partial form creation returns \`{ kind: "partial", created, failedStage, reason, retry }\`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 

@@ -7,7 +7,6 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SecondaryButton } from "../ui/controls";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, X } from "lucide-react";
-import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   useCallback,
   useContext,
@@ -47,6 +46,8 @@ import { useColorScheme } from "../useColorScheme";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
 import { ShellErrorReporter } from "../shell/useShellError";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import { AppsSettings } from "./AppsSettings";
+import { pinnedAppsFor } from "../../settings/pinnedApps";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
@@ -64,6 +65,7 @@ import {
   ThemeControl,
 } from "./SettingRow";
 import { SettingsNav } from "./SettingsNav";
+import { AttachmentLocationControl } from "./AttachmentLocationControl";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
@@ -171,6 +173,10 @@ export function SettingsDialog(props: {
    * view runs no owner live delivery, so it has no such list to manage.
    */
   onOpenLiveDocuments?: () => void;
+  /** Closes Settings and opens one of this workspace's apps in its tab. */
+  onOpenApp?: (appRoot: string) => void;
+  /** Pins an app to the sidebar or unpins it. The shell reports a failure. */
+  onSetAppPinned?: (appRoot: string, pinned: boolean) => void;
 }) {
   const { onWorkspaceSettingsRead } = props;
   // A shared view never runs app code, so it has no trust to change.
@@ -822,48 +828,37 @@ export function SettingsDialog(props: {
             </SettingsSection>
           </div>
         );
-      case "workbench":
+      case "apps":
         return (
-          <div data-testid={settingsSectionPin("workbench")}>
-            <SettingsSection>
-              <SettingRow
-                title="App previews"
-                modified={isModified(
-                  workspaceSettings.sites.defaultPreviewMode,
-                  DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-                )}
-                onReset={() =>
-                  void saveWorkspaceSettings({
-                    sites: {
-                      defaultPreviewMode:
-                        DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-                    },
-                  })
-                }
-                testId="settings-row-site-preview-mode"
-              >
-                <select
-                  aria-label="Default app preview mode"
-                  data-testid="site-preview-mode-select"
-                  value={workspaceSettings.sites.defaultPreviewMode}
-                  onChange={(event) =>
-                    void saveWorkspaceSettings({
-                      sites: {
-                        defaultPreviewMode: event.target
-                          .value as WorkspaceSettings["sites"]["defaultPreviewMode"],
-                      },
-                    })
-                  }
-                  className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
-                >
-                  {WORKSPACE_PREVIEW_MODES.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
-                    </option>
-                  ))}
-                </select>
-              </SettingRow>
-            </SettingsSection>
+          <div data-testid={settingsSectionPin("apps")}>
+            <AppsSettings
+              workspaceId={props.workspaceId}
+              sharedView={!!props.sharedView}
+              defaultPreviewMode={workspaceSettings.sites.defaultPreviewMode}
+              defaultModified={isModified(
+                workspaceSettings.sites.defaultPreviewMode,
+                DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+              )}
+              onDefaultChange={(defaultPreviewMode) =>
+                void saveWorkspaceSettings({ sites: { defaultPreviewMode } })
+              }
+              onDefaultReset={() =>
+                void saveWorkspaceSettings({
+                  sites: {
+                    defaultPreviewMode:
+                      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+                  },
+                })
+              }
+              {...(!props.sharedView
+                ? { trust: { trusted: workspaceTrust.trusted, onOpen: () => { setQuery(""); setActiveSection("privacy"); } } }
+                : {})}
+              pinned={pinnedAppsFor(userSettings, props.workspaceId)}
+              {...(props.onSetAppPinned ? { onSetPinned: props.onSetAppPinned } : {})}
+              {...(props.onOpenApp ? { onOpenApp: props.onOpenApp } : {})}
+              {...(props.onError ? { onError: props.onError } : {})}
+              {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+            />
           </div>
         );
       case "files":
@@ -885,75 +880,71 @@ export function SettingsDialog(props: {
                   })
                 }
                 testId="settings-row-attachment-location"
-              >
-                <select
-                  aria-label="Attachment location"
-                  data-testid="attachment-location-select"
-                  value={workspaceSettings.files.attachmentLocation}
-                  onChange={(event) =>
-                    void saveWorkspaceSettings({
-                      files: {
-                        attachmentLocation: event.target
-                          .value as WorkspaceSettings["files"]["attachmentLocation"],
-                      },
-                    })
-                  }
-                  // As wide as its longest option, which names the folder.
-                  className="h-8 max-w-full rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
-                >
-                  <option value="per-document">
-                    {`In a folder next to the document (${
-                      workspaceSettings.files.attachmentFolderName || "assets"
-                    }/)`}
-                  </option>
-                  <option value="global-folder">
-                    In one folder at the workspace root
-                  </option>
-                  <option value="same-folder">Next to the document</option>
-                </select>
-              </SettingRow>
-              {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
-                <SettingRow
-                  title="Attachment folder name"
-                  modified={isModified(
-                    workspaceSettings.files.attachmentFolderName,
-                    DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
-                  )}
-                  onReset={() =>
-                    void saveWorkspaceSettings({
-                      files: {
-                        attachmentFolderName:
-                          DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
-                      },
-                    })
-                  }
-                  testId="settings-row-attachment-folder"
-                >
-                  <TextControl
-                    label="Attachment folder name"
-                    value={workspaceSettings.files.attachmentFolderName}
-                    placeholder="assets"
-                    testId="attachment-folder-input"
-                    maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
-                    onChange={(attachmentFolderName) =>
-                      void saveWorkspaceSettings({
-                        files: {
-                          // mergeWorkspaceSettings re-parses and throws past the
-                          // schema bound, and this is a plain change handler — an
-                          // over-long value must be clamped, not thrown. `maxLength`
-                          // already stops typing and pasting; this is the belt to
-                          // its braces (a longer value can only arrive if the two
-                          // ever drift).
-                          attachmentFolderName: attachmentFolderName.slice(
-                            0,
-                            ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-                          ),
-                        },
-                      })
+                description="Where dohc saves an image you paste, drop, or insert into a document."
+                top
+                aside={
+                  <AttachmentLocationControl
+                    value={workspaceSettings.files.attachmentLocation}
+                    folderName={workspaceSettings.files.attachmentFolderName}
+                    onChange={(attachmentLocation) =>
+                      void saveWorkspaceSettings({ files: { attachmentLocation } })
                     }
                   />
-                </SettingRow>
-              ) : null}
+                }
+              />
+              <SettingRow
+                title="Folder name"
+                description={
+                  workspaceSettings.files.attachmentLocation === "same-folder" ? (
+                    <span id="attachment-folder-unused">
+                      Not used when images go beside the document.
+                    </span>
+                  ) : undefined
+                }
+                modified={isModified(
+                  workspaceSettings.files.attachmentFolderName,
+                  DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                )}
+                onReset={() =>
+                  void saveWorkspaceSettings({
+                    files: {
+                      attachmentFolderName:
+                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                    },
+                  })
+                }
+                testId="settings-row-attachment-folder"
+              >
+                <TextControl
+                  label="Attachment folder name"
+                  value={workspaceSettings.files.attachmentFolderName}
+                  placeholder="assets"
+                  testId="attachment-folder-input"
+                  disabled={workspaceSettings.files.attachmentLocation === "same-folder"}
+                  describedBy={
+                    workspaceSettings.files.attachmentLocation === "same-folder"
+                      ? "attachment-folder-unused"
+                      : undefined
+                  }
+                  maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
+                  onChange={(attachmentFolderName) =>
+                    void saveWorkspaceSettings({
+                      files: {
+                        // mergeWorkspaceSettings re-parses and throws past the
+                        // schema bound, and this is a plain change handler — an
+                        // over-long value must be clamped, not thrown. `maxLength`
+                        // already stops typing and pasting; this is the belt to
+                        // its braces (a longer value can only arrive if the two
+                        // ever drift).
+                        attachmentFolderName: attachmentFolderName.slice(
+                          0,
+                          ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+                        ),
+                      },
+                    })
+                  }
+                />
+              </SettingRow>
             </SettingsSection>
           </div>
         );
@@ -1224,8 +1215,8 @@ export function SettingsDialog(props: {
         <section className="min-h-0 flex-1 overflow-auto px-12 pt-10 pb-[calc(var(--dohc-toast-room,0px)+3rem)] scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
           {/* Only Sharing matched: no section's heading stands over its results. */}
           <h3
-            // The Agents page shows its own title.
-            hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
+            // The Agents and Apps pages show their own titles.
+            hidden={activeSection === "agents" || activeSection === "apps" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
             className="m-0 mb-6 text-base font-semibold text-ink"
           >
             {activeMeta.label}

@@ -19,7 +19,7 @@ import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/works
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { chatWorkReportSchema, chatWatchInputSchema, cliAgentIdSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWorkReportSchema, chatWatchInputSchema, cliAgentIdSchema, LIVE_DOCUMENT_REASON_STEPS, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -27,6 +27,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
+  heldNoteChange,
   chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
@@ -44,6 +45,7 @@ import {
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
+  retryChatRun,
   readRecord,
   setRecordFields,
   waitForMessages,
@@ -68,11 +70,13 @@ import {
   queryDatabase,
   readChange,
   readDocument,
+  readHeldChange,
   readWorkspaceFile,
   saveKeptCopy,
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
+  listLiveDocuments,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -142,6 +146,19 @@ function toolArg(value: string | undefined): keyof typeof MCP_TOOL_CAPABILITIES 
   throw new Error(`--tool must name a dohc tool, such as dohc_reply_to_chat. Received: ${received}.`);
 }
 
+// A misspelled argument is refused, never dropped: a dropped filter widens a
+// read, and a dropped check unguards a write.
+function strictArguments<Shape extends z.ZodRawShape>(shape: Shape) {
+  const names = Object.keys(shape);
+  return z.strictObject(shape, {
+    error: issue => {
+      if (issue.code !== "unrecognized_keys") return undefined;
+      const unknown = issue.keys.map(key => JSON.stringify(key)).join(", ");
+      return `Unknown argument${issue.keys.length === 1 ? "" : "s"} ${unknown}. This tool takes ${names.join(", ") || "no arguments"}.`;
+    },
+  });
+}
+
 function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
@@ -158,9 +175,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   function register<InputArgs extends z.ZodRawShape>(
     name: keyof typeof MCP_TOOL_CAPABILITIES,
     config: { description: string; inputSchema: InputArgs },
-    handler: ToolCallback<InputArgs>,
+    handler: ToolCallback<ReturnType<typeof strictArguments<InputArgs>>>,
   ) {
-    if (MCP_TOOL_LEVELS[name].includes(level) && (ctx.tools?.has(name) ?? true)) server.registerTool(name, config, handler);
+    if (MCP_TOOL_LEVELS[name].includes(level) && (ctx.tools?.has(name) ?? true)) {
+      const inputSchema = strictArguments(config.inputSchema);
+      server.registerTool<z.ZodRawShape, typeof inputSchema>(name, { description: config.description, inputSchema }, handler);
+    }
   }
 
   register("dohc_read_share_copy", {
@@ -339,6 +359,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   register(
+    "dohc_list_live_documents",
+    {
+      description:
+        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
+        Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `\`${reason}\`: ${step}`).join(" ") +
+        " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
+      inputSchema: { cursor: z.string().min(1).max(4096).optional() },
+    },
+    async (args) => text(await listLiveDocuments(ctx, args)),
+  );
+
+  register(
     "dohc_list_retained_copies",
     {
       description:
@@ -355,7 +387,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         "Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.",
       inputSchema: {
         copies: z
-          .array(z.object({ id: z.number().int(), revision: z.number().int() }))
+          .array(z.strictObject({ id: z.number().int(), revision: z.number().int() }))
           .max(100),
         acceptLateWriteRisk: z.literal(true),
       },
@@ -431,6 +463,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readDocument(ctx, args)),
   );
 
+  register(
+    "dohc_read_held_change",
+    {
+      description:
+        "Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await readHeldChange(ctx, args)),
+  );
+
   // The client names itself in the MCP handshake. A name the document door
   // accepts becomes the author of this agent's edits. The desktop labels unnamed agents "Agent".
   const agentName = (): string | undefined => {
@@ -441,6 +485,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // and version from the handshake, and the model it states. It travels
   // beside the author name and never changes it.
   const reported = (model: string | undefined) => reportedAgent(server.server.getClientVersion(), model);
+
+  register("dohc_held_note_change", {
+    description: "Review, drop, or undo a held note change. Only a local agent in the owner's workspace may use this. Review names the authors and returns a token. Drop requires that token, saves the waiting text in History, and returns an Undo token. Undo restores the waiting text as held. Neither action rewrites the file or grants conversion consent. Refusals: held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    inputSchema: {path: z.string().min(1).max(4096), action: z.enum(["review", "drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u).optional()},
+  }, async args => text(await heldNoteChange(ctx, args)));
 
   register(
     "dohc_edit_document",
@@ -716,6 +765,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   register(
+    "dohc_retry_chat_run",
+    {
+      description:
+        "Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.",
+      inputSchema: { threadId: z.string().min(1).max(200) },
+    },
+    async (args) => text(await retryChatRun(ctx, args)),
+  );
+
+  register(
     "dohc_query_collection",
     {
       description:
@@ -723,7 +782,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         filter: z
-          .object({
+          .strictObject({
             field: z.string().min(1).max(200),
             operator: z.enum(["equals", "contains"]),
             value: z.unknown(),
@@ -731,7 +790,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .optional(),
         sort: z
           .array(
-            z.object({
+            z.strictObject({
               field: z.string().min(1).max(200),
               direction: z.enum(["asc", "desc"]),
             }),

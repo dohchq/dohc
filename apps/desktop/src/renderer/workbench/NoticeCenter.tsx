@@ -28,6 +28,7 @@ import { neutralPresentation, presentationClasses, subscribePresentation } from 
 import { personalAgentName } from "./chosenColors";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { unjournalablePathMessages } from "../../workspaces/shareViewRecords";
 
 export type NoticeAction = {
   label: string;
@@ -576,7 +577,18 @@ export const AUTOMATION_HOLDS_UNREADABLE =
 type LiveDeliveryRecovery = "retry" | "live-documents" | "restart";
 function liveDeliveryCopy(
   reason: SyncStatusResult["ownerLiveDeliveryReason"],
+  pausedPaths: readonly string[] = [],
 ): { title: string; body: string; recovery: LiveDeliveryRecovery; Icon: typeof Bell } {
+  // Delivering the waiting edits lifts it, so Try again is the way forward.
+  if (reason === "unsent-edits-limit") {
+    const subject = pausedPaths.length === 1 ? `"${pausedPaths[0]}" has` : pausedPaths.length > 1 ? `${pausedPaths.length} files have` : "A file has";
+    return {
+      title: "Live editing paused",
+      body: `${subject} too many edits waiting to reach the server. They are saved on this device, and live editing is paused there until they arrive.`,
+      recovery: "retry",
+      Icon: RefreshCw,
+    };
+  }
   if (reason === "document-unavailable") {
     return {
       title: "Live editing paused",
@@ -1382,9 +1394,10 @@ export function NoticeCenter(props: {
   }
   // Keyed, so an unchanged status keeps one copy object: the notice list and
   // the toast below both hang off its identity.
+  const pausedPaths = props.syncStatus?.ownerLivePausedPaths?.join("\n") ?? "";
   const liveDelivery = useMemo(
-    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason) : null),
-    [liveDeliveryKey, liveDeliveryReason],
+    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason, pausedPaths ? pausedPaths.split("\n") : []) : null),
+    [liveDeliveryKey, liveDeliveryReason, pausedPaths],
   );
   // One report for the row and the toast, so a person who copies from either
   // pastes the same facts — including when the notice was raised.
@@ -1665,7 +1678,33 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (props.syncStatus?.shareProjection?.state === "pending") {
+    const projection = props.syncStatus?.shareProjection;
+    // Only held files remain, each waiting on a person's step, so the row
+    // names the file and the step. A background refresh skips an unchanged
+    // share, so once the person moves their own file, Refresh brings the
+    // shared one in. Only the sharer can rename one of two spellings.
+    if (
+      projection?.state === "pending" &&
+      projection.pendingPathCount === 0 &&
+      !projection.pullInFlight &&
+      projection.collisionPathCount > 0 &&
+      projection.heldPathCount === projection.collisionPathCount
+    ) {
+      next.push({
+        id: "share-projection-held",
+        tone: "warning",
+        title: projection.heldPathCount === 1
+          ? "dohc held back a shared file"
+          : `dohc held back ${projection.heldPathCount} shared files`,
+        ...(projection.heldPaths.some(entry => entry.reason === "local-collision")
+          ? {
+              body: `${unjournalablePathMessages(projection.heldPaths).join(" ")} Then choose Refresh.`,
+              actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
+            }
+          : { body: unjournalablePathMessages(projection.heldPaths).join(" ") }),
+        Icon: AlertTriangle,
+      });
+    } else if (projection?.state === "pending") {
       next.push({
         id: "share-projection-pending",
         tone: "warning",

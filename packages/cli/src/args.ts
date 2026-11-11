@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -37,12 +37,14 @@ type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "documentRead" | "documentHeld" | "fileChats"; path: string }
   | { verb: "collectionSetFields"; recordPath: string; fields: Record<string, string>; agent?: string }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
+  | { verb: "liveDocuments"; cursor?: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
+  | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -109,6 +111,7 @@ type CliCommandBody =
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
+  | { verb: "chatRetry"; thread: string }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
       verb: "automationPress";
@@ -179,6 +182,38 @@ function lookup<T>(table: Readonly<Record<string, T>>, name: string): T | undefi
   return Object.hasOwn(table, name) ? table[name] : undefined;
 }
 
+/** Edits between two names: an insert, a delete, a changed letter, or two neighbors swapped. */
+function editDistance(a: string, b: string): number {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j += 1) rows[0]![j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const changed = a[i - 1] === b[j - 1] ? 0 : 1;
+      rows[i]![j] = Math.min(rows[i - 1]![j]! + 1, rows[i]![j - 1]! + 1, rows[i - 1]![j - 1]! + changed);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        rows[i]![j] = Math.min(rows[i]![j]!, rows[i - 2]![j - 2]! + 1);
+      }
+    }
+  }
+  return rows[a.length]![b.length]!;
+}
+
+/**
+ * The one name a mistyped name most likely meant. It differs only in case and dashes, or by one
+ * edit, or by two when the name has eight letters or more. A tie suggests nothing.
+ */
+function nearest(name: string, candidates: readonly string[]): string | undefined {
+  const fold = (value: string) => value.toLowerCase().replace(/[-_]/g, "");
+  const folded = candidates.filter((candidate) => candidate !== name && fold(candidate) === fold(name));
+  if (folded.length === 1) return folded[0];
+  const limit = fold(name).length >= 8 ? 2 : 1;
+  const [first, second] = candidates
+    .map((candidate) => ({ candidate, distance: editDistance(name, candidate) }))
+    .filter(({ distance }) => distance > 0 && distance <= limit)
+    .sort((left, right) => left.distance - right.distance);
+  return first && first.distance !== second?.distance ? first.candidate : undefined;
+}
+
 function takeValue(tokens: readonly string[], index: number, flag: string): string {
   const value = tokens[index + 1];
   if (value === undefined || value === "--") fail(`${flag} requires a value`);
@@ -229,7 +264,10 @@ function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(verb.strayRefusal ?? `unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
+      if (verb.strayRefusal) fail(verb.strayRefusal);
+      const meant = nearest(token, [...flags, ...GLOBAL_FLAGS].map((candidate) => candidate.name));
+      const dashRule = verb.freeText ? `${meant ? " Otherwise put" : "; put"} ${DASH_RULE}` : "";
+      fail(`unknown ${name} option '${token}'${meant ? `; did you mean '${meant}'?` : ""}${dashRule}`);
     } else {
       operands.push(token);
     }
@@ -303,6 +341,36 @@ const DOCUMENT_VERBS = {
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
     parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
+  },
+  held: {
+    capabilityId: "document.held.read",
+    summary: "Show a change dohc held: the file's text and what saving the change would write.",
+    operands: "<path>",
+    notes: ["Prints null when nothing is held for the file."],
+    parse: input => ({ verb: "documentHeld", path: parsePath(input, "document held") }),
+  },
+  "held-change": {
+    capabilityId: "document.held.change",
+    summary: "Review, drop, or undo a held change on the owner's computer.",
+    operands: "<path>",
+    flags: [{name: "--action", value: "review|drop|undo", text: "Review returns the token needed for Drop."},
+      {name: "--token", value: "token", text: "Use the review token for Drop or the Drop token for Undo."}],
+    notes: [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ],
+    parse: (input: VerbInput): CliCommandBody => {
+      const path = parsePath(input, "document held-change");
+      const action = lastValue(input, "--action") ?? "review";
+      const token = lastValue(input, "--token");
+      if (action !== "review" && action !== "drop" && action !== "undo") fail("--action must be review, drop, or undo");
+      if (action !== "review" && !token) fail("Drop and Undo require --token");
+      if (token !== undefined && !/^[0-9a-f]{64}$/u.test(token)) fail("--token must be the 64-character token returned by Review or Drop");
+      return {verb: "heldNoteChange", path, action, ...(token ? {token} : {})};
+    },
   },
   edit: {
     capabilityId: "document.edit",
@@ -450,6 +518,23 @@ const DOCUMENT_VERBS = {
       if (!path || !incident) fail("stop-again requires a path and an incident");
       noExtraArgs(extra, "document stop-again");
       return { verb: "stopAgain", path, incident };
+    },
+  },
+  live: {
+    capabilityId: "share.live.documents.list",
+    summary: "List this workspace's live documents, with each one's state and why.",
+    operands: "",
+    notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
+      "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
+      ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
+      "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
+      "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
+      "Pass nextCursor as --cursor until it is null."],
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+    parse: input => {
+      noExtraArgs(input.operands, "document live");
+      const cursor = lastValue(input, "--cursor");
+      return { verb: "liveDocuments", ...(cursor ? { cursor } : {}) };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -639,6 +724,21 @@ const CHAT_VERBS = {
         body,
         ...chatAgent(input),
       };
+    },
+  },
+  retry: {
+    capabilityId: "agent.run.retry",
+    summary: "Run an agent's stopped request in a conversation again, as Try again does.",
+    operands: "<thread>",
+    notes: [
+      "dohc chat show reports a stopped run under dispatch.lastRun.",
+      "Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.",
+    ],
+    parse: ({ operands }) => {
+      const [thread, ...extra] = operands;
+      if (!thread) fail("retry requires a thread id");
+      noExtraArgs(extra, "retry");
+      return { verb: "chatRetry", thread };
     },
   },
   react: {
@@ -1381,7 +1481,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,
@@ -1585,6 +1685,12 @@ function stripGlobalFlags(argv: readonly string[]): {
   return { actorFlag, ...(agentId === undefined ? {} : { agentId }), json, tokens };
 }
 
+/** Leads into the help command for an unknown name, with the name it likely meant when there is one. */
+function seeHelp(name: string, candidates: readonly string[]): string {
+  const meant = nearest(name, candidates);
+  return meant ? `did you mean '${meant}'? Run` : "run";
+}
+
 export function parseCliArguments(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -1596,10 +1702,10 @@ export function parseCliArguments(
   const [commandName, verbName, ...tokens] = help ? names : global.tokens;
   if (!commandName) return { help: [] };
   const command = lookup(CLI_COMMANDS, commandName);
-  if (!command) fail(`unknown command '${commandName}'; run dohc --help`);
+  if (!command) fail(`unknown command '${commandName}'; ${seeHelp(commandName, Object.keys(CLI_COMMANDS))} dohc --help`);
   if (!verbName) return { help: [commandName] };
   const verb = lookup(command.verbs, verbName);
-  if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
+  if (!verb) fail(`unknown ${commandName} verb '${verbName}'; ${seeHelp(verbName, Object.keys(command.verbs))} dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
   const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || global.agentId !== undefined || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));

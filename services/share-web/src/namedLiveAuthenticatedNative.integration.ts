@@ -163,7 +163,7 @@ it("authenticates two accounts through the production browser transport and pres
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const evidence = registration.evidence, markdown = Buffer.from("Hello");
+    const evidence = registration.evidence, markdown = Buffer.from("Hello\n");
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
@@ -268,7 +268,7 @@ it("authenticates two accounts through the production browser transport and pres
     ]);
     expect(sockets).toHaveLength(socketCount);
     results.authentication = { accountIds: users.map(user => user.id), requests, wrongAccount: wrongAccount.provider.state(), wrongGrant: wrongGrant.provider.state() };
-    expect(yDocToMarkdown(first.provider.doc)).toBe("Hello"); expect(yDocToMarkdown(peer.provider.doc)).toBe("Hello");
+    expect(yDocToMarkdown(first.provider.doc)).toBe("Hello\n"); expect(yDocToMarkdown(peer.provider.doc)).toBe("Hello\n");
     const actor = { kind: "owner", userId: "owner", shareId: "share-0" } as const;
     const current = storage.resolveCurrentLiveDocumentBinding({ document, actor }); if (current.kind !== "current") throw new Error("Current binding unavailable.");
     const capture = await active.captureNative(current.binding);

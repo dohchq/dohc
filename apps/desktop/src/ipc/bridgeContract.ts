@@ -2,6 +2,7 @@ import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-li
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
+import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -1492,7 +1493,9 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required", "unsent-edits-limit"]).optional(),
+  // Files that take no edits until the ones waiting for the server reach it.
+  ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
@@ -1508,6 +1511,15 @@ const SYNC_STATUS_BASE_FIELDS = {
         pendingPaths: z.array(PATH_STRING),
         collisionPathCount: z.number().int().nonnegative(),
         collisionPaths: z.array(PATH_STRING),
+        // Recorded collisions held for a person's step, from the last refresh
+        // or repair: a file from this computer in the way, or two shared names
+        // this disk treats as one.
+        heldPathCount: z.number().int().nonnegative(),
+        heldPaths: z.array(z.object({
+          path: PATH_STRING,
+          reason: z.enum(["local-collision", "spelling-collision"]),
+          owner: PATH_STRING.optional(),
+        })),
         pullInFlight: z.boolean(),
       }),
     ])
@@ -1721,7 +1733,7 @@ export const SetAgentColorPayload = AgentColorChangedEvent;
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
 const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
 
-const EngineMomentAuthor = z.union([
+export const EngineMomentAuthor = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
@@ -2349,6 +2361,25 @@ export const SendChatMessageResult = z.union([
 ]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
+// Marks a question or poll answered with a reply that already saved, after
+// the answer failed. It posts nothing. The reply must be one this person
+// wrote from a window on this device, in the question's thread.
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: OPAQUE_ID,
+  // The question or poll.
+  messageId: OPAQUE_ID,
+  // The reply that answers it.
+  resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
+}).strict();
+export type ResolveChatDecisionPayload = z.infer<typeof ResolveChatDecisionPayload>;
+
+export const ResolveChatDecisionResult = z.object({
+  resolved: ChatDecisionRecord,
+}).strict();
+export type ResolveChatDecisionResult = z.infer<typeof ResolveChatDecisionResult>;
+
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: OPAQUE_ID,
@@ -2388,6 +2419,8 @@ export const ChatRunRecord = z.object({
   endedAtMs: z.number().optional(),
   exitCode: z.number().int().optional(),
   logPath: PATH_STRING.optional(),
+  // dohc removed the finished run's log after the time the settings file keeps it.
+  logRemoved: z.literal(true).optional(),
 });
 export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
 
@@ -3317,7 +3350,20 @@ const retainedCopiesGuard = {
     "dohc stopped deleting old file copies because this window changed workspaces. Open the workspace and try again.",
 } as const;
 
+export const HeldNoteChangePayload = z.discriminatedUnion("action", [
+  z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING, action: z.literal("review")}).strict(),
+  z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING, action: z.enum(["drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u)}).strict(),
+]);
+export const HeldNoteChangeResult = z.object({
+  path: PATH_STRING, token: z.string(), authors: z.array(z.object({name: z.string().nullable()}).strict()), held: z.boolean(), historyMomentId: z.string().nullable(),
+}).strict();
+export type HeldNoteChangeResult = z.infer<typeof HeldNoteChangeResult>;
+
 export const workspaceVersionOperations = {
+  heldNoteChange: {
+    capabilityId: "document.held.change", channel: "desktop:held-note-change",
+    payload: HeldNoteChangePayload, result: HeldNoteChangeResult, ...versionGuard,
+  },
   listWorkspaceVersions: {
     capabilityId: "version.list",
     channel: "desktop:list-workspace-versions",
@@ -6188,11 +6234,12 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
-// Archives or unarchives one chat in this person's sidebar for one workspace.
+// Moves one chat in this person's sidebar for one workspace: back to its
+// list, to Archived, or, for a removed agent's chat, off Archived.
 export const SetChatArchivedPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
-  archived: z.boolean(),
+  state: z.enum(["active", "archived", "hidden"]),
 }).strict();
 export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
 
@@ -7815,6 +7862,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof updateDownloadOperations>,

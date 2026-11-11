@@ -200,8 +200,14 @@ async fn prepare_eligible(
         if resolver.is_some() {
             for input in eligible {
                 let preparation = store.read_with(|conn| {
-                    let version = capture_file_holds::hold_in(conn, &input.workspace_id, &input.path)?
-                        .map_or(input.version_id.clone(), |hold| hold.source_version_id);
+                    let hold = capture_file_holds::hold_in(conn, &input.workspace_id, &input.path)?;
+                    // Capture refuses a note whose switch write is pending, so the reader skips it.
+                    if hold.is_none()
+                        && switch_placement_waits(conn, &input.workspace_id, &input.path, input.text.as_bytes())?
+                    {
+                        return Ok(None);
+                    }
+                    let version = hold.map_or(input.version_id.clone(), |hold| hold.source_version_id);
                     let object: Option<(String, String)> = conn.query_row(
                         "SELECT object_id,blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
                         params![input.workspace_id, version, input.path], |row| Ok((row.get(0)?, row.get(1)?)))

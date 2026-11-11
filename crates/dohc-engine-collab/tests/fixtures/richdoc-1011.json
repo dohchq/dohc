@@ -2,16 +2,16 @@
  "seed": 1011,
  "contentKind": "richdoc",
  "updates": [
-  "AQHxhtCgAgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTEA",
-  "AQHxhtCgAgEoAQtmcm9udG1hdHRlcgVjb3VudAF9owEA",
-  "AQXxhtCgAgIHAQRib2R5AwlwYXJhZ3JhcGgHAPGG0KACAgYGAPGG0KACAwRib2xkBHRydWWE8YbQoAIEDW5hw692ZVrDvHJpY2iG8YbQoAIPBGJvbGQEbnVsbAA=",
-  "AQXxhtCgAhGH8YbQoAICAwlwYXJhZ3JhcGgHAPGG0KACEQYGAPGG0KACEgRib2xkBHRydWWE8YbQoAITC2NhZsOpaGVsbG8ghvGG0KACHQRib2xkBG51bGwA",
-  "AQXxhtCgAh+H8YbQoAIRAwlwYXJhZ3JhcGgHAPGG0KACHwYGAPGG0KACIAZpdGFsaWMEdHJ1ZYTxhtCgAiEU2YXYsdit2KjYp9mF2LHYrdio2KeG8YbQoAIrBml0YWxpYwRudWxsAA==",
-  "AQPxhtCgAi2H8YbQoAIfAwlwYXJhZ3JhcGgHAPGG0KACLQYEAPGG0KACLg9aw7xyaWNo8J+YgPCfjokA",
-  "AQHxhtCgAjnE8YbQoAIE8YbQoAIFAVgA"
+  "AQHF7d3iAQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTEA",
+  "AQHF7d3iAQEoAQtmcm9udG1hdHRlcgVjb3VudAF9owEA",
+  "AQXF7d3iAQIHAQRib2R5AwlwYXJhZ3JhcGgHAMXt3eIBAgYGAMXt3eIBAwRib2xkBHRydWWExe3d4gEEDW5hw692ZVrDvHJpY2iGxe3d4gEPBGJvbGQEbnVsbAA=",
+  "AQXF7d3iARGHxe3d4gECAwlwYXJhZ3JhcGgHAMXt3eIBEQYGAMXt3eIBEgRib2xkBHRydWWExe3d4gETC2NhZsOpaGVsbG8ghsXt3eIBHQRib2xkBG51bGwA",
+  "AQXF7d3iAR+Hxe3d4gERAwlwYXJhZ3JhcGgHAMXt3eIBHwYGAMXt3eIBIAZpdGFsaWMEdHJ1ZYTF7d3iASEU2YXYsdit2KjYp9mF2LHYrdio2KeGxe3d4gErBml0YWxpYwRudWxsAA==",
+  "AQPF7d3iAS2Hxe3d4gEfAwlwYXJhZ3JhcGgHAMXt3eIBLQYEAMXt3eIBLg9aw7xyaWNo8J+YgPCfjokA",
+  "AQHF7d3iATnExe3d4gEExe3d4gEFAVgA"
  ],
- "mergedUpdateB64": "ARXxhtCgAgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTEoAQtmcm9udG1hdHRlcgVjb3VudAF9owEHAQRib2R5AwlwYXJhZ3JhcGgHAPGG0KACAgYGAPGG0KACAwRib2xkBHRydWWE8YbQoAIEDW5hw692ZVrDvHJpY2iG8YbQoAIPBGJvbGQEbnVsbIfxhtCgAgIDCXBhcmFncmFwaAcA8YbQoAIRBgYA8YbQoAISBGJvbGQEdHJ1ZYTxhtCgAhMLY2Fmw6loZWxsbyCG8YbQoAIdBGJvbGQEbnVsbIfxhtCgAhEDCXBhcmFncmFwaAcA8YbQoAIfBgYA8YbQoAIgBml0YWxpYwR0cnVlhPGG0KACIRTZhdix2K3YqNin2YXYsdit2KjYp4bxhtCgAisGaXRhbGljBG51bGyH8YbQoAIfAwlwYXJhZ3JhcGgHAPGG0KACLQYEAPGG0KACLg9aw7xyaWNo8J+YgPCfjonE8YbQoAIE8YbQoAIFAVgA",
- "stateVectorB64": "AfGG0KACOg==",
+ "mergedUpdateB64": "ARXF7d3iAQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTEoAQtmcm9udG1hdHRlcgVjb3VudAF9owEHAQRib2R5AwlwYXJhZ3JhcGgHAMXt3eIBAgYGAMXt3eIBAwRib2xkBHRydWWExe3d4gEEDW5hw692ZVrDvHJpY2iGxe3d4gEPBGJvbGQEbnVsbIfF7d3iAQIDCXBhcmFncmFwaAcAxe3d4gERBgYAxe3d4gESBGJvbGQEdHJ1ZYTF7d3iARMLY2Fmw6loZWxsbyCGxe3d4gEdBGJvbGQEbnVsbIfF7d3iAREDCXBhcmFncmFwaAcAxe3d4gEfBgYAxe3d4gEgBml0YWxpYwR0cnVlhMXt3eIBIRTZhdix2K3YqNin2YXYsdit2KjYp4bF7d3iASsGaXRhbGljBG51bGyHxe3d4gEfAwlwYXJhZ3JhcGgHAMXt3eIBLQYEAMXt3eIBLg9aw7xyaWNo8J+YgPCfjonExe3d4gEExe3d4gEFAVgA",
+ "stateVectorB64": "AcXt3eIBOg==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1011",
@@ -55,6 +55,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1011\ncount: 99\n---\n\n**XnaïveZürich**\n\n**caféhello** \n\n*مرحبامرحبا*\n\nZürich😀🎉"
+  "markdown": "---\nalpha: value-1011\ncount: 99\n---\n\n**XnaïveZürich**\n\n**caféhello** \n\n*مرحبامرحبا*\n\nZürich😀🎉\n"
  }
 }

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExplorerMenuEntry, SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { ExplorerApps } from "./AppsSection";
 import { Explorer, type ExplorerProps } from "./Explorer";
-import { OTHER_FILES_SHOWN } from "./explorerHomeModel";
+import { FILES_SHOWN } from "./explorerHomeModel";
 import { collectionTabPath, siteTabPath } from "./workbenchState";
 
 const app = {
@@ -64,6 +64,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
       file("tasks/one.md"),
       file("budget.csv"),
       file("photos/tram.png"),
+      file("plans/board.excalidraw"),
     ],
     folders: ["Plans", "Plans/Old", "trip", "guests", "tasks", "photos", "empty"],
     listingRequest: 0,
@@ -208,12 +209,12 @@ describe("Explorer Files", () => {
 });
 
 describe("Explorer Home", () => {
-  it("orders its sections Open editors, Pinned, Pages, Collections, Apps, Other files", () => {
+  it("orders its sections Open editors, Pinned, Pages, Sketches, Collections, Apps, Other files", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
     expect(sections.map((element) => element.getAttribute("aria-label")))
-      .toEqual(["Open editors", "Pinned", "Pages", "Collections", "Apps", "Other files"]);
+      .toEqual(["Open editors", "Pinned", "Pages", "Sketches", "Collections", "Apps", "Other files"]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
   });
 
@@ -267,6 +268,7 @@ describe("Explorer Home", () => {
     expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(empty.id);
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Sketches" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     expect(rowLabels("Pages")).toEqual([]);
     await user.click(within(section("Pages")).getByRole("button", { name: "New page" }));
@@ -462,12 +464,35 @@ describe("Explorer Home", () => {
     expect(within(section("Other files")).getByRole("button", { name: /^tram\.png/ }).textContent).toBe("tram.pngphotos");
     expect(screen.queryByTestId("other-files-show-all")).toBeNull();
 
-    const many = Array.from({ length: OTHER_FILES_SHOWN + 3 }, (_, index) => file(`data/${String(index).padStart(2, "0")}.json`));
+    const many = Array.from({ length: FILES_SHOWN + 3 }, (_, index) => file(`data/${String(index).padStart(2, "0")}.json`));
     view.rerender(<Explorer {...explorerProps({ onModeChange, files: many, folders: ["data"] })} />);
-    expect(rowLabels("Other files")).toHaveLength(OTHER_FILES_SHOWN);
+    expect(rowLabels("Other files")).toHaveLength(FILES_SHOWN);
     // Other files counts every file, so its count is a total, with no "+".
-    expect(screen.getByLabelText(`${OTHER_FILES_SHOWN + 3} files`).textContent).toBe(String(OTHER_FILES_SHOWN + 3));
+    expect(screen.getByLabelText(`${FILES_SHOWN + 3} files`).textContent).toBe(String(FILES_SHOWN + 3));
     await user.click(screen.getByTestId("other-files-show-all"));
+    expect(onModeChange).toHaveBeenCalledWith("files");
+  });
+
+  it("lists Excalidraw files under Sketches, not Other files, and opens one from its row", async () => {
+    const onModeChange = vi.fn();
+    const onOpenFile = vi.fn();
+    const user = userEvent.setup();
+    const view = render(<Explorer {...explorerProps({ onModeChange, onOpenFile })} />);
+    expect(rowLabels("Sketches")).toEqual(["board.excalidraw"]);
+    expect(within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }).textContent).toBe("board.excalidrawplans");
+    expect(screen.getByLabelText("1 sketch").textContent).toBe("1");
+    expect(rowLabels("Other files")).not.toContain("board.excalidraw");
+    await user.click(within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }));
+    expect(onOpenFile).toHaveBeenCalledWith("plans/board.excalidraw");
+    expect(screen.queryByTestId("sketches-show-all")).toBeNull();
+
+    // Sketches alone leave no Other files section.
+    const many = Array.from({ length: FILES_SHOWN + 2 }, (_, index) => file(`ideas/${String(index).padStart(2, "0")}.excalidraw`));
+    view.rerender(<Explorer {...explorerProps({ onModeChange, files: many, folders: ["ideas"] })} />);
+    expect(rowLabels("Sketches")).toHaveLength(FILES_SHOWN);
+    expect(screen.getByLabelText(`${FILES_SHOWN + 2} sketches`).textContent).toBe(String(FILES_SHOWN + 2));
+    expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
+    await user.click(screen.getByTestId("sketches-show-all"));
     expect(onModeChange).toHaveBeenCalledWith("files");
   });
 
@@ -618,10 +643,11 @@ describe("selecting several rows in Home", () => {
       "pinned:notes.md",
       "pages:Plans/",
       "pages:notes.md",
+      "sketches:plans/board.excalidraw",
       `collections:d:${TABLE}`,
       "collections:tasks/",
     ]);
-    expect(bar()?.textContent).toBe("4 selected");
+    expect(bar()?.textContent).toBe("5 selected");
   });
 
   it("extends the selection with Shift and the arrows, past a heading", async () => {
@@ -631,8 +657,8 @@ describe("selecting several rows in Home", () => {
     // A folder clicked alone is not the open row, so it is picked.
     expect(picked()).toEqual(["pages:Plans/"]);
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
-    expect(document.activeElement).toBe(homeRow(`collections:d:${TABLE}`));
-    expect(picked()).toEqual(["pages:Plans/", "pages:notes.md", `collections:d:${TABLE}`]);
+    expect(document.activeElement).toBe(homeRow("sketches:plans/board.excalidraw"));
+    expect(picked()).toEqual(["pages:Plans/", "pages:notes.md", "sketches:plans/board.excalidraw"]);
   });
 
   it("selects every row with a path with Ctrl+A, and Escape clears it", async () => {

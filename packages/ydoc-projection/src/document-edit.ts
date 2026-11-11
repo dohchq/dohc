@@ -64,17 +64,22 @@ interface Layout {
 
 /** The document in `state` as the Markdown an edit matches against. */
 export function documentMarkdown(state: Uint8Array): string {
-  return withDoc(state, (doc) => markdownOfLayout(layoutOf(doc)))
+  return withDoc(state, (doc) => savedForm(markdownOfLayout(layoutOf(doc))))
 }
 
 /** A settled Markdown file as the Markdown an edit to it would match against. */
 export function settledDocumentMarkdown(markdown: string): string {
   const doc = markdownToYDoc(markdown)
   try {
-    return markdownOfLayout(layoutOf(doc))
+    return savedForm(markdownOfLayout(layoutOf(doc)))
   } finally {
     doc.destroy()
   }
+}
+
+// As the saved file ends: a note that isn't empty ends with one line break.
+function savedForm(markdown: string): string {
+  return markdown === '' || markdown.endsWith('\n') ? markdown : `${markdown}\n`
 }
 
 /**
@@ -206,7 +211,7 @@ function planEdit(layout: Layout, edit: DocumentEdit): ((doc: Y.Doc) => void) | 
     return blockChange(layout, lastWithText + 1, lastWithText, replacement)
   }
   const find = edit.find.replaceAll('\r\n', '\n')
-  const at = uniqueMatch(markdownOfLayout(layout), find) - layout.frontmatter.length
+  const at = uniqueMatch(savedForm(markdownOfLayout(layout)), find) - layout.frontmatter.length
   if (at < 0) {
     throw new Error("The text is in the document's frontmatter. Document edits change the body only.")
   }

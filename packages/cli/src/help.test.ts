@@ -47,6 +47,17 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
 };
 
 describe("CLI help", () => {
+  it("gives agents a next step for each held-change refusal", async () => {
+    const text = flat(await help("document", "held-change", "--help"));
+    for (const words of [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ]) expect(text).toContain(words);
+    expect(text).not.toContain("Edit anyway");
+  });
   it("gives every dispatched verb a line in help and its own flags", async () => {
     const top = await help("--help");
     for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {
@@ -112,6 +123,19 @@ describe("CLI help", () => {
       [["chat", "channels"], "dohc: unknown chat verb 'channels'; run dohc chat --help\n"],
       [["chat", "constructor"], "dohc: unknown chat verb 'constructor'; run dohc chat --help\n"],
       [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
+      [["chta", "post"], "dohc: unknown command 'chta'; did you mean 'chat'? Run dohc --help\n"],
+      // Two edits from share: too far for a five-letter name, close enough for an eight-letter one.
+      [["state"], "dohc: unknown command 'state'; run dohc --help\n"],
+      [["autmaton", "list"], "dohc: unknown command 'autmaton'; did you mean 'automation'? Run dohc --help\n"],
+      [["chat", "psot", "general", "hi"], "dohc: unknown chat verb 'psot'; did you mean 'post'? Run dohc chat --help\n"],
+      [["chat", "createGroup", "Design"], "dohc: unknown chat verb 'createGroup'; did you mean 'create-group'? Run dohc chat --help\n"],
+      [["dataset", "delete-preview"], "dohc: unknown dataset verb 'delete-preview'; did you mean 'deletePreview'? Run dohc dataset --help\n"],
+      [["chat", "show", "th_1", "--peak"], "dohc: unknown chat show option '--peak'; did you mean '--peek'?\n"],
+      [["chat", "show", "th_1", "--jsno"], "dohc: unknown chat show option '--jsno'; did you mean '--json'?\n"],
+      [
+        ["chat", "post", "general", "--titel", "Plan", "hi"],
+        "dohc: unknown chat post option '--titel'; did you mean '--title'? Otherwise put options first, then --, then text that starts with a dash\n",
+      ],
       [
         ["chat", "post", "general", "--help", "me"],
         "dohc: unknown chat post option '--help'; put options first, then --, then text that starts with a dash\n",

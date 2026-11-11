@@ -48,6 +48,7 @@ import {
   assertShareChangesJournalable,
   recordedShareSelector,
   SharePinInvalidError,
+  type UnjournalablePath,
 } from "./shareViewRecords";
 import {
   SHARE_VIEW_REOPEN_MESSAGE,
@@ -161,8 +162,18 @@ export type ShareViewProjectionStatus =
       pendingPaths: string[];
       collisionPathCount: number;
       collisionPaths: string[];
+      heldPathCount: number;
+      heldPaths: HeldSharePath[];
       pullInFlight: boolean;
     };
+
+// A recorded collision that waits on a person, not on repair: a local file in
+// its way, or another shared spelling that owns its file on this disk (#2416).
+export type HeldSharePath = UnjournalablePath & { reason: "local-collision" | "spelling-collision" };
+
+export function isHeldSharePath(entry: UnjournalablePath): entry is HeldSharePath {
+  return entry.reason === "local-collision" || entry.reason === "spelling-collision";
+}
 
 export type ShareViewReconcileRequest = "settle" | "repair" | "refresh";
 
@@ -270,6 +281,9 @@ export class ShareViewFilesState {
     string,
     { stamp: string; icon: string | undefined }
   >();
+  // Each share's holds from its last refresh, repair or settle, so its status
+  // can say why a recorded collision waits.
+  readonly heldPaths = new Map<string, HeldSharePath[]>();
 }
 
 type ActiveShareViewFilesTarget = ResolvedShareViewFilesTarget & {
@@ -641,6 +655,8 @@ export function createShareViewFiles(
   dependencies: ShareViewFilesDependencies,
 ): ShareViewFiles {
   const fallbackState = new ShareViewFilesState();
+  const heldPathsFor = (target: ResolvedShareViewFilesTarget) =>
+    (dependencies.stateFor?.(target) ?? fallbackState).heldPaths;
 
   function rememberIcon(
     iconCache: ShareViewFilesState["iconCache"],
@@ -1367,6 +1383,8 @@ export function createShareViewFiles(
             pendingPaths: [],
             collisionPathCount: 0,
             collisionPaths: [],
+            heldPathCount: 0,
+            heldPaths: [],
             pullInFlight: false,
           };
         }
@@ -1379,12 +1397,18 @@ export function createShareViewFiles(
         }
         const pendingPaths = [...debt.pendingPaths].sort();
         const collisionPaths = [...debt.collisionPaths].sort();
+        // A hold counts only while its collision is still recorded.
+        const heldPaths = (heldPathsFor(target).get(target.shareId) ?? [])
+          .filter(entry => debt.collisionPaths.has(entry.path))
+          .sort((left, right) => left.path.localeCompare(right.path));
         return {
           state: "pending",
           pendingPathCount: pendingPaths.length,
           pendingPaths: pendingPaths.slice(0, STATUS_PATH_LIMIT),
           collisionPathCount: collisionPaths.length,
           collisionPaths: collisionPaths.slice(0, STATUS_PATH_LIMIT),
+          heldPathCount: heldPaths.length,
+          heldPaths: heldPaths.slice(0, STATUS_PATH_LIMIT),
           pullInFlight: debt.pullInFlight,
         };
       });
@@ -1395,9 +1419,14 @@ export function createShareViewFiles(
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
-        return withOwnerCapability(lease, target, (owner) =>
+        const outcome = await withOwnerCapability(lease, target, (owner) =>
           reconcileWithOwner(lease, target, request, owner, onCursorCommitted),
         );
+        const settled = outcome.kind === "refresh" ? outcome.outcome : outcome;
+        if ("unjournalablePaths" in settled) {
+          heldPathsFor(target).set(target.shareId, settled.unjournalablePaths.filter(isHeldSharePath));
+        }
+        return outcome;
       });
     },
 

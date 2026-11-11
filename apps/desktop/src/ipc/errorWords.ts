@@ -23,6 +23,9 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
+const HELD_CHANGE_REFUSALS = new Set([
+  "held-change-shared-owner", "held-change-stale", "held-change-missing", "held-change-conflict", "held-change-undo-stale",
+]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
@@ -148,6 +151,11 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
     ...CHAT_MENTION_PAGE_CHANGED_WORDS,
+    "held-change-shared-owner": "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.",
+    "held-change-stale": "The note or its file changed. Choose Drop again to review the waiting edits.",
+    "held-change-missing": "There is no held change to drop. Open the note again.",
+    "held-change-conflict": "The note has a conflict. Resolve it before using Drop.",
+    "held-change-undo-stale": "The note changed after Drop. Open History to find the waiting text.",
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
@@ -397,7 +405,8 @@ export function readError(error: unknown): ReadError {
   );
   if (entry && key !== undefined) {
     const words = entry[key] ?? null;
-    return { words, mapped: words !== null, cause: text };
+    return { words, mapped: words !== null, cause: text,
+      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key) ? {canRetry: false as const} : {}) };
   }
   if (!message) return { words: null, mapped: false, cause: null };
   if (RAW_CODE.test(message) || isDump(message)) {
@@ -574,6 +583,14 @@ export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
 export function isDatasetServerNotFound(error: unknown): boolean {
   return parse(error).code === DATASET_SERVER_NOT_FOUND;
 }
+/** Main's code for an owner's action on a Collection asked from a shared view, which only its owner can take. */
+export const DATASET_OWNER_ONLY = "dataset_owner_only";
+export function datasetOwnerOnlyError(): Error {
+  return Object.assign(new Error("Open the original workspace to manage this Collection."), { code: DATASET_OWNER_ONLY });
+}
+export function isDatasetOwnerOnly(error: unknown): boolean {
+  return parse(error).code === DATASET_OWNER_ONLY;
+}
 /** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
 export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
   return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
@@ -748,7 +765,7 @@ export function outsideVersionWaitingMessage(path: string): string {
 
 // Capture holds every refused outside edit with one reason, so these words
 // name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
-export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file's exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.";
+export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
 
 export function captureHeldLiveMessage(path: string): string {
   return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;

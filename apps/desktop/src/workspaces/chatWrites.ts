@@ -521,7 +521,56 @@ export function createChatWrites(dependencies: {
     return answered;
   }
 
-  return { createFileThread, sendMessage, answer, startThread, setReaction };
+  // Marks a question answered with a reply that already saved, when the
+  // answer failed after the reply landed. It posts nothing. The reply must be
+  // in the question's thread, written from a window rather than the CLI, and
+  // carry the key this session gives the writer, which only a reply this
+  // device wrote for them keeps. A question another reply answered stays as
+  // that reply left it, and this refuses.
+  async function answerWith(place: ChatWritePlace, input: {
+    writer: PersonWriter;
+    threadId: string;
+    messageId: string;
+    resolvedByMessageId: string;
+    chosenOption?: string;
+  }) {
+    const { workspaceId, store } = place;
+    const target = { threadId: input.threadId };
+    const admission = await admit(place, target);
+    const reply = await store.getMessage({ workspaceId, messageId: input.resolvedByMessageId });
+    const { author } = await personActorFor(input.writer);
+    const authorActorKey = deriveChatActorKey({
+      credentials: admission.actorCredentials,
+      installationId: admission.installationId,
+      workspaceId,
+      writer: input.writer,
+      displayName: author.displayName,
+    });
+    if (reply.threadId !== input.threadId || reply.id === input.messageId || reply.origin !== undefined || authorActorKey === null ||
+      reply.authorActorKey !== authorActorKey || reply.authorUserId !== admission.authorUserId) {
+      throw new Error("Only your own reply in this thread can answer its question.");
+    }
+    const decision = await commit(place, admission, () => store.resolveChatDecision({
+      workspaceId,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      resolvedByMessageId: reply.id,
+      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
+    }));
+    if (decision.resolvedByMessageId !== reply.id) throw new Error("Another reply already answered this question.");
+    afterWrite(workspaceId, target, false);
+    // No new message reaches the other views, so they hear of the answer here.
+    notifyRenderer(workspaceId);
+    return decision;
+  }
+
+  // Throws unless a message to this thread would be admitted now: the checks
+  // a write makes, without writing.
+  async function assertMayPost(place: ChatWritePlace, threadId: string): Promise<void> {
+    await admit(place, { threadId });
+  }
+
+  return { createFileThread, sendMessage, answer, answerWith, startThread, setReaction, assertMayPost };
 }
 
 // Use captured admission credentials, including for a DM's opening message.

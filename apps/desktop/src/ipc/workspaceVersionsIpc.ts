@@ -2,7 +2,8 @@ import type {
   WorkspaceVersionRecord,
   workspaceVersionOperations,
 } from "./bridgeContract";
-import { versionConflictForIpc } from "./engineHistoryIpc";
+import { heldChangeAuthorsForIpc, versionConflictForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import type { WriteAuthor } from "@dohc/workspace-engine-client";
 import type { OperationHandlers } from "./operationTable";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 
@@ -22,6 +23,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "resolveConflict"
   | "listKeptCopies"
   | "saveKeptCopy"
+  | "heldNoteChange"
   | "listRetainedCopies"
   | "deleteRetainedCopies"
 >;
@@ -45,12 +47,14 @@ export function workspaceVersionForIpc(version: {
   };
 }
 
-export function workspaceVersionHandlers(dependencies: {
+export function workspaceVersionHandlers<Event = unknown>(dependencies: {
+  localPerson(): Promise<WriteAuthor>;
+  authorNames(workspaceId: string, event: Event): EngineMomentAuthorNames;
   onRefusalsChanged?(): void;
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
   notifyRenderer(target: { workspaceId: string }): void;
   activity: { queueCloudSync(workspaceId: string): void };
-}): OperationHandlers<typeof workspaceVersionOperations> {
+}): OperationHandlers<typeof workspaceVersionOperations, Event> {
   const { requireEngineCapture, notifyRenderer, activity } = dependencies;
 
   async function requireVersionOperations(workspaceId: string) {
@@ -62,6 +66,18 @@ export function workspaceVersionHandlers(dependencies: {
   }
 
   return {
+    async heldNoteChange(input, {event}) {
+      const {workspaceId, ...params} = input;
+      const request = params.action === "review" ? params : {...params, author: await dependencies.localPerson()};
+      const capture = await requireVersionOperations(workspaceId);
+      const result = await capture.heldNoteChange(request);
+      if (input.action !== "review") {
+        notifyRenderer({workspaceId: input.workspaceId});
+        dependencies.onRefusalsChanged?.();
+        activity.queueCloudSync(input.workspaceId);
+      }
+      return {...result, authors: heldChangeAuthorsForIpc(result.authors, dependencies.authorNames(workspaceId, event))};
+    },
     async listWorkspaceVersions(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const snapshot = await capture.listVersions();

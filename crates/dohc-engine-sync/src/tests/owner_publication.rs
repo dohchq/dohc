@@ -393,7 +393,7 @@ fn delete_sets_require_acceptance_even_when_struct_clocks_already_match() {
     let (_dir, mut store, observed, checkpoint) = fixture();
     // Yjs deletion of all body children in the pinned owner-source seed. It
     // carries no new structs, so comparing state vectors would accept it early.
-    let deletion = decode_hex("0001f38ce4ab0d01011d");
+    let deletion = decode_hex("0001c5c4bcb10d01011d");
     let before = Ydoc::wire();
     before.apply(&checkpoint).unwrap();
     let vector = before.encode_state_vector();

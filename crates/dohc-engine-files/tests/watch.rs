@@ -378,3 +378,56 @@ async fn native_watcher_survives_a_name_that_is_not_utf8() {
     watcher.stop().expect("stop");
     drop(actor);
 }
+
+/// When a burst of changes overflows the `ReadDirectoryChangesW` buffer,
+/// Windows drops their details and completes the next read with zero bytes.
+/// The backend must report that as a rescan. An unpatched notify 8.2.0
+/// reported nothing, so the engine never learned of the burst.
+#[cfg(windows)]
+#[test]
+fn windows_overflow_is_reported_as_a_rescan() {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+
+    let scratch = Scratch::new();
+    let (events_tx, events) = mpsc::channel();
+    let (held_tx, held) = mpsc::channel();
+    let (release_tx, release) = mpsc::channel::<()>();
+    let mut hold = Some((held_tx, release));
+    let mut watcher = notify::RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            // Hold the backend's thread on the first event, so the burst below
+            // overflows the buffer before the backend reads it again.
+            if let Some((held_tx, release)) = hold.take() {
+                let _ = held_tx.send(());
+                let _ = release.recv();
+            }
+            let _ = events_tx.send(event);
+        },
+        notify::Config::default(),
+    )
+    .expect("watcher");
+    watcher
+        .watch(scratch.path(), RecursiveMode::Recursive)
+        .expect("watch");
+
+    std::fs::write(scratch.path().join("first.md"), b"first").expect("first change");
+    held.recv_timeout(Duration::from_secs(10))
+        .expect("the first change reached the handler");
+    // Each entry takes about 140 bytes, so 1000 files overflow the 16 KiB buffer.
+    let pad = "x".repeat(48);
+    for i in 0..1000 {
+        std::fs::write(scratch.path().join(format!("burst-{i:04}-{pad}.md")), b"")
+            .expect("burst file");
+    }
+    drop(release_tx);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(event)) if event.need_rescan() => break,
+            Ok(_) => {}
+            Err(_) => panic!("the overflow was never reported as a rescan"),
+        }
+    }
+}

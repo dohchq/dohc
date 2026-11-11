@@ -3120,6 +3120,7 @@ it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports 
   const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
+  const paused: (boolean | undefined)[] = [];
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-causal-refusal", rootPath: fixture.rootPath,
     rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
@@ -3128,7 +3129,7 @@ it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports 
   const mirror = new Y.Doc();
   const session = await capture.openYDocSession({
     path: "note.md", onRemoteUpdate: () => undefined,
-    onEditRefused: (_id, message) => notices.push(message),
+    onEditRefused: (_id, message, isPaused) => { notices.push(message); paused.push(isPaused); },
     onLineageReplaced: update => {
       const fresh = new Y.Doc();
       Y.applyUpdate(fresh, update);
@@ -3164,6 +3165,8 @@ it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports 
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit."
     : kind === "frozen" ? "Live editing is paused for this file." : "No answer after three attempts.");
+  // #2719: the workspace notice hears which refusal paused the file.
+  expect(paused).toEqual([kind === "frozen"]);
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
@@ -3198,7 +3201,7 @@ it("reports dependent typing when a caller-confirmed original is refused during 
   expect((await session.settleNow())?.content).toBe("");
   expect(fixture.state.journalKeys).toEqual([]);
   expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices).toHaveBeenCalledWith("typing", expect.stringContaining("Use Save copy"));
+  expect(notices).toHaveBeenCalledWith("typing", expect.stringContaining("Use Save copy"), false);
   expect(errors).toHaveBeenCalledTimes(1);
   await session.settleNow();
   expect(notices).toHaveBeenCalledTimes(1);

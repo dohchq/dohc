@@ -3,6 +3,8 @@ export const MAX_PAYLOAD_JSON_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
 export const MAX_SHARE_ID_CHARS = 128;
 export { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "@dohc/security-contract/share-discussion";
 export const MAX_LOG_PAGE_SIZE = 500;
+// The most rows a held read counts as the caller's own. Above it the read wakes for any row.
+export const MAX_HELD_READ_KNOWN_ROWS = 1024;
 
 // Transport cap. The relay never parses content, so it cannot tell a captured
 // file from a document body from a Y.Doc payload; it carries the widest engine

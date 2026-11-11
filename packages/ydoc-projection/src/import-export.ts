@@ -785,13 +785,17 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
   )
 
-  return `${frontmatterBlockFor(
+  const markdown = `${frontmatterBlockFor(
     frontmatter,
     internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
     body,
     usesCrlf ? '\r\n' : '\n',
     writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), internalMeta),
   )}${restoreLineEndings(body)}`
+  // A saved note that isn't empty ends with one line break.
+  return markdown === '' || markdown.endsWith('\n') || internalMeta.get('contentKind') === PLAIN_TEXT_CONTENT_KIND
+    ? markdown
+    : `${markdown}${usesCrlf ? '\r\n' : '\n'}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {

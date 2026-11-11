@@ -56,6 +56,9 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
   const bridgeMock = {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
+    // A lossy note's band asks the engine whether it holds a change.
+    readHeldChange: vi.fn(async () => ({ change: null })),
+    onNoticesChanged: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({ text, truncated: false, contentHash: "a".repeat(64) })),
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({ status: "written", contentHash: "f".repeat(64) })),
     openFileExternally: vi.fn(async () => undefined),
