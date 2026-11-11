@@ -6598,6 +6598,38 @@ fn received_work_reference_mappings(
                         admitted
                     } else { false }
                 }
+                WorkTarget::Thread { thread_id, channel_id } => {
+                    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn.query_row(
+                        "SELECT t.channel_id,w.wire_id,t.linked_object_id FROM chat_threads t \
+                         LEFT JOIN chat_channel_wire_ids w ON w.workspace_id=t.workspace_id AND w.channel_id=t.channel_id \
+                         WHERE t.workspace_id=?1 AND t.thread_id=?2",
+                        params![workspace_id, thread_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+                        .optional().map_err(SyncError::corrupt)?;
+                    if let Some((local_channel, wire, object)) = row {
+                        let admitted = if boundary.surface == crate::ShareSurface::SharedChannel {
+                            boundary.channel_wire_id.is_some() && wire == boundary.channel_wire_id
+                        } else if let (Some(grant), Some(object)) = (&boundary.granted, object) {
+                            crate::share::object_main_path(conn, workspace_id, &object)?.as_deref()
+                                .is_some_and(|path| crate::share::selected_path_within_grant(path, grant))
+                        } else { false };
+                        if admitted { *channel_id = local_channel; }
+                        admitted
+                    } else { false }
+                }
+                // Only the shared chat, under the id this store gave it.
+                WorkTarget::Chat { channel_id } => {
+                    let local: Option<String> = match (&boundary.surface, &boundary.channel_wire_id) {
+                        (crate::ShareSurface::SharedChannel, Some(wire)) => conn.query_row(
+                            "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id=?1 AND wire_id=?2",
+                            params![workspace_id, wire], |row| row.get(0))
+                            .optional().map_err(SyncError::corrupt)?,
+                        _ => None,
+                    };
+                    match local {
+                        Some(local) => { *channel_id = local; true }
+                        None => false,
+                    }
+                }
                 // Dataset targets need the dataset host's admission contract.
                 WorkTarget::TransactionalCollection { .. } | WorkTarget::TransactionalRecord { .. } => false,
             };

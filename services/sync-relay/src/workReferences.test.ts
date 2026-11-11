@@ -410,6 +410,35 @@ describe("work reference registration and resolution", () => {
     expect(await json(await handler(request("owner", `/sync/work-references/${ref}`)))).toMatchObject({target: message});
   });
 
+  it("resolves a chat only through a share of that chat, and a thread as its messages read", async () => {
+    const {handler, storage} = await fixture();
+    await appendLog(handler, "owner", ws, sequenced([
+      chatChannelCreate("group", {type: "both", folderPath: "notes"}), chatThreadCreate("thread", "group"),
+      chatMessageAppend("message", "thread", "Plan", {authorUserId: "owner"}),
+    ]), {originId: "chat-device"});
+    const chatRef = "C".repeat(43);
+    const chat = {kind: "chat", channelId: "channel-group"};
+    const thread = {kind: "thread", threadId: "thread", channelId: "channel-group"};
+    expect(await json(await register(handler, [{reference: chatRef, target: chat, createdAtMs: 1}, {reference: ref, target: thread, createdAtMs: 1}])))
+      .toMatchObject({registeredReferences: [chatRef, ref]});
+    expect(await json(await register(handler, [{reference: "D".repeat(43), target: {kind: "chat", channelId: "forged"}, createdAtMs: 1}, {reference: "E".repeat(43), target: {...thread, channelId: "forged"}, createdAtMs: 1}])))
+      .toMatchObject({registeredReferences: []});
+    await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "filer", access: "view"});
+    const missing = await denialBytes(await handler(request("filer", `/sync/work-references/${"Z".repeat(43)}`)));
+    expect(await denialBytes(await handler(request("filer", `/sync/work-references/${chatRef}`)))).toBe(missing);
+    expect(await denialBytes(await handler(request("filer", `/sync/work-references/${ref}`)))).toBe(missing);
+    const shareId = await createShare(handler, "owner", ws, {channelWireId: "group", paths: ["notes"], recipientUserId: "reader", access: "read-only"});
+    expect(await json(await handler(request("reader", `/sync/work-references/${chatRef}`)))).toMatchObject({status: "found", target: chat});
+    // A Group share's reader reads a thread as they read its messages: without the owner's channel id.
+    expect((await json(await handler(request("reader", `/sync/work-references/${ref}`)))).target).toEqual({kind: "thread", threadId: "thread"});
+    expect(await json(await handler(request("reader", "/sync/internal/work-references", mintBody(chat))))).toMatchObject({reference: chatRef, target: chat});
+    const token = "L".repeat(43);
+    seedLinkGrant(storage, {shareId, grantId: "chat-link", access: "read-only", secretHash: hashLinkBearer("secret", LINK_KEY)});
+    seedLinkSession(storage, {grantId: "chat-link", capabilityHash: hashLinkBearer(token, LINK_KEY)});
+    expect((await json(await handler(linkRequest(token, `/sync/work-references/${ref}`)))).target).toEqual({kind: "thread", threadId: "thread"});
+    expect(await json(await handler(request("stranger", `/sync/work-references/${chatRef}`)))).not.toMatchObject({status: "found"});
+  });
+
   it("registers a new target in the same batch as its referencing message", async () => {
     const {handler} = await fixture();
     const fresh = {...target, objectId: "fresh"};

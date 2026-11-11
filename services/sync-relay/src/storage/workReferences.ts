@@ -65,21 +65,36 @@ function snapshotObject(storage: StorageContext, workspaceId: string, versionId:
     WHERE s.workspace_id=? AND s.version_id=? AND s.${field}=?`).get(workspaceId, versionId, value);
 }
 
+// The first create of a chat by its channel id: its wire id and kind.
+function chatCreate(storage: StorageContext, workspaceId: string, channelId: string): {wireId: string; kind: unknown} | null {
+  const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+    AND json_extract(payload_json,'$.channelId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, channelId);
+  if (!row) return null;
+  const payload = JSON.parse(String(row.payload_json)) as {wireId?: unknown; kind?: unknown};
+  return {wireId: typeof payload.wireId === "string" ? payload.wireId : channelId, kind: payload.kind};
+}
+
 type Scope = {versionId: string | null; objectId: string | null; path: string | null; live: boolean};
 function scope(storage: StorageContext, workspaceId: string, target: WorkTarget, datasetAccess?: DatasetReferenceAccess): Scope | null {
-  if (target.kind === "message") {
-    const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.message.append'
-      AND json_extract(payload_json,'$.messageId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, target.messageId);
-    if (!row) return null;
-    const message = JSON.parse(String(row.payload_json)) as {threadId?: string};
-    if (message.threadId !== target.threadId) return null;
+  if (target.kind === "chat") {
+    return chatCreate(storage, workspaceId, target.channelId) ? {versionId: null, objectId: null, path: null, live: true} : null;
+  }
+  if (target.kind === "message" || target.kind === "thread") {
+    if (target.kind === "message") {
+      const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.message.append'
+        AND json_extract(payload_json,'$.messageId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, target.messageId);
+      if (!row) return null;
+      const message = JSON.parse(String(row.payload_json)) as {threadId?: string};
+      if (message.threadId !== target.threadId) return null;
+    }
     const wire = storage.findThreadCreateChannelWireId(workspaceId, target.threadId);
     // Engine channel ids are local. Only the admitted thread's wire id crosses the relay.
     if (wire === undefined) return null;
-    if (target.channelId !== null) {
+    const channelId = target.channelId ?? null;
+    if (channelId !== null) {
       const channel = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
         AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, wire);
-      if (!channel || JSON.parse(String(channel.payload_json)).channelId !== target.channelId) return null;
+      if (!channel || JSON.parse(String(channel.payload_json)).channelId !== channelId) return null;
     } else if (wire !== null) return null;
     return {versionId: null, objectId: null, path: null, live: true};
   }
@@ -128,11 +143,19 @@ function authorizations(storage: StorageContext, workspaceId: string, reader: Wo
 }
 
 function readable(storage: StorageContext, workspaceId: string, target: WorkTarget, current: Scope, grant: AuthorizedShareAction): boolean {
-  if (target.kind === "message") {
+  // A thread reads as its messages do.
+  if (target.kind === "message" || target.kind === "thread") {
     return filterOpForShare(grant.effectiveSelector, "chat.message.append", JSON.stringify({
-      messageId: target.messageId, threadId: target.threadId, body: "", authorKind: "human", authorId: "reference",
-      createdAtMs: 0,
+      messageId: target.kind === "message" ? target.messageId : "reference", threadId: target.threadId, body: "",
+      authorKind: "human", authorId: "reference", createdAtMs: 0,
     }), chat(storage, workspaceId)).allowed;
+  }
+  // A chat reads only through a share of that chat.
+  if (target.kind === "chat") {
+    const created = chatCreate(storage, workspaceId, target.channelId);
+    return !!created && filterOpForShare(grant.effectiveSelector, "chat.channel.create", JSON.stringify({
+      channelId: target.channelId, wireId: created.wireId, kind: created.kind, name: "", slug: "", createdAtMs: 0,
+    }), chat(storage, workspaceId), "chat").allowed;
   }
   if (target.kind === "transactionalCollection" || target.kind === "transactionalRecord") return current.live;
   const files = fileSideOf(grant.effectiveSelector);
@@ -191,7 +214,7 @@ export async function makeWorkReference(storage: StorageContext, input: {
       if (!row) throw notFound();
       target = {...target, objectId: String(row.object_id)};
     }
-    if (!owner && target.kind === "message") {
+    if (!owner && (target.kind === "message" || target.kind === "thread")) {
       const wire = storage.findThreadCreateChannelWireId(input.workspaceId, target.threadId);
       const channel = wire && storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
         AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`).get(input.workspaceId, wire);
@@ -238,9 +261,9 @@ function resolveIn(storage: StorageContext, input: Parameters<typeof resolveWork
   if (!sourceHandle) return unavailable;
   // Message, thread, and record ids match the share's other read paths.
   let projected = "objectId" in target ? {...target, objectId: identity.object(recipient, workspaceId, target.objectId)!} : target;
-  if (projected.kind === "message" && (input.reader.kind === "link" || fileSideOf(grant.effectiveSelector))) {
-    const {channelId: _channelId, ...message} = projected;
-    projected = message;
+  if ((projected.kind === "message" || projected.kind === "thread") && (input.reader.kind === "link" || fileSideOf(grant.effectiveSelector))) {
+    const {channelId: _channelId, ...chatTarget} = projected;
+    projected = chatTarget;
   }
   if (input.reader.kind === "link") input.reader.requireSession();
   if ("objectId" in target && "objectId" in projected) {
