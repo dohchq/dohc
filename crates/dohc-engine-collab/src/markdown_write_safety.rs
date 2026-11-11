@@ -197,6 +197,7 @@ impl WitnessChecks {
                     if matches!(
                         failure,
                         Failure::Crashed
+                            | Failure::NotStarted
                             | Failure::TimedOut
                             | Failure::Overloaded
                             | Failure::Superseded
@@ -398,6 +399,7 @@ mod tests {
         let reader = Arc::new(Reader::new(None));
         for failure in [
             Failure::Crashed,
+            Failure::NotStarted,
             Failure::TimedOut,
             Failure::Overloaded,
             Failure::Superseded,

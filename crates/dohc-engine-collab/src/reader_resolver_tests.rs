@@ -583,7 +583,12 @@ fn pending_entries_are_bounded_and_restart_has_no_proofs() {
 
 /// Failures that get every transient retry. A crash is transient too, but its
 /// second one ends the proof (`a_second_crash_ends_the_proof_then_allows_a_later_action`).
-const RETRIED: [Failure; 3] = [Failure::TimedOut, Failure::Overloaded, Failure::Superseded];
+const RETRIED: [Failure; 4] = [
+    Failure::TimedOut,
+    Failure::NotStarted,
+    Failure::Overloaded,
+    Failure::Superseded,
+];
 
 fn fail_next_request(
     conn: &Connection,
@@ -669,6 +674,7 @@ fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
     let retries = usize::from(MAX_TRANSIENT_RETRIES);
     for (failure, expected_requests, expected_backoffs) in [
         (Failure::TimedOut, retries + 1, retries - 1),
+        (Failure::NotStarted, retries + 1, retries - 1),
         (Failure::Crashed, usize::from(MAX_CRASHES), 0),
     ] {
         // One more failing proof than the cache holds, asked for in turn, so
@@ -753,22 +759,32 @@ fn a_second_crash_ends_the_proof_then_allows_a_later_action() {
     pending(lookup(&conn, &key, &doc, &resolver));
 }
 
+/// Timeouts and readers that never started do not count as crashes, so a
+/// reader that cannot start gets a timeout's retries (#3575).
 #[test]
 fn crashes_between_timeouts_still_end_the_proof_at_the_second() {
-    let (conn, key, doc, _, resolver) = fixture();
-    fail_next_request(&conn, &key, &doc, &resolver, Failure::TimedOut);
-    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-    for failure in [Failure::TimedOut, Failure::Crashed] {
-        assert!(matches!(
-            lookup(&conn, &key, &doc, &resolver),
-            Err(CollabError::MarkdownReaderRetryable)
-        ));
-        fail_next_request(&conn, &key, &doc, &resolver, failure);
+    for other in [Failure::TimedOut, Failure::NotStarted] {
+        let (conn, key, doc, _, resolver) = fixture();
+        fail_next_request(&conn, &key, &doc, &resolver, other);
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+        for failure in [other, other, Failure::Crashed] {
+            assert!(
+                matches!(
+                    lookup(&conn, &key, &doc, &resolver),
+                    Err(CollabError::MarkdownReaderRetryable)
+                ),
+                "{other:?}"
+            );
+            fail_next_request(&conn, &key, &doc, &resolver, failure);
+        }
+        assert!(
+            matches!(
+                lookup(&conn, &key, &doc, &resolver),
+                Err(CollabError::MarkdownReaderUnavailable)
+            ),
+            "{other:?}"
+        );
     }
-    assert!(matches!(
-        lookup(&conn, &key, &doc, &resolver),
-        Err(CollabError::MarkdownReaderUnavailable)
-    ));
 }
 
 /// A terminal failure ends the proof at once, whether it is the first answer

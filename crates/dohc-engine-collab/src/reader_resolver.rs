@@ -109,7 +109,11 @@ pub fn prepare_fold(
 fn transient(failure: &Failure) -> bool {
     matches!(
         failure,
-        Failure::Crashed | Failure::TimedOut | Failure::Overloaded | Failure::Superseded
+        Failure::Crashed
+            | Failure::NotStarted
+            | Failure::TimedOut
+            | Failure::Overloaded
+            | Failure::Superseded
     )
 }
 
@@ -231,7 +235,8 @@ const MAX_TRANSIENT_RETRIES: u8 = 6;
 /// failure, the crash answers every later lookup of this exact proof without
 /// asking the reader, so recovery cannot crash it again. A later action gets a
 /// fresh count: a new save is a new proof, and the engine starting empties the
-/// cache.
+/// cache. A reader that stopped before it took the request answers
+/// `NotStarted`, which is retried like a timeout and is not counted here.
 const MAX_CRASHES: u8 = 2;
 
 /// Retry state of transiently failed proofs the cache dropped to make room,

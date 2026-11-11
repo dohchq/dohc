@@ -1290,8 +1290,8 @@ async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
 
 /// A workspace in which each object owes a save that only the Markdown reader
 /// can make, with a reader that fails every request the same way: it crashes
-/// or times out as it starts. Capture is shut down, so only recovery works on
-/// the saves.
+/// as it starts, or while it reads the note. Capture is shut down, so only
+/// recovery works on the saves.
 struct FailingReaderSaves {
     scratch: ScratchDir,
     service: EngineService,
@@ -1436,8 +1436,8 @@ impl FailingReaderSaves {
     }
 
     /// The session of the save at `index` closes with the save owed: the
-    /// reader failed its first request and the immediate retry. A proof that
-    /// timed out asks for a backoff; one that crashed twice is unavailable.
+    /// reader failed its first request and the immediate retry. A reader that
+    /// did not start asks for a backoff; one that crashed twice is unavailable.
     async fn close_session(&self, index: usize) -> RuntimeError {
         let (key, lineage) = &self.saves[index];
         let result = self
@@ -1526,12 +1526,42 @@ async fn next_pass(passes: &mut UnboundedReceiver<Vec<DocKey>>) -> Vec<DocKey> {
         .unwrap()
 }
 
+/// A reader that never starts has not seen the note, so its proof gets a
+/// timeout's six retries, spaced by recovery's backoff (#3575).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_asks_a_reader_that_cannot_start_again_until_the_resolver_gives_up() {
+    let fixture = FailingReaderSaves::new("startup-crash", &["note"]).await;
+    let key = fixture.saves[0].0.clone();
+    let error = fixture.close_session(0).await;
+    assert!(super::super::error::reader_retryable(&error), "{error}");
+    assert_eq!(fixture.reader.dispatch_count(), 2);
+    let (cancel, mut passes, task) = fixture.recover();
+    // Without an edit, recovery asks the reader once per attempt until the
+    // resolver's six retries are spent: five more requests.
+    let mut attempted = 0;
+    while attempted < 5 {
+        let attempts = next_pass(&mut passes).await;
+        assert!(
+            attempts.iter().all(|attempt| attempt == &key),
+            "{attempts:?}"
+        );
+        attempted += attempts.len();
+    }
+    assert_eq!(attempted, 5);
+    assert_eq!(fixture.reader.dispatch_count(), 7);
+    // The last answer is unavailable, so no backoff asks again.
+    fixture.assert_recovery_stopped(&mut passes).await;
+    cancel.cancel();
+    task.await.unwrap();
+    fixture.close().await;
+}
+
 /// A note that fills the reader's heap crashes it on every request, and each
 /// crash restarts the reader for every other note. Its second crash ends the
 /// proof, where a timeout's six retries would make seven requests (#3575).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_does_not_ask_a_reader_that_crashed_twice_again() {
-    let fixture = FailingReaderSaves::new("startup-crash", &["note"]).await;
+    let fixture = FailingReaderSaves::new("request-crash", &["note"]).await;
     let key = fixture.saves[0].0.clone();
     let error = fixture.close_session(0).await;
     assert!(!super::super::error::reader_retryable(&error), "{error}");
@@ -1553,7 +1583,7 @@ async fn markdown_recovery_does_not_ask_a_reader_that_crashed_twice_again() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_retrying_one_save_does_not_restart_a_save_the_reader_gave_up_on() {
-    let fixture = FailingReaderSaves::new("startup-hang", &["first", "second"]).await;
+    let fixture = FailingReaderSaves::new("startup-crash", &["first", "second"]).await;
     let keys = [&fixture.saves[0].0, &fixture.saves[1].0];
     // After the two requests of its session's settle, each proof has five
     // recovery attempts before the resolver gives up on it.
