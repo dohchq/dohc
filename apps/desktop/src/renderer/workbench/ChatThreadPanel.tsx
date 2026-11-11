@@ -302,19 +302,19 @@ export function WorkingRow(props: { testIdPrefix: string; working: ChatWorking; 
   const ink = useAgentInk(working.presentation);
   return (
     <div className={sizes.column}>
-    <div data-testid={`${props.testIdPrefix}-working`} className={`grid ${sizes.row} pb-2 pt-1.5`}>
-      <span className="flex justify-end">
-        <ChatAvatar presentation={working.presentation} name={working.agentName} kind="agent" size={sizes.avatar} />
-      </span>
-      <div className="min-w-0">
-        <span className={`block truncate font-semibold leading-5 ${sizes.name} ${ink}`}>{working.agentName}</span>
-        <span className="flex h-7 items-center gap-2 text-[14px] text-muted">
-          Working
-          <WorkingDots presentation={working.presentation} />
-          {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
+      <div data-testid={`${props.testIdPrefix}-working`} className={`grid ${sizes.row} pb-2 pt-1.5`}>
+        <span className="flex justify-end">
+          <ChatAvatar presentation={working.presentation} name={working.agentName} kind="agent" size={sizes.avatar} />
         </span>
+        <div className="min-w-0">
+          <span className={`block truncate font-semibold leading-5 ${sizes.name} ${ink}`}>{working.agentName}</span>
+          <span className="flex h-7 items-center gap-2 text-[14px] text-muted">
+            Working
+            <WorkingDots presentation={working.presentation} />
+            {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
+          </span>
+        </div>
       </div>
-    </div>
     </div>
   );
 }
