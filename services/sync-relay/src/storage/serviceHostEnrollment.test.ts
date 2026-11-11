@@ -724,9 +724,9 @@ async function kept() {
   const f = await activated(), restore = keptByOwnerRestore(f.raw, key.namespace);
   withHistory(f.storage);
   const enrolled = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
-  const enabled = (owner?: {userId: string; shareId: string}, restoring = false) =>
+  const enabled = (owner?: {userId: string}, restoring = false) =>
     serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner, restoring);
-  const asOwner = {userId: "owner-1", shareId: scope.shareId};
+  const asOwner = {userId: "owner-1"};
   const covered = (storage: SyncRelayStorage = f.storage) =>
     storage.serviceHostEnrollmentCovered(storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!);
   // The host retiring the kept activation once it released the document, no earlier than the retirement was requested.
@@ -769,8 +769,7 @@ it("keeps a note live for its owner after their restore, and for no one else", a
   expect(f.covered()).toBe(true);
   expect(f.enabled(f.asOwner)).toBe(true);
   expect(f.enabled()).toBe(false);
-  expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
-  expect(f.enabled({userId: "owner-1", shareId: "another-share"})).toBe(false);
+  expect(f.enabled({userId: scope.userId})).toBe(false);
   expect(f.release()).toBeNull();
   expect(f.enrolled()).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10});
   expect(f.afterRestart()).toEqual({covered: true, owner: true});
@@ -934,7 +933,7 @@ it("brings live editing back when the owner resumes a paused restored note", asy
     .toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10});
   expect(f.covered()).toBe(true);
   expect(f.enabled(f.asOwner)).toBe(true);
-  expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
+  expect(f.enabled({userId: scope.userId})).toBe(false);
   expect(f.afterRestart()).toEqual({covered: true, owner: true});
 });
 

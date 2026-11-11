@@ -273,8 +273,8 @@ function assertCurrent(storage: StorageContext, enrollment: ServiceHostEnrollmen
     throw relayError("conflict", "Service host enrollment belongs to an obsolete workspace identity.");
   }
 }
-function assertOwnedEditableDocument(storage: StorageContext, input: {workspaceId: string; path: string; shareId: string; ownerUserId: string}): string {
-  const share = storage.getShare(input.shareId);
+function assertOwnedEditableDocument(storage: StorageContext, input: {workspaceId: string; path: string; shareId: string | null; ownerUserId: string}): string {
+  const share = input.shareId === null ? null : storage.getShare(input.shareId);
   if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
   const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
   const effective = parsed && effectiveShareSelector(parsed, "edit");

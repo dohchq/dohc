@@ -410,9 +410,28 @@ it("reports ready only with completed retained activation and the current native
   f.host.ready.mockReturnValue(false);
   expect((await state()).status).toBe("preparing");
   f.host.ready.mockReturnValue(true);
-  expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
+  expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: a damaged stored activation binding makes its own row unavailable
+// and leaves the rest of the readiness list served.
+it("lists a document with a damaged activation binding as unavailable and still serves the healthy one", async () => {
+  const f = await fixture(); f.seed("docs/b.md", "object-b");
+  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  retainServiceActivation(f.raw, namespace, true);
+  f.host.ready.mockReturnValue(true);
+  const documents = async () => {
+    const response = await f.handle(f.request());
+    expect(response.status).toBe(200);
+    return (await response.json()).documents;
+  };
+  const healthy = {path: "docs/b.md", objectId: "object-b", status: "preparing"};
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
+    document: {binding, relayDatabaseNamespace: namespace}}, healthy]);
+  f.raw.exec("UPDATE sync_relay_service_activations SET binding_json=json_set(binding_json,'$.selectorPaths','damaged')");
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}, healthy]);
 });
 
 // Proves: when the owner's restore ends a note's last Edit grant, the owner
@@ -426,7 +445,7 @@ it("reports a restored note ready to its owner after the restore ended its last 
   keptByOwnerRestore(f.raw, namespace);
   expect(f.release(binding.objectId)).toBeNull();
   expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
-    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace, shareId: scope.shareId}}]);
+    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace}}]);
 });
 
 // Proves: only the owner discovers the restored note. The revoked recipient

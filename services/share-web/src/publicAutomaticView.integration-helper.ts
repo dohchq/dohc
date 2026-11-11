@@ -105,7 +105,7 @@ export async function runPublicAutomaticView(options: Options) {
       workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, hostedReplication: {
         relay: {baseUrl: "https://public-proof-relay.example.test", bearerToken: options.serviceBearer(enrolled)},
         identity: {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: admission.maxPagesPerPull}}],
-      adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path, shareId: link.shareId}]}});
+      adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path}]}});
     const fixture: PublicTransitionFixture = {document: {workspaceId, mainVersionId, objectId, lineageClaimId: hash(selected.baseline.checkpoint)}, path, link};
     await browserExpect.poll(() => h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
       actor: {kind: "owner", userId: h.ownerUserId}}).kind, {timeout: h.timeoutMs}).toBe("current");

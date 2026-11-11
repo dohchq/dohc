@@ -552,7 +552,7 @@ it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation fro
         localYDocSequence: 1, applicationReplayed: false};
     })}};
   const capture = () => {
-    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage, native,
+    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", storage: f.storage, native,
       bounds: {...peer.bounds, maxAdmissionBytes: 20 * MiB}, validate,
       reserveBytes: size => buffers.reserve(size, [[key, 12 * MiB]]),
       validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), maxBytes: 128 * MiB, reserveBytes: buffers.reserve}});

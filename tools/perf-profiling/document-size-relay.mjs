@@ -251,7 +251,7 @@ export async function runRelayCase(options) {
         true,
       );
       const actors = [
-        { kind: 'owner', userId: 'owner', shareId: 'share' },
+        { kind: 'owner', userId: 'owner' },
         { kind: 'named', grantId: 'grant', userId: 'reader' },
         {
           kind: 'link',

@@ -531,7 +531,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     await publication(agentSettlement, [human, agent]);
 
     // A trusted automation the owner runs, through the production owner capture.
-    const automationHost = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
+    const automationHost = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, storage,
       native: await active!.captureNative(binding.binding), bounds: profile.namedLive.host, validate});
     const {automationAck, automationMarkdown} = await (async () => {
       const automationDoc = new Y.Doc();
@@ -816,7 +816,7 @@ async function openSelfHostProof(name: string) {
       } else {
         const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
         if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
-        host = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
+        host = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, storage,
           native: await live().captureNative(binding.binding), bounds: profile.namedLive.host, validate});
       }
       const doc = new Y.Doc();

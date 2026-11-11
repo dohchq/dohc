@@ -396,7 +396,7 @@ it("starts one empty daemon and attaches the first shared document's workspace t
   const f = await fixture(); expect(f.host.unavailable).toBe(true); await f.waitStarted(1);
   const first = await f.waitUpdate(["docs/a.md"]), {config} = f.starts[0]!;
   expect(config.workspaces).toEqual([]); expect(config.activation.targets).toEqual([]);
-  expect(first.documents).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: "docs/a.md", shareId: scope.shareId}]);
+  expect(first.documents).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: "docs/a.md"}]);
   expect(first.departing).toEqual([]);
   expect(first.workspaces).toHaveLength(1);
   expect(basename(first.workspaces[0]!.root)).toBe(storeName(scope.workspaceId));
@@ -435,7 +435,7 @@ it("adds and removes documents on the running daemon while the sibling stays hos
   expect(removed.workspaces).toEqual(first.workspaces);
   await vi.waitFor(() => expect(f.enrollment(second.path)).toMatchObject({enabled: false, ownerStop: "pause"}), {timeout: 10_000});
   // It was released only after an update told the daemon it departed.
-  expect(f.updates.map(update => update.departing)).toContainEqual([{workspaceId: scope.workspaceId, objectId: second.objectId, path: second.path, shareId: scope.shareId}]);
+  expect(f.updates.map(update => update.departing)).toContainEqual([{workspaceId: scope.workspaceId, objectId: second.objectId, path: second.path}]);
   expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.peak()).toBe(1);
   expect(f.updates.every(update => update.documents.some(row => row.path === "docs/a.md"))).toBe(true);
 });
@@ -456,7 +456,7 @@ it("keeps the workspace attachment unchanged when the document that first attach
 it("lists a moved document again for its restore after its replica lets it go", async () => {
   const f = await fixture(); f.add(); f.share("share-overlap", ["docs"]);
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md", "docs/b.md"]);
-  const moved = {workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath, shareId: scope.shareId};
+  const moved = {workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath};
   const document = {workspaceId: scope.workspaceId, mainVersionId: "main" as const, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const move = (path: string) => f.raw.prepare("UPDATE sync_relay_object_moments SET path=? WHERE object_id=?").run(path, binding.objectId);
   move("elsewhere/a.md"); f.host.reconcile();
@@ -544,7 +544,7 @@ it("drains a stopped last document, then detaches the workspace and releases it,
   expect(stopped).toMatchObject({enabled: false, retired: true});
   const drainingSet = await f.waitUpdate([]);
   expect(drainingSet.workspaces.map(row => row.workspaceId)).toEqual([scope.workspaceId]);
-  expect(drainingSet.departing).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath, shareId: scope.shareId}]);
+  expect(drainingSet.departing).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath}]);
   await f.waitPasses();
   // Undrained, so the hosted credential and the store stay.
   expect(f.enrollment()!.hostDrainedAtMs).toBeNull();
@@ -728,7 +728,7 @@ it("releases nothing through a failed file removal and a restart until the remov
   await f.waitStarted(2);
   const restarted = await f.waitUpdate(["docs/b.md"]);
   // The document departs again on the replacement; it is not hosted there.
-  expect(restarted.departing).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath, shareId: scope.shareId}]);
+  expect(restarted.departing).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath}]);
   await f.waitPasses();
   expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause", hostDrainedAtMs: null});
   f.pending.delete(binding.objectId);
@@ -1176,7 +1176,7 @@ const rename = (f: Awaited<ReturnType<typeof fixture>>, path: string) => {
   f.raw.prepare("UPDATE sync_relay_object_moments SET path=? WHERE workspace_id=? AND object_id=?").run(path, scope.workspaceId, binding.objectId);
   f.host.reconcile();
 };
-const departingA = {workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath, shareId: scope.shareId};
+const departingA = {workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath};
 
 // Proves: a renamed document leaves its replica as a departed one does while
 // its sibling stays hosted, keeps its enrollment, and is hosted again at its path.

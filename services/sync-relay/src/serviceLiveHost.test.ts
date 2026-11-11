@@ -383,7 +383,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
     identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
     settlement:{maxApplicationsPerSettlement:8},sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
-    activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
+    activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
       idleUnloadMs:600_000,idleRetryMs:30_000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
@@ -1232,8 +1232,8 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
   limits?: DrainLimits; selfHosted?: boolean; restore?: boolean} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
-  const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
-  const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
+  const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md"};
+  const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md"};
   const activate = ServiceActivationDriver.prototype.activate, loaded = ServiceActivationDriver.prototype.loaded, passes = {deliver: true};
   vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(function (this: ServiceActivationDriver, ...args) {
     if (!passes.deliver && args[0].path === sibling.path) return Promise.resolve({kind: "pending" as const, reason: "paused"});
@@ -2586,7 +2586,7 @@ it.each([false, true])("settles a document whose share was deleted, after a rest
 it("admits nothing after the last Edit share is deleted while a drain waits, and settles what the host applied before", async () => {
   const o = await enrolledServiceHost({frameChanges: true});
   vi.spyOn(console, "error").mockImplementation(() => {});
-  const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: o.f.storage,
+  const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", storage: o.f.storage,
     native: await o.host.captureNative(o.binding), validate: o.validateJournal,
     bounds: {maxClientVectorBytes: 1_000, maxSyncOutputBytes: 10_000, maxAppliedUpdateBytes: 10_000, maxSubmissionBytes: 10_000, maxAdmissionBytes: 100_000}});
   const edit = o.acceptEdit("before");
@@ -3528,7 +3528,7 @@ it("completes a moved document's retirement after a restart by its own object wh
   expect(releases.length).toBeGreaterThan(0);
   expect(releases).toEqual(releases.map(() => expect.objectContaining(key)));
   await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
-  expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path, shareId: other.shareId})]);
+  expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path})]);
   const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => (call as unknown[])[1] === o.sibling.path).length, seen = captures();
   await vi.waitFor(() => expect(captures()).toBeGreaterThan(seen), {timeout: 10_000});
   expect(o.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_service_activations WHERE object_id=?").get(other.objectId)).toEqual({count: 0});
@@ -3689,7 +3689,7 @@ it("ends a no-retirement restore route without an unload once the moved document
   expect(forgetMoved).toHaveBeenCalledTimes(1);
   expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
   expect(host.retains(o.sibling)).toBe(true);
-  expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path, shareId: o.sibling.shareId})]);
+  expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path})]);
 });
 
 // Proves: a moved document whose restore opened no retirement keeps its route
@@ -3852,7 +3852,7 @@ it("keeps a replacement at a moved document's old path apart from the moved docu
   expect(o.ownerCalls()).toContainEqual(["liveApplication.releaseActivation", key]);
   await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
   expect(host.retains(other)).toBe(true);
-  expect(driver()!.targets.filter(target => target.path === other.path)).toEqual([expect.objectContaining({path: other.path, shareId: other.shareId})]);
+  expect(driver()!.targets.filter(target => target.path === other.path)).toEqual([expect.objectContaining({path: other.path})]);
   expect(captures()).not.toContain(ACTIVATION);
 });
 
@@ -4081,7 +4081,7 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
   expect(currentFile(), "The removed document must no longer be available as a saved file.").toBeUndefined();
   expect(o.f.storage.objectMoment({workspaceId: "workspace", objectId: o.sibling.objectId, versionId: "main"})).toMatchObject({path: null});
   expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(true);
-  expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: o.sibling.objectId, ownerUserId: "owner", shareId: o.sibling.shareId,
+  expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: o.sibling.objectId, ownerUserId: "owner", shareId: "share",
     path: o.sibling.path})).toBe(true);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   await o.depart();
@@ -4213,7 +4213,7 @@ for (const c of [
   const siblingCapture = o.otherActivations.get(REPLACEMENT_ACTIVATION)!;
   const siblingDocument = {workspaceId: sibling.workspaceId, mainVersionId: "main" as const, objectId: sibling.objectId,
     lineageClaimId: siblingCapture.source.lineageClaimId};
-  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: sibling.shareId,
+  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
     path: sibling.path, nowMs: 35, guard() {}});
   const visitor = c.changedText ? undefined : await replacementActivation(o, {name: "visitor", path: "docs/visitor.md",
     activationId: `ordinary-activation-${"d".repeat(64)}`});
@@ -4546,7 +4546,7 @@ it("does not repeat an at-path document's copied held retirement across later me
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.distinctRegistrations();
   const sibling = await replacementActivation(o, {name: "sibling", path: "docs/c.md"});
-  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: sibling.shareId,
+  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
     path: sibling.path, nowMs: 35, guard() {}});
   await o.host.update({workspaces, documents: [o.sibling, sibling], ...stay});
   await vi.waitFor(() => expect(o.host.settled(sibling)).toBe(true));
@@ -5083,7 +5083,7 @@ it.each(["generation", "engine"] as const)("keeps a stopped document whose retir
 // that only from its own pull, and the document is released only once a
 // retry removes it.
 it("retains a departed document through a failed file removal and a restart until its retirement succeeds", async () => {
-  const o = await emptyServiceHost(), workspaces = [o.workspace], left = {workspaceId: "workspace", objectId: "object-left", path: "docs/left.md", shareId: "share"};
+  const o = await emptyServiceHost(), workspaces = [o.workspace], left = {workspaceId: "workspace", objectId: "object-left", path: "docs/left.md"};
   vi.spyOn(console, "error").mockImplementation(() => {});
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
@@ -5357,7 +5357,7 @@ it.each([
   ["keeps retrying", "live-application-conflict", diverged, undefined],
 ] as const)("%s a document whose first capture the engine refuses as %s", async (_verb, _reason, refusal, block) => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  const plain = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md", shareId: "share"};
+  const plain = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md"};
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -6113,7 +6113,7 @@ it("frees an ended hold while another document keeps its workspace from being re
 // the host lets it go.
 it("lets a parked document after a stuck departed prefix go within a sweep of pulls, and never while a list names it", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  const left = {workspaceId: "workspace", objectId: "object-z", path: "docs/left.md", shareId: "share"};
+  const left = {workspaceId: "workspace", objectId: "object-z", path: "docs/left.md"};
   const stuck = ["object-a1", "object-a2", "object-a3", "object-a4", "object-a5"];
   vi.spyOn(console, "error").mockImplementation(() => {});
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
@@ -6143,8 +6143,8 @@ it("lets a parked document after a stuck departed prefix go within a sweep of pu
 // a list names it.
 it("confirms a parked document gone while its retired enrollment pages rotate, and never while a list names it", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  const left = {workspaceId: "workspace", objectId: "object-z", path: "docs/left.md", shareId: "share"};
-  const stuck = {workspaceId: "workspace", objectId: "object-a1", path: "docs/stuck.md", shareId: "share"};
+  const left = {workspaceId: "workspace", objectId: "object-z", path: "docs/left.md"};
+  const stuck = {workspaceId: "workspace", objectId: "object-a1", path: "docs/stuck.md"};
   vi.spyOn(console, "error").mockImplementation(() => {});
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));

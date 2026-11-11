@@ -796,7 +796,7 @@ it('rolls back the full activation when its retained-state quota charge fails',a
 type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={},config:Partial<ServiceActivationConfig>={}){
-  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
+  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,

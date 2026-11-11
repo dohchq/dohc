@@ -40,7 +40,12 @@ export interface OwnerOutboxAdmission {
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
-/** The owner a queue in the workspace delivers as. */
+/**
+ * The owner a queue in the workspace delivers as: whoever owns the workspace
+ * now. Nothing ties a queue to the account that wrote it, and the relay has
+ * no ownership transfer. Any future transfer must fence the old owner's
+ * queues, or tie them to that account, before this delivers them.
+ */
 export function admittedOwner(storage: Pick<SyncRelayStorage, "workspaceOwner">, admission: Pick<OwnerOutboxAdmission, "workspaceIds">, workspaceId: string) {
   const userId = admission.workspaceIds.has(workspaceId) ? storage.workspaceOwner(workspaceId) : null;
   if (userId === null) throw new Error("Owner workspace is unavailable.");

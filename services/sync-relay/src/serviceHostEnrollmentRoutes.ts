@@ -212,7 +212,10 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
-    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
+    // A damaged activation record stops its own document, not the list. Only the operator can repair it.
+    let saved: ReturnType<typeof activation.read>;
+    try {saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);}
+    catch {return {...base, status: "unavailable", reason: "session-host-diverged"};}
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId}});
