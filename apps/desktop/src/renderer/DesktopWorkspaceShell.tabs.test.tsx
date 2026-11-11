@@ -184,6 +184,21 @@ describe("shell tab surfaces", () => {
     await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
   });
 
+  // Home sorts the fresh walk's dataset.json files by the Collection folders, read here from the cached listing.
+  it("reads Home's Collection folders again once a fresh walk replaces the cached listing", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const fresh = Promise.withResolvers<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    bridge.listWorkspaceFiles
+      .mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], folders: [], cached: true })
+      .mockImplementationOnce(() => fresh.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
+    const reads = bridge.listCollections.mock.calls.length;
+    await act(async () => fresh.resolve({ visibility: { status: "ready", rules: [] }, files: [{ path: "data/dataset.json", kind: "file" }], folders: [] }));
+    await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
+  });
+
   it("keeps an app mounted while another tab is shown", async () => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));

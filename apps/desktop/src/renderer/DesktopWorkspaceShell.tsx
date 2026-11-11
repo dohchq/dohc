@@ -2119,6 +2119,8 @@ export function DesktopWorkspaceShell(props: {
   const historyReadable = (status: SyncStatusResult | null) =>
     shareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
+  const readsCollectionsRef = useRef(false);
+  readsCollectionsRef.current = !shareView || shareViewReadsCollections;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
   const { collectionFolders, unclaimedDatasetFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown } = useCollectionFolders(
@@ -4802,6 +4804,8 @@ export function DesktopWorkspaceShell(props: {
         const paintedCachedListing = (await refreshFiles({ allowCached: true })).cached === true;
         if (cancelled || !paintedCachedListing) return;
         await refreshFiles();
+        // Home sorts this walk's dataset.json files by Collection folders read from the cached listing.
+        if (!cancelled && readsCollectionsRef.current) void refreshCollections();
       };
       const reportInitialFilesFailure = (error: unknown) => {
         if (!cancelled) {
@@ -4822,6 +4826,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceOpenAttempt,
     markCurrentSwitchPhase,
     refreshFiles,
+    refreshCollections,
     reportShellError,
     setCaptureDecidedFor,
     syncStatusLane,
