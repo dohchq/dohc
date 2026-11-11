@@ -518,11 +518,16 @@ export function saveOnlyLiveDocuments(quarantines: readonly OwnerLiveQuarantine[
     ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
 }
 // What a Stop did with edits the server refused: wrote them into the file,
-// or kept them on this computer because it could not.
+// or kept them on this computer because it could not. `already` when the
+// server says live editing was already stopped, so this Stop changed nothing.
 export const StopOwnerLiveDocumentResult = z.object({
   keptEdits: z.enum(["none", "recovered", "kept"]),
+  already: z.literal(true).optional(),
 }).strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
+// `already` when the server says the document was already live, so this Resume changed nothing.
+export const ResumeOwnerLiveDocumentResult = z.object({already: z.literal(true).optional()}).strict();
+export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();
@@ -788,9 +793,10 @@ const CollectionQueryFilterSchema: z.ZodType<CollectionQueryFilter> = z.object({
 export const ListCollectionsPayload = WorkspaceIdPayload;
 export type ListCollectionsPayload = z.infer<typeof ListCollectionsPayload>;
 
-export const ListCollectionsResult: z.ZodType<CollectionListResultContract> =
-  z.object({ collections: z.array(CollectionSummarySchema).max(10_000) });
-export type ListCollectionsResult = CollectionListResultContract;
+// `unclaimedDatasetFolders`: folders whose dataset.json names no Collection on this computer, as a deleted one leaves.
+export type ListCollectionsResult = CollectionListResultContract & { unclaimedDatasetFolders: string[] };
+export const ListCollectionsResult: z.ZodType<ListCollectionsResult> =
+  z.object({ collections: z.array(CollectionSummarySchema).max(10_000), unclaimedDatasetFolders: z.array(z.string().max(4096)).max(10_000) });
 
 export const GetCollectionPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1498,6 +1504,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
+  // Shared notes whose edits wait on this computer for the server.
+  ownerPendingShare: z.array(SAFE_RELATIVE_PATH).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -2562,6 +2570,21 @@ export const ListChatChannelsResult = z.object({
   fileThreads: z.array(FileChatThreadRecord),
 });
 export type ListChatChannelsResult = z.infer<typeof ListChatChannelsResult>;
+
+// Each chat's unread count, read from this computer alone: no relay pass, so
+// a tab strip can ask after every workspace change.
+export const ListChatUnreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListChatUnreadPayload = z.infer<typeof ListChatUnreadPayload>;
+
+export const ListChatUnreadResult = z.object({
+  chats: z.array(z.object({
+    channelId: z.string().min(1),
+    unreadCount: z.number().int().min(0),
+  })),
+});
+export type ListChatUnreadResult = z.infer<typeof ListChatUnreadResult>;
 
 const CHAT_FOLLOW_TARGET_KIND = z.enum(["person", "agent", "channel", "thread"]);
 const CHAT_FOLLOW_STATE = z.enum(["following", "unfollowed"]);
@@ -7394,7 +7417,30 @@ export type WorkspacePathOpenFailure = z.infer<typeof WorkspacePathOpenFailure>;
 // it loads loses nothing.
 export const WorkspacePathOpenFailedEvent = z.undefined();
 
+// Typing kept for a workspace no longer in the list, such as one whose join
+// failed. It stays until the person dismisses it.
+export const KeptTyping = z.object({
+  workspaceId: WORKSPACE_ID,
+  recordId: LiveDraftRecoveryRecord.shape.recordId,
+  path: LiveDraftRecoveryRecord.shape.path,
+  text: z.string(),
+}).strict();
+export type KeptTyping = z.infer<typeof KeptTyping>;
+
 export const noticeOperations = {
+  listKeptTyping: {
+    capabilityId: "document.typing.kept.list",
+    scope: "device",
+    channel: "desktop:list-kept-typing",
+    payload: z.object({}), result: z.array(KeptTyping), guard: "trusted-sender",
+  },
+  dismissKeptTyping: {
+    capabilityId: "document.typing.kept.dismiss",
+    channel: "desktop:dismiss-kept-typing",
+    payload: KeptTyping.pick({ workspaceId: true, recordId: true }).strict(), guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "findWorkspace === null + removeKeptTyping", reason: "Main deletes kept typing only for a workspace no longer in the list, and only the record that names that workspace." },
+  },
   listNotices: {
     capabilityId: "notice.list",
     scope: "device",
@@ -7716,7 +7762,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
+export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied", "volume-shares-new-files", "document-too-dense"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({

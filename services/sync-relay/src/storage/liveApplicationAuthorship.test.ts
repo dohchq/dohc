@@ -54,8 +54,8 @@ function application(inBatch = false) {
       f.write(db => {
         db.prepare(`INSERT INTO sync_relay_service_activations
           (relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-           source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,accounted_bytes)
-          VALUES (?,'activation','workspace','main','object',?,'{}',?,?,?,'owner','share',1)`)
+           source_json,binding_json,state_digest,state_bytes,owner_user_id,accounted_bytes)
+          VALUES (?,'activation','workspace','main','object',?,'{}',?,?,?,'owner',1)`)
           .run(record.relayDatabaseNamespace, binding.lineageClaimId, JSON.stringify(binding), hash(new Uint8Array([0,0])), new Uint8Array([0,0]));
         db.prepare(`INSERT INTO sync_relay_live_delivery_hosts
           (host_id,workspace_id,funded_document_sequence,funded_journal_cursor,accounted_bytes) VALUES ('retiring','workspace',0,0,1)`).run();

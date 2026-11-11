@@ -8,7 +8,7 @@ import {selfHostLiveProfile} from "./selfHostLiveProfile";
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks();});
 const signal = () => new AbortController().signal;
-const input = {binding, shareId: scope.shareId, ownerUserId: "owner-1"};
+const input = {binding, ownerUserId: "owner-1"};
 
 async function setup() {
   const state = await fixture();
@@ -58,7 +58,7 @@ it("selects the current service host and supplies only the trusted owner's accou
   await expect(createAutomationRecordHost(f.options).capture(input, abort)).resolves.toBe(captured);
   expect(f.service.captureNative).toHaveBeenCalledExactlyOnceWith(binding, abort);
   expect(f.device.captureNative).toHaveBeenCalledTimes(1);
-  expect(capture).toHaveBeenCalledExactlyOnceWith({authenticatedUserId: "owner-1", shareId: scope.shareId,
+  expect(capture).toHaveBeenCalledExactlyOnceWith({authenticatedUserId: "owner-1",
     storage: f.storage, native: f.native, trustedAccount: {accountId: "owner-1", name: "Owner name"},
     bounds: f.options.bounds, validate: f.options.validate});
 });

@@ -236,7 +236,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const stateDirectory = await createTestScratch("engine-ipc-settings-");
   const registrations = createWorkspaceEngineIpc({
-    historyCollections,
+    historyCollections, unclaimedDatasetFolders: async () => ["old"],
     readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
@@ -521,7 +521,7 @@ describe("workspace engine IPC registrations", () => {
   it("returns an empty list without an adapter but rejects get and query", async () => {
     const h = await harness();
     h.setMissingAdapter();
-    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [] });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [], unclaimedDatasetFolders: ["old"] });
     for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory]) {
       await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "data", recordId: "rec_a" })).rejects.toThrow("engine is not running");
     }
@@ -550,7 +550,7 @@ describe("workspace engine IPC registrations", () => {
       { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
       { path: "shared-with-me/healthy/tasks", objectId: "schema", status: "valid", reasons: [] },
       { path: "shared-with-me/other/tasks", objectId: "schema", status: "valid", reasons: [] },
-    ] });
+    ], unclaimedDatasetFolders: ["old"] });
     h.adapter.listCollections.mockRejectedValue(new Error("host store refused"));
     await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow("host store refused");
   });
@@ -587,7 +587,7 @@ describe("workspace engine IPC registrations", () => {
     const record = { id: "retained", path: "data/a.md", conflicted: false, values: [] };
     h.adapter.queryCollectionRecords.mockResolvedValue({ collection,
       records: [record, { ...record, id: "outside", path: "private/a.md" }], groups: null, nextCursor: null });
-    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection] });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection], unclaimedDatasetFolders: [] });
     await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" }))
       .resolves.toMatchObject({ schema: { name: "Retained" }, recordCount: 1 });
     await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" }))

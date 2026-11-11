@@ -49,6 +49,8 @@ mod bounded_encoder;
 mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
+#[cfg(test)]
+mod outside_save_fold_tests;
 mod reference_links;
 mod restore_copy;
 mod wikilinks;
@@ -1611,12 +1613,23 @@ impl Ydoc {
                         map.insert(txn, key.as_str(), json_to_any(value));
                     }
                     keep_frontmatter_source(&map, &meta, txn, source.as_deref());
+                    // A live note keeps every block it deletes, so an outside
+                    // save keeps the blocks it left alone at either end and
+                    // adds only what changed (#3741).
+                    let (start, end) = if file_fold {
+                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
+                    } else {
+                        (0, 0)
+                    };
                     let len = frag.len(txn);
-                    if len > 0 {
-                        frag.remove_range(txn, 0, len);
+                    if len > start + end {
+                        frag.remove_range(txn, start, len - start - end);
                     }
-                    for block in blocks.iter().rev() {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, 0, block);
+                    for block in blocks[start as usize..blocks.len() - end as usize]
+                        .iter()
+                        .rev()
+                    {
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block);
                     }
                 };
                 if WIRE_SEED {
@@ -5038,6 +5051,76 @@ fn out_json<T: ReadTxn>(txn: &T, out: Out) -> Value {
         Out::YXmlText(t) => xml_json(txn, XmlOut::Text(t)),
         Out::Any(any) => json!({ "type": "any", "value": any_to_json(&any) }),
         other => json!({ "type": "unsupported", "debug": format!("{other:?}") }),
+    }
+}
+
+/// How many of `body`'s blocks at the start and at the end are already what
+/// `blocks` would insert there, compared without overlapping.
+fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
+    txn: &T,
+    body: &yrs::XmlFragmentRef,
+    blocks: &[MdBlock<'_>],
+) -> (u32, u32) {
+    let len = body.len(txn);
+    if len == 0 || blocks.is_empty() {
+        return (0, 0);
+    }
+    // Read by index, a block walks every item before it, deleted ones too,
+    // so the body is read once. `children` stops at a value that is not
+    // XML, so a body holding one keeps nothing.
+    let old: Vec<XmlOut> = body.children(txn).collect();
+    if old.len() as u32 != len {
+        return (0, 0);
+    }
+    let scratch = yrs::Doc::new();
+    let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut scratch_txn = scratch.transact_mut();
+    // Whether `old` is exactly the block `block` inserts. Each block is built
+    // alone at the front of the scratch body, and only until the first that
+    // differs.
+    let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
+        let before = fresh.len(&scratch_txn);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
+        if fresh.len(&scratch_txn) != before + 1 {
+            return false;
+        }
+        fresh.get(&scratch_txn, 0).is_some_and(|new| {
+            plain_xml(txn, old) && xml_json(txn, old.clone()) == xml_json(&scratch_txn, new)
+        })
+    };
+    let most = len.min(blocks.len() as u32);
+    let mut start = 0;
+    while start < most && kept(&old[start as usize], &blocks[start as usize]) {
+        start += 1;
+    }
+    let mut end = 0;
+    while start + end < most
+        && kept(
+            &old[(len - 1 - end) as usize],
+            &blocks[blocks.len() - 1 - end as usize],
+        )
+    {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Whether `node` holds only XML and plain values, which [`xml_json`] spells
+/// without loss. It spells an embedded shared type by its debug name.
+fn plain_xml<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
+    match node {
+        XmlOut::Element(element) => {
+            element
+                .attributes(txn)
+                .all(|(_, value)| matches!(value, Out::Any(_)))
+                && element.children(txn).count() as u32 == element.len(txn)
+                && element.children(txn).all(|child| plain_xml(txn, &child))
+        }
+        XmlOut::Text(text) => text
+            .diff(txn, YChange::identity)
+            .iter()
+            .all(|chunk| matches!(chunk.insert, Out::Any(_))),
+        XmlOut::Fragment(_) => false,
     }
 }
 

@@ -847,7 +847,7 @@ describe("a server that pushes its copy of a workspace", () => {
     const capture = vi.fn(() => preparing);
     const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null})),
       ownerYDocPrepareEnrollment: vi.fn(() => preparing)};
-    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "active", pendingBytes: 10,
       oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
@@ -873,7 +873,7 @@ describe("a server that pushes its copy of a workspace", () => {
     const draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
     const capture = vi.fn(async () => {throw new Error("Device delivery is unavailable.");});
     const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
-    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
       oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: "delivery",
@@ -897,7 +897,7 @@ describe("a server that pushes its copy of a workspace", () => {
     // The engine lists a quarantined draft as pending only while its owner's Try again waits.
     const client = {ownerYDocListDrafts: vi.fn(async (_request: unknown, input: {pendingOnly?: boolean}) =>
       ({drafts: input.pendingOnly ? [] : [draft], next: null}))};
-    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
       oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
@@ -931,7 +931,7 @@ describe("a server that pushes its copy of a workspace", () => {
       currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
     let draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
     const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
-    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
       oldestEntryAtMs: 1, quarantineReason: "binding-changed", observedBinding: null, retryDeliveryId: null,
@@ -959,9 +959,9 @@ describe("a server that pushes its copy of a workspace", () => {
     await vi.waitFor(() => expect(ended()).toEqual([]));
     readHead.mockRestore(); currentBinding.mockRestore();
   });
-  it.each<[string, (binding: LiveObjectBinding) => {binding: LiveObjectBinding; shareId: string} | null]>([
+  it.each<[string, (binding: LiveObjectBinding) => {binding: LiveObjectBinding} | null]>([
     ["the owner deleted the record", () => null],
-    ["the owner replaced the record's lineage", (binding: LiveObjectBinding) => ({binding: {...binding, lineageClaimId: "c".repeat(64)}, shareId: "share"})],
+    ["the owner replaced the record's lineage", (binding: LiveObjectBinding) => ({binding: {...binding, lineageClaimId: "c".repeat(64)}})],
     ["the owner revoked the share", () => {throw new Error("The shared file is unavailable. Restore access, then try again.");}],
   ])("confirms later runs' changes sent while a set-aside queue waits that cannot recover, because %s", async (_case, current) => {
     clock = at(8);

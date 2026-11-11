@@ -43,6 +43,8 @@ type CliCommandBody =
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "liveDocuments"; cursor?: string }
+  | { verb: "liveStop"; path: string; objectId?: string }
+  | { verb: "liveResume"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
@@ -457,7 +459,7 @@ const DOCUMENT_VERBS = {
   },
   "kept-edits": {
     capabilityId: "workspace.status",
-    summary: "List live documents whose edits the server refused, and where dohc keeps those edits.",
+    summary: "List live documents whose edits the server refused or has not accepted yet, and where dohc keeps those edits.",
     operands: "",
     notes: ["storedOn is this-computer, or server for a document the server hosts.",
       "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
@@ -466,7 +468,8 @@ const DOCUMENT_VERBS = {
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
       "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
-      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them."],
+      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.",
+      "pendingShare lists shared notes whose edits wait on this computer for the server. Each file holds older text until the server accepts them; document read returns the current text."],
     parse: input => {
       noExtraArgs(input.operands, "document kept-edits");
       return { verb: "liveKeptEdits" };
@@ -525,7 +528,7 @@ const DOCUMENT_VERBS = {
     summary: "List this workspace's live documents, with each one's state and why.",
     operands: "",
     notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
-      "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
+      "reason says why a document is not live. canResume is true when resume can start it again.",
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
       "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
@@ -535,6 +538,39 @@ const DOCUMENT_VERBS = {
       noExtraArgs(input.operands, "document live");
       const cursor = lastValue(input, "--cursor");
       return { verb: "liveDocuments", ...(cursor ? { cursor } : {}) };
+    },
+  },
+  stop: {
+    capabilityId: "share.live.document.stop",
+    summary: "Stop live editing for a document, as Stop does in Live documents.",
+    operands: "<path>",
+    notes: ["Run resume to start live editing again. dohc records the Stop as this agent's when the server says this request stopped it.",
+      "already is true when live editing was already stopped. Then dohc records no one.",
+      "Pass --object-id from live to stop the server's document when its file moved or is gone. dohc then stops that document, whatever path it has now.",
+      "keptEdits is recovered when dohc wrote edits the server refused into the file, kept while dohc still keeps them, and none when there were none.",
+      "For kept, run kept-edits, then save-recovery-copy or stop-again.",
+      "Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing. Ask the person using dohc to close it."],
+    flags: [{ name: "--object-id", value: "id", text: "Stop the server's document with this objectId from live." }],
+    parse: input => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document stop requires a path");
+      noExtraArgs(extra, "document stop");
+      const objectId = lastValue(input, "--object-id");
+      return { verb: "liveStop", path, ...(objectId ? { objectId } : {}) };
+    },
+  },
+  resume: {
+    capabilityId: "share.live.document.resume",
+    summary: "Resume live editing for a document, as Resume does in Live documents.",
+    operands: "<path>",
+    notes: ["Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it.",
+      "already is true when the document was already live. Then dohc records no one.",
+      "Run live again to follow it: preparing until the server starts the document, then ready."],
+    parse: input => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document resume requires a path");
+      noExtraArgs(extra, "document resume");
+      return { verb: "liveResume", path };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -1481,7 +1517,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List, stop, and resume live documents, and recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

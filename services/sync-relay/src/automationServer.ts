@@ -138,7 +138,7 @@ export interface AutomationServerOptions {
   datasetHost?: RelayDatasetHost;
   recordDelivery?: {
     namespace: string;
-    capture(input: {binding: LiveObjectBinding; shareId: string; ownerUserId: string}, signal: AbortSignal): Promise<NamedFrameHostSession>;
+    capture(input: {binding: LiveObjectBinding; ownerUserId: string}, signal: AbortSignal): Promise<NamedFrameHostSession>;
   };
   /** This server, as the owner's settings name it. */
   server: AutomationServer;

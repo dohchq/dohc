@@ -168,7 +168,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
     const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,refusals: new OwnerKnownRefusals(),
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), workspaceIds: new Set(["workspace"]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)}}});
     relay.on("upgrade",control.handleUpgrade);
     const {certificate, key} = await ensureLocalhostTls();
@@ -219,7 +219,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       connection.stop(); await connection.closed; control.close();
       await new Promise<void>(resolve => relay.close(() => resolve())); deployment.storage.close(); deployment = undefined;
       const admissionPath = join(root,"owner-admission.json");
-      writeFileSync(admissionPath,JSON.stringify({version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation: policy,
+      writeFileSync(admissionPath,JSON.stringify({version: 1,validation: policy,
         maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 30_000}));
       const mainPath = process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN
         ? resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN)
@@ -359,7 +359,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); membership.close(); namedPeer.close(); browser.destroy();};
     // A link's wire selector is relative to its share.
     expect(peerSync.binding.selectorPaths).toEqual([link ? "a.md" : "docs/a.md"]);
-    expect(nativePeer.binding.selectorPaths).toEqual(["docs"]);
+    // The recipient's accepted binding is the lineage's recorded one, on which the owner registered.
+    expect(ticket.binding.selectorPaths).toEqual(["docs/a.md"]);
+    expect(nativePeer.binding.selectorPaths).toEqual(["docs/a.md"]);
     expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
     const firstApplied = peerSync.nextApplied(peerSignal.signal);
     // The production nextApplied waiter must be armed before the owner changes.

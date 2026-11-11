@@ -155,8 +155,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
 
   const noFolders = useMemo(() => new Set<string>(), []);
   const kinds = useMemo(
-    () => classifyFiles(files, explorer.collectionFolders, explorer.appFolders ?? noFolders),
-    [files, explorer.collectionFolders, explorer.appFolders, noFolders],
+    () => classifyFiles(files, explorer.collectionFolders, explorer.appFolders ?? noFolders, explorer.unclaimedDatasetFolders ?? noFolders),
+    [files, explorer.collectionFolders, explorer.appFolders, explorer.unclaimedDatasetFolders, noFolders],
   );
   const tree = useMemo(() => pageTree(kinds.pages), [kinds.pages]);
   const pages = useMemo(() => pageRows(tree, expanded), [tree, expanded]);

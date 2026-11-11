@@ -29,8 +29,8 @@ const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 it("preserves each save-only restore queue and its incident in kept edits", () => {
   const keptEdits = ["old-1:delivery:0", "old-2:delivery:0"].map(incident => ({path: "note.md", reason: "restore-fenced",
     storedOn: "this-computer", recovery: "paused", saveOnly: true, incident}));
-  expect(parseCliResult("liveKeptEdits", {ok: true, keptEdits})).toEqual({ok: true, keptEdits});
-  expect(() => parseCliResult("liveKeptEdits", {ok: true, keptEdits: [{...keptEdits[0], saveOnly: false}]})).toThrow();
+  expect(parseCliResult("liveKeptEdits", {ok: true, keptEdits, pendingShare: []})).toEqual({ok: true, keptEdits, pendingShare: []});
+  expect(() => parseCliResult("liveKeptEdits", {ok: true, keptEdits: [{...keptEdits[0], saveOnly: false}], pendingShare: []})).toThrow();
 });
 
 it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {

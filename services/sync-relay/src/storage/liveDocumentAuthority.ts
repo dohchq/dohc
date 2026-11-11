@@ -4,7 +4,9 @@ import type { StoredLiveDocumentAuthority } from "./types";
 import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
 import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
 import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
-import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { allowsServiceActivation, readServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import type {
   CurrentLiveBindingRequest,
   LiveDocumentBaselineRegistrationInput,
@@ -50,8 +52,6 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import { createHash } from "node:crypto";
 import {
   type ShareSelector,
-  parseStoredAnyShareSelectorJson,
-  effectiveShareSelector,
   isLiveEditShareSelector,
 } from "../shareFilter";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -74,6 +74,7 @@ import { liveBrowserActor } from "../liveBrowserContext";
 import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment, type LinkEnrollment } from "./linkEnrollment";
 import { agentWriteAuthorityInTransaction } from "./agentConnections";
 import { authorizeLinkShareAction } from "../shareAuthorization";
+import { createAccountlessPathProjection } from "../accountlessPathProjection";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
 export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
@@ -101,11 +102,11 @@ export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest):
       grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
   }
   const actor = ticketRecord(outer.actor,
-    kind.value === "owner" ? ["kind", "userId", "shareId"] : ["kind", "userId", "grantId"]);
+    kind.value === "owner" ? ["kind", "userId"] : ["kind", "userId", "grantId"]);
   if (actor.kind !== kind.value) throw new TypeError("live authority actor changed during capture");
   const userId = parseLiveUpdateIdentifier(actor.userId, "actor user ID");
   return { document, actor: kind.value === "owner"
-    ? { kind: "owner", userId, shareId: parseLiveUpdateIdentifier(actor.shareId, "share ID") }
+    ? { kind: "owner", userId }
     : { kind: "named", userId, grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID") } };
 }
 
@@ -354,11 +355,8 @@ export function automationRecordBinding(storage: StorageContext, workspaceId: st
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw new Error("Automation workspace ownership changed.");
   const document = currentLiveDocument(storage, workspaceId, path);
   if (!document) return null;
-  for (const {share} of storage.listSharesGrantedBy(ownerUserId)) {
-    if (share.workspaceId !== workspaceId) continue;
-    const current = resolveCurrentLiveDocumentBinding(storage, {document, actor: {kind: "owner", userId: ownerUserId, shareId: share.shareId}});
-    if (current.kind === "current") return {binding: current.binding, shareId: share.shareId};
-  }
+  const current = resolveCurrentLiveDocumentBinding(storage, {document, actor: {kind: "owner", userId: ownerUserId}});
+  if (current.kind === "current") return {binding: current.binding};
   throw new Error("The shared file is unavailable. Restore access, then try again.");
 }
 
@@ -379,9 +377,9 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) return { kind: "refused", reason: "host-unavailable" };
-    const link = currentLinkEdit(storage, liveBrowserActor(scope));
+    const actor = liveBrowserActor(scope), link = currentLinkEdit(storage, actor);
     if (!link) return { kind: "refused", reason: "not-authorized" };
-    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), link.share, link.effectiveSelector);
+    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), actor, link.share, link.effectiveSelector);
     if (bound.kind !== "bound") return bound;
     return { kind: "current", binding: bound.binding,
       host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
@@ -729,82 +727,134 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
     stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined)) return {kind: "refused", reason: "host-unavailable"};
-    let share: SyncRelayShareRow;
-    let selector: ShareSelector;
+    let bound: BoundLiveDocument | LiveBindingRefusal;
     let authority: ServerDerivedLiveUpdateAuthority;
     if (actor.kind === "named") {
       const named = authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: actor.userId, grantId: actor.grantId });
       if (!named.ok) return { kind: "refused", reason: named.reason };
-      share = named.share;
-      selector = named.effectiveSelector;
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
         grantId: named.grant.grantId, grantGeneration: named.grant.generation });
+      bound = bindLiveDocument(storage, document, stored, actor, named.share, named.effectiveSelector);
     } else if (actor.kind === "link") {
       const link = currentLinkEdit(storage, actor);
       if (!link?.enrollment.principal || link.enrollment.sessionPrincipalId !== link.enrollment.principal.principalId) {
         return { kind: "refused", reason: "not-authorized" };
       }
-      share = link.share;
-      selector = link.effectiveSelector;
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
         grantId: link.grant.grantId, grantGeneration: link.grant.generation });
+      bound = bindLiveDocument(storage, document, stored, actor, link.share, link.effectiveSelector);
     } else {
-      const owned = ownerLiveEditShare(storage, actor);
-      if (owned.kind === "refused") return owned;
-      ({share, selector} = owned);
+      if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) return { kind: "refused", reason: "not-authorized" };
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
         grantId: null, grantGeneration: null });
+      bound = bindOwnedLiveDocument(storage, document, stored);
     }
-    const bound = bindLiveDocument(storage, document, stored, share, selector);
     if (bound.kind !== "bound") return bound;
-    const { binding } = bound;
+    const { binding, view } = bound;
     const coordinate = { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
       instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
     if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
-    return { kind: "current", binding, authority, host: coordinate };
+    return { kind: "current", binding, view, authority, host: coordinate };
   }
 
-function ownerLiveEditShare(storage: StorageContext, actor: {userId: string; shareId: string}):
-  { kind: "share"; share: SyncRelayShareRow; selector: ShareSelector } | Extract<CurrentLiveBindingResult, { kind: "refused" }> {
-    const share = storage.getShare(actor.shareId);
-    if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) {
-      return { kind: "refused", reason: "not-authorized" };
-    }
-    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
-    const selector = parsed && effectiveShareSelector(parsed, "edit");
-    if (!selector || !isLiveEditShareSelector(selector)) return { kind: "refused", reason: "stale-selector" };
-    return { kind: "share", share, selector };
+type StoredLiveBinding = Pick<StoredLiveDocumentAuthority, "binding" | "current" | "open" | "baselineSequence">;
+type LiveBindingRefusal = Extract<CurrentLiveBindingResult, { kind: "refused" }>;
+
+/**
+ * The one binding every editor of a stored lineage gets, owner, named and link
+ * alike, at `current`'s restore generation: the one its first activation
+ * recorded; before any activation, the one this host's owner adoption
+ * recorded; else the baseline's, which a first record copies. No share is read.
+ * Null when the record names another document or path, or can't be read.
+ */
+export function recordedLiveBinding(storage: StorageContext, document: LiveDocumentKey, current: LiveObjectBinding): LiveObjectBinding | null {
+  const activation = readServiceActivation(storage, document);
+  const adoption = activation ? undefined : adoptedOwnerOrigin(storage, document);
+  if (!activation && adoption === undefined) return current;
+  let recorded: LiveObjectBinding;
+  // A damaged record refuses its own document, not the request or pass that reached it.
+  try { recorded = parseLiveObjectBinding(activation ? JSON.parse(String(activation.binding_json)) : JSON.parse(adoption!).originalBinding); }
+  catch { return null; }
+  if (recorded.workspaceId !== current.workspaceId || recorded.mainVersionId !== current.mainVersionId || recorded.objectId !== current.objectId ||
+    recorded.lineageClaimId !== current.lineageClaimId || recorded.currentPath !== current.currentPath) return null;
+  return parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: current.restoreFenceGeneration });
+}
+
+// This host's owner adoption of the lineage. One made while owners took a
+// share's selector recorded that selector, so every editor keeps it.
+function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey): string | undefined {
+  const namespace = attachedLiveJournalHistoryNamespace(storage), host = readLiveHostControl(storage.db);
+  if (namespace === undefined || host === null) return undefined;
+  const row = storage.db.prepare(`SELECT origin_json FROM ${LIVE_DELIVERY_OWNERS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=?
+    AND object_id=? AND lineage_claim_id=? AND host_id=?`)
+    .get(namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, host.configuredHostId);
+  return row === undefined ? undefined : String(row.origin_json);
+}
+
+/** An editor's binding, and what that editor is shown of it. */
+type BoundLiveDocument = { kind: "bound"; binding: LiveObjectBinding; view: LiveObjectBinding };
+
+function bindOwnedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null):
+  BoundLiveDocument | LiveBindingRefusal {
+    if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
+    return bindRecordedLiveDocument(storage, document, stored);
+  }
+
+// An owner is shown the binding itself.
+function bindRecordedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding):
+  BoundLiveDocument | LiveBindingRefusal {
+    const binding = recordedLiveBinding(storage, document, stored.binding);
+    return binding ? { kind: "bound", binding, view: binding } : { kind: "refused", reason: "stale-document" };
   }
 
 /**
- * The binding the owner's share gives the document before any service
- * activation decides admission: the binding a successor's pending row keeps,
- * which `currentLiveDocumentBinding` then authorizes in full with its access.
+ * The owner's binding before any service activation decides admission: the
+ * binding a successor's pending row keeps, which `currentLiveDocumentBinding`
+ * then authorizes in full with its access.
  */
-export function ownerLiveDocumentBinding(storage: StorageContext, document: LiveDocumentKey, actor: {userId: string; shareId: string}): LiveObjectBinding | null {
-    const owned = ownerLiveEditShare(storage, actor);
-    if (owned.kind === "refused") return null;
-    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), owned.share, owned.selector);
+export function ownerLiveDocumentBinding(storage: StorageContext, document: LiveDocumentKey): LiveObjectBinding | null {
+    const bound = bindOwnedLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document));
     return bound.kind === "bound" ? bound.binding : null;
   }
 
-function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey,
-  stored: Pick<StoredLiveDocumentAuthority, "binding" | "current" | "open" | "baselineSequence"> | null,
-  share: SyncRelayShareRow, selector: ShareSelector):
-  { kind: "bound"; binding: LiveObjectBinding } | Extract<CurrentLiveBindingResult, { kind: "refused" }> {
-    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
-      stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
-      return { kind: "refused", reason: "stale-document" };
-    }
-    if (!currentLiveDocumentMoment(storage, document, stored.binding.currentPath)) {
-      return { kind: "refused", reason: "stale-document" };
-    }
+function liveDocumentIsCurrent(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null): stored is StoredLiveBinding {
+    return !!stored && stored.current && stored.open && stored.binding.lineageClaimId === document.lineageClaimId &&
+      stored.baselineSequence > storage.getEpochLogFloor(document.workspaceId) &&
+      !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath);
+  }
+
+type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner" }>;
+
+/**
+ * A recipient's share decides whether the recipient is admitted and what it
+ * is shown. Its accepted events carry the lineage's recorded binding, as the
+ * owner's do. A share whose paths can't form that view refuses here, before a
+ * ticket is minted or used.
+ */
+function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null,
+  actor: LiveRecipient, share: SyncRelayShareRow, selector: ShareSelector):
+  BoundLiveDocument | LiveBindingRefusal {
+    if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
     if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
     if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
       return { kind: "refused", reason: "stale-selector" };
     }
-    let binding: LiveObjectBinding;
-    try { binding = parseLiveObjectBinding({ ...stored.binding, selectorPaths: selector.paths }); }
-    catch { return { kind: "refused", reason: "stale-selector" }; }
-    return { kind: "bound", binding };
+    const bound = bindRecordedLiveDocument(storage, document, stored);
+    if (bound.kind !== "bound") return bound;
+    const view = liveRecipientView(bound.binding, actor, selector.paths);
+    return view ? { ...bound, view } : { kind: "refused", reason: "stale-selector" };
+}
+
+/**
+ * What a recipient's share shows of `binding`: the share's own paths, under a
+ * workspace ID naming the grant. A link sees paths relative to its share.
+ * Null when those paths can't form a binding.
+ */
+function liveRecipientView(binding: LiveObjectBinding, actor: LiveRecipient, paths: readonly string[]): LiveObjectBinding | null {
+  try {
+    if (actor.kind === "named") return parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}`, selectorPaths: paths });
+    const projection = createAccountlessPathProjection({ paths: [...paths], versionId: null, access: "edit" });
+    return parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
+      currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths });
+  } catch { return null; }
 }

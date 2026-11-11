@@ -13,6 +13,7 @@ export {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isVolumeSharesNewFilesRefusal,
+  isDocumentTooDenseRefusal,
   isIdempotencyKeyReuseRefusal,
   isOwnerOutboxFrozenRefusal,
   isYdocUpdateAdmissionRefusal,

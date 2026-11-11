@@ -38,6 +38,8 @@ import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
 import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerRestoreRoutes.js'
 import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
 import {preparedStop} from '../../../services/sync-relay/src/liveTickets.test-helper.js'
+import {registered,cleanupLiveDeliveryFixtures} from './liveCommittedDeliveryTestSupport.js'
+import {liveDeliveryBookkeepingBytes} from './liveDeliveryQuotaTestSupport.js'
 import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -48,7 +50,7 @@ const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJ
 // The pool's check, run in this process.
 const validateActivation:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,policy)
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
-const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
+const actor={kind:'owner' as const,userId:'owner'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
@@ -89,7 +91,7 @@ function fixture(note='Original',large=false,clientID?:number){
   raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)").run(JSON.stringify({paths:['docs'],versionId:null}))
   raw.exec('COMMIT')
   storage.provisionLiveHostControl({...host,updatedAtMs:1,guard(){}})
-  const prepare=(readBounds=bounds,validate=validateActivation)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validate,bounds:readBounds})
+  const prepare=(readBounds=bounds,validate=validateActivation)=>store.prepare({capture,host,registeredAtMs:3,guard(){},validate,bounds:readBounds})
   return {storage,raw,store,history,capture,document,prepare,path,close(){raw.close();storage.close();rmSync(root,{recursive:true,force:true})}}
 }
 it('retains the original lineage and edited ordinary cut, closing ordinary authority until activation completes',async()=>{
@@ -641,7 +643,8 @@ async function ownerCapture(f:ReturnType<typeof fixture>){
     localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
   return {capture,delivery,acknowledge}
 }
-it.each(['selector','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
+// The owner's binding takes no share's selector; a restore generation is what moves it.
+it.each(['generation','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
   const f=fixture();try{
     await f.prepare()
     const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
@@ -650,10 +653,37 @@ it.each(['selector','host'] as const)('revalidates a private pending activation 
     expect(captured.assertCurrent).not.toThrow()
     const wrong=f.storage.createLiveCommittedDeliveryStore(f.history,{activationId:'wrong-activation'})
     expect(()=>wrong.captureOwnerBinding({host,document:f.document,actor})).toThrow()
-    if(change==='selector')f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
-      .run(JSON.stringify({paths:['other'],versionId:null}))
+    if(change==='generation')f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
     else f.raw.exec("UPDATE sync_relay_session_host_control SET registered_connection_id='different-connection'")
     expect(captured.assertCurrent).toThrow()
+  }finally{f.close()}
+})
+// Proves: a lineage activated while owners still took a share's selector
+// recorded it, up to 100 selectors of the maximum length. Its owner adopts
+// under that recorded binding, and the adoption's origin is charged from its
+// reservation, so usage doesn't move. A later restore generation changes the
+// binding, and the capture no longer holds.
+it('transfers owner metadata quota for a recorded binding of 100 maximum-length selectors and detects a changed binding',async()=>{
+  const f=fixture();try{
+    await f.prepare()
+    // In a binding's canonical order, by UTF-8 bytes, which its pending activation compares exactly.
+    const selectors=['docs',...Array.from({length:99},(_,index)=>`${index}`.padEnd(1024,'x'))]
+      .sort((left,right)=>Buffer.compare(Buffer.from(left),Buffer.from(right)))
+    const recorded=JSON.parse(String(f.raw.prepare('SELECT binding_json FROM sync_relay_service_activations').get()!.binding_json))
+    f.raw.prepare('UPDATE sync_relay_service_activations SET binding_json=?').run(JSON.stringify({...recorded,selectorPaths:selectors}))
+    const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+    const capture=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+      expectedLocalSequence:f.capture.source.nativeHeadSequence,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+    expect(capture.binding.selectorPaths).toEqual(selectors)
+    const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)-liveDeliveryBookkeepingBytes(f.raw)
+    const before=usage()
+    delivery.acknowledgeOwnerAdoption(capture,{adoptionId:f.capture.activationId,localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
+    expect(usage()).toBe(before)
+    const origin=String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json)
+    expect(JSON.parse(origin).originalBinding).toEqual(capture.binding)
+    expect(Buffer.byteLength(origin)).toBeLessThan(Buffer.byteLength(JSON.stringify(capture.binding))+4096)
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
+    expect(()=>capture.assertCurrent()).toThrow()
   }finally{f.close()}
 })
 it('revalidates the frozen activation source before acknowledging a captured owner cut',async()=>{
@@ -795,7 +825,7 @@ it('rolls back the full activation when its retained-state quota charge fails',a
 type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={},config:Partial<ServiceActivationConfig>={}){
-  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
+  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
@@ -1555,7 +1585,7 @@ async function retirePredecessor(f:ReturnType<typeof fixture>){
 const successor=(f:ReturnType<typeof fixture>,source={})=>
   ({...f.capture,activationId:SUCCESSOR,source:{...f.capture.source,predecessorActivationId:f.capture.activationId,...source}})
 const prepareSuccessor=(f:ReturnType<typeof fixture>,capture:NativeOwnerActivation=successor(f))=>
-  f.store.prepare({capture,host,shareId:'share',registeredAtMs:21,guard(){},validate:validateActivation,bounds})
+  f.store.prepare({capture,host,registeredAtMs:21,guard(){},validate:validateActivation,bounds})
 const activations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT activation_id,predecessor_activation_id FROM sync_relay_service_activations ORDER BY rowid').all()
 
 it("prepares a successor of the lineage's retired tail, closed to ordinary admission and reserved for its own owner row",async()=>{
@@ -1588,10 +1618,10 @@ it('refuses a successor beside a current activation or a sibling successor',asyn
   const f=fixture();try{
     await retirePredecessor(f)
     const columns=`relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,
-      state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
+      state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
     // A successor that already followed the tail, and retired before it, is the tail now.
     f.raw.exec(`INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${'c'.repeat(64)}',workspace_id,main_version_id,
-      object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,share_id,completion_json,accounted_bytes,10,retire_restore_generation,
+      object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,completion_json,accounted_bytes,10,retire_restore_generation,
       retire_accepted_cursor,10,retired_boundary_json FROM sync_relay_service_activations`)
     await expect(prepareSuccessor(f)).rejects.toThrow('names another predecessor')
     f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${'c'.repeat(64)}'`)
@@ -1602,7 +1632,7 @@ it('refuses a successor beside a current activation or a sibling successor',asyn
       SELECT workspace_id,main_version_id,object_id,'${other}',NULL,current_path,baseline_moment_relay_seq,baseline_projected_sha256,
         baseline_projected_byte_length,'${other}',baseline_bytes,'retired','closed',restore_fence_generation,1,1 FROM sync_relay_live_documents;
       INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${other}',workspace_id,main_version_id,object_id,'${other}',
-        NULL,source_json,binding_json,state_digest,x'0000',owner_user_id,share_id,NULL,accounted_bytes,NULL,NULL,NULL,NULL,NULL FROM sync_relay_service_activations`)
+        NULL,source_json,binding_json,state_digest,x'0000',owner_user_id,NULL,accounted_bytes,NULL,NULL,NULL,NULL,NULL FROM sync_relay_service_activations`)
     await expect(prepareSuccessor(f)).rejects.toThrow('already has a current activation')
     f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${other}';
       DELETE FROM sync_relay_live_documents WHERE lineage_claim_id='${other}'`)
@@ -1812,7 +1842,7 @@ it("adopts a successor on another host than its predecessor's, funded only there
     const ledger=unaccounted(f)
     const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
     expect(unaccounted(f)).toBe(ledger)
-    await f.store.prepare({capture:successor(f),host:other,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:other,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(adoptionReservations(f)).toEqual([{host_id:'other'}])
     const {access,delivery}=adoptSuccessorOn(f,other,boundary)
     const terminal=boundary.terminalReceipt.journalCursor,cursors=journalCursors(f)
@@ -1856,7 +1886,7 @@ it("funds a lineage only on the host its successor uses, and again on a known ho
     // Room for the successor's activation and its adoption on B alone.
     await retirePredecessor(sized);const free=usageOf(sized);await prepareSuccessor(sized)
     optionsOf(f).workspaceQuotaBytes=usageOf(f)+usageOf(sized)-free
-    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:b,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(adoptionReservations(f)).toEqual([{host_id:'other-b'}])
     expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
     expect(unaccounted(f)).toBe(ledger)
@@ -1895,7 +1925,7 @@ it("resumes and registers a successor prepared on a host a transition funded aft
     const {edit,boundary}=await retirePredecessor(f)
     const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
     const b=transitionHost(f,host,'device','other-b')
-    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:b,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
     expect(f.store.resume({document:f.document,activationId:SUCCESSOR,host:b,registeredAtMs:51,guard(){}})).toMatchObject({completed:false})
     expect(f.storage.registerLiveHost({...b,updatedAtMs:52,guard(){}}).ok).toBe(true)
@@ -2486,15 +2516,17 @@ const V1_ACTIVATIONS=`CREATE TABLE sync_relay_service_activations (
   FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
     REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
 ) STRICT`
-// Rebuilds the fixture's v2 activation storage as the v1 layout, keeping its rows.
+// Rebuilds the fixture's activation storage as the v1 layout, keeping its rows. v1 named a share on each activation.
 function downgradeActivations(f:ReturnType<typeof fixture>,sql=V1_ACTIVATIONS){
-  const columns='relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes'
+  const columns='relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes'
   f.raw.exec(`BEGIN;DROP TABLE sync_relay_live_delivery_owner_history;
-    ALTER TABLE sync_relay_service_activations RENAME TO v2_activations;${sql};
-    INSERT INTO sync_relay_service_activations(${columns}) SELECT ${columns} FROM v2_activations;DROP TABLE v2_activations;
-    DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v2';
+    ALTER TABLE sync_relay_service_activations RENAME TO current_activations;${sql};
+    INSERT INTO sync_relay_service_activations(${columns},share_id) SELECT ${columns},'share' FROM current_activations;DROP TABLE current_activations;
+    DELETE FROM sync_relay_migrations WHERE migration_id IN ('service-activation-v2','service-activation-v3');
     INSERT OR IGNORE INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES ('service-activation-v1',0);COMMIT`)
 }
+const activationMarks=(db:{prepare(sql:string):{all():unknown[]}})=>
+  db.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-activation-v%' ORDER BY migration_id").all()
 it('migrates v1 activations as current ones with no obligation, and refuses damaged v1 storage',async()=>{
   const f=fixture(),damaged=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
   try{
@@ -2506,8 +2538,7 @@ it('migrates v1 activations as current ones with no obligation, and refuses dama
     const db=(reopened as StorageContext).db
     expect(db.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual(before.map(row=>({...row,predecessor_activation_id:null,
       retire_requested_at_ms:null,retire_restore_generation:null,retire_accepted_cursor:null,retired_at_ms:null,retired_boundary_json:null})))
-    expect(db.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-activation-v%' ORDER BY migration_id").all())
-      .toEqual([{migration_id:'service-activation-v1'},{migration_id:'service-activation-v2'}])
+    expect(activationMarks(db)).toEqual([{migration_id:'service-activation-v1'},{migration_id:'service-activation-v2'},{migration_id:'service-activation-v3'}])
     expect(db.prepare('SELECT * FROM sync_relay_workspace_usage').all()).toEqual(usage)
     expect(retirement(reopened)).toBeNull()
     expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
@@ -2516,4 +2547,121 @@ it('migrates v1 activations as current ones with no obligation, and refuses dama
     downgradeActivations(damaged,V1_ACTIVATIONS.replace(' STRICT',''))
     expect(()=>openSyncRelayStorage(damaged.path)).toThrow('Service activation storage is damaged.')
   }finally{reopened?.close();f.close();damaged.close()}
+})
+
+// The v2 activation layout, which named the share each owner activated through.
+const V2_ACTIVATIONS=`CREATE TABLE sync_relay_service_activations (
+  relay_database_namespace TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL CHECK (main_version_id='main'),
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  predecessor_activation_id TEXT,
+  source_json TEXT NOT NULL CHECK (json_valid(source_json)),
+  binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+  state_digest TEXT NOT NULL CHECK (length(state_digest)=64 AND state_digest NOT GLOB '*[^0-9a-f]*'),
+  state_bytes BLOB CHECK (state_bytes IS NULL OR length(state_bytes) BETWEEN 2 AND 20971520),
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  completion_json TEXT CHECK (completion_json IS NULL OR json_valid(completion_json)),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  retire_requested_at_ms INTEGER CHECK (retire_requested_at_ms IS NULL OR retire_requested_at_ms BETWEEN 0 AND 9007199254740991),
+  retire_restore_generation INTEGER CHECK (retire_restore_generation IS NULL OR retire_restore_generation BETWEEN 0 AND 9007199254740991),
+  retire_accepted_cursor INTEGER CHECK (retire_accepted_cursor IS NULL OR retire_accepted_cursor BETWEEN 0 AND 9007199254740991),
+  retired_at_ms INTEGER CHECK (retired_at_ms IS NULL OR retired_at_ms BETWEEN 0 AND 9007199254740991),
+  retired_boundary_json TEXT CHECK (retired_boundary_json IS NULL OR json_valid(retired_boundary_json)),
+  CHECK ((retire_requested_at_ms IS NULL)=(retire_restore_generation IS NULL) AND (retire_requested_at_ms IS NULL)=(retire_accepted_cursor IS NULL)),
+  CHECK ((retired_at_ms IS NULL)=(retired_boundary_json IS NULL) AND (retired_at_ms IS NULL)=(state_bytes IS NOT NULL)),
+  CHECK (retired_at_ms IS NULL OR (retire_requested_at_ms IS NOT NULL AND retired_at_ms>=retire_requested_at_ms)),
+  CHECK (predecessor_activation_id IS NULL OR predecessor_activation_id<>activation_id),
+  PRIMARY KEY (relay_database_namespace,activation_id),
+  FOREIGN KEY (relay_database_namespace,predecessor_activation_id) REFERENCES sync_relay_service_activations(relay_database_namespace,activation_id),
+  FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
+    REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
+) STRICT`
+// Rebuilds a store's activations and archived history in the v2 layout, naming the fixture's share on every activation.
+// The v2 indexes and history table are the current ones.
+function downgradeToV2(raw:InstanceType<typeof DatabaseSync>,sql=V2_ACTIVATIONS){
+  const columns=raw.prepare("SELECT name FROM pragma_table_info('sync_relay_service_activations') ORDER BY cid").all().map(row=>String(row.name)).join(',')
+  const kept=raw.prepare(`SELECT sql FROM sqlite_schema WHERE name='sync_relay_live_delivery_owner_history'
+    OR (type='index' AND tbl_name='sync_relay_service_activations' AND sql IS NOT NULL) ORDER BY type='table'`).all().map(row=>`${String(row.sql)};`).join('')
+  raw.exec(`BEGIN;PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE activations_v3 AS SELECT * FROM sync_relay_service_activations;
+    CREATE TEMP TABLE history_v3 AS SELECT * FROM sync_relay_live_delivery_owner_history;
+    DROP TABLE sync_relay_live_delivery_owner_history;DROP TABLE sync_relay_service_activations;${sql};${kept}
+    INSERT INTO sync_relay_service_activations(${columns},share_id) SELECT ${columns},'share' FROM temp.activations_v3;
+    INSERT INTO sync_relay_live_delivery_owner_history SELECT * FROM temp.history_v3;
+    DROP TABLE temp.activations_v3;DROP TABLE temp.history_v3;
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v3';COMMIT`)
+}
+
+// Proves: the v3 rebuild drops the share each v2 activation named and keeps
+// the rest of the store: retired predecessors with their archived history,
+// completed activations, the pending successor, every chain link and every
+// charge. Initialization accepts the rebuilt store, again on the next open,
+// and the pending successor's access still serves the owner its lineage's
+// binding. A v2 table that is not the shipped layout is refused.
+it('migrates v2 activations and their archived history without the share each named, and refuses damaged v2 storage',async()=>{
+  const f=fixture(),damaged=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    const {boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    stopDocument(f,20);resumeDocument(f,20)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(await prepareSuccessor(f,{...f.capture,activationId:NEXT,source:{...f.capture.source,predecessorActivationId:SUCCESSOR}}))
+      .toEqual({document:f.document,replayed:false,completed:false})
+    const rows=(db:{prepare(sql:string):{all():Record<string,unknown>[]}})=>({
+      activations:db.prepare('SELECT * FROM sync_relay_service_activations ORDER BY activation_id').all(),
+      history:db.prepare('SELECT * FROM sync_relay_live_delivery_owner_history ORDER BY activation_id').all(),
+      usage:db.prepare('SELECT * FROM sync_relay_workspace_usage ORDER BY workspace_id').all()})
+    const before=rows(f.raw)
+    expect(before.activations.map(row=>[row.activation_id,row.predecessor_activation_id,row.retired_at_ms!==null,row.completion_json!==null]))
+      .toEqual([[f.capture.activationId,null,true,true],[SUCCESSOR,f.capture.activationId,true,true],[NEXT,SUCCESSOR,false,false]])
+    expect(before.history.map(row=>row.activation_id)).toEqual([f.capture.activationId,SUCCESSOR])
+    downgradeToV2(f.raw)
+    expect(f.raw.prepare('SELECT DISTINCT share_id FROM sync_relay_service_activations').all()).toEqual([{share_id:'share'}])
+    expect(activationMarks(f.raw)).toEqual([{migration_id:'service-activation-v2'}])
+    reopened=openSyncRelayStorage(f.path)
+    // The migrating connection reads its own schema; the test's raw one may still hold the old one.
+    const db=(reopened as StorageContext).db
+    expect(rows(db)).toEqual(before)
+    expect(activationMarks(db)).toEqual([{migration_id:'service-activation-v2'},{migration_id:'service-activation-v3'}])
+    const next=JSON.parse(String(before.activations[2]!.binding_json))
+    expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('refused')
+    const access=reopened.createServiceActivationStore(f.history).pending(f.document,host)
+    expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toMatchObject({kind:'current',binding:next})
+    reopened.close();reopened=openSyncRelayStorage(f.path)
+    expect(rows((reopened as StorageContext).db)).toEqual(before)
+    await damaged.prepare()
+    downgradeToV2(damaged.raw,V2_ACTIVATIONS.replace(' STRICT',''))
+    expect(()=>openSyncRelayStorage(damaged.path)).toThrow('Service activation storage is damaged.')
+  }finally{reopened?.close();f.close();damaged.close()}
+})
+
+// Proves: a lineage a folder share activated before the upgrade keeps that
+// share's selector as its recorded owner scope. After the upgrade no share is
+// consulted: the share it named is gone and no other covers the note, and the
+// owner is served its `["notes"]` binding and the owner's draft delivers. A
+// draft bound to the note's path alone is not that binding, and is refused.
+it('serves a folder-share lineage its recorded binding after the upgrade, consulting no share',()=>{
+  const f=registered({currentPath:'notes/a.md'});let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    const document=f.input.evidence.document,recorded={...document,currentPath:'notes/a.md',selectorPaths:['notes'],restoreFenceGeneration:1}
+    downgradeToV2(f.raw)
+    f.raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('history',?,?,'main',?,?,'{}',?,?,x'0000','owner','notes-share','{}',1)`)
+      .run(`ordinary-activation-${'f'.repeat(64)}`,document.workspaceId,document.objectId,document.lineageClaimId,JSON.stringify(recorded),document.lineageClaimId)
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_shares WHERE share_id='notes-share'").get()).toBeUndefined()
+    reopened=openSyncRelayStorage(f.path)
+    expect((reopened as StorageContext).db.prepare('SELECT binding_json FROM sync_relay_service_activations').all()).toEqual([{binding_json:JSON.stringify(recorded)}])
+    reopened.close();reopened=undefined
+    f.storage.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}))
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document,actor:f.actor})).toMatchObject({kind:'current',binding:recorded})
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('title','Draft'),'draft')).result.kind).toBe('accepted')
+    const narrowed=f.capture(f.update('title','Narrowed'),'narrowed')
+    expect(f.storage.commitLiveUpdateJournal({...narrowed,metadata:{...narrowed.metadata,binding:{...recorded,selectorPaths:['notes/a.md']}}}).result)
+      .toEqual({kind:'refused',reason:'stale-binding'})
+  }finally{reopened?.close();f.close();cleanupLiveDeliveryFixtures()}
 })

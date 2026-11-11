@@ -306,7 +306,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
     }));
     for (const peer of peers) for (let index = 0; index < peers.length; index++) await browserExpect(peer.editor).toContainText(`Public peer ${index}.`);
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId}});
+    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
     if (current.kind !== "current") throw new Error("Current native binding missing.");
     const native = await active.captureNative(current.binding);
     const journal = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
@@ -464,7 +464,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
     }));
     for (const peer of workloadBrowsers) for (let index = 0; index < workloadBrowsers.length; index++) await browserExpect(peer.editor).toContainText(`Workload peer ${index}.`);
-    const browserBinding = storage.resolveCurrentLiveDocumentBinding({document: browserWorkloadDocument, actor: {kind: "owner", userId: ownerUser.id, shareId: browserWorkloadLink.shareId}});
+    const browserBinding = storage.resolveCurrentLiveDocumentBinding({document: browserWorkloadDocument, actor: {kind: "owner", userId: ownerUser.id}});
     if (browserBinding.kind !== "current") throw new Error("Browser workload native binding missing.");
     const browserNative = await active.captureNative(browserBinding.binding), browserJournal = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
     try {
@@ -492,7 +492,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await socket.sync(); expect(hash(Buffer.from(yDocToMarkdown(socket.doc)))).toBe(hash(workload.markdown)); workloadWires.push(socket);
     }
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
-    const workloadCurrent = storage.resolveCurrentLiveDocumentBinding({document: workloadDocument, actor: {kind: "owner", userId: ownerUser.id, shareId: workloadLink.shareId}});
+    const workloadCurrent = storage.resolveCurrentLiveDocumentBinding({document: workloadDocument, actor: {kind: "owner", userId: ownerUser.id}});
     if (workloadCurrent.kind !== "current") throw new Error("Workload native binding missing.");
     const workloadNative = await active.captureNative(workloadCurrent.binding), workloadRounds = [];
     for (const [index, round] of workload.rounds.entries()) {

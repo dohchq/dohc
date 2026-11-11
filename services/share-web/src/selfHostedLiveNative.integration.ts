@@ -413,7 +413,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const acceptedDoc = new Y.Doc(); Y.applyUpdate(acceptedDoc, acceptedDraft.initialUpdate);
     expect(yDocToMarkdown(acceptedDoc)).toBe(yDocToMarkdown(provider.doc)); acceptedDoc.destroy();
     results.ownerDelivery = {restartPreservedDraft: true, concurrentOwnerAndNamedEditsMerged: true, idleOwnerPulledRecipientEdit: true, finalCursor: finalAck.journalCursor};
-    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
+    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
     if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
     const capture = await active!.captureNative(binding.binding);
     expect(await capture.client.readLiveApplicationAck({id: capture.nextRequestId(), workspace: capture.workspace, registrationId: capture.registrationId, deadlineMs: capture.deadlineMs},
@@ -531,7 +531,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     await publication(agentSettlement, [human, agent]);
 
     // A trusted automation the owner runs, through the production owner capture.
-    const automationHost = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
+    const automationHost = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, storage,
       native: await active!.captureNative(binding.binding), bounds: profile.namedLive.host, validate});
     const {automationAck, automationMarkdown} = await (async () => {
       const automationDoc = new Y.Doc();
@@ -814,9 +814,9 @@ async function openSelfHostProof(name: string) {
         host = captureNamedLiveFrameHost({ticket, actor: liveBrowserActor(viewer), storage, native: await live().captureNative(ticket.binding),
           bounds: profile.namedLive.host, validate});
       } else {
-        const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
+        const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
         if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
-        host = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, shareId: "share", storage,
+        host = captureOwnerLiveFrameHost({authenticatedUserId: ownerUser.id, storage,
           native: await live().captureNative(binding.binding), bounds: profile.namedLive.host, validate});
       }
       const doc = new Y.Doc();
@@ -885,7 +885,7 @@ async function openSelfHostProof(name: string) {
         FROM sync_relay_service_activations WHERE workspace_id='workspace' AND object_id=? ORDER BY rowid`).all(object)
         .map(row => ({...row, boundary: row.boundary === null ? null : JSON.parse(String(row.boundary))})),
       /** How the host lists a ready document: its current binding, through the activation that holds it. */
-      ready: (path: string) => ({path, objectId: activation(path)!.source.objectId, status: "ready", document: {binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace, shareId: "share"}}),
+      ready: (path: string) => ({path, objectId: activation(path)!.source.objectId, status: "ready", document: {binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace}}),
       /** A document's rows in the relay's live journal. */
       journal: (object = objectId) => relayRead.prepare(`SELECT journal_cursor,delivery_id,update_digest,principal_kind,grant_id
         FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? ORDER BY journal_cursor`).all(object),
@@ -1196,7 +1196,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   harness.unpublished = true;
   const accepted = await proof.liveEdit("beforeStop", "live");
   expect((await proof.route("DELETE", {path: "docs/a.md", retire: true})).body).toEqual({ok: true, path: "docs/a.md", objectId: proof.objectId, status: "retired",
-    acceptedCursor: accepted.journalCursor});
+    acceptedCursor: accepted.journalCursor, changed: true});
   const retiring = {activation_id: P, predecessor_activation_id: null, state_digest: predecessor.source.fullStateDigest, completed: 1,
     retire_accepted_cursor: accepted.journalCursor, retired: 0, boundary: null, stateDropped: 0};
   // Retirement settled the edit and its replica confirmed the document left. The engine still will not release it:
@@ -1420,7 +1420,7 @@ it("retires a paused document's activation at once, and Resume starts a successo
 
   // Resume: one capture starts a successor of the retired activation, which holds the edit. Nothing holds the document.
   const captured = attempts();
-  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing"}});
+  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
   await vi.waitFor(async () => {
     expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]);
     expect(proof.activations()).toEqual([retired, expect.objectContaining({predecessor_activation_id: P, completed: 1})]);

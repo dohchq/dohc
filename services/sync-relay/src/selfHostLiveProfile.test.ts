@@ -19,7 +19,7 @@ it("uses mutually compatible browser, relay, native and owner limits", () => {
   expect(editor.provider.frames.receive.maxFrameBytes).toBeLessThanOrEqual(gateway.maxFrameBytes);
   expect(gateway.maxFrameBytes).toBeLessThanOrEqual(relay.frames.receive.maxFrameBytes);
   expect(parseNativeLiveSyncConfig(profile.service.sync, profile.service.ingress.aggregateBytes)).toEqual(profile.service.sync);
-  expect(parseServiceActivationConfig({...profile.service.activation, targets: [{workspaceId: "workspace", shareId: "share", path: "doc.md"}]})).toMatchObject({maxCaptureBytes: profile.service.activation.maxCaptureBytes});
+  expect(parseServiceActivationConfig({...profile.service.activation, targets: [{workspaceId: "workspace", path: "doc.md"}]})).toMatchObject({maxCaptureBytes: profile.service.activation.maxCaptureBytes});
   expect(profile.service.activation.maxCaptureBytes).toBeLessThanOrEqual(profile.nativeIngress.sync.policy.maxOutputBytes);
   // The supported server offers the owner's stop-access restore.
   expect(parseLiveRestoreConfig(profile.service.restore)).toMatchObject({maxBytes: profile.service.restore.maxBytes, maxEvents: profile.service.restore.maxEvents});

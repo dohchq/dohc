@@ -456,10 +456,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
     case "liveKeptEdits": {
-      const { keptEdits } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
-      if (keptEdits.length === 0) return "No document has kept edits.";
-      return keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
-        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")).join("\n");
+      const { keptEdits, pendingShare } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
+      const pending = pendingShare.map(path => `${lineSafe(path)} · pending share: the file holds older text`);
+      if (keptEdits.length === 0 && pending.length === 0) return "No document has kept edits.";
+      return [...keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
+        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")), ...pending].join("\n");
     }
     case "saveRecoveryCopy": {
       const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;
@@ -473,6 +474,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
     case "liveDocuments":
       return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
+    case "liveResume": {
+      const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
+      return resumed.already ? `${lineSafe(resumed.path)} was already live.` : `Resuming live editing for ${lineSafe(resumed.path)}`;
+    }
+    case "liveStop": {
+      const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
+      const path = lineSafe(stopped.path);
+      if (stopped.already) return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
+      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept" ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
+        : `Stopped live editing for ${path}`;
+    }
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`

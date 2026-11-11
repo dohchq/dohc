@@ -7,7 +7,7 @@ import { deferred } from "../testing/deferred";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
 vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
+  BoardView: (props:BoardViewProps)=><div data-testid="board" data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
   CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
@@ -39,6 +39,14 @@ it("queries every board group beyond the first table page and pages each indepen
   await screen.findByText("Later task");
   expect(invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).after!==undefined)).toBe(true);
   expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("names a board's fields as the Collection does, not by their ids",async()=>{
+  setup(async request=>{
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{group,rows:group.value==="Todo"?[{id:1,version:1,values:{name:"First task",status:"Todo"}}]:[],nextCursor:null}};
+  });
+  await screen.findByText("First task");
+  expect(screen.getByTestId("board").getAttribute("data-field-names")).toBe("Name|Status|Date");
 });
 it("shows a board's failed read in the page under the table's Notices row, and drops both when the board loads",async()=>{
   const waiting=new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.");

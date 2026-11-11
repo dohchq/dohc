@@ -58,6 +58,7 @@ import {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isVolumeSharesNewFilesRefusal,
+  isDocumentTooDenseRefusal,
   isYdocUpdateAdmissionRefusal,
   ydocUpdateDependsOn,
   isTransientEngineRefusal,
@@ -1011,6 +1012,11 @@ function isFileLockedCause(error: unknown): boolean {
 // write this one.
 export function isVolumeSharesNewFilesCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isVolumeSharesNewFilesRefusal);
+}
+
+// The engine refused to save the note because it is too dense to check.
+export function isDocumentTooDenseCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isDocumentTooDenseRefusal);
 }
 
 // Blocked by something that clears on its own — a program outside dohc

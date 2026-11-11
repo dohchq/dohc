@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { EngineYDocSaveStateEvent, SaveFailureReason } from "../../ipc/bridgeContract";
 import {
+  DOCUMENT_TOO_DENSE_WORDS,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
   isVolumeSharesNewFiles,
@@ -8,6 +9,7 @@ import {
   VOLUME_SHARES_NEW_FILES_WORDS,
 } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
+import { copyNoteAsMarkdown } from "../DocumentMenu";
 import type { ErrorDetailField } from "./copyDetails";
 import type { ShellError, ShellErrorKind } from "./useShellError";
 
@@ -32,7 +34,7 @@ const REPLACES_FAILURE = new Set<EngineYDocSaveStateEvent["state"]["kind"]>([
 ]);
 
 // The reason that tells a person the most, when writers give different ones.
-const REASON_ORDER: readonly SaveFailureReason[] = ["deleted", "privacy-denied", "volume-shares-new-files", "read-only"];
+const REASON_ORDER: readonly SaveFailureReason[] = ["deleted", "document-too-dense", "privacy-denied", "volume-shares-new-files", "read-only"];
 
 // What a person reads for each reason, and the cause Copy details carries.
 function reasonWords(reason: SaveFailureReason): { message: string; cause: string | null } {
@@ -45,6 +47,8 @@ function reasonWords(reason: SaveFailureReason): { message: string; cause: strin
       return { message: VOLUME_SHARES_NEW_FILES_WORDS, cause: "The disk adds sharing permissions to new files." };
     case "read-only":
       return { message: "The file is read-only. Make it writable, then try again.", cause: "The file is read-only." };
+    case "document-too-dense":
+      return { message: DOCUMENT_TOO_DENSE_WORDS, cause: "document-too-dense" };
     case null:
       return { message: "dohc couldn't write the file.", cause: null };
   }
@@ -179,10 +183,18 @@ export function useDocumentSaveNotices(input: {
         identity: identity(path),
         target: { to: "file", path },
         // The engine refuses every save over a deleted file until the file is
-        // back, and only the person chooses to bring it back.
+        // back, and only the person chooses to bring it back. A note too
+        // dense to check never gets lighter, so asking again cannot save it:
+        // its row copies the note's text, read from the open editor without
+        // the engine's check, for the person to move into new notes.
         ...(reason === "deleted"
           ? { retry: null, action: { label: "Save it again", run: retry(true), ends: true } }
-          : { retry: retry(false) }),
+          : reason === "document-too-dense"
+            ? { retry: null, action: { label: "Copy as Markdown", run: () => copyNoteAsMarkdown(
+              { workspaceId: owner, path, name: path.slice(path.lastIndexOf("/") + 1), open: () => latest.current.open(path) },
+              { report: latest.current.report, clear: latest.current.clear },
+            ), reads: true } }
+            : { retry: retry(false) }),
         onDismiss: () => {
           failed.reported = false;
         },

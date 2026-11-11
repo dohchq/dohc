@@ -8,7 +8,7 @@ const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "obj
 const frames = {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const config = {version: 1, nativeConfigPath: resolve("test", "native-owner.json"), nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2}, relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 2500,
-  documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};
+  documents: [{binding, relayDatabaseNamespace: "namespace"}]};
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 afterEach(() => vi.useRealTimers());
 

@@ -1,6 +1,6 @@
 import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
-import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
+import { DOCUMENT_TOO_DENSE_WORDS, isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
@@ -76,6 +76,7 @@ import {
   isYDocSessionUnreleasedError,
   isConflictStaleTargetCause,
   isVolumeSharesNewFilesCause,
+  isDocumentTooDenseCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
   type WorkspaceEngineYDocProviderSession,
@@ -137,6 +138,9 @@ interface EngineYDocSessionIpcOptions {
   ) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
+  // An edit landed, or an editor's note started or stopped waiting for the
+  // server, so the notes whose files trail their text may have changed.
+  onPendingShareMayChange?: (workspaceId: string) => void;
   sharedCaptureFor?: (workspace: EngineYDocWorkspace) => Promise<EngineYDocSessionCapture | null>;
   // A shared note's current text when no editor holds it, edits still on
   // their way to the server included. Null for a note that is not shared.
@@ -156,8 +160,10 @@ interface EngineYDocSessionIpcOptions {
 // permissions to new files; otherwise the file is checked. The engine refuses
 // a save over a file that is gone, so a missing file with that refusal was
 // deleted outside dohc. A shared view's file is its host's, so only a local
-// file says so. A file that cannot be checked names no reason.
+// file says so. A file that cannot be checked names no reason. A note too
+// dense to check is refused whatever the file allows.
 function saveFailureReason(absolutePath: string, failure: unknown, shared: boolean): SaveFailureReason {
+  if (isDocumentTooDenseCause(failure)) return "document-too-dense";
   if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
@@ -487,6 +493,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #sharedCaptureFor: EngineYDocSessionIpcOptions["sharedCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #ownerDraftState: EngineYDocSessionIpcOptions["ownerDraftState"];
+  readonly #onPendingShareMayChange: EngineYDocSessionIpcOptions["onPendingShareMayChange"];
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
     "resolveDocumentPath"
   ];
@@ -511,6 +518,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#onPendingShareMayChange = options.onPendingShareMayChange;
     this.#sharedCaptureFor = options.sharedCaptureFor;
     this.#ownerDraftState = options.ownerDraftState;
     this.#resolveDocumentPath = options.resolveDocumentPath;
@@ -721,6 +729,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const saveSeq = createEngineYDocSaveSeqState();
         let lastEvent: SessionEvent | null = null;
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
+        let pendingShare = false;
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
@@ -759,6 +768,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
+              if (!shared && (state === "pending-share" || state === "saved-to-host" || state === "saved") && (state === "pending-share") !== pendingShare) {
+                pendingShare = state === "pending-share";
+                this.#onPendingShareMayChange?.(workspace.workspaceId);
+              }
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
@@ -1104,7 +1117,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         });
       this.#documentEdits.set(key, turn);
       try {
-        return { path, ...(await turn) };
+        const applied = await turn;
+        this.#onPendingShareMayChange?.(workspace.workspaceId);
+        return { path, ...applied };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
@@ -1419,7 +1434,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
     } catch (error) {
       if (!(error instanceof LiveDocumentOwnedError)) throw error;
-      throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`, { cause: error });
+      throw new Error(`${path} is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.`, { cause: error });
     }
   }
 
@@ -1576,6 +1591,8 @@ async function applyDocumentEdit(
       throw new LiveDocumentEditAppliedError(
         isConflictStaleTargetCause(error)
           ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+          : isDocumentTooDenseCause(error)
+          ? `The edit is in ${path}. ${DOCUMENT_TOO_DENSE_WORDS} Retrying won't help.`
           : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
         { cause: error },
       );

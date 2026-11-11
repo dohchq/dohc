@@ -231,8 +231,7 @@ it.each([
   ["grant access", "UPDATE sync_relay_share_grants SET access='view'"],
   ["named principal", "UPDATE sync_relay_share_grants SET principal_user_id='other'"],
   ["workspace owner", "UPDATE sync_relay_workspaces SET owner_user_id='other'"],
-  ["selector narrowing", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/b.md"],"versionId":null}'`],
-  ["selector widening", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs","more"],"versionId":null}'`],
+  ["selector losing the document", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/b.md"],"versionId":null}'`],
   ["pinned version", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs"],"versionId":"v1"}'`],
   ["fence generation", "UPDATE sync_relay_live_documents SET restore_fence_generation=8"],
   ["zero fence", "UPDATE sync_relay_live_documents SET restore_fence_generation=0"],
@@ -306,6 +305,21 @@ it.each(["mode", "hostId", "hostEpoch", "instanceId", "connectionId"] as const)(
     state.storage.mintLiveTicket(mint);
     expect(state.storage.redeemLiveTicket({ ...redeem, report: changed })).toBeNull();
     expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
+  } finally { await state.close(); }
+});
+
+// A recipient's ticket carries the lineage's recorded binding, so a share edit
+// that still covers the document changes nothing it was minted against.
+it.each([
+  ["narrowed", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/a.md"],"versionId":null}'`],
+  ["widened", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs","more"],"versionId":null}'`],
+])("redeems a ticket whose share was %s and still covers the document", async (_name, sql) => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    state.raw.exec(sql);
+    expect(state.storage.redeemLiveTicket(redeem)).toMatchObject({ binding });
+    expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: 1000 }]);
   } finally { await state.close(); }
 });
 
@@ -479,7 +493,7 @@ it("shares retained capacity across objects", async () => {
       INSERT INTO sync_relay_live_documents SELECT workspace_id, main_version_id, 'object-2', lineage_claim_id, replaces_lineage_claim_id,
       'docs/b.md', baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest, baseline_bytes,
       lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms FROM sync_relay_live_documents`);
-    const otherBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md" };
+    const otherBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md", selectorPaths: ["docs/b.md"] };
     expect(state.storage.mintLiveTicket({ ...another(3), objectId: "object-2", report: { ...report, binding: otherBinding } })).toBeNull();
   } finally { await state.close(); }
 });

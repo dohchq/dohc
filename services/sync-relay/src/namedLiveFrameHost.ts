@@ -16,7 +16,6 @@ import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
 import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
-import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
@@ -73,7 +72,6 @@ export function captureNamedLiveFrameHost(options: {
 export function captureOwnerLiveFrameHost(options: {
   authenticatedUserId: string;
   trustedAccount?: TrustedLiveAccount;
-  shareId: string;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
@@ -85,7 +83,7 @@ export function captureOwnerLiveFrameHost(options: {
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const request = snapshotCurrentBindingRequest({document,
-    actor: {kind: "owner", userId: options.authenticatedUserId, shareId: options.shareId}});
+    actor: {kind: "owner", userId: options.authenticatedUserId}});
   const current = options.storage.resolveCurrentLiveDocumentBinding(request);
   if (current.kind !== "current") throw new Error("Owner live authority is unavailable.");
   return captureLiveFrameHost({...options, actor: request.actor, binding: current.binding,
@@ -129,12 +127,10 @@ function captureLiveFrameHost(options: {
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
-  // The wire binding describes the public selection. Private authority always uses binding.
-  const projection = actor.kind === "link"
-    ? createAccountlessPathProjection({ paths: [...binding.selectorPaths], versionId: null, access: "edit" }) : null;
-  const wireBinding = projection && actor.kind === "link" ? parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
-    currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths })
-    : actor.kind === "named" ? parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}` }) : binding;
+  // What this editor is shown, which the opening check reads from its current
+  // binding: an owner sees binding, a recipient its own share's view. Accepted
+  // events carry binding, the lineage's one recorded binding, for every editor.
+  let wireBinding: LiveObjectBinding | undefined;
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -149,10 +145,16 @@ function captureLiveFrameHost(options: {
     caller?.throwIfAborted(); lifetime.signal.throwIfAborted();
     try {
       standing();
+      // A recipient's share stands while it covers the document under the same
+      // grant generation. The session also ends when what that share shows
+      // changes, so reopening shows the new view.
       const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+      if (current.kind === "current") wireBinding ??= current.view;
       if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
         !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
-        !isDeepStrictEqual(current.host, native.coordinate)) throw new Error("Named host standing changed.");
+        !isDeepStrictEqual(current.host, native.coordinate) || !isDeepStrictEqual(current.view, wireBinding)) {
+        throw new Error("Named host standing changed.");
+      }
     } catch (error) { close(); throw error; }
   }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });
@@ -189,7 +191,7 @@ function captureLiveFrameHost(options: {
       const feed = new AbortController();
       const feedSignal = AbortSignal.any([signal, feed.signal]);
       return {
-        binding: wireBinding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
+        binding: wireBinding!, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
         appliedThroughJournalCursor: position.journalCursor,
         close() { feed.abort(); },
         async nextApplied(callerSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> {

@@ -28,6 +28,8 @@ export function useCollectionFolders(
   const [collectionFolders, setCollectionFolders] = useState<
     ReadonlySet<string>
   >(EMPTY_COLLECTION_FOLDERS);
+  // Folders whose dataset.json names no Collection on this computer, which Home shows.
+  const [unclaimedDatasetFolders, setUnclaimedDatasetFolders] = useState<ReadonlySet<string>>(EMPTY_COLLECTION_FOLDERS);
   const collectionsRequest = useRef(0);
   // `elsewhere`: another computer keeps the workspace's Collections, and the
   // list holds the ones on this computer's server. It says where the others
@@ -111,6 +113,7 @@ export function useCollectionFolders(
       setCollectionFolders(
         new Set(result.collections.map((collection) => collection.path)),
       );
+      setUnclaimedDatasetFolders(result.unclaimedDatasetFolders.length ? new Set(result.unclaimedDatasetFolders) : EMPTY_COLLECTION_FOLDERS);
     } catch {
       // Collections are an engine capability; without it the explorer keeps
       // plain folder behavior. Nothing to repaint, nothing to report.
@@ -133,5 +136,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown };
+  return { collectionFolders, unclaimedDatasetFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown };
 }

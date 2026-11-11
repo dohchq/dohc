@@ -13,6 +13,7 @@ import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, RelayError, relayError} from "./errors";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 import {RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
+import {ServiceActivationDamaged} from "./storage/serviceActivation";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -212,12 +213,18 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
-    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
+    // A damaged activation record stops its own document, not the list. Only the operator can repair it.
+    let saved: ReturnType<typeof activation.read>;
+    try {saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);}
+    catch (error) {
+      if (!(error instanceof ServiceActivationDamaged)) throw error;
+      return {...base, status: "unavailable", reason: "session-host-diverged"};
+    }
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
+    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId}});
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
-    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
+    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace}};
   }
   // The exact prepared activation, pending or completed, of a document the host
   // holds for an unadmitted live edit. Its Resume retires that activation inside
@@ -305,22 +312,28 @@ export function createServiceHostEnrollmentRoutes(options: {
         const row = objectId === undefined ? fence() : await host.stop({workspaceId, objectId}, fence, request.signal);
         if (row === "waiting") throw relayError("edits-pending");
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor} : state(row))});
+        // `changed` says whether this request retired the document, as its transaction found the row.
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor,
+          changed: row.changed === true} : state(row))});
       }
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||
         (input.retry === true && (input.path !== undefined || input.shareId === undefined)) || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
       const retained = input.path === undefined ? undefined : storage.readServiceHostEnrollment(workspaceId, input.path as string);
       if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
-      const shareId = parseShareId(input.shareId ?? retained!.shareId);
+      const shareId = parseShareId(input.shareId ?? retained!.shareId ?? undefined);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
-      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {})})));
-      // A Resume gives a blocked document one more attempt in the store it has.
-      if (input.path !== undefined) host.unblock(rows[0]!);
+      let enabled = false;
+      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {}),
+        ...(input.path === undefined ? {} : {changed: (value: boolean) => {enabled = value;}})})));
+      // A Resume gives a blocked document one more attempt in the store it has. It changed live editing
+      // when it enabled the document or ended that block; a document a share already made live is unchanged.
+      const unblocked = input.path !== undefined && host.unblock(rows[0]!);
       host.reconcile();
       const documents = rows.map(state);
-      return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
+      return response({ok: true, ...(input.path === undefined ? {documents} : {...documents[0], changed: enabled || unblocked})},
+        documents.every(row => row.status === "ready") ? 200 : 202);
     } catch (error) {
       if (error instanceof KeptEditsConflict) return response({ok: false, code: error.code, error: error.message}, 409);
       if (error instanceof RecoveryCopyRefusal) return response({ok: false, code: "kept-edits-unrecoverable", reason: error.reason, error: error.message}, 409);

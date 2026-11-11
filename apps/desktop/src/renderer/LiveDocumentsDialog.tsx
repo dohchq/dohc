@@ -481,7 +481,13 @@ export function LiveDocumentsDialog({
           setPendingStops(previous => new Map(previous).set(work.objectId, refusal));
           return;
         }
-        if (!isCurrent()) return;
+        // A server-only document's Stop the server isn't ready for gets the
+        // relay's restore-in-progress words, without its code.
+        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        const waits = work.kind === "stop" && (notReady || isLiveStopWaiting(error));
+        // A Stop that waits is reported after this opening closes too, as a refused one is.
+        // The shell drops a report from a workspace that is no longer open.
+        if (!isCurrent() && !waits) return;
         // Only a failed read leaves the list unproven. A refused action and a
         // failed "more" both keep the rows the last successful read proved.
         if (work.kind === "reload" || mutated) setState({ kind: "unknown" });
@@ -495,10 +501,7 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        // A server-only document's Stop the server isn't ready for gets the
-        // relay's restore-in-progress words, without its code.
-        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        if (work.kind === "stop" && (notReady || isLiveStopWaiting(error))) {
+        if (work.kind === "stop" && waits) {
           onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry,
             {title: notReady ? `Live editing didn't stop for ${work.path}` : `Stopping live editing for ${work.path}`, objectId: work.objectId});
         } else onError(failureMessage(work, mutated), error, retry);

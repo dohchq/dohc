@@ -264,7 +264,7 @@ it("enforces baseline range bounds and composite identity", async () => {
 const readBaseline = new Uint8Array([0, 0]);
 const readLineage = createHash("sha256").update(readBaseline).digest("hex");
 const readDocument = { workspaceId: "workspace-1", mainVersionId: "main", objectId: "object-1", lineageClaimId: readLineage };
-const ownerActor = { kind: "owner", userId: "owner-1", shareId: "share-1" } as const;
+const ownerActor = { kind: "owner", userId: "owner-1" } as const;
 const namedActor = { kind: "named", userId: "reader-1", grantId: "edit-1" } as const;
 const readHost = { mode: "device", hostId: "host-1", hostEpoch: parseHostEpoch(1), instanceId: "instance-1", connectionId: "connection-1" } as const;
 
@@ -309,14 +309,18 @@ async function withBindingFixture(run: (storage: SyncRelayStorage, path: string)
   } finally { storage.close(); }
 }
 
-it("reads owned current owner and exact named authority, preserving the stored fence across reopen", async () => {
+it("reads the baseline binding for owner and named alike, with exact named authority, preserving the stored fence across reopen", async () => {
   await withBindingFixture((storage, path) => {
     const before = raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all());
     for (const actor of [ownerActor, namedActor]) {
+      // Nothing is recorded, so every editor gets the baseline's own path. The named share decides only admission.
+      const selectorPaths = ["docs/a.md"];
       const request = { document: { ...readDocument }, actor: { ...actor } };
       const result = storage.resolveCurrentLiveDocumentBinding(request);
-      expect(result).toEqual({ kind: "current", host: readHost,
-        binding: { ...readDocument, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 },
+      const binding = { ...readDocument, currentPath: "docs/a.md", selectorPaths, restoreFenceGeneration: 7 };
+      expect(result).toEqual({ kind: "current", host: readHost, binding,
+        // An owner is shown the binding itself, a named recipient its own share's paths under a workspace ID naming the grant.
+        view: actor.kind === "owner" ? binding : { ...binding, workspaceId: "named:edit-1", selectorPaths: ["docs"] },
         authority: actor.kind === "owner"
           ? { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null }
           : { principalKind: "named", principalId: "reader-1", grantId: "edit-1", grantGeneration: 4 } });
@@ -330,7 +334,7 @@ it("reads owned current owner and exact named authority, preserving the stored f
         const fresh = reopened.resolveCurrentLiveDocumentBinding({ document: readDocument, actor });
         expect(fresh.kind).toBe("current");
         if (fresh.kind === "current") {
-          expect(fresh.binding.selectorPaths).toEqual(["docs"]);
+          expect(fresh.binding.selectorPaths).toEqual(selectorPaths);
           expect(fresh.binding.restoreFenceGeneration).toBe(7);
           expect(fresh.host).toEqual(readHost);
           expect(fresh.authority.principalId).toBe(actor.userId);
@@ -394,12 +398,26 @@ it.each([
   JSON.stringify({ paths: ["outside"], versionId: null }), JSON.stringify({ paths: ["../docs"], versionId: null }),
   JSON.stringify({ paths: ["docs//"], versionId: null }), JSON.stringify({ paths: ["docs", "docs"], versionId: null }),
   JSON.stringify({ paths: ["docs"], versionId: null, extra: true }),
-])("refuses selector damage or drift for both actor kinds: %s", async selector => {
+])("refuses a named actor on selector damage or drift, which the owner never reads: %s", async selector => {
   await withBindingFixture((storage, path) => {
     raw(path, db => db.prepare("UPDATE sync_relay_shares SET selector_json = ?").run(selector));
-    for (const actor of [ownerActor, namedActor]) {
-      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor })).toEqual({ kind: "refused", reason: "stale-selector" });
-    }
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason: "stale-selector" });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
+      .toMatchObject({ kind: "current", binding: { selectorPaths: ["docs/a.md"] } });
+  });
+});
+
+// A share path may run to 1024 UTF-16 code units; a binding holds 1024 UTF-8
+// bytes. Admission refuses a share whose view can't form a binding, before any
+// ticket is minted, rather than at capture.
+it("refuses a named actor whose share selects a path no binding can hold", async () => {
+  await withBindingFixture((storage, path) => {
+    const wide = Array.from({ length: 3 }, () => "日".repeat(120)).join("/");
+    expect(Buffer.byteLength(wide)).toBeGreaterThan(1024);
+    raw(path, db => db.prepare("UPDATE sync_relay_shares SET selector_json = ?").run(JSON.stringify({ paths: ["docs", wide], versionId: null })));
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason: "stale-selector" });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
+      .toMatchObject({ kind: "current", binding: { selectorPaths: ["docs/a.md"] } });
   });
 });
 
@@ -411,9 +429,9 @@ it("checks owner and workspace standing before constructing either authority env
       db.exec("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES ('other-workspace', 'owner-1', 0)");
       db.exec("UPDATE sync_relay_shares SET workspace_id = 'other-workspace'");
     });
-    for (const actor of [ownerActor, namedActor]) {
-      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor })).toEqual({ kind: "refused", reason: "not-authorized" });
-    }
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason: "not-authorized" });
+    // The workspace's owner holds its document whatever its shares.
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }).kind).toBe("current");
   });
 });
 

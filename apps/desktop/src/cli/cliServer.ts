@@ -310,15 +310,22 @@ export interface CliKeptCopiesPort {
 // that kept them. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
+  /** Shared notes whose edits wait on this computer for the server, so their files hold older text. */
+  pendingShare(): Promise<readonly string[]>;
   /** With an incident, saves exactly the kept edits it names. */
   saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
-// The owner's Live documents list, read as the dialog reads it. Paths are
-// workspace-relative; the cursor is the list's own nextCursor.
-export type CliLiveDocumentsPort = (cursor?: string) => Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+// The owner's Live documents list, and its Stop and Resume for one document,
+// through the same desktop actions as the dialog. Paths are workspace-relative;
+// the cursor is the list's own nextCursor. A Stop or Resume names its author.
+export interface CliLiveDocumentsPort {
+  list(cursor?: string): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+  stop(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
+  resume(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
+}
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
@@ -843,8 +850,15 @@ function retainedCopiesUnavailable() {
   };
 }
 
+// Who stopped or resumed live editing through this socket. Every call here
+// is an agent's, whatever it claims: the window is the person's door. The
+// agent is the one History records for this socket's edits.
+function liveChangeAuthor(context: CliWorkspaceContext, options: CliServerOptions): import("@dohc/workspace-contracts/change-author").ChangeAuthor {
+  return { kind: "agent", agentId: editingAgentId(context), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) };
+}
+
 function liveDocumentsUnavailable() {
-  return { ok: false as const, reason: "Live documents are listed only in the original workspace. Open it to continue." };
+  return { ok: false as const, reason: "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue." };
 }
 
 function keptEditsUnavailable() {
@@ -2093,7 +2107,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2107,7 +2121,7 @@ async function dispatch(
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
-  if (paths.shared && request.verb === "liveDocuments") return liveDocumentsUnavailable();
+  if (paths.shared && (request.verb === "liveDocuments" || request.verb === "liveStop" || request.verb === "liveResume")) return liveDocumentsUnavailable();
   if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
@@ -2157,6 +2171,12 @@ async function dispatch(
         break;
       case "retryKeptEdits":
       case "stopAgain":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "liveStop":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "liveResume":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentCreate":
@@ -2922,7 +2942,8 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        return { ok: true as const, keptEdits: await keptEdits.list() };
+        const [kept, pendingShare] = await Promise.all([keptEdits.list(), keptEdits.pendingShare()]);
+        return { ok: true as const, keptEdits: kept, pendingShare: [...pendingShare] };
       } catch (error) {
         return mcpFailure(error, "failed to list kept edits");
       }
@@ -2985,9 +3006,33 @@ async function dispatchWorkspace(
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
       try {
-        return { ok: true as const, ...await live(request.args.cursor) };
+        return { ok: true as const, ...await live.list(request.args.cursor) };
       } catch (error) {
         return mcpFailure(error, "failed to list live documents");
+      }
+    }
+
+    case "liveStop": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        const stopped = await live.stop(request.args.path, liveChangeAuthor(context, options), request.args.objectId);
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits, ...(stopped.already ? { already: true as const } : {}) };
+      } catch (error) {
+        return mcpFailure(error, `failed to stop live editing for ${request.args.path}`);
+      }
+    }
+
+    case "liveResume": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, ...(resumed.already ? { already: true as const } : {}) };
+      } catch (error) {
+        return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
       }
     }
 

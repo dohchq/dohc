@@ -24,7 +24,13 @@ const { composeArgs, readSettings } = await import(pathToFileURL(join(bundle, "t
 const owner = `dohc-rehearsal-${randomUUID().slice(0, 8)}`, work = join(output, owner);
 const mount = join(work, "mnt"), tls = join(work, "tls"), envFile = join(work, "drive.env");
 const subnet = `10.237.${100 + Math.floor(Math.random() * 100)}`, neonAddress = `${subnet}.10`;
-const publicHost = "drive.rehearsal.test", appDomain = "apps.rehearsal.test";
+// share-web starts only when both names have a real public suffix and the app domain is a registrable
+// domain apart from the server's. The release refuses the documentation domains as unset values, so these
+// are Drive's own domains. Nothing here publishes DNS, and the app certificate comes from the local CA.
+const publicHost = "rehearsal.dohc.computer", appDomain = "dohc.app";
+// The stand-in answers to a name, as a provider's database does. node-postgres checks a certificate against
+// "localhost" when the host is an IP address, so an address could never pass verify-full.
+const databaseHost = "accounts.rehearsal.test";
 const evidence = { revision: release.revision, imageId: release.imageId, owner, commands: [], assertions: [], residual: [] };
 // Command output stays in memory, so a leaked secret never reaches the evidence file.
 const transcript = [];
@@ -152,7 +158,7 @@ try {
 
   certificate("ca");
   certificate("other");
-  certificate("neon", `IP:${neonAddress}`);
+  certificate("neon", `DNS:${databaseHost}`);
   certificate("app", `DNS:*.${appDomain}`);
   writeFileSync(join(tls, "pg_hba.conf"), "local all all trust\nhostssl all all all scram-sha-256\n");
   for (const file of ["ca.pem", "other.pem", "neon.pem", "neon.key", "app.pem", "pg_hba.conf"]) chmodSync(join(tls, file), 0o644);
@@ -163,7 +169,7 @@ try {
   const settings = { ...parseEnv(readFileSync(envFile, "utf8")),
     DOHC_DEPLOYMENT_NAME: owner, DOHC_BEHIND_CLOUDFLARE: "1", DOHC_RELAY_AUTOMATIONS: "0", DOHC_DATA_DIRECTORY: join(mount, "dohc"),
     DOHC_NETWORK_SUBNET: `${subnet}.0/24`, DOHC_NETWORK_IP_RANGE: `${subnet}.128/25`, DOHC_GATEWAY_ADDRESS: `${subnet}.2`, DOHC_SHARE_WEB_ADDRESS: `${subnet}.3`,
-    DOHC_POSTGRES_HOST: neonAddress, DOHC_POSTGRES_PORT: "5432", DOHC_POSTGRES_CA_FILE: join(tls, "ca.pem"), POSTGRES_DB: "drive", POSTGRES_USER: "drive",
+    DOHC_POSTGRES_HOST: databaseHost, DOHC_POSTGRES_PORT: "5432", DOHC_POSTGRES_CA_FILE: join(tls, "ca.pem"), POSTGRES_DB: "drive", POSTGRES_USER: "drive",
     DOHC_SMTP_HOST: "smtp.rehearsal.invalid", DOHC_SMTP_PORT: "2525", DOHC_SMTP_SECURE: "false", DOHC_SMTP_FROM: `noreply@${publicHost}`,
     DOHC_SIGN_UP_EMAILS: "owner@rehearsal.test",
     DOHC_RELAY_APP_PUBLICATIONS: "1", DOHC_SHARE_WEB_APP_DOMAIN: appDomain, DOHC_APP_TLS_CERT_FILE: join(tls, "app.pem"), DOHC_APP_TLS_KEY_FILE: join(tls, "app.key"),

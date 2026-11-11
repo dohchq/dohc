@@ -77,6 +77,8 @@ export function createWorkspaceEngineIpc<
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
   historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
+  /** Folders whose dataset.json names no Collection this computer keeps. None on a computer that doesn't keep them. */
+  unclaimedDatasetFolders(operation: Operation): Promise<string[]>;
   /** The name Settings gives one of this computer's agents, while Settings lists it. */
   agentName(agentId: string): string | undefined;
   localPersonId(): string;
@@ -171,7 +173,9 @@ export function createWorkspaceEngineIpc<
           for (const result of mounted) {
             if (result.status === "fulfilled") collections.push(...result.value);
           }
-          return ListCollectionsResult.parse({ collections });
+          // Only for the workspace's own folders. Without an answer, Home keeps hiding every Collection's folder.
+          const unclaimedDatasetFolders = operation.workspace.shareView ? [] : await dependencies.unclaimedDatasetFolders(operation).catch(() => []);
+          return ListCollectionsResult.parse({ collections, unclaimedDatasetFolders });
         },
       );
     });

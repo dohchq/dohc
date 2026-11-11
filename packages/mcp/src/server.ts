@@ -77,6 +77,8 @@ import {
   retryKeptEdits,
   stopAgain,
   listLiveDocuments,
+  stopLiveEditing,
+  resumeLiveEditing,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -226,7 +228,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 
   register(
     "dohc_workspace_status",
-    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.", inputSchema: {} },
+    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
@@ -362,12 +364,32 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_live_documents",
     {
       description:
-        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
+        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. " +
         Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `\`${reason}\`: ${step}`).join(" ") +
         " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       inputSchema: { cursor: z.string().min(1).max(4096).optional() },
     },
     async (args) => text(await listLiveDocuments(ctx, args)),
+  );
+
+  register(
+    "dohc_stop_live_editing",
+    {
+      description:
+        "Stop live editing for a document, as Stop does in Live documents. dohc_resume_live_editing starts it again. dohc records the Stop as this agent's when the server says this request stopped it; `already: true` means live editing was already stopped, and dohc records no one. Pass the row's `objectId` from dohc_list_live_documents to stop the server's document when its file moved or is gone; dohc then stops that document, whatever path it has now. `keptEdits` is `recovered` when dohc wrote edits the server refused into the file, `kept` while dohc still keeps them (see `keptEdits` in dohc_workspace_status), and `none` when there were none. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing; ask the person using dohc to close it. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), objectId: z.string().min(1).max(512).optional() },
+    },
+    async (args) => text(await stopLiveEditing(ctx, args)),
+  );
+
+  register(
+    "dohc_resume_live_editing",
+    {
+      description:
+        "Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096) },
+    },
+    async (args) => text(await resumeLiveEditing(ctx, args)),
   );
 
   register(
@@ -422,7 +444,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register(
     "dohc_read_file",
     {
-      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
+      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes. A shared note's Markdown file can trail the note while its edits wait for the server, even when the result carries no warning; dohc_workspace_status lists those notes as pendingShare, and dohc_read_document returns their current text.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         encoding: z.enum(["utf8", "base64"]).optional(),

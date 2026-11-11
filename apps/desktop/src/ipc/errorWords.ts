@@ -43,6 +43,14 @@ export const PRIVACY_DENIED_WORDS =
  * was created without, as a network share can, so a secret or a file's own
  * access could not be kept.
  */
+/**
+ * The engine's refusal to save a note too dense for its Markdown reader to
+ * check (#3575). A live note keeps the blocks its edits deleted, so the
+ * note's weight never goes down: only new notes clear it.
+ */
+export const DOCUMENT_TOO_DENSE_WORDS =
+  "This note has grown too large for dohc to save, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. dohc still has the latest text and shows it in the note, but the file on disk has an older version, which is what other programs and agents see. Move its text into new, smaller notes and continue there.";
+
 export const VOLUME_SHARES_NEW_FILES_WORDS =
   "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
 

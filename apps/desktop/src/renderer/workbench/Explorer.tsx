@@ -10,6 +10,8 @@ import { deleteConfirmText } from "./deleteConfirm";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MiddleCutName } from "../ui/MiddleCutName";
+import { SAVE_STATE } from "../ui/StateMark";
+import { usePendingShareMark } from "./pendingShareMarks";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -161,6 +163,9 @@ export interface ExplorerProps {
   // Folders main recognizes as apps. Their rows draw the app glyph; a row
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
+  // Folders whose dataset.json names no Collection on this computer, as a
+  // deleted one leaves. Home shows their files.
+  unclaimedDatasetFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   // The workspace's apps, for Home's Apps section. Without it Home has no
   // Apps section.
@@ -420,6 +425,9 @@ export const TreeRow = memo(function TreeRow(props: {
 }) {
   const { row } = props;
   const name = basenameOf(row.fullPath);
+  // A closed shared note whose edits wait for the server: the pending-share
+  // mark, and its words in the row's name and tooltip.
+  const pendingShare = usePendingShareMark(row.fullPath, !row.isFolder);
   const blocked = props.dropPreview?.kind === "blocked";
   const target = props.dropPreview?.role === "target";
   // A drop preview colors the whole row, glyph included. An allowed target's
@@ -454,8 +462,9 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-selected={props.selected}
         // The whole name, read once, though MiddleCutName draws it in two
         // parts. The tooltip shows what a cut row hides.
-        aria-label={name}
-        title={name}
+        aria-label={pendingShare ? `${name}, ${SAVE_STATE["pending-share"].label}` : name}
+        title={pendingShare ? `${name}\n${SAVE_STATE["pending-share"].label}. ${SAVE_STATE["pending-share"].title}` : name}
+        data-state={pendingShare ? "pending-share" : undefined}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
@@ -535,6 +544,9 @@ export const TreeRow = memo(function TreeRow(props: {
           </>
         )}
         <MiddleCutName name={name} />
+        {pendingShare ? (
+          <span aria-hidden data-testid="tree-row-pending-share" className="ml-auto size-2 shrink-0 rounded-full border-[1.5px] border-current text-subtle" />
+        ) : null}
       </button>
     </li>
   );

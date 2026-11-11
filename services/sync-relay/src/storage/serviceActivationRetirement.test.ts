@@ -19,9 +19,9 @@ it.each(["pause", "revoke"] as const)("refuses a validated update whose commit f
     f.storage.enrollServiceHostDocument(enrollment);
     expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "First"), "first")).result.kind).toBe("accepted");
     f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('history',?,?,'main',?,?,?,?,?,x'0000','owner','share','{}',1)`)
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('history',?,?,'main',?,?,?,?,?,x'0000','owner','{}',1)`)
       .run(activationId, document.workspaceId, document.objectId, document.lineageClaimId, JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream"}),
-        JSON.stringify({currentPath: "docs/a.md"}), document.lineageClaimId));
+        JSON.stringify({...document, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 1}), document.lineageClaimId));
     const delayed = f.capture(f.update("title", "Delayed"), "delayed");
     if (cause === "pause") f.storage.setServiceHostEnrollmentEnabled({...enrollment, enabled: false, nowMs: 20});
     else expect(f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 20}).ok).toBe(true);

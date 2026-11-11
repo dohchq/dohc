@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 import * as Y from "yjs";
 import type { YdocContentKind } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
-import { LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
+import { KeptTyping, LiveDraftRecoveryRecord } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { sendToWorkspaceWindows } from "../ipc/workspaceActivityBroadcast";
 
@@ -226,4 +226,35 @@ export async function removeWorkspaceLiveDrafts(directory: string, workspaceId: 
       await rm(row.file, {force: true});
     }
   }
+}
+
+// Typing kept for a workspace no longer in the list, such as one whose join
+// failed. It stays until the person dismisses it in Notices.
+export async function listKeptTyping(directory: string, isListed: (workspaceId: string) => boolean): Promise<Array<{workspaceId: string} & Pick<LiveDraftRecoveryRecord, "recordId" | "path" | "text">>> {
+  // Only saved records: an interrupted write shares its record's id, so
+  // listing it would let a dismissal delete text the person did not see. The
+  // store promotes or sets it aside on its own.
+  const rows = (await recoveryRecords(directory)).filter(row => /^[a-f0-9]{64}\.json$/.test(basename(row.file)));
+  const removed = new Set(rows.map(row => row.record.workspaceId).filter((id): id is string =>
+    typeof id === "string" && KeptTyping.shape.workspaceId.safeParse(id).success && !isListed(id)));
+  const kept = [];
+  for (const workspaceId of [...removed].sort()) {
+    for (const {recordId, path, text} of await readableRecoveryRecords(rows, workspaceId, undefined, true)) kept.push({workspaceId, recordId, path, text});
+  }
+  return kept;
+}
+
+export async function removeKeptTyping(directory: string, workspaceId: string, recordId: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(recordId)) throw new Error("This is not a draft record.");
+  const file = join(directory, `${recordId}.json`);
+  await onDraftFile(file, async () => {
+    const raw = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
+    if (raw === null) return;
+    const record: unknown = JSON.parse(raw);
+    if (typeof record !== "object" || record === null || !("workspaceId" in record) || record.workspaceId !== workspaceId) {
+      throw new Error("This kept typing belongs to another workspace.");
+    }
+    await rm(file, {force: true});
+    draftWrites.delete(file);
+  });
 }

@@ -382,6 +382,8 @@ function makeBaseBridge(
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    listKeptTyping: vi.fn(async (): Promise<import("../ipc/bridgeContract").KeptTyping[]> => []),
+    dismissKeptTyping: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["dismissKeptTyping"]>[0]) => undefined),
     discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
@@ -875,7 +877,7 @@ export function makeBridge(
     // swap in real rows.
     listCollections: vi.fn(
       async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
-        collections: [],
+        collections: [], unclaimedDatasetFolders: [],
       }),
     ),
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
@@ -961,6 +963,7 @@ export function makeBridge(
         fileThreads: FileChatThreadRecord[];
       }> => ({ channels: [], fileThreads: [] }),
     ),
+    listChatUnread: vi.fn(async (): Promise<{ chats: Array<{ channelId: string; unreadCount: number }> }> => ({ chats: [] })),
     listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
     listChatChannelShares: vi.fn(async () => {

@@ -112,7 +112,7 @@ function seedJournal(storage:StorageContext,shareId:string) {
     const registered=createLiveMarkdownRegistrationValidator(policy)({document,currentPath:"docs/file.md",checkpoint:baseline});
     if(registered.kind!=="accepted")throw Error("registration refused");
     expect(storage.registerLiveDocumentBaseline({host,evidence:registered.evidence,baselineBytes:baseline,registeredAtMs:10}).kind).toBe("registered");
-    const actor={kind:"owner" as const,userId:deleted,shareId};
+    const actor={kind:"owner" as const,userId:deleted};
     const current=storage.resolveCurrentLiveDocumentBinding({document,actor});if(current.kind!=="current")throw Error(JSON.stringify(current));
     const cut=storage.readLiveUpdateJournalCut({document});if(cut.kind!=="cut")throw Error("missing cut");
     const before=Y.encodeStateVector(doc);doc.getMap("frontmatter").set("title",email);const bytes=Y.encodeStateAsUpdate(doc,before);
