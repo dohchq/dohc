@@ -181,6 +181,15 @@ describe("what the host allows and has not confirmed", () => {
     expect(screen.queryByRole("note")).toBeNull();
   });
 
+  it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
+    const { grid } = setup();
+    expect(grid.classList.contains("isolate")).toBe(true);
+    // Inside it, the header still sits above the editor that scrolls under it.
+    fireEvent.click(grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!);
+    expect(grid.querySelector('[role="row"]')!.classList.contains("z-20")).toBe(true);
+    expect(grid.querySelector("[data-cell-editor]")!.classList.contains("z-10")).toBe(true);
+  });
+
   it("says why a change was refused, starts the next edit from what was typed, and dismisses it", () => {
     const dismiss = vi.fn();
     const { store, set } = statusStore({ "rec-a:title": { state: "refused", value: "Typed", reason: "Enter a shorter name.", dismiss } });

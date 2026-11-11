@@ -854,7 +854,9 @@ export function TableView({
       tabIndex={rows.length > 0 && fields.length > 0 ? 0 : undefined}
       // The selected cell's ring shows where the keys act. With no cell
       // selected the grid wears the halo, inset so its scroller cannot clip it.
-      className={`h-full overflow-auto ${at ? "outline-none" : "focus-visible:-outline-offset-2"}`}
+      // The table's layers, such as its sticky header, stack among themselves
+      // and never over a menu of the page that holds the table.
+      className={`isolate h-full overflow-auto ${at ? "outline-none" : "focus-visible:-outline-offset-2"}`}
       onKeyDown={onGridKeyDown}
     >
       <div className="w-max min-w-full pb-6 pr-5">
