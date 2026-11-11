@@ -2,12 +2,17 @@
 // document, and listeners on one node all run for the same event regardless
 // of stopPropagation, so each asks whether it is on top before it handles
 // Escape or Tab.
+//
+// While any overlay is open, the root carries data-modal-open and styles.css
+// turns the titlebar's drag region off. The backdrop covers the titlebar, so a
+// press there is a press outside the dialog and closes it.
 
 const escapeStack: symbol[] = [];
 const openListeners = new Set<() => void>();
 
 export function pushOverlay(id: symbol): void {
   escapeStack.push(id);
+  document.documentElement.dataset.modalOpen = "";
   announceOverlayOpen();
 }
 
@@ -26,6 +31,7 @@ export function onOverlayOpen(listener: () => void): () => void {
 export function removeOverlay(id: symbol): void {
   const index = escapeStack.indexOf(id);
   if (index !== -1) escapeStack.splice(index, 1);
+  if (escapeStack.length === 0) delete document.documentElement.dataset.modalOpen;
 }
 
 /** True while `id` is the overlay a keystroke belongs to. Without this, one

@@ -80,15 +80,13 @@ export function OverlayFrame(props: {
 }
 
 // Shared modal scaffold: a dimmed backdrop and a panel, with one close and
-// keyboard behavior everywhere. Escape, ⌘W on macOS, and the dialog's own
-// controls close it; a press on the backdrop does nothing, so a stray click never throws
-// away what someone typed. A dialog whose fields save as the person leaves
-// them, such as Settings or a picker, sets closeOnBackdrop. A field marked
-// data-unsaved then keeps the dialog open and takes focus, so its problem
-// shows.
+// keyboard behavior everywhere. Escape, ⌘W on macOS, a press on the backdrop,
+// and the dialog's own controls close it, all through onClose. A dialog that
+// must not close yet, such as one saving, passes no onClose. A field marked
+// data-unsaved keeps the dialog open on a press outside and takes focus, so
+// its problem shows.
 export function Overlay(props: {
   onClose?: () => void;
-  closeOnBackdrop?: boolean;
   children: ReactNode;
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
@@ -156,7 +154,7 @@ export function Overlay(props: {
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
-      onBackdropClick={props.closeOnBackdrop ? closeFromBackdrop : undefined}
+      onBackdropClick={closeFromBackdrop}
     >
       {props.children}
     </OverlayFrame>

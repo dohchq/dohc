@@ -450,7 +450,7 @@ describe("SettingsDialog", () => {
     const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
     const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
       render(
-        <Overlay onClose={onClose} closeOnBackdrop>
+        <Overlay onClose={onClose}>
           <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
         </Overlay>,
       );
@@ -542,7 +542,7 @@ describe("SettingsDialog", () => {
         const [open, setOpen] = useState(true);
         const close = () => setOpen(false);
         return open ? (
-          <Overlay onClose={close} closeOnBackdrop>
+          <Overlay onClose={close}>
             <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
           </Overlay>
         ) : null;
