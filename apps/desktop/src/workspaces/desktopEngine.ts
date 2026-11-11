@@ -131,6 +131,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   noteNoAtomicPlacement(workspaceId: string): void;
   noteWriteDeferred(workspaceId: string, path: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
+  // The server accepted or refused a document's edits, so the notes waiting for it changed.
+  notifyOwnerDraftsChanged?(workspaceId: string): void;
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
@@ -443,7 +445,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               // A pass delivers one waiting edit, so only an empty queue takes edits again.
               // A refused queue, which this pass may have found, has its own notice.
               for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) paused.delete(pausedPath);
-              if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
+              if (result === "acknowledged" || result === "frozen") {notifyRenderer({workspaceId}); dependencies.notifyOwnerDraftsChanged?.(workspaceId);}
               setOwnerDeliveryStatus(workspaceId, failures.size || paused.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
                 frozen.size && !ownerMustAct ? "document-unavailable" : paused.size && !reason ? "unsent-edits-limit" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
@@ -481,6 +483,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                   document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
                   signal, bearer: session.bearer, accountId: session.accountId, assertCurrent, observedOnly: true});
                 if (quarantinesMayChange(workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                if (result === "acknowledged" || result === "frozen") dependencies.notifyOwnerDraftsChanged?.(workspaceId);
                 return result;
               }), check);
             });} finally {activeOwnerWorkspace = undefined;}
@@ -515,7 +518,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 onEnrolled: async () => {await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);}});
               assertCurrent();
               if (quarantinesMayChange(document.binding.workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
-              if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
+              if (result === "acknowledged" || result === "frozen") {notifyRenderer({workspaceId: document.binding.workspaceId}); dependencies.notifyOwnerDraftsChanged?.(document.binding.workspaceId);}
               return result;
             }));
         },

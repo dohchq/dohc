@@ -138,6 +138,9 @@ interface EngineYDocSessionIpcOptions {
   ) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
+  // An edit landed, or an editor's note started or stopped waiting for the
+  // server, so the notes whose files trail their text may have changed.
+  onPendingShareMayChange?: (workspaceId: string) => void;
   sharedCaptureFor?: (workspace: EngineYDocWorkspace) => Promise<EngineYDocSessionCapture | null>;
   // A shared note's current text when no editor holds it, edits still on
   // their way to the server included. Null for a note that is not shared.
@@ -490,6 +493,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #sharedCaptureFor: EngineYDocSessionIpcOptions["sharedCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #ownerDraftState: EngineYDocSessionIpcOptions["ownerDraftState"];
+  readonly #onPendingShareMayChange: EngineYDocSessionIpcOptions["onPendingShareMayChange"];
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
     "resolveDocumentPath"
   ];
@@ -514,6 +518,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#onPendingShareMayChange = options.onPendingShareMayChange;
     this.#sharedCaptureFor = options.sharedCaptureFor;
     this.#ownerDraftState = options.ownerDraftState;
     this.#resolveDocumentPath = options.resolveDocumentPath;
@@ -724,6 +729,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const saveSeq = createEngineYDocSaveSeqState();
         let lastEvent: SessionEvent | null = null;
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
+        let pendingShare = false;
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
@@ -762,6 +768,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
+              if (!shared && (state === "pending-share" || state === "saved-to-host" || state === "saved") && (state === "pending-share") !== pendingShare) {
+                pendingShare = state === "pending-share";
+                this.#onPendingShareMayChange?.(workspace.workspaceId);
+              }
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
@@ -1107,7 +1117,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         });
       this.#documentEdits.set(key, turn);
       try {
-        return { path, ...(await turn) };
+        const applied = await turn;
+        this.#onPendingShareMayChange?.(workspace.workspaceId);
+        return { path, ...applied };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }

@@ -226,7 +226,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 
   register(
     "dohc_workspace_status",
-    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.", inputSchema: {} },
+    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
@@ -422,7 +422,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register(
     "dohc_read_file",
     {
-      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
+      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes. A shared note's Markdown file can trail the note while its edits wait for the server, even when the result carries no warning; dohc_workspace_status lists those notes as pendingShare, and dohc_read_document returns their current text.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         encoding: z.enum(["utf8", "base64"]).optional(),

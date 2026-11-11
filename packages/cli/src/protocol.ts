@@ -1637,6 +1637,9 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       earlier: z.literal(true).optional(),
       saveOnly: z.literal(true).optional(),
     }).strict()),
+    // Shared notes whose edits wait on this computer for the server. Each
+    // file holds the text the server last settled until it accepts them.
+    pendingShare: z.array(z.string().min(1)),
   }).strict(),
   rawFailureSchema,
 ]);

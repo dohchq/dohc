@@ -140,6 +140,7 @@ interface TestHarnessOptions {
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
+  onPendingShareMayChange?: (workspaceId: string) => void;
 }
 
 function rendererSession(
@@ -201,6 +202,7 @@ function harness(
     isSharedView: () => readOnly,
     sharedCaptureFor: options.sharedCaptureFor,
     ownerDraftState: options.ownerDraftState,
+    onPendingShareMayChange: options.onPendingShareMayChange,
     resolveDocumentPath,
     onError,
   });
@@ -249,6 +251,26 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: false, seq: 0});
     } finally {
       unregister();
+      await h.ipc.shutdown();
+    }
+  });
+
+  it("asks for the waiting notes again only when an open note starts or stops waiting for the server", async () => {
+    const sender = new FakeSender(7);
+    const onPendingShareMayChange = vi.fn();
+    const h = harness(providerSession(), { onPendingShareMayChange });
+    try {
+      await h.ipc.open(sender, openPayload);
+      const save = h.capturedOpen()!.onSaveState!;
+      save("saved", 0, "status");
+      save("settling", 1, "start");
+      expect(onPendingShareMayChange).not.toHaveBeenCalled();
+      save("pending-share", 1, "outcome");
+      save("pending-share", 2, "outcome");
+      expect(onPendingShareMayChange).toHaveBeenCalledExactlyOnceWith(DOCUMENT.workspaceId);
+      save("saved-to-host", 2, "status");
+      expect(onPendingShareMayChange).toHaveBeenCalledTimes(2);
+    } finally {
       await h.ipc.shutdown();
     }
   });

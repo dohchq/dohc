@@ -221,6 +221,7 @@ import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
+import { createPathMarks, PendingShareMarks } from "./workbench/pendingShareMarks";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, sourcePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
@@ -2198,6 +2199,14 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  // Closed shared notes whose edits wait for the server. Rows read the marks
+  // themselves, so a change leaves the Explorer and every other row alone; an
+  // open note's editor shows its own state.
+  const [pendingShareMarks] = useState(createPathMarks);
+  const pendingShare = syncStatus?.ownerPendingShare;
+  useEffect(() => {
+    pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
+  }, [pendingShareMarks, pendingShare, openTabs]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -5815,7 +5824,7 @@ export function DesktopWorkspaceShell(props: {
     : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const explorerView = (
-    <>
+    <PendingShareMarks.Provider value={pendingShareMarks}>
       <Explorer
         workspaceId={workspaceId}
         mode={wb.explorerMode}
@@ -5873,7 +5882,7 @@ export function DesktopWorkspaceShell(props: {
         onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
-    </>
+    </PendingShareMarks.Provider>
   );
 
   // The editor is the one live conversation surface. It owns presence,

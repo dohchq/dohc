@@ -459,6 +459,7 @@ import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
 import { readOwnerDraftState } from "./workspaces/ownerDraftRead";
+import { createOwnerPendingShare, listOwnerPendingSharePaths } from "./workspaces/ownerPendingShare";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
@@ -2768,6 +2769,7 @@ const activity = {
       ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
+      ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -5110,6 +5112,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
     keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
+    pendingShare: workspaceId => ownerPendingShare.paths(workspaceId),
     save: (workspace, path, incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
     retry: (workspace, objectId, incident) => desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
     stopAgain: (operation, kept) => {
@@ -5236,11 +5239,27 @@ const { startDesktopCliServer } = createDesktopCliServer({
   localPersonId: localUserId,
   notifyRenderer,
   notifyNoticesChanged,
-  // Created after the windows, so read when a version change runs.
-  versionRound: (workspaceId, change, announce) => versionRounds.run(workspaceId, change, announce),
+  // Created after the windows, so read when a version change runs. A change
+  // of active version changes which notes wait for the server.
+  versionRound: (workspaceId, change, announce) => versionRounds.run(workspaceId, change, announce)
+    .finally(() => ownerPendingShare.refresh(workspaceId)),
   syncSharedChannelsForChatTarget,
   chatDispatchService,
   rememberPendingCliRunMessageLink,
+});
+
+// Shared notes whose files trail their text while edits wait for the server.
+const ownerPendingShare = createOwnerPendingShare({
+  read: workspaceId => withPhysicalWorkspaceOperation(workspaceId, async operation => {
+    if (sharedViewOf(workspaceId)) return [];
+    const active = (await withEngineAdapter(operation.workspace, adapter => adapter.getActiveVersion({ workspaceId })))?.id ?? "main";
+    return requireEngineSessions().run(operation.workspace, async session => {
+      const client = desktopEngine.daemon?.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not read which notes wait for the server.");
+      return listOwnerPendingSharePaths(client, session.workspace, active);
+    });
+  }),
+  onChange: workspaceId => notifyRenderer({ workspaceId }),
 });
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
@@ -5268,6 +5287,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     return readOwnerDraftState(client, session.workspace, path, async () =>
       (await withEngineAdapter(workspace, adapter => adapter.getActiveVersion({ workspaceId: workspace.workspaceId })))?.id ?? "main");
   }),
+  onPendingShareMayChange: workspaceId => ownerPendingShare.refresh(workspaceId),
   sharedCaptureFor: async (workspace) => {
     await warmCredentialCache();
     const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
@@ -5408,6 +5428,7 @@ const desktopEngine = createDesktopEngine({
     const workspace = findWorkspace(workspaceId);
     // A window's reads that came before this open, such as its settings, read again.
     notifyRenderer({workspaceId});
+    ownerPendingShare.refresh(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
     if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
       reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
@@ -5428,7 +5449,8 @@ const desktopEngine = createDesktopEngine({
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
     fetch: (input, init) => relayShareFetch(input, init)}),
-  notifyOwnerDeliveryChanged: workspaceId => notifyRenderer({workspaceId}),
+  notifyOwnerDeliveryChanged: workspaceId => {notifyRenderer({workspaceId}); ownerPendingShare.refresh(workspaceId);},
+  notifyOwnerDraftsChanged: workspaceId => ownerPendingShare.refresh(workspaceId),
   notifyOwnerLiveStopped: (workspaceId, objectId) => sendRendererActivity({workspaceId, liveDocumentStopped: objectId}),
   ownerDeliveryCredentials: () => cachedCredentials?.relayUrl ? {bearer: cachedCredentials.token, accountId: cachedCredentials.userId,
     relayUrl: cachedCredentials.relayUrl, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -7696,7 +7718,9 @@ function registerIpcHandlers(): void {
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
-    requireEngineCapture, notifyRenderer, activity,
+    requireEngineCapture, activity,
+    // A version change can change which notes wait for the server.
+    notifyRenderer: target => { notifyRenderer(target); ownerPendingShare.refresh(target.workspaceId); },
     localPerson,
     authorNames: (workspaceId, event: IpcMainInvokeEvent) => workspaceEngineIpc.authorNames(workspaceId, event.sender, () => []),
     onRefusalsChanged: notifyNoticesChanged,

@@ -310,6 +310,8 @@ export interface CliKeptCopiesPort {
 // that kept them. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
+  /** Shared notes whose edits wait on this computer for the server, so their files hold older text. */
+  pendingShare(): Promise<readonly string[]>;
   /** With an incident, saves exactly the kept edits it names. */
   saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
@@ -2922,7 +2924,8 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        return { ok: true as const, keptEdits: await keptEdits.list() };
+        const [kept, pendingShare] = await Promise.all([keptEdits.list(), keptEdits.pendingShare()]);
+        return { ok: true as const, keptEdits: kept, pendingShare: [...pendingShare] };
       } catch (error) {
         return mcpFailure(error, "failed to list kept edits");
       }
