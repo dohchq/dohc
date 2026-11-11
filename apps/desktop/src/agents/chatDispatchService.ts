@@ -1422,6 +1422,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
+      // Its recorded end is now, so its log's age counts from now too.
+      await markRunLogEnded(actualLogPath(claim.run.runId, claim.run.logPath), nowMs()).catch(reportError);
       notifyRunUpdated(workspace, claim.run.threadId);
       await settleRunNotice(workspace, claim.run.runId);
     }

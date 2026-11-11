@@ -1,5 +1,6 @@
 import { readdir, stat, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
+import { MAX_IGNORED_SETTINGS } from "../settings/settingsFile";
 import { DEFAULT_RUN_LOG_KEEP_DAYS, type AgentRunLogsSettings, type StoredUserSettingsResult } from "../settings/userSettings";
 
 // Each agent run writes its output to run-logs/<runId>.log in dohc's state
@@ -14,11 +15,12 @@ export const MIN_RUN_LOG_AGE_MS = DEFAULT_RUN_LOG_KEEP_DAYS * DAY_MS;
 const RUN_FILE = /^(?<runId>[^.]+)\.log(?:\.node|\.mcp\.json)?$/u;
 
 // A file dohc could not read, or a limit it ignored, may ask to keep logs
-// longer, so dohc keeps every log until the file says how long.
+// longer, so dohc keeps every log until the file says how long. A full list
+// of ignored keys may have left the limit out.
 export function runLogKeepDays(
   result: Pick<StoredUserSettingsResult, "settings" | "source" | "ignored">,
 ): AgentRunLogsSettings["keepDays"] {
-  const unread = result.source === "recovered" ||
+  const unread = result.source === "recovered" || (result.ignored?.length ?? 0) >= MAX_IGNORED_SETTINGS ||
     result.ignored?.some(({ key }) => key === "agentRunLogs" || key.startsWith("agentRunLogs."));
   return unread ? "forever" : result.settings.agentRunLogs.keepDays;
 }

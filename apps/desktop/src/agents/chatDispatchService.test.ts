@@ -9,7 +9,7 @@ import {
   type SpawnRunner,
 } from "./chatRunnerProcess";
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
   type ChatDispatch,
@@ -3038,9 +3038,18 @@ describe("chatDispatchService", () => {
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
     if (!interrupted) throw new Error("Expected an interrupted run.");
+    // Quiet for 40 days before dohc stopped, so only the end stamp keeps it.
+    const log = join(fixture.stateRoot, "run-logs", `${interrupted.run.runId}.log`);
+    await mkdir(dirname(log), { recursive: true });
+    await writeFile(log, "started");
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 40 * 24 * 60 * 60 * 1000);
+    await utimes(log, lastWrite, lastWrite);
+    fixture.now.value = restarted;
 
     await activate(fixture);
 
+    expect((await stat(log)).mtimeMs).toBe(restarted);
     expect(await fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
       failureHandled: true,
       failureReason: "app restart during run",

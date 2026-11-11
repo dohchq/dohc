@@ -75,5 +75,7 @@ describe("runLogKeepDays", () => {
     expect(await limitFor('{ "version": 2, "agentRunLogs": { "keepDays": 365 }')).toBe("forever");
     expect(await limitFor(JSON.stringify({ version: 2, agentRunLogs: { keepDays: "a year" } }))).toBe("forever");
     expect(await limitFor(JSON.stringify({ version: 2, agentRunLogs: 365 }))).toBe("forever");
+    const unknown = Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`unknown${index}`, true]));
+    expect(await limitFor(JSON.stringify({ version: 2, ...unknown, agentRunLogs: { keepDays: "a year" } }))).toBe("forever");
   });
 });
