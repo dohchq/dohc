@@ -1278,8 +1278,8 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// Other origins are excluded because their content may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
 /// Matching pending rollback restores also exclude their destination heads,
-/// and so do pending plaintext switch writes with no file to replace, such as
-/// one that waits for a held file in the folder at its path.
+/// and so do this version's pending plaintext switch writes with no file to
+/// replace, such as one that waits for a held file in the folder at its path.
 ///
 /// Pending rollback deletes contribute transient last-known-disk entries when
 /// their target has no alias in this version. These entries keep that path out
@@ -1301,7 +1301,7 @@ pub fn capture_manifest_seed(
             .prepare(
                 "SELECT a.path, COALESCE(s.content_kind, 'text'), \
                         s.blob_sha256, tb.byte_length, \
-                        s.binary_sha256, bb.byte_length \
+                        s.binary_sha256, bb.byte_length, 1 \
                  FROM path_aliases a \
                  JOIN snapshots s ON s.workspace_id = a.workspace_id \
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
@@ -1338,12 +1338,10 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3 \
-                              OR (j.job_id GLOB 'version-switch-mat_*' \
-                                  AND j.preimage_present = 0))) \
+                                    length(?3)) = ?3)) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
-                        j.content_sha256, bb.byte_length \
+                        j.content_sha256, bb.byte_length, 0 \
                  FROM materialization_jobs j \
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
                   WHERE j.status = 'pending' AND j.operation = 'delete' \
@@ -1359,6 +1357,7 @@ pub fn capture_manifest_seed(
                  ORDER BY 1",
             )
             .map_err(DomainError::sql_corrupt)?;
+        let unwritten = unwritten_switch_writes(conn, &ws, &version)?;
         let rows = stmt
             .query_map(params![ws, version, rollback_version_prefix], |row| {
                 Ok((
@@ -1368,11 +1367,12 @@ pub fn capture_manifest_seed(
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             })
             .map_err(DomainError::sql_corrupt)?;
         for row in rows {
-            let (path, kind, text_sha, text_len, binary_sha, binary_len) =
+            let (path, kind, text_sha, text_len, binary_sha, binary_len, head) =
                 row.map_err(DomainError::sql_corrupt)?;
             let (sha256, size) = match kind.as_str() {
                 "binary" => match (binary_sha, binary_len) {
@@ -1384,6 +1384,10 @@ pub fn capture_manifest_seed(
                     _ => continue,
                 },
             };
+            if head && !unwritten.is_empty() && unwritten.contains(&(path.clone(), sha256.clone()))
+            {
+                continue;
+            }
             entries.push(CaptureManifestSeedEntry { path, size, sha256 });
         }
         // Same capture-ownership rule for the encrypted store: a tip written
@@ -1441,6 +1445,45 @@ pub fn switch_projection_job_id(
         "version-switch-mat_"
     };
     format!("{prefix}{}", hex_sha256(identity.as_bytes()))
+}
+
+/// The `(path, sha256)` pairs that `version`'s plaintext switch has yet to
+/// write where no file was. Another version's pending write at the same path
+/// does not count (dohc#3622).
+fn unwritten_switch_writes(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+) -> Result<std::collections::HashSet<(String, String)>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT job_id, target_path, content_sha256 FROM materialization_jobs \
+             WHERE workspace_id IN (?1, '') AND status = 'pending' AND operation = 'write' \
+               AND preimage_present = 0 AND job_id GLOB 'version-switch-mat_*'",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let mut rows = stmt
+        .query(params![workspace])
+        .map_err(DomainError::sql_corrupt)?;
+    let mut writes = std::collections::HashSet::new();
+    while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+        let job: String = row.get(0).map_err(DomainError::sql_corrupt)?;
+        let path: String = row.get(1).map_err(DomainError::sql_corrupt)?;
+        let sha: String = row.get(2).map_err(DomainError::sql_corrupt)?;
+        if job
+            == switch_projection_job_id(
+                workspace,
+                version,
+                &path,
+                MaterializationOperation::Write,
+                &sha,
+                false,
+            )
+        {
+            writes.insert((path, sha));
+        }
+    }
+    Ok(writes)
 }
 
 fn reconstruct_capture_binary(
