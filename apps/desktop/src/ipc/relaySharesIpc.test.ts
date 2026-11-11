@@ -788,9 +788,9 @@ describe("owner live document enrollment", () => {
     it("says live editing stopped when the page leaves its path after the server stopped", async () => {
       const h = harness(); h.request.mockResolvedValue(retired);
       h.ownerLiveStop.mockImplementation(released());
-      // Found for the Stop and its first check; gone once the server answered.
+      // Found for the handler, the Stop, and its first check; gone once the server answered.
       let lookups = 0;
-      h.liveDocument.mockImplementation(async () => ++lookups <= 2 ? {mainVersionId: "main", objectId: "object", currentPath: "live.md"} : null);
+      h.liveDocument.mockImplementation(async () => ++lookups <= 3 ? {mainVersionId: "main", objectId: "object", currentPath: "live.md"} : null);
       vi.spyOn(console, "error").mockImplementation(() => {});
       await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
       // The release waits for Stop reconciliation, which finds the document wherever it is.
