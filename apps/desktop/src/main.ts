@@ -5239,8 +5239,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
   localPersonId: localUserId,
   notifyRenderer,
   notifyNoticesChanged,
-  // Created after the windows, so read when a version change runs.
-  versionRound: (workspaceId, change, announce) => versionRounds.run(workspaceId, change, announce),
+  // Created after the windows, so read when a version change runs. A change
+  // of active version changes which notes wait for the server.
+  versionRound: (workspaceId, change, announce) => versionRounds.run(workspaceId, change, announce)
+    .finally(() => ownerPendingShare.refresh(workspaceId)),
   syncSharedChannelsForChatTarget,
   chatDispatchService,
   rememberPendingCliRunMessageLink,
@@ -7716,7 +7718,9 @@ function registerIpcHandlers(): void {
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
-    requireEngineCapture, notifyRenderer, activity,
+    requireEngineCapture, activity,
+    // A version change can change which notes wait for the server.
+    notifyRenderer: target => { notifyRenderer(target); ownerPendingShare.refresh(target.workspaceId); },
     localPerson,
     authorNames: (workspaceId, event: IpcMainInvokeEvent) => workspaceEngineIpc.authorNames(workspaceId, event.sender, () => []),
     onRefusalsChanged: notifyNoticesChanged,
