@@ -877,7 +877,7 @@ export function makeBridge(
     // swap in real rows.
     listCollections: vi.fn(
       async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
-        collections: [],
+        collections: [], unclaimedDatasetFolders: [],
       }),
     ),
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {

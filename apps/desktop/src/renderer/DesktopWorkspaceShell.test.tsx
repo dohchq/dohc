@@ -348,7 +348,7 @@ describe("collection folders", () => {
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [] }));
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
     renderShell(bridge);
@@ -381,7 +381,7 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [],
     }));
     renderShell(bridge);
     const user = userEvent.setup();
@@ -430,7 +430,7 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }],
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [],
     }));
     bridge.getCollection = vi.fn(async () => ({
       path: "tasks",

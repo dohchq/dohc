@@ -793,9 +793,10 @@ const CollectionQueryFilterSchema: z.ZodType<CollectionQueryFilter> = z.object({
 export const ListCollectionsPayload = WorkspaceIdPayload;
 export type ListCollectionsPayload = z.infer<typeof ListCollectionsPayload>;
 
-export const ListCollectionsResult: z.ZodType<CollectionListResultContract> =
-  z.object({ collections: z.array(CollectionSummarySchema).max(10_000) });
-export type ListCollectionsResult = CollectionListResultContract;
+// `unclaimedDatasetFolders`: folders whose dataset.json names no Collection on this computer, as a deleted one leaves.
+export type ListCollectionsResult = CollectionListResultContract & { unclaimedDatasetFolders: string[] };
+export const ListCollectionsResult: z.ZodType<ListCollectionsResult> =
+  z.object({ collections: z.array(CollectionSummarySchema).max(10_000), unclaimedDatasetFolders: z.array(z.string().max(4096)).max(10_000) });
 
 export const GetCollectionPayload = z.object({
   workspaceId: WORKSPACE_ID,

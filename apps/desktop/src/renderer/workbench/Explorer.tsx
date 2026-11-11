@@ -163,6 +163,9 @@ export interface ExplorerProps {
   // Folders main recognizes as apps. Their rows draw the app glyph; a row
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
+  // Folders whose dataset.json names no Collection on this computer, as a
+  // deleted one leaves. Home shows their files.
+  unclaimedDatasetFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   // The workspace's apps, for Home's Apps section. Without it Home has no
   // Apps section.

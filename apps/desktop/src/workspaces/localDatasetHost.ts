@@ -486,6 +486,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           pending.delete(input.preparationId); return changed(approved);
         });
       },
+      keptDatasetIds() { assertCurrent(); return host.keptDatasetIds(owner, {workspaceId}); },
       list(input: {after?: string; limit?: number; includeArchived?: boolean} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
       describe(datasetId: string, input: { includeArchived?: boolean } = {}) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId, ...input}); },
       lifecycle(input: { datasetId: string; after?: string; limit?: number }) { assertCurrent(); return host.lifecycle(owner, { workspaceId, ...input }); },

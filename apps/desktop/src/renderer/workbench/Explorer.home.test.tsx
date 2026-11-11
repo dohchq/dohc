@@ -496,6 +496,13 @@ describe("Explorer Home", () => {
     expect(onModeChange).toHaveBeenCalledWith("files");
   });
 
+  it("shows the files a deleted Collection left in its folder, and still leaves out a listed Collection's", () => {
+    const files = [file("guests/dataset.json"), file("guests/notes.md"), file("old/dataset.json"), file("old/plan.md"), file("old/app/index.html")];
+    render(<Explorer {...explorerProps({ files, folders: ["guests", "old", "old/app"], expandedFolders: ["old"], unclaimedDatasetFolders: new Set(["old"]) })} />);
+    expect(rowLabels("Pages")).toEqual(["old", "plan"]);
+    expect(rowLabels("Other files")).toEqual(["dataset.json", "index.html"]);
+  });
+
   it("pins apps first, then everything else pinned, once each", () => {
     render(<Explorer {...explorerProps({
       pinned: ["notes.md", "trip", collectionTabPath("tasks"), "gone.md"],

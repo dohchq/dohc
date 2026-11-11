@@ -2119,9 +2119,11 @@ export function DesktopWorkspaceShell(props: {
   const historyReadable = (status: SyncStatusResult | null) =>
     shareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
+  const readsCollectionsRef = useRef(false);
+  readsCollectionsRef.current = !shareView || shareViewReadsCollections;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown } = useCollectionFolders(
+  const { collectionFolders, unclaimedDatasetFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -4803,6 +4805,8 @@ export function DesktopWorkspaceShell(props: {
         const paintedCachedListing = (await refreshFiles({ allowCached: true })).cached === true;
         if (cancelled || !paintedCachedListing) return;
         await refreshFiles();
+        // Home sorts this walk's dataset.json files by Collection folders read from the cached listing.
+        if (!cancelled && readsCollectionsRef.current) void refreshCollections();
       };
       const reportInitialFilesFailure = (error: unknown) => {
         if (!cancelled) {
@@ -4823,6 +4827,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceOpenAttempt,
     markCurrentSwitchPhase,
     refreshFiles,
+    refreshCollections,
     reportShellError,
     setCaptureDecidedFor,
     syncStatusLane,
@@ -5873,6 +5878,7 @@ export function DesktopWorkspaceShell(props: {
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         collectionFolders={collectionFolders}
+        unclaimedDatasetFolders={unclaimedDatasetFolders}
         appFolders={appFolders}
         onOpenCollection={openCollectionTab}
         apps={explorerApps}
@@ -7042,7 +7048,11 @@ export function DesktopWorkspaceShell(props: {
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!shareView}
-                  onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
+                  onLifecycleChanged={() => {
+                    void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error));
+                    // A deleted Collection's folder holds its files still, now as plain files on Home.
+                    void refreshCollections();
+                  }}
                   onError={collectionReports.onError}
                   onKeepCollections={keepCollectionsWithList}
                   onSettled={collectionReports.onSettled}
