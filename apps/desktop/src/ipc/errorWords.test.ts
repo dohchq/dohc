@@ -12,6 +12,7 @@ import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError,
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
+import { DatasetHostError, resolveCompatibleDatasetRevision } from "@dohc/app-backend-runtime/dataset-host";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
@@ -54,6 +55,7 @@ import {
   namingCollectionMove,
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
+  isCollectionRulesReplaced,
   readCollectionReopenWait,
   readCollectionsRefusal,
   readError,
@@ -701,6 +703,18 @@ describe("error words", () => {
     expect(readError(acrossIpc(stopped, "desktop:dataset")).words).toBe(readError(acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset")).words);
     expect(readCollectionReopenWait(acrossIpc(stopped, "desktop:dataset"))).toBeNull();
     expect(readCollectionReopenWait(new Error("This Collection is waiting to reopen. Try again in 5 seconds."))).toBeNull();
+  });
+
+  it("tells a request the Collection's host refused for replaced rules from its other conflicts, across IPC", () => {
+    // The host's own check, with rules approved at revision 2 and no history that reaches the request's revision 1.
+    const none = { prepare: () => ({ get: () => undefined, all: () => [] }) } as unknown as Parameters<typeof resolveCompatibleDatasetRevision>[0];
+    const approved = { revision: 2, revisionSha256: "b".repeat(64) } as Parameters<typeof resolveCompatibleDatasetRevision>[3];
+    let replaced: unknown;
+    try { resolveCompatibleDatasetRevision(none, { workspaceId: "workspace", datasetId: "dataset" }, { revision: 1, revisionSha256: "a".repeat(64) }, approved); } catch (error) { replaced = error; }
+    expect(replaced).toBeInstanceOf(DatasetHostError);
+    expect(isCollectionRulesReplaced(acrossIpc(replaced, "desktop:dataset"))).toBe(true);
+    expect(isCollectionRulesReplaced(acrossIpc(new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it."), "desktop:dataset"))).toBe(false);
+    expect(isCollectionRulesReplaced(new Error("The Collection's rules changed. Its owner must approve this access again."))).toBe(false);
   });
 
   it("tells a person what to do for each way the engine can be unavailable", () => {

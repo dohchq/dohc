@@ -428,6 +428,17 @@ export function isConflictStaleTarget(error: unknown): boolean {
   return (name === "DaemonRefusalError" || name === "VersionedTextStoreError") && message === "conflict-stale-target";
 }
 
+/**
+ * Whether a Collection on this computer refused a request because it names
+ * rules the Collection has replaced. The host ran nothing, and the same
+ * request can never run. A Collection on a server answers this with a bare
+ * `conflict`, as it answers an archived Collection, so this reads false there.
+ */
+export function isCollectionRulesReplaced(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return name === "DatasetHostError" && code === "conflict" && message === "The Collection's rules changed. Its owner must approve this access again.";
+}
+
 /** A caller's sentence, then the error's words when they add to it. */
 export function withErrorWords(sentence: string, error: unknown): string {
   const { words } = readError(error);
