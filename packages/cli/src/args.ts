@@ -197,13 +197,13 @@ function editDistance(a: string, b: string): number {
 
 /**
  * The one name a mistyped name most likely meant. It differs only in case and dashes, or by one
- * edit, or by two when the name has more than four letters. A tie suggests nothing.
+ * edit, or by two when the name has eight letters or more. A tie suggests nothing.
  */
 function nearest(name: string, candidates: readonly string[]): string | undefined {
   const fold = (value: string) => value.toLowerCase().replace(/[-_]/g, "");
   const folded = candidates.filter((candidate) => candidate !== name && fold(candidate) === fold(name));
   if (folded.length === 1) return folded[0];
-  const limit = fold(name).length > 4 ? 2 : 1;
+  const limit = fold(name).length >= 8 ? 2 : 1;
   const [first, second] = candidates
     .map((candidate) => ({ candidate, distance: editDistance(name, candidate) }))
     .filter(({ distance }) => distance > 0 && distance <= limit)

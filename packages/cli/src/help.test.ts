@@ -113,6 +113,9 @@ describe("CLI help", () => {
       [["chat", "constructor"], "dohc: unknown chat verb 'constructor'; run dohc chat --help\n"],
       [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
       [["chta", "post"], "dohc: unknown command 'chta'; did you mean 'chat'? Run dohc --help\n"],
+      // Two edits from share: too far for a five-letter name, close enough for an eight-letter one.
+      [["state"], "dohc: unknown command 'state'; run dohc --help\n"],
+      [["autmaton", "list"], "dohc: unknown command 'autmaton'; did you mean 'automation'? Run dohc --help\n"],
       [["chat", "psot", "general", "hi"], "dohc: unknown chat verb 'psot'; did you mean 'post'? Run dohc chat --help\n"],
       [["chat", "createGroup", "Design"], "dohc: unknown chat verb 'createGroup'; did you mean 'create-group'? Run dohc chat --help\n"],
       [["dataset", "delete-preview"], "dohc: unknown dataset verb 'delete-preview'; did you mean 'deletePreview'? Run dohc dataset --help\n"],
