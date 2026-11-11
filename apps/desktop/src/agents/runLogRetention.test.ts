@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { removeExpiredRunLogs, RUN_LOG_FOLDER } from "./runLogRetention";
+import { readUserSettingsFile, USER_SETTINGS_FILE } from "../settings/userSettingsStore";
+import { removeExpiredRunLogs, RUN_LOG_FOLDER, runLogKeepDays } from "./runLogRetention";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-11-11T12:00:00Z");
@@ -53,5 +54,26 @@ describe("removeExpiredRunLogs", () => {
     const stateDir = await mkdtemp(join(tmpdir(), "dohc-run-logs-"));
     dirs.push(stateDir);
     await expect(removeExpiredRunLogs({ stateDir, keepDays: 30, nowMs: NOW, isRunning: () => false })).resolves.toBeUndefined();
+  });
+});
+
+describe("runLogKeepDays", () => {
+  // The limit dohc sweeps with when the settings file holds this text.
+  async function limitFor(text: string) {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-run-log-settings-"));
+    dirs.push(dir);
+    await writeFile(join(dir, USER_SETTINGS_FILE), text);
+    return runLogKeepDays(await readUserSettingsFile(dir));
+  }
+
+  it("uses the limit the settings file sets", async () => {
+    expect(await limitFor(JSON.stringify({ version: 2, agentRunLogs: { keepDays: 90 } }))).toBe(90);
+    expect(await limitFor(JSON.stringify({ version: 2 }))).toBe(30);
+  });
+
+  it("keeps every log while dohc cannot read the file or its limit", async () => {
+    expect(await limitFor('{ "version": 2, "agentRunLogs": { "keepDays": 365 }')).toBe("forever");
+    expect(await limitFor(JSON.stringify({ version: 2, agentRunLogs: { keepDays: "a year" } }))).toBe("forever");
+    expect(await limitFor(JSON.stringify({ version: 2, agentRunLogs: 365 }))).toBe("forever");
   });
 });

@@ -17,6 +17,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { AgentIntegration, AgentRunRecord } from "../agents/AgentIntegration";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
+import { MIN_RUN_LOG_AGE_MS } from "../agents/runLogRetention";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 
 export function createAgentRunsIpc<
@@ -68,7 +69,7 @@ export function createAgentRunsIpc<
 
   // dohc removes a finished run's log once the settings file stops keeping it
   // (agents/runLogRetention.ts), so its details say so instead of naming no file.
-  const removed = (path: string) => stat(path).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  const missing = (path: string) => stat(path).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
   function registerChatRunRecords(): void {
     registerHandler(CHANNELS.chatRunRecordsForThread, workspaceHandler(async (event, payload) => {
@@ -99,8 +100,10 @@ export function createAgentRunsIpc<
               : {}),
             ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
             ...(!run.logPath ? {}
-              : run.endedAtMs !== undefined && await removed(run.logPath) ? { logRemoved: true }
-              : { logPath: run.logPath }),
+              : run.endedAtMs === undefined || !await missing(run.logPath) ? { logPath: run.logPath }
+              // Only a run older than any limit can have had its log removed by dohc.
+              : run.endedAtMs < Date.now() - MIN_RUN_LOG_AGE_MS ? { logRemoved: true }
+              : {}),
           },
         ]),
       ));

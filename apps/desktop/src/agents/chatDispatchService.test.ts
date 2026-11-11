@@ -8,7 +8,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -1230,6 +1230,24 @@ describe("chatDispatchService", () => {
     } finally {
       await service.stop();
     }
+  });
+
+  it("counts a quiet run's log from when the run ended, not its last write", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Take your time.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    const log = join(fixture.stateRoot, "run-logs", `${claim.run.runId}.log`);
+    // Its last write was 40 days before it ended.
+    const ended = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(ended - 40 * 24 * 60 * 60 * 1000);
+    await utimes(log, lastWrite, lastWrite);
+    fixture.now.value = ended;
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(async () => expect((await stat(log)).mtimeMs).toBe(ended));
   });
 
   it("reports each pause and resume once, wherever it came from", async () => {

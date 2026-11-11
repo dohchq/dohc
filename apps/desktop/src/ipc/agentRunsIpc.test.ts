@@ -351,7 +351,7 @@ describe("agent run IPC registrations", () => {
     expect(h.records).toHaveBeenCalledWith("workspace-a", "thread-1", { limit: 200 });
   });
 
-  it("says a finished run's log was removed when its file is gone, and names a running run's log", async () => {
+  it("says an old finished run's log was removed when its file is gone, and names a running run's log", async () => {
     const h = await harness();
     const logs = await createTestScratch("agent-run-logs-");
     const kept = join(logs, "run-kept.log");
@@ -364,6 +364,8 @@ describe("agent run IPC registrations", () => {
       kept: run("run-kept", { endedAtMs: 2, exitCode: 0, logPath: kept }),
       gone: run("run-gone", { endedAtMs: 2, exitCode: 0, logPath: join(logs, "run-gone.log") }),
       starting: run("run-starting", { logPath: join(logs, "run-starting.log") }),
+      // Ended yesterday: younger than any limit, so dohc did not remove it.
+      lost: run("run-lost", { endedAtMs: Date.now() - 86_400_000, exitCode: 0, logPath: join(logs, "run-lost.log") }),
     });
     const { runs } = await h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload) as { runs: Record<string, { logPath?: string; logRemoved?: true }> };
     expect(runs.kept).toMatchObject({ logPath: kept });
@@ -372,6 +374,8 @@ describe("agent run IPC registrations", () => {
     expect(runs.gone?.logPath).toBeUndefined();
     expect(runs.starting).toMatchObject({ logPath: join(logs, "run-starting.log") });
     expect(runs.starting?.logRemoved).toBeUndefined();
+    expect(runs.lost?.logRemoved).toBeUndefined();
+    expect(runs.lost?.logPath).toBeUndefined();
   });
 
   it.each([CHANNELS.chatRunRecordsForThread, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, retryStoppedRun.channel])("propagates capture refusal before %s store work", async (channel) => {

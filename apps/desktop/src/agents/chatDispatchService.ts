@@ -22,7 +22,7 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { Agent, AgentRunLogsSettings, AgentWithLaunch } from "../settings/userSettings";
-import { removeExpiredRunLogs } from "./runLogRetention";
+import { markRunLogEnded, removeExpiredRunLogs } from "./runLogRetention";
 import type { AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -752,6 +752,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     if (!live.child.hasExited()) return false;
+    await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
     // Try again waits for the process to exit, so read the run again.
@@ -2247,6 +2248,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       [
         ...runWorkspacesToRelease.map(async (live) => {
           try {
+            await markRunLogEnded(live.logPath, nowMs()).catch(reportError);
             await clearLiveAttribution(live);
           } catch (error) {
             reportError(error);
