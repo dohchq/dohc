@@ -17,8 +17,8 @@ import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
-import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
-import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
+import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,type OrdinaryActivationCapacityValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
+import {validateOrdinaryActivation} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
 import {createLiveValidationExecutor} from '../../../services/sync-relay/src/liveValidation.js'
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
@@ -46,7 +46,9 @@ const policy={maxStructVisits:1_000_000,maxValueNodeVisits:5_000_000,maxDecodedP
   maxStructClientGroupVisits:1_000_000,maxDeleteClientGroupVisits:1_000_000,maxDeleteIntervalVisits:1_000_000,maxIndexOperations:10_000_000}
 const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJournal=createLiveMarkdownJournalValidator(policy)
 // The pool's check, run in this process.
-const validateActivation:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,policy)
+const validateActivation:OrdinaryActivationCapacityValidator=async work=>validateOrdinaryActivation(work,policy)
+// A busy pool's answer, whose slot is free again at once.
+const busy={kind:'retry',reason:'admission-unavailable',waitForCapacity:async()=>{}} as const
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
@@ -793,7 +795,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
     config:{targets:[target],validation:policy,validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
-    adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
+    adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},wake(){},
     runDocument,lifetime:new AbortController().signal,
   })
   return {driver,target,pull}
@@ -1153,7 +1155,7 @@ it('refuses a capture whose validation runs out of heap, blocks it for its owner
 it('releases a capture and tries again on a later pass while live validation is busy',async()=>{
   const f=fixture();try{
     const send=vi.fn(async()=>({result:{released:true}}))
-    const d=activationDriver(f,vi.fn(async()=>f.capture),send,undefined,undefined,{validateActivation:async()=>({kind:'retry',reason:'admission-unavailable'})})
+    const d=activationDriver(f,vi.fn(async()=>f.capture),send,undefined,undefined,{validateActivation:async()=>busy})
     expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
     expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation'}),expect.any(AbortSignal))
     expect(d.driver.blocked(d.target)).toBeUndefined()
@@ -1183,9 +1185,9 @@ it('releases the lease of a capture the pass deadline aborted during validation 
     const order:string[]=[],send=vi.fn(async()=>{order.push('release');return {result:{released:true}}})
     const deadline=new AbortController(),reason=new Error('Pass deadline reached.')
     let validations=0
-    const validate:OrdinaryActivationValidator=async(_work,signal)=>{
+    const validate:OrdinaryActivationCapacityValidator=async(_work,signal)=>{
       if(validations++===0){deadline.abort(reason);signal?.throwIfAborted()}
-      return {kind:'retry',reason:'admission-unavailable'}
+      return busy
     }
     const capture=vi.fn(async()=>{order.push('capture');return f.capture})
     const d=activationDriver(f,capture,send,undefined,undefined,{validateActivation:validate})
@@ -1203,9 +1205,9 @@ it('releases the lease of a capture whose validation worker exited before the ne
   const f=fixture();try{
     const order:string[]=[],send=vi.fn(async()=>{order.push('release');return {result:{released:true}}})
     let validations=0
-    const validate:OrdinaryActivationValidator=async()=>{
+    const validate:OrdinaryActivationCapacityValidator=async()=>{
       if(validations++===0)throw new Error('Live validation worker exited.')
-      return {kind:'retry',reason:'admission-unavailable'}
+      return busy
     }
     const capture=vi.fn(async()=>{order.push('capture');return f.capture})
     const d=activationDriver(f,capture,send,undefined,undefined,{validateActivation:validate})
@@ -1224,7 +1226,7 @@ it('releases the lease of a capture whose validation worker exited before the ne
 // A write can land between validation and the transaction without moving the relay cursor.
 it('refuses a capture as stale when its history changes after validation',async()=>{
   const f=fixture();try{
-    const validate:OrdinaryActivationValidator=async work=>{
+    const validate:OrdinaryActivationCapacityValidator=async work=>{
       const result=await validateActivation(work)
       f.raw.prepare('UPDATE sync_relay_log SET settlement_admission_json=? WHERE relay_seq=3')
         .run(JSON.stringify({status:'refused',settlementId:'late',reason:'authorship-mismatch'}))
@@ -1244,7 +1246,7 @@ it('refuses a capture as stale when the retained activation it read is gone by t
     expect(read).toHaveBeenCalled()
     read.mockClear()
     const documents=f.raw.prepare('SELECT * FROM sync_relay_live_documents').all(),control=f.storage.getLiveHostControl()
-    const validate:OrdinaryActivationValidator=async work=>{
+    const validate:OrdinaryActivationCapacityValidator=async work=>{
       expect(work.cut).toBeUndefined()
       f.raw.exec('DELETE FROM sync_relay_service_activations')
       return validateActivation(work)
