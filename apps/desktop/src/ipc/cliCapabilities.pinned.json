@@ -96,6 +96,9 @@
     "sharedFilesHeld": [
       "workspace.status"
     ],
+    "syncFailure": [
+      "workspace.status"
+    ],
     "saveKeptCopy": [
       "file.kept.save"
     ],

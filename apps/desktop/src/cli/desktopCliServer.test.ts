@@ -146,7 +146,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     agentYouRun: vi.fn(async (agentId: string) => agentId === "terminal" ? { name: "Terminal" } : null),
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), dispatchedRunSecret: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), dispatchedRunSecret: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined), getStatus: vi.fn(() => ({})) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -544,13 +544,13 @@ describe("desktop CLI workspace context", () => {
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, conflicts: [{ conflictId: "c1", origin: "sync", waiting: {
         code: "resolve-existing-conflict",
-        message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+        message: "A newer version of notes.md from another computer is waiting. It comes in after this conflict is resolved.",
         objectId: "notes-object", originId: "computer-d", originSeq: 4 } }] });
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waitingVersion");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect((await cli("version", "conflicts")).stdout).toBe(
-        "c1 · sync · notes.md\n  A newer version from another machine is waiting. It comes in after you resolve this conflict.\n");
+        "c1 · sync · notes.md\n  A newer version from another computer is waiting. It comes in after you resolve this conflict.\n");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
       expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
@@ -730,6 +730,22 @@ describe("desktop CLI workspace context", () => {
     expect(await context.sharedFilesHeld?.()).toEqual({ count: 1, files });
     f.dependencies.shareProjection = vi.fn(async () => ({ state: "current" as const }));
     expect(await (await f.create().openCliWorkspace(f.workspace)).sharedFilesHeld?.()).toEqual({ count: 0, files: [] });
+  });
+
+  it("reads the sync failure from the workspace's status", async () => {
+    const f = fixture();
+    const failure = { cause: "server-unreachable" as const, detail: "RelayUnreachableError: offline", sinceMs: 1, attempts: 1 };
+    f.dependencies.activity.getStatus = vi.fn(() => ({ syncFailure: failure }));
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.syncFailure?.()).toEqual(failure);
+    expect(f.dependencies.activity.getStatus).toHaveBeenCalledWith(f.workspace.workspaceId);
+    f.dependencies.activity.getStatus = vi.fn(() => ({}));
+    expect(context.syncFailure?.()).toBeNull();
+    // A shared view's marker, even a damaged one, keeps the owner's sync from it.
+    f.workspace.shareView = {} as RegistryEntry["shareView"];
+    f.dependencies.activity.getStatus = vi.fn(() => ({ syncFailure: failure }));
+    expect(() => context.syncFailure?.()).toThrow("original workspace");
+    expect(f.dependencies.activity.getStatus).not.toHaveBeenCalled();
   });
 
   it("refuses both collection reads when the engine adapter is unavailable", async () => {

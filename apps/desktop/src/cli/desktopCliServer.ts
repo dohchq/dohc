@@ -161,6 +161,7 @@ interface DesktopCliServerDependencies<State> {
     agentWriteRunId(workspaceId: string): string | null;
     dispatchedRunSecret(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
+    getStatus(workspaceId: string): Pick<SyncStatusResult, "syncFailure">;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -412,6 +413,11 @@ export function createDesktopCliServer<State>(
           ? { count: projection.heldPathCount, files: projection.heldPaths }
           : { count: 0, files: [] };
       },
+      // A shared view's marker, even a damaged one, keeps the owner's sync from it.
+      syncFailure: () => {
+        assertOriginalWorkspace(findWorkspace(workspace.workspaceId) ?? workspace);
+        return activity.getStatus(workspace.workspaceId).syncFailure ?? null;
+      },
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
           return decodeWorkspaceResult(
@@ -619,7 +625,7 @@ export function createDesktopCliServer<State>(
                   const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
                   if (waitingVersion === null) return listed;
                   // The conflict's own path, which a waiting move does not change.
-                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
+                  const message = `A newer version of ${conflict.path} from another computer is waiting. It comes in after this conflict is resolved.`;
                   const { code, objectId, originId, originSeq } = waitingVersion;
                   return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
                 };

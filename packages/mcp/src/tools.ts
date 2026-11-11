@@ -1097,7 +1097,7 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting, kept, held] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept, held, failed] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
@@ -1105,6 +1105,8 @@ export async function workspaceStatus(ctx: ToolContext) {
     requestCli(ctx, "collectionsWaiting", {}),
     ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
     requestCli(ctx, "sharedFilesHeld", {}),
+    // A shared view's profile reads no sync failure: it can name the owner's paths.
+    ctx.shareAccess === undefined ? requestCli(ctx, "syncFailure", {}) : null,
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1128,6 +1130,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
     ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
     ...(held.ok && held.heldFiles ? { heldFiles: held.heldFiles } : {}),
+    ...(failed?.ok && failed.syncFailure ? { syncFailure: failed.syncFailure } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

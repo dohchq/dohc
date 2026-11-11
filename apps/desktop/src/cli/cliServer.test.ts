@@ -3312,10 +3312,37 @@ describe("CLI socket server", () => {
       .resolves.toMatchObject({ ok: false });
   });
 
+  it("says why sync stopped in the person's words, with the engine's detail", async () => {
+    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
+    const failures = [{ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }, null];
+    context.syncFailure = () => failures.shift() ?? null;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: { code: "conflict-wait-limit", message: sentences, detail } });
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: null });
+    // Only the original workspace reads its sync, as with kept edits and
+    // History: a received share's folder, any folder in it, and a shared view.
+    const refused = { ok: false, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+    const read = vi.fn(() => ({ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }));
+    context.syncFailure = read;
+    await mkdir(join(workspaceRoot, "shared-with-me", "received", "notes"), { recursive: true });
+    for (const cwd of [join(workspaceRoot, "shared-with-me"), join(workspaceRoot, "shared-with-me", "received", "notes")]) {
+      await expect(invoke("syncFailure", { cwd, actor: "agent" })).resolves.toEqual(refused);
+    }
+    context.readOnly = true;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(refused);
+    context.readOnly = false;
+    expect(read).not.toHaveBeenCalled();
+    // The desktop's own check for a shared view's marker refuses too.
+    context.syncFailure = () => { throw new Error("This is a shared view — only the original workspace can be shared."); };
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toMatchObject({ ok: false });
+  });
+
   it("passes a conflict's waiting version through to version conflicts and a resolve's remaining page", async () => {
     const waiting = {
       code: "resolve-existing-conflict" as const,
-      message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+      message: "A newer version of notes.md from another computer is waiting. It comes in after this conflict is resolved.",
       objectId: "notes-object",
       originId: "computer-d",
       originSeq: 4,
