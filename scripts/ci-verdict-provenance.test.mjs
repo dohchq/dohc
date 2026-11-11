@@ -428,10 +428,10 @@ function workflowExpression(expression, { github, vars = {}, inputs = {}, needs 
   );
 }
 
-function workflowContext({ enabled = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4" } = {}) {
+function workflowContext({ enabled = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4", provider = "github" } = {}) {
   return {
     github: {event_name: event, repository: "dohchq/dohc", event: {pull_request: {draft, head: {repo: {full_name: fork ? "contributor/dohc" : "dohchq/dohc"}}}}},
-    vars: {BLACKSMITH_ENABLED: enabled}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size} : {},
+    vars: {BLACKSMITH_ENABLED: enabled}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size, runner_provider: provider} : {},
   };
 }
 
@@ -455,6 +455,27 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
     for (const [name, job] of Object.entries(document.jobs)) {
       if (name === "javascript-prepare") assert.equal(job["runs-on"], "ubuntu-24.04");
       else assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
+    }
+  }
+});
+
+test("manual Blacksmith selection leaves automatic and default runs unchanged", () => {
+  const document = load(workflow);
+  assert.equal(document.on.workflow_dispatch.inputs.runner_provider.default, "github");
+  assert.deepEqual(document.on.workflow_dispatch.inputs.runner_provider.options, ["github", "blacksmith"]);
+  for (const enabled of ["", "false"]) for (const size of ["4", "8", "32", ""]) {
+    const manual = workflowContext({enabled, size, event: "workflow_dispatch", provider: "blacksmith"});
+    const automatic = {...workflowContext({enabled}), inputs: {runner_provider: "blacksmith", runner_size: size}};
+    const unknown = workflowContext({enabled, size, event: "workflow_dispatch", provider: "unknown"});
+    for (const [name, job] of Object.entries(document.jobs)) {
+      if (name === "javascript-prepare") {
+        assert.equal(job["runs-on"], "ubuntu-24.04");
+        continue;
+      }
+      const cpus = ["changes", "verification"].includes(name) ? "2" : size === "8" ? "8" : "4";
+      assert.deepEqual(workflowExpression(job["runs-on"], manual), [`blacksmith-${cpus}vcpu-ubuntu-2404`], name);
+      assert.deepEqual(workflowExpression(job["runs-on"], automatic), ["ubuntu-24.04"], name);
+      assert.deepEqual(workflowExpression(job["runs-on"], unknown), ["ubuntu-24.04"], name);
     }
   }
 });

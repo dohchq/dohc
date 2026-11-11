@@ -7,7 +7,9 @@ Track the remaining public-contributor setup in [issue #1193](https://github.com
 ## Keep Blacksmith off
 
 The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
-An absent variable or `false` runs PR checks and manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
+An absent variable or `false` runs PR checks and default manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
+A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
+Shared preparation and confinement always run on GitHub's `ubuntu-24.04` image.
 
 Inspect the switch:
 
@@ -59,10 +61,12 @@ There are no automatic main-branch, nightly, Windows, macOS, or release builds i
 Run a manual benchmark from the Actions page, or use:
 
 ```sh
-gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_size=4
+gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_provider=blacksmith -f runner_size=4
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.
+The `runner_provider` input accepts `github` (default) or `blacksmith` for a manual opt-in.
+The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 Complete cloud gate budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
@@ -140,4 +144,5 @@ Record the run URL and verification scope in the PR before artifacts expire.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-New PR checks and manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+New PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+An explicit `runner_provider=blacksmith` manual dispatch still opts into Blacksmith, so leave that input at `github`.
