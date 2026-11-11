@@ -62,6 +62,7 @@
   "desktop:chat-links": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-messages": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:send-chat-message": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },
+  "desktop:resolve-chat-decision": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },
   "desktop:list-personal-chat-feed": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-channel-threads": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:start-channel-thread": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "chatsIpc.withRendererWorkspaceOperation" } },

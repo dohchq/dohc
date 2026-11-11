@@ -8,7 +8,7 @@ import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createTestScratch, createTestScratchSync } from "../workspaces/testTemp";
-import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
+import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult, ResolveChatDecisionResult } from "./bridgeContract";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -909,6 +909,126 @@ it("reads both IPC polls back with their decisions from the live chat store", as
     ]));
     expect(decisions.decisions).toHaveLength(2);
   } finally { await sessions.closeWorkspace(workspace); }
+});
+
+// Try again after an answer whose reply saved while its question stayed open.
+describe("marking a question answered with a reply that saved", () => {
+  async function withPoll(run: (chats: {
+    test: ReturnType<typeof fixture>; store: DesktopLinkedChatStore; channelId: string;
+    threadId: string; questionId: string; replyId: string;
+    resolve(input: { threadId?: string; resolvedByMessageId: string }): Promise<unknown>;
+    reply(threadId: string, body: string): Promise<string>;
+    messageIds(threadId: string): Promise<string[]>;
+    decision(): Promise<unknown>;
+  }) => Promise<void>) {
+    const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-ipc-answer-") };
+    const engine = new ChatsLoopbackEngine();
+    const client = { close() {}, async sendRequest(request: import("@dohc/workspace-engine-client").Request): Promise<import("@dohc/workspace-engine-client").Response> {
+      if (request.method === "workspace.open") return { id: request.id, result: { workspace: workspace.workspaceId } };
+      if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+      return engine.sendRequest(request);
+    } };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const store = createDesktopLinkedChatStore(workspace, { sessions });
+    try {
+      const { id: channelId } = await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+      const test = fixture("local", store);
+      const asked = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+        workspaceId: workspace.workspaceId, channelId, body: "Which day?", options: ["Monday", "Tuesday"],
+      })));
+      const threadId = asked.thread.id;
+      const reply = async (thread: string, body: string) => shown(SendChatMessageResult.parse(await test.invoke(
+        chatOperations.sendChatMessage.channel, { workspaceId: workspace.workspaceId, threadId: thread, body },
+      ))).message.id;
+      // The reply saved; its question is still open, as after a failed answer.
+      const replyId = await reply(threadId, "Monday");
+      await run({
+        test, store, channelId, threadId, questionId: asked.message.id, replyId, reply,
+        resolve: async (input) => await test.invoke(chatOperations.resolveChatDecision.channel, {
+          workspaceId: workspace.workspaceId, threadId: input.threadId ?? threadId, messageId: asked.message.id,
+          resolvedByMessageId: input.resolvedByMessageId, chosenOption: "Monday",
+        }),
+        // Read from the store, which answers whichever workspace the window shows.
+        messageIds: async (thread) => (await store.listMessages({ workspaceId: workspace.workspaceId, threadId: thread }))
+          .map(message => message.id),
+        decision: async () => (await store.listThreadDecisions(workspace.workspaceId, threadId))
+          .find(decision => decision.messageId === asked.message.id),
+      });
+    } finally { await sessions.closeWorkspace(workspace); }
+  }
+
+  it("marks the question answered with the window's own reply and posts nothing", async () => {
+    await withPoll(async ({ test, threadId, questionId, replyId, resolve, messageIds, decision }) => {
+      test.activity.queueCloudSync.mockClear();
+      const resolved = ResolveChatDecisionResult.parse(await resolve({ resolvedByMessageId: replyId }));
+      expect(resolved).toEqual({ resolved: expect.objectContaining({
+        threadId, messageId: questionId, state: "resolved", resolvedByMessageId: replyId, chosenOption: "Monday",
+      }) });
+      expect(await decision()).toMatchObject({ state: "resolved", resolvedByMessageId: replyId });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId]);
+      expect(test.activity.queueCloudSync).toHaveBeenCalledWith("workspace");
+    });
+  });
+
+  it("refuses a reply in another thread", async () => {
+    await withPoll(async ({ test, channelId, threadId, questionId, replyId, resolve, messageIds, decision }) => {
+      const other = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+        workspaceId: "workspace", channelId, body: "Another plan",
+      })));
+      await expect(resolve({ resolvedByMessageId: other.message.id }))
+        .rejects.toThrow("Only your own reply in this thread can answer its question.");
+      // Naming the other thread instead finds no such question there.
+      await expect(resolve({ threadId: other.thread.id, resolvedByMessageId: other.message.id })).rejects.toThrow();
+      expect(await decision()).toMatchObject({ state: "open" });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId]);
+    });
+  });
+
+  it("refuses a reply by another author", async () => {
+    await withPoll(async ({ store, threadId, questionId, replyId, resolve, messageIds, decision }) => {
+      const theirs = await store.sendMessage({
+        workspaceId: "workspace", threadId, author: { kind: "human", displayName: "Ada" },
+        authorUserId: "ada", authorActorKey: null, body: "Tuesday",
+      });
+      await expect(resolve({ resolvedByMessageId: theirs.id }))
+        .rejects.toThrow("Only your own reply in this thread can answer its question.");
+      expect(await decision()).toMatchObject({ state: "open" });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId, theirs.id]);
+    });
+  });
+
+  it("refuses a question another reply already answered, which keeps that answer", async () => {
+    await withPoll(async ({ threadId, questionId, replyId, reply, resolve, messageIds, decision }) => {
+      ResolveChatDecisionResult.parse(await resolve({ resolvedByMessageId: replyId }));
+      const later = await reply(threadId, "Monday, to be sure");
+      await expect(resolve({ resolvedByMessageId: later })).rejects.toThrow("Another reply already answered this question.");
+      expect(await decision()).toMatchObject({ state: "resolved", resolvedByMessageId: replyId });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId, later]);
+    });
+  });
+
+  it("is refused for a window that changed workspaces, as a send is", async () => {
+    await withPoll(async ({ test, threadId, questionId, replyId, resolve, messageIds, decision }) => {
+      test.endSession();
+      await expect(resolve({ resolvedByMessageId: replyId })).rejects.toThrow(CHATS_STOPPED);
+      await expect(test.invoke(chatOperations.sendChatMessage.channel, { workspaceId: "workspace", threadId, body: "Hi" }))
+        .rejects.toThrow(CHATS_STOPPED);
+      expect(await decision()).toMatchObject({ state: "open" });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId]);
+    });
+  });
+});
+
+it("refuses marking a question answered for another workspace before calling chat services", async () => {
+  const h = fixture();
+  await expect(h.invoke(chatOperations.resolveChatDecision.channel, {
+    workspaceId: "other", threadId: "thread", messageId: "question", resolvedByMessageId: "message",
+  })).rejects.toThrow(CHATS_STOPPED);
+  const services = [h.requireEngineCapture, h.linkedChatStoreFor, h.openWorkspaceActivity,
+    h.warmCredentialCache, h.resolveEngineFiles, h.readOwnedWorkspaceText,
+    h.chatRelayIdentityFor, h.ensureGroupFolder, ...Object.values(h.storeMethods),
+    ...Object.values(h.captureMethods), ...Object.values(h.desktopChatBookmarks)];
+  services.forEach(service => expect(service).not.toHaveBeenCalled());
 });
 
 
