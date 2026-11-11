@@ -115,7 +115,7 @@ Workers run pure tests during preparation. Native tests start after the prepared
 The Rust gate builds one test archive, runs its complete inventory across 12 shards, and checks policy separately.
 Ordinary Rust tests use nextest's `hash:N/12` partitions. Shard 5 also runs the reader proofs, beside its lighter ordinary workload.
 The completed verdict requires those proofs exactly once on that shard.
-Rust test jobs wait for JavaScript reporting to finish to limit overlap with JavaScript workers.
+Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.
@@ -129,7 +129,7 @@ This measures confinement as if both runners started when preparation finished; 
 `seconds` is the larger of these two numbers. No runner-wait discount estimates the workload.
 Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
 A gate is `contended` when a job inside its span waited more than 30 s for a runner. Selection's pre-span wait and confinement's queue do not count.
-Rust also counts waits of non-skipped JavaScript group jobs because its tests need the JavaScript aggregate. JavaScript conclusions do not affect Rust's verdict.
+Rust also counts waits of non-skipped JavaScript worker matrix jobs because its tests need that matrix. JavaScript conclusions do not affect Rust's verdict.
 Within budget, timing is `"within budget"`. An uncontended overrun fails.
 A contended overrun reports timing as `"unmeasured"`, emits a warning with the longest wait, and does not fail for time.
 Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.

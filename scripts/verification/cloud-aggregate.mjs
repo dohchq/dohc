@@ -57,8 +57,8 @@ export const CLOUD_JOB_GRAPH = {
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
   "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
-  "rust-tests": { names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "javascript"] },
-  rust: { names: ["engine gate"], needs: ["changes", "javascript"] },
+  "rust-tests": { names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "rust-archive", "javascript-workers"] },
+  rust: { names: ["engine gate"], needs: ["changes", "rust-archive", "javascript-workers"] },
 };
 
 function gateJobNames(scope) {
@@ -79,8 +79,8 @@ function gateTiming(scope, required, confinement = [], metadata = required) {
     + Math.max(...confinement.map(job => Date.parse(job.completed_at) - Date.parse(job.started_at)))) / 1000 : null;
   const jobs = all.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
     startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
-  // Rust's workflow needs JavaScript, but only its waits affect Rust's timing.
-  const javascriptNames = [...CLOUD_JOB_GRAPH.javascript.names, ...CLOUD_JOB_GRAPH["javascript-workers"].names];
+  // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
+  const javascriptNames = CLOUD_JOB_GRAPH["javascript-workers"].names;
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
     runnerWaitSeconds: Math.max(0, (Date.parse(job.started_at) - Date.parse(job.created_at)) / 1000) || 0 })) : [];

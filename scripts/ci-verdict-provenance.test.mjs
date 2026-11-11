@@ -391,7 +391,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
   assert.equal(jobs.javascript.needs, "changes");
-  assert.deepEqual(jobs.rust.needs, ["changes", "javascript"]);
+  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive", "javascript-workers"]);
   assert.equal(jobs["rust-archive"].needs, "changes", "Rust compilation can overlap JavaScript");
   assert.equal(jobs["rust-policy"].needs, "changes", "cold policy checks can overlap JavaScript");
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
@@ -407,7 +407,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");
   assert.equal(workers.steps.find(step => step.name === "Run the complete assigned inventory").run, "node scripts/verification/cloud.mjs worker ${{ matrix.shard }}");
   const tests = jobs["rust-tests"];
-  assert.deepEqual(tests.needs, ["changes", "javascript"], "archive waits must not occupy JavaScript runner slots");
+  assert.deepEqual(tests.needs, ["changes", "rust-archive", "javascript-workers"], "Rust consumers start after the archive and JS workers without waiting for JS reporting");
   for (const job of [tests, jobs.rust]) {
     assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
     const install = job.steps.findIndex(step => step.name === "Install dependencies");
@@ -502,6 +502,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   for (const name of ["confinement-compiler", "confinement-relay"]) assert.deepEqual(workflowExpression(jobs[name]["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
   for (const name of ["javascript-prepare", "javascript-workers"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
   for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
+  for (const name of ["rust-tests", "rust"]) assert.deepEqual(jobs[name].needs, ["changes", "rust-archive", "javascript-workers"]);
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
@@ -514,7 +515,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
     assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), true);
     for (const result of ["success", "failure", "skipped"]) {
-      const selected = {...context, needs: {changes: {result: "success", outputs: {}}, javascript: {result}}};
+      const selected = {...context, needs: {changes: {result: "success", outputs: {}}, "rust-archive": {result: "success"}, "javascript-workers": {result}}};
       for (const name of ["rust-tests", "rust", "rust-policy"]) {
         assert.match(jobs[name].if, /^always\(\)/, "a skipped JavaScript gate must allow Rust-only runs");
         assert.equal(workflowExpression(jobs[name].if, selected), gate !== "js");

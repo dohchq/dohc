@@ -266,6 +266,9 @@ test("contention counts only waits that can occur inside the gate span", t => {
   assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), /exceeding/u);
   jobs.find(job => job.name === "engine gate").completed_at = new Date(start + 650_000).toISOString();
   assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
+  const reporting = jobs.find(job => job.name === "typecheck + tests");
+  reporting.created_at = new Date(Date.parse(reporting.started_at) - 300_000).toISOString();
+  assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u, "Rust does not wait for JS reporting");
   const js = jobs.find(job => job.name === "JS worker 1");
   js.created_at = new Date(Date.parse(js.started_at) - 300_000).toISOString();
   js.conclusion = "failure";

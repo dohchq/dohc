@@ -575,7 +575,7 @@ jobs:
           compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, javascript]
+    needs: [changes, rust-archive, javascript-workers]
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
@@ -680,7 +680,7 @@ jobs:
           compression-level: 0
   rust:
     name: engine gate
-    needs: [changes, javascript]
+    needs: [changes, rust-archive, javascript-workers]
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 40
