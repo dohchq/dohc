@@ -445,16 +445,14 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
       const context = workflowContext({enabled, draft, fork});
       assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
       for (const [name, job] of Object.entries(document.jobs)) {
-        if (name === "javascript-prepare") assert.equal(job["runs-on"], "ubuntu-24.04");
-        else assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"]);
+        assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"], name);
       }
     }
     assert.equal(workflowExpression(document.jobs.verification.if, {...workflowContext({enabled}), needs: {changes: {result: "skipped"}}}), false);
     const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const [name, job] of Object.entries(document.jobs)) {
-      if (name === "javascript-prepare") assert.equal(job["runs-on"], "ubuntu-24.04");
-      else assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
+      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"], name);
     }
   }
 });
@@ -469,13 +467,38 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
     const unknown = workflowContext({enabled, size, event: "workflow_dispatch", provider: "unknown"});
     for (const [name, job] of Object.entries(document.jobs)) {
       if (name === "javascript-prepare") {
-        assert.equal(job["runs-on"], "ubuntu-24.04");
+        assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
         continue;
       }
       const cpus = ["changes", "verification"].includes(name) ? "2" : size === "8" ? "8" : "4";
       assert.deepEqual(workflowExpression(job["runs-on"], manual), [`blacksmith-${cpus}vcpu-ubuntu-2404`], name);
       assert.deepEqual(workflowExpression(job["runs-on"], automatic), ["ubuntu-24.04"], name);
       assert.deepEqual(workflowExpression(job["runs-on"], unknown), ["ubuntu-24.04"], name);
+    }
+  }
+});
+
+test("a temporary preparation runner requires an explicit manual run on the task branch", () => {
+  const document = load(workflow);
+  assert.equal(document.on.workflow_dispatch.inputs.proof_runner.default, "github");
+  assert.deepEqual(document.on.workflow_dispatch.inputs.proof_runner.options, ["github", "isolated-linux"]);
+  for (const event of ["pull_request", "workflow_dispatch"]) {
+    for (const repository of ["dohchq/dohc", "contributor/dohc"]) {
+      for (const ref of ["refs/heads/perf/verification-js5-rust10", "refs/heads/main", "refs/heads/other"]) {
+        for (const proofRunner of [undefined, "github", "isolated-linux", "unknown"]) {
+          const context = workflowContext({event});
+          Object.assign(context.github, {repository, ref});
+          context.inputs.proof_runner = proofRunner;
+          const selected = event === "workflow_dispatch" && repository === "dohchq/dohc"
+            && ref === "refs/heads/perf/verification-js5-rust10" && proofRunner === "isolated-linux";
+          for (const [name, job] of Object.entries(document.jobs)) {
+            const runsOn = job["runs-on"];
+            const labels = runsOn.startsWith("${{") ? workflowExpression(runsOn, context) : [runsOn];
+            assert.deepEqual(labels, selected && name === "javascript-prepare"
+              ? ["verification-perf-landlock"] : ["ubuntu-24.04"], `${event} ${repository} ${ref} ${proofRunner} ${name}`);
+          }
+        }
+      }
     }
   }
 });
@@ -499,8 +522,8 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
     }
   }
-  // Blacksmith's kernel has no Landlock, so the sandbox suites always run on GitHub's image.
-  assert.equal(jobs["javascript-prepare"]["runs-on"], "ubuntu-24.04");
+  // Confinement needs Landlock, including when the other jobs use Blacksmith.
+  assert.deepEqual(workflowExpression(jobs["javascript-prepare"]["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
   for (const name of ["javascript-prepare", "javascript-workers"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
   for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
@@ -1099,13 +1122,20 @@ test("a checkout that keeps no HEAD reflog is refused, not passed", () => {
   assert.equal(formatTreeState({ ...A, reflog: null }), "UNATTRIBUTABLE");
 });
 
-test("no workflow can target a self-hosted runner", async () => {
+test("workflows reject generic self-hosted labels and restrict the task label to preparation", async () => {
   const directory = fileURLToPath(new URL("../.github/workflows/", import.meta.url));
   const files = (await readdir(directory, { recursive: true })).filter(file => /\.ya?ml$/i.test(file));
   assert.ok(files.length > 0);
   const unsafe = [];
   for (const file of files) {
-    if (/self-hosted/i.test(await readFile(join(directory, file), "utf8"))) unsafe.push(file);
+    const document = load(await readFile(join(directory, file), "utf8"));
+    for (const [name, job] of Object.entries(document.jobs ?? {})) {
+      const labels = JSON.stringify(job["runs-on"]);
+      if (/self-hosted/i.test(labels)) unsafe.push(`${file}:${name}`);
+      if (labels.includes("verification-perf-landlock") && (file !== "pr-checks.yml" || name !== "javascript-prepare")) {
+        unsafe.push(`${file}:${name}`);
+      }
+    }
   }
-  assert.deepEqual(unsafe, [], "workflows mentioning self-hosted runners");
+  assert.deepEqual(unsafe, [], "unrestricted runner labels");
 });
