@@ -797,7 +797,6 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         accepted.apply(&remote.encode_full_state()).unwrap();
         let remote_bytes =
             remote.richdoc_append_paragraph(&format!("Capacity remote paragraph {admitted}"));
-        f.doc.apply(&remote_bytes).unwrap();
         let seen = first_seen_for_test(&accepted, &remote_bytes);
         let (receipt, result) = deliver_seen(
             &actor,
@@ -811,9 +810,12 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         .await;
         match result {
             ApplicationResult::Applied(..) => {
+                f.doc.apply(&remote_bytes).unwrap();
                 terminal = Some(receipt);
                 admitted += 1;
             }
+            // The local document doesn't hold the refused paragraph yet, so
+            // the private edit below doesn't follow it.
             ApplicationResult::Pending(ApplicationPending::SettlementRequired) => {
                 break (cursor, remote_bytes, seen);
             }
