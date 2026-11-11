@@ -65,13 +65,20 @@ function snapshotObject(storage: StorageContext, workspaceId: string, versionId:
     WHERE s.workspace_id=? AND s.version_id=? AND s.${field}=?`).get(workspaceId, versionId, value);
 }
 
-// The first create of a chat by its channel id: its wire id and kind.
+// A chat's wire id and kind, from the first create of its wire. A later
+// create, such as a share member's for the same wire, never names the chat.
 function chatCreate(storage: StorageContext, workspaceId: string, channelId: string): {wireId: string; kind: unknown} | null {
-  const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
-    AND json_extract(payload_json,'$.channelId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, channelId);
-  if (!row) return null;
-  const payload = JSON.parse(String(row.payload_json)) as {wireId?: unknown; kind?: unknown};
-  return {wireId: typeof payload.wireId === "string" ? payload.wireId : channelId, kind: payload.kind};
+  const first = (field: "channelId" | "wireId", value: string) => {
+    const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+      AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, value);
+    return row ? JSON.parse(String(row.payload_json)) as {channelId?: unknown; wireId?: unknown; kind?: unknown} : null;
+  };
+  const named = first("channelId", channelId);
+  if (!named) return null;
+  const wireId = typeof named.wireId === "string" ? named.wireId : channelId;
+  const created = first("wireId", wireId);
+  if (typeof named.wireId === "string" && created?.channelId !== channelId) return null;
+  return {wireId, kind: named.kind};
 }
 
 type Scope = {versionId: string | null; objectId: string | null; path: string | null; live: boolean};
@@ -255,7 +262,8 @@ function resolveIn(storage: StorageContext, input: Parameters<typeof resolveWork
     return {status: "found", reference: input.reference, target, workspaceId, createdAtMs: Number(row.created_at_ms)};
   }
   const grant = authorizations(storage, workspaceId, input.reader).find(grant => readable(storage, workspaceId, target, current, grant));
-  if (!grant) return unavailable;
+  // A chat's engine id is the owner's; a link reader holds only its wire id.
+  if (!grant || (target.kind === "chat" && input.reader.kind === "link")) return unavailable;
   const recipient: ReceivedRecipient = input.reader.kind === "user" ? ["user", input.reader.userId] : ["link", input.reader.grantId];
   const identity = createReceivedIdentity(input.identityKey), sourceHandle = identity.source(recipient, workspaceId);
   if (!sourceHandle) return unavailable;

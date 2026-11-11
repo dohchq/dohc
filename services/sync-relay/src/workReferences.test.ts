@@ -436,7 +436,15 @@ describe("work reference registration and resolution", () => {
     seedLinkGrant(storage, {shareId, grantId: "chat-link", access: "read-only", secretHash: hashLinkBearer("secret", LINK_KEY)});
     seedLinkSession(storage, {grantId: "chat-link", capabilityHash: hashLinkBearer(token, LINK_KEY)});
     expect((await json(await handler(linkRequest(token, `/sync/work-references/${ref}`)))).target).toEqual({kind: "thread", threadId: "thread"});
+    // A link holds the chat's wire id, never the owner's engine id.
+    expect(await denialBytes(await handler(linkRequest(token, `/sync/work-references/${chatRef}`)))).toBe(missing);
     expect(await json(await handler(request("stranger", `/sync/work-references/${chatRef}`)))).not.toMatchObject({status: "found"});
+    // A later create of the same wire names no chat.
+    await appendLog(handler, "owner", ws, sequenced([chatChannelCreate("group", {channelId: "later"})]), {originId: "other-device"});
+    expect(await json(await register(handler, [{reference: "F".repeat(43), target: {kind: "chat", channelId: "later"}, createdAtMs: 1}])))
+      .toMatchObject({registeredReferences: []});
+    expect(await json(await handler(request("reader", "/sync/internal/work-references", mintBody({kind: "chat", channelId: "later"})))))
+      .not.toMatchObject({target: {channelId: "later"}});
   });
 
   it("registers a new target in the same batch as its referencing message", async () => {
