@@ -53,6 +53,8 @@ overrides:
   prosemirror-model: 1.25.11
   prosemirror-view: 1.42.2
 
+packageExtensionsChecksum: sha256-YXluaL9EEbODrJI+SuPxKm4U9Q66TxPBkOANS3thXpI=
+
 patchedDependencies:
   '@legendapp/list@3.3.11': ab6f0e9cddd0e8a6ac3c43e22ef95252c9942947f55a50e1d74caa7c9d69035b
   app-builder-lib@26.15.3: 43a9677d5c0d33b767329d8638103ec8ed4bdc14cfe2a4dfc930b673f3081946
@@ -8839,6 +8841,10 @@ packages:
     resolution: {integrity: sha512-Ne2YiiGN8bmrmJJEuTWTLJR32nh/JdL1+PSicowtNb0WFpn59GK8/lfD61bVtzguz7b3PBt74nxpv/Pw5po5Rg==}
     engines: {node: '>=8'}
 
+  type-fest@4.41.0:
+    resolution: {integrity: sha512-TeTSQ6H5YHvpqVwBRcnLDCBnDOHWYu7IvGbHT6N8AOymcr9PJGjc1GTtiWZTYg0NCgYwvnYWEkVChQAr9bjfwA==}
+    engines: {node: '>=16'}
+
   type-fest@5.10.0:
     resolution: {integrity: sha512-NoSdpq/WEiAg5sjmBkmV/hfxv6HJH4NqPNrqjtSO5CwRmpsDfaf4begxW34KdJykH/l1yHtwBWQkCRdoXO8mPA==}
     engines: {node: '>=20'}
@@ -16005,6 +16011,7 @@ snapshots:
       roughjs: 4.6.6
       stylis: 4.4.0
       ts-dedent: 2.3.0
+      type-fest: 4.41.0
       uuid: 14.0.1
 
   meshoptimizer@1.1.1: {}
@@ -18148,6 +18155,8 @@ snapshots:
   type-fest@0.21.3: {}
 
   type-fest@0.7.1: {}
+
+  type-fest@4.41.0: {}
 
   type-fest@5.10.0:
     dependencies:
