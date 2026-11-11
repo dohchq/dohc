@@ -694,6 +694,7 @@ async fn a_close_after_a_resync_and_a_rival_version_writes_the_rival() {
         .await
         .expect("the close writes the rival");
     assert_eq!(deferred_rows(&db), 0);
+    assert_eq!(head_text(&db), "rival edit", "the rival is the head");
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
         head_text(&db),
@@ -849,5 +850,79 @@ async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
         "before parked again"
     );
     assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// Three resyncs owe three writes, and an outside edit leaves the file holding
+/// what the second would write. The first then conflicts and the second stays
+/// owed, but the head's write would find the file it expects. The settle must
+/// stop rather than write the head past the owed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let mut previous = {
+        let actor = supervisor.open(&db, 200).expect("open actor").actor;
+        actor
+            .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+            .await
+            .expect("first resync")
+    };
+    supervisor.close(&db).expect("close actor");
+    for (seq, text) in [(2, " again"), (3, " more")] {
+        let peer = Ydoc::wire();
+        peer.apply(&previous.initial_update).expect("peer state");
+        let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+        let edit = peer.plaintext_insert(end, text);
+        park(
+            &db,
+            &key,
+            ("peer", seq, seq),
+            Some(claim.as_deref().expect("lineage")),
+            &edit,
+        );
+        let actor = supervisor
+            .open(&db, 100 + 100 * seq)
+            .expect("reopen actor")
+            .actor;
+        previous = actor
+            .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+            .await
+            .expect("resync");
+        supervisor.close(&db).expect("close actor");
+    }
+    assert_eq!(unfinished_writes(&db), 3);
+    std::fs::write(&file, "before parked again").expect("outside edit");
+
+    let actor = supervisor.open(&db, 400).expect("reopen actor").actor;
+    actor
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key,
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim,
+            previous.head_blob_sha256.clone(),
+            "older-write-conflicts".into(),
+            Arc::new(()),
+            401,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("an older write didn't land, so the settle stops");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again",
+        "the head's write does not pass the owed one"
+    );
     supervisor.close(&db).expect("close actor");
 }
