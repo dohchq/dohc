@@ -1065,3 +1065,13 @@ it("reuses history statements and targets the requested catalog row", async () =
   readDatasetHistoryHeads(f.db, input);
   expect(prepared.mock.calls.filter(([sql]) => String(sql).includes("WITH changes") || String(sql).includes("SELECT c.dataset_id") || String(sql).includes("checkpoint_digest AS digest"))).toEqual([]);
 });
+
+it("keeps a Collection still importing, and names only the asking workspace's Collections", async () => {
+  const f = await fixture(); await f.activate();
+  const importing = f.db.prepare("INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)");
+  importing.run("import-here", "workspace", id(20), "0".repeat(64), "{}", "owner", 0);
+  importing.run("import-elsewhere", "other-workspace", id(21), "0".repeat(64), "{}", "owner", 0);
+  expect(f.host.keptDatasetIds("owner", { workspaceId: "workspace" }).sort()).toEqual([id(1), id(20)]);
+  // Without access to the other workspace, the owner here learns nothing of what it keeps.
+  expect(() => f.host.keptDatasetIds("owner", { workspaceId: "other-workspace" })).toThrow("revoked");
+});
