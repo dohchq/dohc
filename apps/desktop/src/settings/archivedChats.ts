@@ -1,3 +1,4 @@
+import type { SetChatArchivedPayload } from "../ipc/bridgeContract";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   MAX_ARCHIVED_CHATS,
@@ -8,7 +9,7 @@ import {
  * Where one chat sits in this person's sidebar: in its list, in Archived, or
  * off both, which only a removed agent's chat can be.
  */
-export type ChatListState = "active" | "archived" | "hidden";
+export type ChatListState = SetChatArchivedPayload["state"];
 
 /** The chats this person archived in one workspace, by chat id. */
 export function archivedChatsFor(

@@ -3711,6 +3711,7 @@ export function ChatsView(props: {
         settings,
         agentProblems: file.agentProblems,
         agent: { id: agentId, name: entry.name },
+        chatId: agentChats.find((channel) => channel.agentId === agentId)?.id,
         save: async (next) => {
           try {
             return await bridge().setUserSettings({ settings: next, base: settings });
@@ -3733,7 +3734,7 @@ export function ChatsView(props: {
         onNotice: props.onNotice,
       });
     },
-    [props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
+    [agentChats, props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
   );
   // The members dialog, opened from a group's menu in the sidebar.
   const [membersFor, setMembersFor] = useState<{ workspaceId: string; channel: ChatChannelRecord; session: number } | null>(null);

@@ -32,24 +32,56 @@ export async function hideAgentChat(input: {
     .catch((cause: unknown) => onError(ipcErrorMessage(cause, `dohc could not bring back ${name}'s chat.`), cause)));
 }
 
-/** This workspace's agent chats, or null until they are read. */
+/**
+ * This workspace's agent chats, or null until they are read. They are read
+ * again on activity here, which is how a chat an agent's check starts arrives.
+ */
 export function useAgentChats(workspaceId: string, onError: OnError | undefined): readonly ChatChannelRecord[] | null {
   const [chats, setChats] = useState<{ workspaceId: string; channels: readonly ChatChannelRecord[] } | null>(null);
   const requests = useRequestSequence([workspaceId]);
   const report = useRef(onError);
   report.current = onError;
+  // The workspace shown, or null once closed. Try again reads only for it.
+  const shown = useRef<string | null>(workspaceId);
   const read = useCallback(async (): Promise<void> => {
     const token = requests.next();
     try {
       const { channels } = await bridge().listChatChannels({ workspaceId });
       if (requests.isCurrent(token)) setChats({ workspaceId, channels: channels.filter((channel) => channel.kind === "agent") });
     } catch (cause) {
-      if (requests.isCurrent(token)) report.current?.(ipcErrorMessage(cause, "dohc could not read this workspace's agent chats."), cause, read);
+      if (requests.isCurrent(token)) report.current?.(ipcErrorMessage(cause, "dohc could not read this workspace's agent chats."), cause, async () => {
+        if (shown.current === workspaceId) await read();
+      });
     }
   }, [requests, workspaceId]);
   useEffect(() => {
-    void read();
-  }, [read]);
+    shown.current = workspaceId;
+    // A burst of activity reads once more after the read in flight, not once per event.
+    let reading = false;
+    let again = false;
+    const refresh = () => {
+      if (reading) {
+        again = true;
+        return;
+      }
+      reading = true;
+      void read().finally(() => {
+        reading = false;
+        if (again && shown.current === workspaceId) {
+          again = false;
+          refresh();
+        }
+      });
+    };
+    refresh();
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === undefined || event.workspaceId === workspaceId) refresh();
+    });
+    return () => {
+      shown.current = null;
+      unsubscribe();
+    };
+  }, [read, workspaceId]);
   return chats?.workspaceId === workspaceId ? chats.channels : null;
 }
 
@@ -141,7 +173,7 @@ export function ArchivedAgents(props: {
           );
         })}
       </div>
-      {hiding ? (
+      {hiding && props.removed.some((chat) => chat.id === hiding.chat.id) ? (
         <HideAgentChatDialog
           name={hiding.name}
           onCancel={() => setHiding(null)}

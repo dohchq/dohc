@@ -529,7 +529,7 @@ export function AgentList(props: {
   const archivedChats = archivedAgentChats(workspaceId, settings, agentChats, (agentId) =>
     isPersonalAgentId(agentId)
       ? personalKnown ? entries.some((entry) => entry.agent.agentId === agentId) : null
-      : Object.hasOwn(settings.agents, agentId) || (props.agentProblems ?? []).some((problem) => problem.id === agentId));
+      : (props.agentProblems ?? []).some((problem) => problem.id === agentId));
   const listed = rows.filter((row) => row.kind === "broken" || !archivedChats.archived.has(row.agent.id));
   // The agent Remove asks about. A dialog opened in one workspace closes in the next.
   const [removing, setRemoving] = useState<{ workspaceId: string; agent: Agent } | null>(null);
@@ -557,7 +557,10 @@ export function AgentList(props: {
       (target === "page" ? back.current : heading.current)?.focus();
       return;
     }
-    const element = card.current?.querySelector<HTMLElement>(`[data-testid="agent-row"][data-agent-id="${CSS.escape(target.row)}"]`);
+    const id = CSS.escape(target.row);
+    const element = card.current?.querySelector<HTMLElement>(
+      `[data-testid="agent-row"][data-agent-id="${id}"], [data-testid="agent-row-archived"][data-agent-id="${id}"] > button`,
+    );
     // A row for an agent just added waits for the settings that list it.
     if (!element && !Object.hasOwn(settings.agents, target.row)) return;
     focusAfter.current = null;
@@ -732,16 +735,14 @@ export function AgentList(props: {
 
   const remove = async (agent: Agent) => {
     const removed = await removeAgentWithUndo({
-      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave, order: onOrder, onError, onClearError, onNotice,
+      workspaceId, settings, agentProblems: props.agentProblems, agent, save: onSave,
+      chatId: agentChats?.find((chat) => chat.agentId === agent.id)?.id, order: onOrder, onError, onClearError, onNotice,
     });
     if (!removed) return;
     setRenaming((current) => (current === agent.id ? null : current));
-    // Its page goes with it, and focus goes to the Agents heading.
-    setOpened((current) => {
-      if (current !== agent.id) return current;
-      focusAfter.current = "heading";
-      return null;
-    });
+    // Its page or Archived row goes with it, and focus goes to the Agents heading.
+    focusAfter.current = "heading";
+    setOpened((current) => (current === agent.id ? null : current));
   };
 
   const changePersonal = async (entry: PersonalEntry, next: PersonalAgentChange, failure: string): Promise<boolean> => {
