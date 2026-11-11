@@ -574,18 +574,19 @@ export function storeLiveTicketInTransaction(storage: StorageContext, ticket: St
 }
 
 /**
- * Consumes a matched ticket inside a ticket transaction. Only the personal
- * connection the ticket names, or none for a browser ticket, can consume it.
+ * Consumes a matched ticket inside a ticket transaction and returns the
+ * stored ticket's claims. Only the personal connection the ticket names, or
+ * none for a browser ticket, can consume it.
  */
 export function consumeLiveTicketInTransaction(storage: StorageContext, ticket: {
-  readonly claims: LiveTicketClaims; readonly tokenHash: string; readonly personalConnectionId: string | null;
+  readonly ticketId: string; readonly tokenHash: string; readonly personalConnectionId: string | null;
 }, now: number): RedeemedLiveTicket {
-  const redeemed = parseRedeemedLiveTicket({ ...ticket.claims, redeemedAtMs: now });
-  const updated = storage.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
-    WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?`)
-    .run(now, ticket.claims.ticketId, ticket.tokenHash, ticket.personalConnectionId, now, now);
-  if (updated.changes !== 1) throw LIVE_TICKET_REFUSED;
-  return redeemed;
+  const row = storage.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
+    WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?
+    RETURNING *`)
+    .get(now, ticket.ticketId, ticket.tokenHash, ticket.personalConnectionId, now, now);
+  if (!row) throw LIVE_TICKET_REFUSED;
+  return parseRedeemedLiveTicket({ ...parseStoredLiveTicket(row).claims, redeemedAtMs: now });
 }
 
 export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedemption): RedeemedLiveTicket | null {
@@ -599,7 +600,7 @@ export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedem
         JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
         throw LIVE_TICKET_REFUSED;
       }
-      return consumeLiveTicketInTransaction(storage, { claims, tokenHash: owned.tokenHash, personalConnectionId: null }, now);
+      return consumeLiveTicketInTransaction(storage, { ticketId: claims.ticketId, tokenHash: owned.tokenHash, personalConnectionId: null }, now);
     });
   }
 

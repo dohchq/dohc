@@ -543,7 +543,7 @@ const storePersonal = (state: State, ticketId: string, hash: string, personalCon
 const consumePersonal = (state: State, ticketId: string, hash: string, personalConnectionId: string | null) => {
   const storage = state.storage as StorageContext;
   return storage.ticketTransaction(now =>
-    consumeLiveTicketInTransaction(storage, { claims: personalClaims(ticketId, 1000), tokenHash: hash, personalConnectionId }, now));
+    consumeLiveTicketInTransaction(storage, { ticketId, tokenHash: hash, personalConnectionId }, now));
 };
 
 it("stores a personal agent's ticket only with no grant and the connection that may redeem it", async () => {
