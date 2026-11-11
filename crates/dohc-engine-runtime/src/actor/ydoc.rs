@@ -4673,6 +4673,29 @@ fn pending_ydoc_writes_in(
         .map_err(StorageError::corrupt_public)
 }
 
+fn last_pending_write_before_in(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<Option<String>, StorageError> {
+    conn.query_row(
+        "SELECT job.job_id FROM materialization_jobs AS job \
+         CROSS JOIN moments AS moment \
+         WHERE job.status='pending' AND job.workspace_id=?1 \
+           AND job.job_id GLOB 'ydoc-mat_*' \
+           AND moment.workspace_id=job.workspace_id \
+           AND moment.moment_id=substr(job.job_id, 10) \
+           AND moment.version_id=?2 AND moment.object_id=?3 \
+           AND moment.moment_order < (SELECT moment_order FROM moments \
+             WHERE workspace_id=?1 AND moment_id=?4) \
+         ORDER BY moment.moment_order DESC LIMIT 1",
+        params![key.workspace_id, key.version_id, key.object_id, moment_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(StorageError::corrupt_public)
+}
+
 fn head_moment_in(
     conn: &rusqlite::Connection,
     key: &DocKey,
@@ -4707,7 +4730,12 @@ fn ydoc_write_state_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<YdocWriteState, RuntimeError> {
-    let writes = store.read_with(|conn| pending_ydoc_writes_in(conn, key))?;
+    let (writes, before) = store.read_with(|conn| {
+        Ok((
+            pending_ydoc_writes_in(conn, key)?,
+            last_pending_write_before_in(conn, key, moment_id)?,
+        ))
+    })?;
     replay_materializations_in_order(
         store,
         &materialization.root_dir,
@@ -4725,12 +4753,13 @@ fn ydoc_write_state_on_store(
         &writes,
     )?;
     // A head with no write of its own needs the file to hold the newest
-    // write before it, so that write answers for it.
+    // write before it, so that write answers for it. A write after the head
+    // owes nothing to it.
     let own = [
         format!("ydoc-mat_{moment_id}"),
         format!("sync-mat_{moment_id}"),
     ];
-    for job_id in own.iter().chain(writes.last()) {
+    for job_id in own.iter().chain(&before) {
         if let Some(job) = store.load_materialization_job(job_id)? {
             return Ok(match job.status {
                 JobStatus::Complete | JobStatus::Cancelled => YdocWriteState::Landed,
@@ -5691,50 +5720,11 @@ mod pending_write_order_tests {
     /// moments happened. Each write expects the file to hold the one before
     /// it, so only moment order lands both.
     fn two_writes_that_tie_in_time() -> (ScratchDir, EngineStore, Vec<String>) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let mut store = EngineStore::open(
-            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
-            1,
-        )
-        .expect("store");
-        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
-            .expect("version");
-        let mut preimage = None;
-        for (moment, text) in [
-            ("moment-base", "base"),
-            ("moment-z", "first edit"),
-            ("moment-a", "second edit"),
-        ] {
-            let input = WriteText {
-                workspace_id: "workspace".into(),
-                version_id: "main".into(),
-                object_id: "object".into(),
-                path: "note.md".into(),
-                text: text.into(),
-                moment_id: moment.into(),
-                metadata_origin: "ydoc".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 5,
-                request_id: None,
-            };
-            let queued = preimage.clone();
-            let outcome = store
-                .write_with(&NoFaults, |tx| {
-                    let result = write_text_in_tx(tx, &input)?;
-                    if let Some(preimage) = queued {
-                        enqueue_write(tx, &result, preimage, "ydoc")?;
-                    }
-                    Ok::<_, RuntimeError>(result.snapshot.blob_sha256)
-                })
-                .expect("write");
-            let TxnOutcome::Committed(sha) = outcome else {
-                panic!("the write commits");
-            };
-            preimage = Some(Preimage::Present(sha));
-        }
-        std::fs::write(scratch.path().join("note.md"), "base").expect("disk");
+        let (scratch, mut store) = note_changes(&[
+            ("moment-base", "base", false),
+            ("moment-z", "first edit", true),
+            ("moment-a", "second edit", true),
+        ]);
         let key = DocKey::new("workspace", "main", "object").expect("key");
         let writes = store
             .read_with(|conn| pending_ydoc_writes_in(conn, &key))
@@ -5752,6 +5742,86 @@ mod pending_write_order_tests {
             .collect();
         assert_eq!(created[0], created[1], "the writes tie in time");
         (scratch, store, writes)
+    }
+
+    /// Records each change to note.md in order, queueing a file write for
+    /// those marked to write. The file starts as "base".
+    fn note_changes(changes: &[(&str, &str, bool)]) -> (ScratchDir, EngineStore) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
+            1,
+        )
+        .expect("store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("version");
+        let mut preimage = None;
+        for &(moment, text, writes) in changes {
+            let input = WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "note.md".into(),
+                text: text.into(),
+                moment_id: moment.into(),
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            };
+            let queued = preimage.clone().filter(|_| writes);
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    let result = write_text_in_tx(tx, &input)?;
+                    if let Some(preimage) = queued {
+                        enqueue_write(tx, &result, preimage, "ydoc")?;
+                    }
+                    Ok::<_, RuntimeError>(result.snapshot.blob_sha256)
+                })
+                .expect("write");
+            let TxnOutcome::Committed(sha) = outcome else {
+                panic!("the write commits");
+            };
+            preimage = Some(Preimage::Present(sha));
+        }
+        std::fs::write(scratch.path().join("note.md"), "base").expect("disk");
+        (scratch, store)
+    }
+
+    fn write_state_after_an_outside_edit(
+        scratch: &ScratchDir,
+        store: &mut EngineStore,
+        head: &str,
+    ) -> YdocWriteState {
+        std::fs::write(scratch.path().join("note.md"), "outside edit").expect("outside edit");
+        let key = DocKey::new("workspace", "main", "object").expect("key");
+        let state = ydoc_write_state_on_store(
+            store,
+            &key,
+            head,
+            &YdocCloseMaterialization {
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+            },
+            6,
+            &NoFaults,
+        )
+        .expect("write state");
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+            "outside edit"
+        );
+        state
+    }
+
+    fn job_status(store: &EngineStore, job_id: &str) -> JobStatus {
+        store
+            .load_materialization_job(job_id)
+            .expect("load")
+            .expect("job")
+            .status
     }
 
     #[test]
@@ -5799,39 +5869,41 @@ mod pending_write_order_tests {
     /// writes before it that did not land.
     #[test]
     fn a_head_without_a_write_answers_for_the_writes_it_was_owed() {
-        let (scratch, mut store, _) = two_writes_that_tie_in_time();
-        std::fs::write(scratch.path().join("note.md"), "outside edit").expect("outside edit");
-        let key = DocKey::new("workspace", "main", "object").expect("key");
-        let state = ydoc_write_state_on_store(
-            &mut store,
-            &key,
-            "moment-without-a-write",
-            &YdocCloseMaterialization {
-                root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(()),
-            },
-            6,
-            &NoFaults,
-        )
-        .expect("write state");
-        let statuses: Vec<_> = ["ydoc-mat_moment-z", "ydoc-mat_moment-a"]
-            .iter()
-            .map(|id| {
-                store
-                    .load_materialization_job(id)
-                    .expect("load")
-                    .expect("job")
-                    .status
-            })
-            .collect();
+        let (scratch, mut store) = note_changes(&[
+            ("moment-base", "base", false),
+            ("moment-z", "first edit", true),
+            ("moment-a", "second edit", true),
+            ("moment-head", "head edit", false),
+        ]);
+        let state = write_state_after_an_outside_edit(&scratch, &mut store, "moment-head");
         assert_eq!(
-            state,
-            YdocWriteState::Owed,
-            "the writes stand at {statuses:?}"
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Conflict, JobStatus::Pending]
         );
+        assert_eq!(state, YdocWriteState::Owed);
+    }
+
+    /// A write queued after the head owes nothing to it, so it doesn't
+    /// answer for the head.
+    #[test]
+    fn a_head_without_a_write_ignores_writes_after_it() {
+        let (scratch, mut store) = note_changes(&[
+            ("moment-base", "base", false),
+            ("moment-z", "first edit", true),
+            ("moment-head", "head edit", false),
+            ("moment-a", "later edit", true),
+        ]);
+        let state = write_state_after_an_outside_edit(&scratch, &mut store, "moment-head");
         assert_eq!(
-            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
-            "outside edit"
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Conflict, JobStatus::Pending]
         );
+        assert_eq!(state, YdocWriteState::Conflicted);
     }
 }
