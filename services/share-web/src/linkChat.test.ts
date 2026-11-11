@@ -209,16 +209,16 @@ it("lets an agent with only a read-write link read the channel and post, with th
   const link = await s.link("read-write");
   const mcp = await agent(s, link.secret);
   const tools = (await mcp.listTools()).tools.map((tool) => tool.name);
-  expect(tools).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  expect(tools).toEqual(expect.arrayContaining(["dohc_read_group", "dohc_post_group"]));
   // The conversation the viewer shows for this link: the channel, in place of the share discussion.
   expect(tools.filter((name) => name.includes("discussion"))).toEqual([]);
   // The share's own answer names its channel; listing tools asks the relay nothing more.
   expect(s.relayPaths).not.toContain("/sync/link/chat/channels");
-  const read = (await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).structuredContent as { messages: unknown[]; nextCursor: number };
+  const read = (await mcp.callTool({ name: "dohc_read_group", arguments: {} })).structuredContent as { messages: unknown[]; nextCursor: number };
   expect(read.messages).toEqual([expect.objectContaining({ messageId: "owner-first", body: "Welcome" })]);
 
   // The post shows the name the agent's client reported when it signed in.
-  const posted = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1", threadId: "thread-team" } });
+  const posted = await mcp.callTool({ name: "dohc_post_group", arguments: { body: "On it", idempotencyKey: "agent-1", threadId: "thread-team" } });
   expect(posted.isError).toBeFalsy();
   expect((posted.structuredContent as { message: Record<string, unknown> }).message)
     .toMatchObject({ threadId: "thread-team", authorKind: "link", authorDisplayName: "Planner", linkAgent: true, body: "On it" });
@@ -231,12 +231,12 @@ it("lets an agent with only a read-write link read the channel and post, with th
   expect(s.relayCalls).not.toContain("POST /sync/link/chat/messages");
   expect(s.relayCalls).toContain("GET /sync/link/chat/messages");
 
-  const followed = (await mcp.callTool({ name: "dohc_read_channel", arguments: { since: read.nextCursor } })).structuredContent as { messages: unknown[] };
+  const followed = (await mcp.callTool({ name: "dohc_read_group", arguments: { since: read.nextCursor } })).structuredContent as { messages: unknown[] };
   expect(followed.messages).toEqual([expect.objectContaining({ authorKind: "link", body: "On it" })]);
 
   // A refusal reaches the agent as a sentence it can act on.
   expect(s.storage.setShareLinkWritesPaused({ shareId: s.shareId, workspaceId: WORKSPACE, actorUserId: OWNER, pausedAtMs: Date.now() })).toBe(true);
-  const paused = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "Again", idempotencyKey: "agent-2" } });
+  const paused = await mcp.callTool({ name: "dohc_post_group", arguments: { body: "Again", idempotencyKey: "agent-2" } });
   expect(paused.isError).toBe(true);
   expect(paused.structuredContent).toEqual({ ok: false, code: "link_discussion_paused",
     error: "The owner paused posts from share links. Try again later." });
@@ -257,7 +257,7 @@ it("answers a post whose answer was lost as retryable, and its retry with the sa
 
   // An agent hears that the post may have landed, and that the same key is safe.
   const mcp = await agent(s, (await s.link("read-write")).secret);
-  const post = { name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1" } };
+  const post = { name: "dohc_post_group", arguments: { body: "On it", idempotencyKey: "agent-1" } };
   s.lost.set("POST /sync/link/agent-chat/post", "connection");
   const unknown = await mcp.callTool(post);
   expect(unknown.isError).toBe(true);
@@ -291,7 +291,7 @@ it("answers a lost share answer as retryable, so neither a browser nor an agent 
   for (const loss of ["connection", "body", "refusal"] as const) {
     s.lost.set("GET /sync/link/share", loss);
     await expect(mcp.listTools(), loss).rejects.toThrow(/"code":"link_unavailable"/u);
-    expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+    expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_group", "dohc_post_group"]));
   }
 });
 
@@ -352,8 +352,8 @@ it("gives an agent with a read-only link the channel to read and no tool to post
   const s = await stack();
   const mcp = await agent(s, (await s.link("read-only")).secret);
   const tools = (await mcp.listTools()).tools.map((tool) => tool.name);
-  expect(tools).toContain("dohc_read_channel");
-  expect(tools).not.toContain("dohc_post_channel");
-  expect((await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).isError).toBeFalsy();
+  expect(tools).toContain("dohc_read_group");
+  expect(tools).not.toContain("dohc_post_group");
+  expect((await mcp.callTool({ name: "dohc_read_group", arguments: {} })).isError).toBeFalsy();
   expect(await s.linkPosts()).toEqual([]);
 });
