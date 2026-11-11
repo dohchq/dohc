@@ -40,7 +40,7 @@ import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthori
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
-import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
+import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import type {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
@@ -164,6 +164,8 @@ interface DesktopCliServerDependencies<State> {
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
   agentDispatchStoreHandleFor(workspace: RegistryEntry): Pick<LiveAgentDispatchStoreHandle, "store">;
   sharedViewOf(workspaceId: string): unknown;
+  // A shared view's projection status, or undefined for any other workspace.
+  shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
     workspaceId: string,
     work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Result | Promise<Result>,
@@ -215,6 +217,7 @@ export function createDesktopCliServer<State>(
     currentDaemon,
     agentDispatchStoreHandleFor,
     sharedViewOf,
+    shareProjection,
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
     localPerson,
@@ -397,6 +400,13 @@ export function createDesktopCliServer<State>(
         }, { workspaceId: workspace.workspaceId, ...input });
       }),
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+      sharedFilesHeld: async () => {
+        const projection = await shareProjection(workspace);
+        if (!projection) return null;
+        return projection.state === "pending"
+          ? { count: projection.heldPathCount, files: projection.heldPaths }
+          : { count: 0, files: [] };
+      },
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
           return decodeWorkspaceResult(

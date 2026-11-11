@@ -334,6 +334,8 @@ describe("notice center", () => {
           pendingPaths: ["notes/one.md", "notes/two.md"],
           collisionPathCount: 0,
           collisionPaths: [],
+          heldPathCount: 0,
+          heldPaths: [],
           pullInFlight: false,
         },
       },
@@ -350,6 +352,39 @@ describe("notice center", () => {
     await userEvent.click(within(notice).getByRole("button", { name: "Refresh" }));
     expect(onRefreshShareView).toHaveBeenCalledOnce();
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it("names a held shared file and the person's step, with no Refresh", async () => {
+    const held = (heldPaths: Array<{ path: string; reason: "local-collision" | "spelling-collision"; owner?: string }>): SyncStatusResult => ({
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      liveSessionsGeneration: 0,
+      historyRecordingUnavailable: false,
+      historyShareView: true,
+      shareProjection: {
+        state: "pending",
+        pendingPathCount: 0,
+        pendingPaths: [],
+        collisionPathCount: heldPaths.length,
+        collisionPaths: heldPaths.map(entry => entry.path),
+        heldPathCount: heldPaths.length,
+        heldPaths,
+        pullInFlight: false,
+      },
+    });
+    const view = renderNotices({ syncStatus: held([{ path: "mine.md", reason: "local-collision" }]) });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    let notice = screen.getByTestId("notice-share-projection-held");
+    expect(notice.textContent).toContain("dohc held back a shared file");
+    expect(notice.textContent).toContain("mine.md already has a file from this machine. Move or rename this file to receive the shared file.");
+    expect(within(notice).queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(screen.queryByTestId("notice-share-projection-pending")).toBeNull();
+
+    view.rerender(noticeElement({ syncStatus: held([{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }]) }));
+    notice = screen.getByTestId("notice-share-projection-held");
+    expect(notice.textContent).toContain("This machine treats Plan.md and plan.md as the same name. Ask the person who shared the files to rename one of them.");
+    expect(within(notice).queryByRole("button", { name: "Refresh" })).toBeNull();
   });
 
   it("preserves focus assigned by a notice action", async () => {

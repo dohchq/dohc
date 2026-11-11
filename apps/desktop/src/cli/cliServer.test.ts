@@ -3213,6 +3213,17 @@ describe("CLI socket server", () => {
     })).resolves.toEqual(unavailable);
   });
 
+  it("names the shared files held back with the step for each", async () => {
+    context.sharedFilesHeld = async () => ({ count: 1, files: [{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }] });
+    await expect(invoke("sharedFilesHeld", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({ ok: true, heldFiles: {
+      count: 1,
+      files: [{ path: "Plan.md", reason: "spelling-collision", owner: "plan.md" }],
+      message: "This machine treats Plan.md and plan.md as the same name. Ask the person who shared the files to rename one of them.",
+    } });
+    context.sharedFilesHeld = async () => ({ count: 0, files: [] });
+    await expect(invoke("sharedFilesHeld", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({ ok: true, heldFiles: null });
+  });
+
   it("answers whether Collection updates wait with the engine's own answer", async () => {
     const answers = [true, false];
     context.daemonReads.collectionsWaiting = async () => {

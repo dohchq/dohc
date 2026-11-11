@@ -28,6 +28,7 @@ import { neutralPresentation, presentationClasses, subscribePresentation } from 
 import { personalAgentName } from "./chosenColors";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { unjournalablePathMessages } from "../../workspaces/shareViewRecords";
 
 export type NoticeAction = {
   label: string;
@@ -1665,7 +1666,26 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (props.syncStatus?.shareProjection?.state === "pending") {
+    const projection = props.syncStatus?.shareProjection;
+    // Only held files remain. Each waits on a person's step, which a refresh
+    // cannot take, so the row names the file and the step.
+    if (
+      projection?.state === "pending" &&
+      projection.pendingPathCount === 0 &&
+      !projection.pullInFlight &&
+      projection.collisionPathCount > 0 &&
+      projection.heldPathCount === projection.collisionPathCount
+    ) {
+      next.push({
+        id: "share-projection-held",
+        tone: "warning",
+        title: projection.heldPathCount === 1
+          ? "dohc held back a shared file"
+          : `dohc held back ${projection.heldPathCount} shared files`,
+        body: unjournalablePathMessages(projection.heldPaths).join(" "),
+        Icon: AlertTriangle,
+      });
+    } else if (projection?.state === "pending") {
       next.push({
         id: "share-projection-pending",
         tone: "warning",

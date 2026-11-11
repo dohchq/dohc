@@ -5204,6 +5204,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  shareProjection: ownedShareProjection,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   localPerson,
@@ -5888,23 +5889,24 @@ async function ensureOwnedProjectionCurrent(
   });
 }
 
-async function syncStatusWithOwnedProjection(
+async function ownedShareProjection(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-  status: SyncStatusResult,
-): Promise<SyncStatusResult> {
-  if (!shareViewIsPresent(workspace.shareView)) return status;
+): Promise<SyncStatusResult["shareProjection"]> {
+  if (!shareViewIsPresent(workspace.shareView)) return undefined;
   const projection = await shareViewFiles.projectionStatus({
     kind: "standalone",
     workspaceId: workspace.workspaceId,
   });
-  if (projection.state === "unavailable") return status;
-  return {
-    ...status,
-    shareProjection:
-      projection.state === "current"
-        ? { state: "current" }
-        : projection,
-  };
+  if (projection.state === "unavailable") return undefined;
+  return projection.state === "current" ? { state: "current" } : projection;
+}
+
+async function syncStatusWithOwnedProjection(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  status: SyncStatusResult,
+): Promise<SyncStatusResult> {
+  const shareProjection = await ownedShareProjection(workspace);
+  return shareProjection ? { ...status, shareProjection } : status;
 }
 
 // Main and the test runner share the OS monotonic clock, including across processes.

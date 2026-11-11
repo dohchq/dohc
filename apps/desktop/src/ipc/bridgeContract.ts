@@ -1509,6 +1509,15 @@ const SYNC_STATUS_BASE_FIELDS = {
         pendingPaths: z.array(PATH_STRING),
         collisionPathCount: z.number().int().nonnegative(),
         collisionPaths: z.array(PATH_STRING),
+        // Recorded collisions held for a person's step, from the last refresh
+        // or repair: a file from this computer in the way, or two shared names
+        // this disk treats as one.
+        heldPathCount: z.number().int().nonnegative(),
+        heldPaths: z.array(z.object({
+          path: PATH_STRING,
+          reason: z.enum(["local-collision", "spelling-collision"]),
+          owner: PATH_STRING.optional(),
+        })),
         pullInFlight: z.boolean(),
       }),
     ])
