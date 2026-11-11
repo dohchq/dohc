@@ -2325,6 +2325,78 @@ fn audit_record_refused(snapshot: Option<&str>, coverage: Option<&str>) -> bool 
     refused
 }
 
+/// History the relay committed before it refused personal agents can name one.
+/// The owner applies such an event, then parses and journals its audit record,
+/// so only a peer's import of a new record refuses a personal agent.
+#[test]
+fn the_owner_journals_committed_history_naming_a_personal_agent() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
+        LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
+        ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let personal = LiveAuthorEntry::Agent {
+        agent_id: format!("p-{}", "a".repeat(26)),
+        agent_name: None,
+        on_behalf_of: Some("owner".into()),
+        depth: Some(1),
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "personal-delivery".into(),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![personal.clone()]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: Some(vec![LiveCheckpointAuthorCoverage {
+                author: personal,
+                struct_ranges: Vec::new(),
+                deletion_ranges: Vec::new(),
+            }]),
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    let result = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |tx, namespace, binding, count| {
+            journal_live_event_in_tx(tx, namespace, binding, count, 200)
+                .map(|_| ())
+                .map_err(|error| {
+                    dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                        dohc_engine_storage::StorageError::persist_public(error),
+                    )
+                })
+        },
+    )
+    .unwrap();
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    assert_eq!(count(&f.store, "live_audit_events"), 1);
+    assert!(
+        operations(&f.store)
+            .iter()
+            .any(|op| op.op_kind == application_record::EVENT_OP)
+    );
+}
+
 #[test]
 fn admitted_link_history_roundtrips_without_creating_native_authority() {
     use dohc_engine_collab::live_update_application::{

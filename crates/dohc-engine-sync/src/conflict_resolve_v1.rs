@@ -399,14 +399,16 @@ fn invalid(reason: &'static str) -> SyncError {
     SyncError::InvalidInput { reason }
 }
 
-/// Only the relay writes a personal agent's moments, so no resolution names one.
-fn refuse_personal_agent(agent_id: String) -> Result<String, SyncError> {
+/// Only the relay writes a personal agent's moments, so a new resolution cannot
+/// name one. The relay logged such resolutions before it refused them, so the
+/// shared validator still accepts one as history.
+fn refuse_personal_agent(agent_id: &str) -> Result<(), SyncError> {
     if agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX) {
         return Err(invalid(
             "conflict.resolve author cannot be a personal agent",
         ));
     }
-    Ok(agent_id)
+    Ok(())
 }
 
 fn ensure_limit(
@@ -696,7 +698,7 @@ fn parse_author(value: &Value) -> Result<Option<AgentAuthorV1>, SyncError> {
         return Err(invalid("conflict.resolve author kind must be agent"));
     }
     Ok(Some(AgentAuthorV1 {
-        agent_id: refuse_personal_agent(author_field(field(record, "agentId")?)?)?,
+        agent_id: author_field(field(record, "agentId")?)?,
         on_behalf_of: if field(record, "onBehalfOf")?.is_null() {
             None
         } else {
@@ -1398,6 +1400,9 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             recorded_at_ms: envelope.recorded_at_ms,
         },
     )?;
+    if let Some(author) = &validated.payload.effect_context.author {
+        refuse_personal_agent(&author.agent_id)?;
+    }
     require_imported_roots(tx, &validated)?;
     let payload = &validated.payload;
     let (mut disposition, live) = classify_imported_head(tx, payload)?;
@@ -4048,8 +4053,10 @@ fn local_author(author_json: Option<&str>) -> Result<Option<AgentAuthorV1>, Sync
                 })?,
         ),
     };
+    let agent_id = required("agentId")?;
+    refuse_personal_agent(&agent_id)?;
     Ok(Some(AgentAuthorV1 {
-        agent_id: refuse_personal_agent(required("agentId")?)?,
+        agent_id,
         on_behalf_of: Some(required("onBehalfOf")?),
         agent_run_id,
     }))
@@ -4664,25 +4671,65 @@ mod tests {
         })
     }
 
+    /// Only the relay writes a personal agent's moments, so a resolution this
+    /// engine imports or records that names one is refused. The relay logged
+    /// such resolutions before it refused them, so a pull still validates one
+    /// and collects its blobs.
     #[test]
     fn a_resolution_cannot_name_a_personal_agent() {
-        let context = ConflictResolveEnvelopeContext {
-            workspace_id: "workspace-a",
-            recorded_at_ms: 21,
-        };
         let personal = format!("p-{}", "a".repeat(26));
-        assert!(validate_conflict_resolve_v1(&compact_path_change(), context).is_ok());
-        let mut forged = compact_path_change();
-        forged["effectContext"]["author"]["agentId"] = json!(personal);
+        for (agent_id, refused) in [("agent-1", false), (personal.as_str(), true)] {
+            let (_scratch, mut store, built) = text_keep_receiver_fixture();
+            let mut payload = built.validated.payload;
+            payload.effect_context.author = Some(AgentAuthorV1 {
+                agent_id: agent_id.to_owned(),
+                on_behalf_of: Some("user-1".to_owned()),
+                agent_run_id: None,
+            });
+            let built = build_conflict_resolve_v1(payload).unwrap();
+            let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+            envelope.recorded_at_ms = built.validated.payload.effect_context.recorded_at_ms;
+            let context = ConflictResolveEnvelopeContext {
+                workspace_id: &envelope.workspace_id,
+                recorded_at_ms: envelope.recorded_at_ms,
+            };
+            assert!(validate_conflict_resolve_v1(&envelope.payload, context).is_ok());
+            let refs = crate::relay::collect_blob_refs(std::slice::from_ref(&envelope)).unwrap();
+            assert!(!refs.is_empty());
+            let outcome = crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+            if refused {
+                assert!(
+                    matches!(
+                        &outcome.primary,
+                        crate::ApplyDisposition::Refused(crate::ReplicationRefusal {
+                            reason: crate::RefusalReason::InvalidInput { reason },
+                            ..
+                        }) if reason == "conflict.resolve author cannot be a personal agent"
+                    ),
+                    "{outcome:?}"
+                );
+                assert_ne!(text_keep_open_rows(&store), 0);
+            } else {
+                assert!(
+                    matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+                    "{outcome:?}"
+                );
+                assert_eq!(text_keep_open_rows(&store), 0);
+            }
+        }
+        let local = |agent_id: &str| {
+            json!([{"kind": "agent", "agentId": agent_id, "onBehalfOf": "user-1"}]).to_string()
+        };
+        assert!(local_author(Some(&local("agent-1"))).is_ok());
         assert!(matches!(
-            validate_conflict_resolve_v1(&forged, context),
-            Err(SyncError::InvalidInput {
-                reason: "conflict.resolve author cannot be a personal agent"
-            })
-        ));
-        let local = json!([{"kind": "agent", "agentId": personal, "onBehalfOf": "user-1"}]);
-        assert!(matches!(
-            local_author(Some(&local.to_string())),
+            local_author(Some(&local(&personal))),
             Err(SyncError::InvalidInput {
                 reason: "conflict.resolve author cannot be a personal agent"
             })
