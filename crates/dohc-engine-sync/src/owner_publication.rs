@@ -198,15 +198,46 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
     Ok(result)
 }
 
+/// Whether the desktop's gate holds `reference`, which no binding proves: an
+/// edit on the lineage of a base the relay's first open published, to a note
+/// that was neither stopped nor released.
+fn held_for_first_enrollment(
+    conn: &rusqlite::Connection,
+    gate: Option<&OwnerGate>,
+    key: &DocKey,
+    reference: &Content,
+) -> Result<bool, SyncError> {
+    let (Some(gate), Some(lineage)) = (gate, reference.lineage.as_deref()) else {
+        return Ok(false);
+    };
+    if gate.released.contains(&reference.object) {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND substr(base_origin_id,1,length(?5))=?5) AND NOT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            lineage,
+            dohc_engine_collab::FIRST_OPEN_ORIGIN_PREFIX
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::persist)
+}
+
 /// Stop before the first private owner payload. Never rewrite the origin log.
 /// A share proposal proves Markdown digests only and passes no `ordinary`.
+/// Under the desktop's gate, an edit to a first-open note stops it too.
 pub fn owner_publication_prefix(
     store: &EngineStore,
     workspace: &str,
     ops: &[ReplicationEnvelope],
     max_read_bytes: usize,
-    _ordinary: Option<OrdinaryPublication<'_>>,
+    ordinary: Option<OrdinaryPublication<'_>>,
 ) -> Result<OwnerPublicationPrefix, SyncError> {
+    let gate = ordinary.and_then(|ordinary| ordinary.gate);
     store.read_with(|conn| {
         // One snapshot lets consecutive references to a document reuse its accepted read.
         let read_tx = conn.unchecked_transaction().map_err(SyncError::persist)?;
@@ -248,21 +279,28 @@ pub fn owner_publication_prefix(
                         budget_exhausted: true,
                     });
                 }
-                if allowed == PublicationProof::NotContained {
-                    return Ok(OwnerPublicationPrefix {
-                        allowed_ops,
-                        budget_exhausted: false,
-                        pending: Some(OwnerAdmissionPending {
-                            workspace_id: workspace.into(),
-                            origin_id: op.origin_id.clone(),
-                            origin_seq: op.origin_seq,
-                            version_id: reference.version,
-                            object_id: reference.object,
-                            path: reference.path,
-                            reason: None,
-                        }),
-                    });
-                }
+                let reason = match allowed {
+                    PublicationProof::NotContained => None,
+                    PublicationProof::Unbound
+                        if held_for_first_enrollment(&read_tx, gate, &key, &reference)? =>
+                    {
+                        Some(OwnerAdmissionReason::FirstEnrollment)
+                    }
+                    _ => continue,
+                };
+                return Ok(OwnerPublicationPrefix {
+                    allowed_ops,
+                    budget_exhausted: false,
+                    pending: Some(OwnerAdmissionPending {
+                        workspace_id: workspace.into(),
+                        origin_id: op.origin_id.clone(),
+                        origin_seq: op.origin_seq,
+                        version_id: reference.version,
+                        object_id: reference.object,
+                        path: reference.path,
+                        reason,
+                    }),
+                });
             }
         }
         Ok(OwnerPublicationPrefix {
