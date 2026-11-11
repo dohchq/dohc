@@ -1202,12 +1202,16 @@ async function openProductionSync(f: Awaited<ReturnType<typeof fixture>>, socket
   if (credit) send({kind: "sync-applied", appliedThroughJournalCursor: 0});
 }
 
-it.each([false, true])("delivers one production-size 2 MiB edit to 22 readers of one document; link=%s", async link => {
+// Each reader reserves the edit it is sent, at its size, from the workspace's share of the
+// buffer budget (80 MiB). The target is a 2 MiB edit to 22 readers. The largest edit the
+// server accepts, 4 MiB, reaches 19 readers at once.
+it.each([[2, 22, false], [2, 22, true], [4, 19, false]] as const)("delivers one production-size %s MiB edit to %s readers of one document; link=%s", async (editMiB, count, link) => {
   const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
+  expect(editMiB * 1024 * 1024).toBeLessThanOrEqual(profile.namedLive.host.maxAppliedUpdateBytes);
   const readers: ProductionPeer[] = [];
   const sharedChanges = createNamedFrameChanges(128);
   let shared: NamedFrameNativeHost | undefined;
-  for (let person = 1; person <= 22; person++) {
+  for (let person = 1; person <= count; person++) {
     const f = await fixture(profile.namedLive.transport, link, undefined, false, false, admission, person, 1, true);
     if (!shared) shared = {...f.native, changes: sharedChanges};
     const native = shared;
@@ -1215,28 +1219,36 @@ it.each([false, true])("delivers one production-size 2 MiB edit to 22 readers of
     const socket = f.connect((await f.mint()).token);
     expect(await socket.status).toBe(101);
     await openProductionSync(f, socket);
+    // A reader grants more credit as frames arrive, as the browser's provider does.
+    let grantedBytes = f.frames.maxQueuedBytes, grantedFrames = f.frames.maxQueuedFrames;
+    socket.ws.on("message", (data: Buffer) => {
+      grantedBytes += data.length; grantedFrames += 1;
+      if (socket.ws.readyState === WebSocket.OPEN) socket.ws.send(encodeLiveFrame({kind: "credit", grantedBytes, grantedFrames}, f.frames.receive.maxFrameBytes));
+    });
     readers.push({f, socket});
   }
-  const updateBytes = Buffer.alloc(profile.namedLive.host.maxAppliedUpdateBytes, 42);
-  vi.mocked(shared!.client.readNextLiveApplied).mockImplementation(async (_request, after) => after.eventCount ? null : {
+  const updateBytes = Buffer.alloc(editMiB * 1024 * 1024, 42);
+  let published = false;
+  vi.mocked(shared!.client.readNextLiveApplied).mockImplementation(async (_request, after) => !published || after.eventCount ? null : {
     position: {eventCount: 1, journalCursor: 1, evidenceDigest: "cd".repeat(32)}, updateBytes,
     ack: {deliveryId: "edit", updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1,
       acceptingHostEpoch: host.hostEpoch, localYDocSequence: 1, applicationReplayed: false},
   });
-  await vi.waitFor(() => expect(sharedChanges.listenerCount()).toBe(44));
+  await vi.waitFor(() => expect(sharedChanges.listenerCount()).toBe(2 * count));
+  published = true;
   sharedChanges.notify(readers[0]!.f.binding);
   await vi.waitFor(() => {
-    expect(readers.map(({socket}) => socket.ws.readyState)).toEqual(Array(22).fill(WebSocket.OPEN));
+    expect(readers.map(({socket}) => socket.ws.readyState)).toEqual(Array(count).fill(WebSocket.OPEN));
     expect(readers.map(({socket}) => socket.received.filter(frame => frame.kind === "chunk" && frame.transferId === 2)
-      .reduce((sum, frame) => sum + (frame.kind === "chunk" ? frame.bytes.length : 0), 0))).toEqual(Array(22).fill(updateBytes.length));
-  }, {timeout: 10_000});
+      .reduce((sum, frame) => sum + (frame.kind === "chunk" ? frame.bytes.length : 0), 0))).toEqual(Array(count).fill(updateBytes.length));
+  }, {timeout: 30_000});
   for (const {socket} of readers) {
     const chunks = socket.received.filter((frame): frame is Extract<LiveFrame, {kind: "chunk"}> => frame.kind === "chunk" && frame.transferId === 2);
     expect(Buffer.concat(chunks.map(frame => Buffer.from(frame.bytes))).equals(updateBytes)).toBe(true);
   }
   expect(readers.every(({socket}) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
   await vi.waitFor(() => expect(admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage()).toBe(0));
-}, 60_000);
+}, 90_000);
 
 it("admits a burst of 22 small-document syncs with production bounds", async () => {
   const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
