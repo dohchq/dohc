@@ -12,7 +12,7 @@ import {ownerEnrollment} from "./helpers/engineDb";
 import {approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa} from "./helpers/selfHostOnboarding";
 import {activeWorkspace, createTempWorkspace, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles, type TempWorkspace} from "./helpers/workspace";
 // RETEST INSTRUMENTATION (never merge): diagnostic probes.
-import {recordCouldNotUpdate, recordEngineRefusals, watchReadOnly} from "./helpers/retestProbe";
+import {attachShot, closingProbes, recordCouldNotUpdate, watchReadOnly} from "./helpers/retestProbe";
 
 test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
 
@@ -89,6 +89,8 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     await trust!.route(context, stack!.relayUrl);
     return context.newPage();
   };
+  // RETEST INSTRUMENTATION (never merge): the closing probes, run at the fixme or before teardown after an earlier failure.
+  const probes = closingProbes(info);
   try {
     stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, {live: true, signal});
     trust = trustFixtureCa(stack.ca!.ca);
@@ -136,7 +138,8 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
 
     const recipient = await launch(recipientTemp);
     // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
-    const stopWatching = watchReadOnly(recipient.page, info, "recipient");
+    probes.set({stopWatching: watchReadOnly(recipient.page, info, "recipient"), owner: page, recipient: recipient.page,
+      ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath});
     await test.step("the recipient opens the Edit share and adds R1", async () => {
       const received = recipient.page;
       await received.getByTestId("first-run-open-share").click();
@@ -175,7 +178,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
         await expect(moment).toBeVisible({timeout: 60_000});
       } catch (error) {
         info.annotations.push({type: "RETEST History names no recipient", description: String(error).slice(0, 2000)});
-        await info.attach("RETEST History without the recipient", {contentType: "image/png", body: await page.screenshot()});
+        await attachShot(page, info, "RETEST History without the recipient");
         moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).filter({hasNotText: "Added existing files"}).first();
         await expect(moment).toBeVisible();
       }
@@ -247,11 +250,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     // shared notes stuck, so History no longer offers it. The rest of this
     // test restores through it.
     // RETEST INSTRUMENTATION (never merge): the notices and the engine's refusals as the test reaches its fixme.
-    stopWatching();
-    await recordCouldNotUpdate(page, info, "owner", "at the fixme");
-    await recordCouldNotUpdate(recipient.page, info, "recipient", "at the fixme");
-    recordEngineRefusals(ownerTemp.rootPath, info, "owner", "at the fixme");
-    recordEngineRefusals(recipientTemp.rootPath, info, "recipient", "at the fixme");
+    await probes.run("at the fixme");
     test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
 
     const restored = await test.step("the owner stops the recipient's access and restores to before R1", async () => {
@@ -426,6 +425,8 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     if (stack) await info.attach("relay-output", {body: stack.relayOutput(), contentType: "text/plain"}).catch(() => undefined);
     throw error;
   } finally {
+    // RETEST INSTRUMENTATION (never merge): when the test failed before its fixme, the closing probes run here, before the apps close.
+    await probes.run("before teardown, after an earlier failure");
     const cleanup = await Promise.allSettled([...apps.map(app => app.close()), ...contexts.map(context => context.close())]);
     trust?.restore();
     cleanup.push(...await Promise.allSettled([stack?.close()]));

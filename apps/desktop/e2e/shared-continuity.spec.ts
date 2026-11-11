@@ -14,7 +14,7 @@ import { readHistoryMoments } from "./helpers/history";
 import { appliedServiceHostSeqs, liveDocumentFold, noticedRefusals, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 // RETEST INSTRUMENTATION (never merge): diagnostic probes.
-import { recordCouldNotUpdate, recordEngineRefusals, watchReadOnly } from "./helpers/retestProbe";
+import { attachShot, closingProbes, recordCouldNotUpdate, watchReadOnly } from "./helpers/retestProbe";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
   revealExplorerPath, waitForWorkspaceFile, writeWorkspaceFiles, type TempWorkspace,
@@ -536,6 +536,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   };
   // Accepted history folds into checkpoints; the owner's imported audit record must not change.
   const expectAuditKept = ({ change, audit }: AcceptedDeclaration) => expect(ownerAudit(change.deliveryId)).toEqual(audit);
+  // RETEST INSTRUMENTATION (never merge): the closing probes, run at the fixme or before teardown after an earlier failure.
+  const probes = closingProbes(testInfo);
   try {
     stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true, signal });
     const origin = stack.relayUrl;
@@ -660,11 +662,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expectAuditKept(hosted!);
     });
 
-    // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
-    let stopWatching = () => {};
     await test.step("the recipient opens the share on their own desktop, sees who wrote it, and continues the document", async () => {
       recipient = await launch(recipientTemp);
-      stopWatching = watchReadOnly(recipient.page, testInfo, "recipient");
+      // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
+      probes.set({ stopWatching: watchReadOnly(recipient.page, testInfo, "recipient"), owner: owner!.page, recipient: recipient.page,
+        ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath });
       const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
       const page = recipient.page;
       await expect(editor(page)).toContainText(H1);
@@ -691,8 +693,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     });
 
     await test.step("the idle owner's editor and the agent see the recipient's edit", async () => {
-      // RETEST INSTRUMENTATION (never merge): record a missing recipient credit and go on to the fixme.
-      try {
       await expect(editor(owner!.page)).toContainText(R1, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, R1]), { timeout: 60_000 }).toBe(true);
       // The owner's History credits the recipient's change to the account and
@@ -701,6 +701,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const recipientUserId = await accountId(recipientAccount.email);
       const admitted = { kind: "human", humanId: recipientUserId, humanName: recipientAccount.name, relayConfirmed: true };
       let credit: Awaited<ReturnType<typeof recipientCredit>> | undefined;
+      // RETEST INSTRUMENTATION (never merge): record a missing recipient credit and go on to the fixme.
+      let credited = true;
+      try {
       try {
         await expect.poll(async () => (credit = await recipientCredit(page, workspace.workspaceId, R1, recipientUserId))?.authors ?? [],
           { timeout: 60_000, intervals: [1_000] }).toContainEqual(admitted);
@@ -710,8 +713,16 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       expect(credit!.listed).toEqual(credit!.authors);
       expect(credit!.label).toBe(recipientAccount.name);
+      } catch (error) {
+        credited = false;
+        testInfo.annotations.push({ type: "RETEST recipient credit missing", description: String(error).slice(0, 2000) });
+        await openHistoryView(page).catch(() => undefined);
+        await attachShot(page, testInfo, "RETEST owner History without the recipient credit");
+      }
       // The recipient's credit leaves the hosted agent's credit in place.
       expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
+      // RETEST INSTRUMENTATION (never merge): History's recipient row is checked only when the recipient was credited.
+      if (credited) {
       await openHistoryView(page);
       // The recipient's edits to the note fold into a run whose newest edit
       // names them. The credited edit may be an earlier one, so open the run.
@@ -723,9 +734,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-id="${credit!.id}"]`)).toBeVisible();
       await attachScreen(testInfo, page, "owner History names the recipient");
-      } catch (error) {
-        testInfo.annotations.push({ type: "RETEST recipient credit missing", description: String(error).slice(0, 2000) });
-        await attachScreen(testInfo, owner!.page, "owner History without the recipient credit");
       }
     });
     // RETEST INSTRUMENTATION (never merge): any "could not update" notice once the owner has the recipient's edit.
@@ -747,11 +755,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     // shared notes stuck, so History no longer offers it. The rest of this
     // test restores through it.
     // RETEST INSTRUMENTATION (never merge): the notices and the engine's refusals as the test reaches its fixme.
-    stopWatching();
-    await recordCouldNotUpdate(owner!.page, testInfo, "owner", "at the fixme");
-    await recordCouldNotUpdate(recipient!.page, testInfo, "recipient", "at the fixme");
-    recordEngineRefusals(ownerTemp.rootPath, testInfo, "owner", "at the fixme");
-    recordEngineRefusals(recipientTemp.rootPath, testInfo, "recipient", "at the fixme");
+    await probes.run("at the fixme");
     test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
 
     await test.step("the owner stops the recipient's access and restores the document to before their edit", async () => {
@@ -1052,6 +1056,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     }
     throw error;
   } finally {
+    // RETEST INSTRUMENTATION (never merge): when the test failed before its fixme, the closing probes run here, before the apps close.
+    await probes.run("before teardown, after an earlier failure");
     const cleanup = await Promise.allSettled([
       newRecipientBrowser?.close(), recipientBrowser?.close(), ownerBrowser?.close(),
       newRecipient?.close(), recipient?.close(), owner?.close(),
