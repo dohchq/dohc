@@ -8,7 +8,7 @@ export interface LiveHostRegistration {
   readonly invalidated: AbortSignal;
 }
 
-/** Grant selectors remain in each admitted receipt; a shared host owns the document. */
+/** A shared host owns the document, whatever selector its registration was opened with. */
 export function sameLiveHostDocument(left: LiveObjectBinding, right: LiveObjectBinding): boolean {
   const {selectorPaths: _leftSelectors, ...leftDocument} = left;
   const {selectorPaths: _rightSelectors, ...rightDocument} = right;

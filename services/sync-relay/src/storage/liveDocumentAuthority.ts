@@ -719,12 +719,13 @@ type StoredLiveBinding = Pick<StoredLiveDocumentAuthority, "binding" | "current"
 type LiveBindingRefusal = Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
 /**
- * The owner's binding of a stored lineage, at `current`'s restore generation:
- * the one its first activation recorded; before any activation, the one this
- * host's owner adoption recorded; else the baseline's. No share is read.
+ * The one binding every editor of a stored lineage gets, owner, named and link
+ * alike, at `current`'s restore generation: the one its first activation
+ * recorded; before any activation, the one this host's owner adoption
+ * recorded; else the baseline's, which a first record copies. No share is read.
  * Null when the record names another document or path, or can't be read.
  */
-export function recordedOwnerBinding(storage: StorageContext, document: LiveDocumentKey, current: LiveObjectBinding): LiveObjectBinding | null {
+export function recordedLiveBinding(storage: StorageContext, document: LiveDocumentKey, current: LiveObjectBinding): LiveObjectBinding | null {
   const activation = readServiceActivation(storage, document);
   const adoption = activation ? undefined : adoptedOwnerOrigin(storage, document);
   if (!activation && adoption === undefined) return current;
@@ -738,7 +739,7 @@ export function recordedOwnerBinding(storage: StorageContext, document: LiveDocu
 }
 
 // This host's owner adoption of the lineage. One made while owners took a
-// share's selector recorded that selector, so the owner keeps it.
+// share's selector recorded that selector, so every editor keeps it.
 function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey): string | undefined {
   const namespace = attachedLiveJournalHistoryNamespace(storage), host = readLiveHostControl(storage.db);
   if (namespace === undefined || host === null) return undefined;
@@ -751,7 +752,12 @@ function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey):
 function bindOwnedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null):
   { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
     if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
-    const binding = recordedOwnerBinding(storage, document, stored.binding);
+    return bindRecordedLiveDocument(storage, document, stored);
+  }
+
+function bindRecordedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding):
+  { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
+    const binding = recordedLiveBinding(storage, document, stored.binding);
     return binding ? { kind: "bound", binding } : { kind: "refused", reason: "stale-document" };
   }
 
@@ -771,6 +777,10 @@ function liveDocumentIsCurrent(storage: StorageContext, document: LiveDocumentKe
       !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath);
   }
 
+/**
+ * A recipient's share decides only whether the recipient is admitted. Its
+ * accepted events carry the lineage's recorded binding, as the owner's do.
+ */
 function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null,
   share: SyncRelayShareRow, selector: ShareSelector):
   { kind: "bound"; binding: LiveObjectBinding } | LiveBindingRefusal {
@@ -779,8 +789,20 @@ function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, st
     if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
       return { kind: "refused", reason: "stale-selector" };
     }
-    let binding: LiveObjectBinding;
-    try { binding = parseLiveObjectBinding({ ...stored.binding, selectorPaths: selector.paths }); }
-    catch { return { kind: "refused", reason: "stale-selector" }; }
-    return { kind: "bound", binding };
+    return bindRecordedLiveDocument(storage, document, stored);
+}
+
+/**
+ * The paths a named or link recipient's own share selects: what the relay
+ * shows that recipient of the document's workspace. Null when the share no
+ * longer admits them to live editing there.
+ */
+export function readLiveRecipientSelector(storage: StorageContext, input: CurrentLiveBindingRequest): readonly string[] | null {
+  const { document, actor } = snapshotCurrentBindingRequest(input);
+  if (actor.kind === "owner") throw new TypeError("An owner has no recipient selector.");
+  return storage.readLiveAuthority(() => {
+    const shared = actor.kind === "named"
+      ? authorizeNamedLiveEditShareGrant({ storage, actorUserId: actor.userId, grantId: actor.grantId }) : currentLinkEdit(storage, actor);
+    return shared?.ok && shared.share.workspaceId === document.workspaceId ? shared.effectiveSelector.paths : null;
+  });
 }

@@ -19,7 +19,7 @@ import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_OPERATIONS as table, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson } from "../shareFilter";
-import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure, recordedOwnerBinding } from "./liveDocumentAuthority";
+import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure, recordedLiveBinding } from "./liveDocumentAuthority";
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
 import type { StoredLiveDocumentAuthority } from "./types";
 import { decodeJournalRow, verifyJournalRow } from "./liveUpdateJournal";
@@ -170,7 +170,7 @@ function basis(storage: StorageContext, intent: StopRestoreIntent, authority: St
   const storedSelector = share && parseStoredAnyShareSelectorJson(share.selectorJson);
   const selector = storedSelector && effectiveShareSelector(storedSelector,"edit");
   // The share is the one whose access stops. The owner keeps the lineage's own binding.
-  const ownerBinding = recordedOwnerBinding(storage, intent.document, authority.binding);
+  const ownerBinding = recordedLiveBinding(storage, intent.document, authority.binding);
   if (!ownerBinding || !share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
     !selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share,selector) || !control ||
     !currentLiveDocumentMoment(storage, intent.document, authority.binding.currentPath) ||

@@ -128,12 +128,15 @@ function captureLiveFrameHost(options: {
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
-  // The wire binding describes the public selection. Private authority always uses binding.
+  // A recipient sees the document through its own share. Accepted events carry
+  // binding, the lineage's one recorded binding, for every editor.
+  const shown = actor.kind === "owner" ? binding.selectorPaths : storage.readLiveRecipientSelector({ document, actor });
+  if (!shown) throw new Error("Named host standing changed.");
   const projection = actor.kind === "link"
-    ? createAccountlessPathProjection({ paths: [...binding.selectorPaths], versionId: null, access: "edit" }) : null;
+    ? createAccountlessPathProjection({ paths: [...shown], versionId: null, access: "edit" }) : null;
   const wireBinding = projection && actor.kind === "link" ? parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
     currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths })
-    : actor.kind === "named" ? parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}` }) : binding;
+    : actor.kind === "named" ? parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}`, selectorPaths: shown }) : binding;
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -148,6 +151,8 @@ function captureLiveFrameHost(options: {
     caller?.throwIfAborted(); lifetime.signal.throwIfAborted();
     try {
       standing();
+      // A recipient's share stands while it covers the document under the same
+      // grant generation. A share edit that still covers it changes neither.
       const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
       if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
         !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
