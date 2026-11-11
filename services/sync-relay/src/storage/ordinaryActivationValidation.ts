@@ -80,7 +80,9 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
     projected&&=index===next++&&(index<start||projects(evidence));
     if(keep.has(index))projections.push({index,projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
   }});
-  checkDensity(result);
+  // The note's weight never drops, so with the full state within the bound every prefix is too: a too-dense answer
+  // here means the prefixes ran out the budget they share. That fails activation as before; the note needn't be split.
+  requireValue(result.kind==="accepted"||result.reason!=="document-too-dense","Ordinary activation history exceeds its configured validation budget.");
   requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
   const captured=full.evidence,ordinary=result.evidence;
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
