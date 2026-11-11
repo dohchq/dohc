@@ -3624,3 +3624,128 @@ async fn quarantined_capture_retries_without_a_watched_event() {
     drop(store);
     close_env(env, layer, supervisor, db).await;
 }
+
+/// The sha256 of `version`'s head at `path`.
+fn head_sha256(db: &Path, version: &str, path: &str) -> String {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT blob_sha256 FROM snapshots \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            [WORKSPACE_ID, version, path],
+            |row| row.get(0),
+        )
+        .expect("read the head")
+}
+
+// dohc#3621. A switch that fails before replacing a file leaves the previous
+// version's bytes on disk, and capture refuses them for the active version.
+// The refusal must still track those bytes, so a later edit arrives as a
+// change that claims the active head instead of a new file capture skips.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_after_a_switch_write_waits_is_recorded() {
+    const MAIN: &str = "Main's note.\n";
+    const FEATURE: &str = "Feature's note.\n";
+    const EDITED: &str = "Edited after the switch failed.\n";
+    let harness = Harness::new();
+    let actor = &harness.actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE_ID.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NOTE);
+    let write = |version: &str, text: &str, moment: &str, now_ms| dohc_engine_domain::WriteText {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: version.to_owned(),
+        object_id: object_id.clone(),
+        path: NOTE.to_owned(),
+        text: text.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "ydoc".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: None,
+    };
+    actor
+        .versioned_text_write(
+            write("main", MAIN, "moment-main", 2),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main's note");
+    actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    actor
+        .versioned_text_write(
+            write("feature", FEATURE, "moment-feature", 4),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature's note");
+    std::fs::write(harness.root.join(NOTE), MAIN).expect("main's file");
+    let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+    );
+    actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: harness.root.clone(),
+                self_writes: Arc::new(harness.self_writes.scoped(&harness.root)),
+                now_ms: 5,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the switch fails before its write");
+    assert!(faults.fired());
+    assert_eq!(switch_write_status(&harness.db, NOTE), "pending");
+
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    assert!(harness.capture(&files.handle()).await, "the wait is clean");
+    assert_eq!(
+        head_sha256(&harness.db, "feature", NOTE),
+        dohc_engine_storage::hex_sha256(FEATURE.as_bytes()),
+        "main's bytes stay out of the feature version"
+    );
+
+    std::fs::write(harness.root.join(NOTE), EDITED).expect("edit");
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_sha256(&harness.db, "feature", NOTE),
+        dohc_engine_storage::hex_sha256(EDITED.as_bytes()),
+        "the edit is recorded"
+    );
+
+    files.close().await;
+    harness.close();
+}

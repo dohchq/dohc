@@ -931,7 +931,9 @@ impl StoreCaptureSink {
                     Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                         Ok(IngestOutcome::Captured { size, sha256 })
                     }
-                    Err(error) if waits_for_switch(&error) => Ok(IngestOutcome::Deferred),
+                    Err(error) if waits_for_switch(&error) => {
+                        Ok(IngestOutcome::Captured { size, sha256 })
+                    }
                     Err(_) => Err(SECRET_INGEST_FAILED),
                 }
             }
@@ -1179,8 +1181,9 @@ enum DomainIngest {
     HeldAsNewFile,
     /// A recorded file's outside bytes wait for its live session to release.
     WriteDeferred,
-    /// The disk still holds the bytes a pending version switch replaces. The
-    /// path defers, and capture sees it again once the switch's write lands.
+    /// The disk still holds the bytes a pending version switch replaces, so
+    /// nothing was written. As for a foreign head, the manifest tracks those
+    /// bytes, so the switch's landed write or a later edit arrives as `Changed`.
     WaitsForSwitch,
     Held,
 }
@@ -1517,7 +1520,9 @@ impl StoreCaptureSink {
                             self.remember_deferred_write(&path, &sha256);
                             Ok(IngestOutcome::WriteDeferred)
                         }
-                        Err(error) if waits_for_switch(&error) => Ok(IngestOutcome::Deferred),
+                        Err(error) if waits_for_switch(&error) => {
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
                             Ok(IngestOutcome::Held { size, sha256 })
                         }
@@ -1750,7 +1755,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                     DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
-                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Deferred),
+                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::Held => {
                         self.self_writes.clear_path(&self.workspace_id, path);
                         Ok(IngestOutcome::Held { size, sha256 })
@@ -1833,7 +1838,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                     DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
-                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Deferred),
+                    DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }

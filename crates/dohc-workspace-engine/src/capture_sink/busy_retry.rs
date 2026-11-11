@@ -180,8 +180,8 @@ mod tests {
         retry.run(|| Ok(())).unwrap();
     }
 
-    // dohc#3621. Waiting for a switch's write is not contention. One attempt
-    // defers the path, and the store's answer stays the same until replay.
+    // dohc#3621. Waiting for a switch's write is not contention. The store's
+    // answer stays the same until replay, so one attempt settles the path.
     #[test]
     fn a_capture_waiting_for_a_switch_is_attempted_once() {
         let retry = CaptureBatchRetry::default();
