@@ -199,7 +199,7 @@ import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopR
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
-import { ShareHandoffSurface } from "./ShareHandoffSurface";
+import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSectionId,
@@ -233,12 +233,12 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
-import { countInput } from "./ui/inputCount";
+import { countInput, inputCount } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { lastOpenedOwnWorkspace, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import { useKeptTyping } from "./shell/useKeptTyping";
 import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
@@ -276,6 +276,7 @@ import type {
   ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
+import { INVITATION_WAIT_MS, invitationOutcome, type InvitationLists } from "./workbench/invitationOutcome";
 import {
   parseTab,
   TAB_KINDS,
@@ -3286,6 +3287,94 @@ export function DesktopWorkspaceShell(props: {
     setOpenedFromLink(null);
     setPendingOpen(openedFromLink);
   }, [openedFromLink, workbenchRestored]);
+  // A link to a Group or a message request opens Chats at it, here or, from a
+  // shared view, in the workspace of this person's own they opened last.
+  // Here it waits for the saved layout, as a work link does, so the layout
+  // cannot replace Chats.
+  const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
+  // The handoff ends only when Chats shows the invitation, so a window that
+  // closes before then, or a workspace that fails to open, leaves it for the
+  // next. From a shared view it stays while the other workspace opens and
+  // shows it. `opened` is this handoff's own end, so a late report cannot end
+  // a newer link's.
+  const handoffInChats = useRef<{ shareId: string; opened: (() => void) | undefined } | null>(null);
+  // Each open or Try again is an attempt: what Chats has reported for the
+  // handoff's invitation since, and whether the wait ran out.
+  const [handoffChats, setHandoffChats] = useState<{
+    shareId: string;
+    attempt: number;
+    rowMounted: boolean;
+    lists: InvitationLists | null;
+    late: boolean;
+  } | null>(null);
+  const handoffAttempts = useRef(0);
+  const startHandoffAttempt = (shareId: string) =>
+    setHandoffChats({ shareId, attempt: ++handoffAttempts.current, rowMounted: false, lists: null, late: false });
+  const openHandoffInChats = (invitation: ChatsInvitation) => {
+    if (ownWorkspaceForChats === null) return;
+    if (ownWorkspaceForChats.workspaceId !== workspaceId) {
+      props.onSwitchWorkspace(ownWorkspaceForChats);
+      return;
+    }
+    handoffInChats.current = { shareId: invitation.shareId, opened: props.onShareHandoffOpened };
+    startHandoffAttempt(invitation.shareId);
+    setOpenedFromLink({ to: "chats-invitation", ...invitation });
+  };
+  // Chats reports the newest reveal's lists, and a notice's Open can point
+  // that at another invitation, so only this handoff's invitation counts.
+  // Chats withdraws them once it stops keeping them current (a newer reveal,
+  // or leaving Chats). A row for it counts whichever reveal is newest.
+  const handleInvitationProgress = useCallback((shareId: string, lists: InvitationLists | null) => {
+    if (handoffInChats.current?.shareId !== shareId) return;
+    setHandoffChats((current) => current?.shareId === shareId ? { ...current, lists } : current);
+  }, []);
+  const handleShareRowMounted = useCallback((shareId: string) => {
+    if (handoffInChats.current?.shareId !== shareId) return;
+    setHandoffChats((current) => current?.shareId === shareId && !current.rowMounted ? { ...current, rowMounted: true } : current);
+  }, []);
+  const handoffAttempt = handoffChats?.attempt;
+  useEffect(() => {
+    if (handoffAttempt === undefined) return;
+    const timer = setTimeout(() => {
+      setHandoffChats((current) => current?.attempt === handoffAttempt ? { ...current, late: true } : current);
+    }, INVITATION_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [handoffAttempt]);
+  // With chats off, the panel shows why instead of the list, so nothing in
+  // Chats can answer and the card says the same at once.
+  const handoffOutcome = handoffChats === null ? null : invitationOutcome({
+    progress: {
+      rowMounted: handoffChats.rowMounted,
+      shares: handoffChats.lists?.shares ?? "waiting",
+      dms: handoffChats.lists?.dms ?? "waiting",
+    },
+    chatsOn: !(captureDecided && !captureAvailable),
+    waitedTooLong: handoffChats.late,
+  });
+  useEffect(() => {
+    if (handoffOutcome !== "shown") return;
+    const handoff = handoffInChats.current;
+    handoffInChats.current = null;
+    setHandoffChats(null);
+    handoff?.opened?.();
+  }, [handoffOutcome]);
+  // Back, Escape and Cancel: the person ends it. With no attempt left, Chats'
+  // later reports change nothing.
+  const leaveHandoff = () => {
+    setHandoffChats(null);
+    props.onDismissShareHandoff?.();
+  };
+  // Try again reads Chats' lists once more, as a new reveal.
+  const retryHandoffInChats = () => {
+    const handoff = handoffInChats.current;
+    if (handoff === null) return;
+    startHandoffAttempt(handoff.shareId);
+    openChatsInvitation({ shareId: handoff.shareId, inputs: inputCount() });
+  };
+  const handoffChatsCard: HandoffChatsOutcome | undefined =
+    handoffChats === null || handoffOutcome === null || handoffOutcome === "pending" || handoffOutcome === "shown" ? undefined
+    : handoffOutcome === "off" ? { shareId: handoffChats.shareId, outcome: "off", copy: chatsOffCopy(syncStatus) }
+    : { shareId: handoffChats.shareId, outcome: handoffOutcome };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link clicked in a chat or a document opens its message here, or
   // in the workspace on this computer that holds it. A link none holds, or
@@ -5989,6 +6078,8 @@ export function DesktopWorkspaceShell(props: {
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
+    onInvitationProgress: handleInvitationProgress,
+    onShareRowMounted: handleShareRowMounted,
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,
@@ -7920,13 +8011,15 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
       {handoffStatus.status !== "idle" ? (
-        <Overlay onClose={() => props.onDismissShareHandoff?.()}>
+        <Overlay onClose={leaveHandoff}>
           <ShareHandoffSurface
             status={handoffStatus}
             onWorkspaceReady={props.onSwitchWorkspace}
-            onBack={() => props.onDismissShareHandoff?.()}
+            onBack={leaveHandoff}
             onOpened={() => props.onShareHandoffOpened?.()}
-            ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
+            ownWorkspace={ownWorkspaceForChats !== null}
+            {...(ownWorkspaceForChats === null ? {} : { openInChats: openHandoffInChats })}
+            {...(handoffChatsCard === undefined ? {} : { chatsOutcome: handoffChatsCard, onRetryChats: retryHandoffInChats })}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}
