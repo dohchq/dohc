@@ -192,10 +192,11 @@ pub struct LiveDocumentChanges {
     pub last: Option<LastLiveChange>,
 }
 
-/// Records a pending change, replacing any earlier pending one for the
-/// document. Returns `None`, recording nothing, when `before` already shows
-/// what the action would produce: such an action changes nothing, so it must
-/// not take credit for the state another change made.
+/// Records a pending change. Returns `None`, recording nothing, when `before`
+/// already shows what the action would produce, or while the document has a
+/// pending change: an action that changes nothing must not take credit for the
+/// state another change made, and replacing a change already under way would
+/// lose its record if the relay applies it.
 pub fn begin_live_change(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -211,12 +212,10 @@ pub fn begin_live_change(
     }
     let change_id = random_change_id()?;
     let author = serde_json::to_string(&input.author).map_err(|_| corrupt())?;
-    committed(store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+    let inserted = committed(store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         tx.execute(
             "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,before_status,at_ms,author_json) \
-             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7,?8) \
-             ON CONFLICT(workspace_id,slot,object_id) DO UPDATE SET change_id=excluded.change_id,action=excluded.action,\
-             path=excluded.path,before_status=excluded.before_status,at_ms=excluded.at_ms,author_json=excluded.author_json",
+             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(workspace_id,slot,object_id) DO NOTHING",
             params![
                 workspace_id,
                 input.object_id,
@@ -228,10 +227,9 @@ pub fn begin_live_change(
                 author
             ],
         )
-        .map_err(DomainError::sql_persist)?;
-        Ok::<_, DomainError>(())
+        .map_err(DomainError::sql_persist)
     })?)?;
-    Ok(Some(BegunLiveChange {
+    Ok((inserted == 1).then_some(BegunLiveChange {
         change_id,
         at_ms: now_ms,
     }))
@@ -239,8 +237,8 @@ pub fn begin_live_change(
 
 /// Settles the pending change `change_id` names. Applied, it becomes the
 /// document's last change; refused, it is dropped and the last change stays.
-/// Returns false when the document has no such pending change, as for a late
-/// finish of a change a newer one replaced.
+/// Returns false when the document has no such pending change, as for a
+/// change already settled.
 pub fn finish_live_change(
     store: &mut EngineStore,
     workspace_id: &str,

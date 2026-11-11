@@ -166,22 +166,35 @@ async fn an_action_the_relay_already_shows_records_nothing() {
 }
 
 #[tokio::test]
-async fn a_late_finish_never_settles_a_newer_change() {
+async fn a_change_under_way_is_never_replaced() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open(&transport, &scratch, false).await;
-    let older = begin(&transport, &handle, "doc", "stopped", person(), "ready").await;
-    let newer = begin(&transport, &handle, "doc", "stopped", agent(), "ready").await;
-    assert_ne!(older["changeId"], newer["changeId"]);
-    assert!(!finish(&transport, &handle, "doc", &older, "applied").await);
-    let listed = list(&transport, &handle, &["doc"]).await;
-    assert_eq!(listed[0]["pending"]["changeId"], newer["changeId"]);
-    assert!(listed[0].get("last").is_none());
-    assert!(finish(&transport, &handle, "doc", &newer, "applied").await);
+    let first = begin(&transport, &handle, "doc", "stopped", person(), "ready").await;
+    // A second actor's change while the first is under way records nothing,
+    // so the first keeps its record if the relay applies it.
     assert_eq!(
-        list(&transport, &handle, &["doc"]).await,
-        json!([{ "objectId": "doc", "last": last("stopped", agent(), &newer) }])
+        begin(&transport, &handle, "doc", "resumed", agent(), "retired").await,
+        Value::Null
     );
+    assert!(
+        !finish(
+            &transport,
+            &handle,
+            "doc",
+            &json!({ "changeId": "other" }),
+            "applied"
+        )
+        .await
+    );
+    assert!(finish(&transport, &handle, "doc", &first, "applied").await);
+    let next = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
+    assert_ne!(next["changeId"], first["changeId"]);
+    // A late finish of the settled change never settles the next one.
+    assert!(!finish(&transport, &handle, "doc", &first, "refused").await);
+    let listed = list(&transport, &handle, &["doc"]).await;
+    assert_eq!(listed[0]["pending"]["changeId"], next["changeId"]);
+    assert_eq!(listed[0]["last"], last("stopped", person(), &first));
 }
 
 #[tokio::test]
