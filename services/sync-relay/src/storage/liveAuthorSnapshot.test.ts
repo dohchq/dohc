@@ -106,6 +106,12 @@ it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAut
   expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, own, account))).toContainEqual(expect.objectContaining({ kind: "agent", agentId: "writer" }));
 });
 
+it.each<LiveAuthorContext | undefined>([undefined, { kind: "account", accountId: personal.agentId, agent: personal }])
+  ("derives no snapshot under a personal agent's authority: %j", context => {
+    const authority: ServerDerivedLiveUpdateAuthority = { principalKind: "personal", principalId: personal.agentId, grantId: null, grantGeneration: null };
+    expect(() => deriveLiveAuthorSnapshot(fixture(), authority, context, account)).toThrow(/comes from its authority/);
+  });
+
 it("reuses a durable public mapping and publishes only its ID and stored label", () => {
   const storage = fixture(), before = workspaceUsageBytes(storage, "workspace");
   const publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
