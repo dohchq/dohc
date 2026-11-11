@@ -19,7 +19,7 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
     const removedResponse = response.status === 404;
-    const linkRefused = path.startsWith("/api/live/link-") && [403, 429, 503].includes(response.status);
+    const linkRefused = path.startsWith("/api/live/link-") && [403, 409, 429, 503].includes(response.status);
     const accountRefused = path === "/api/account/sign-in" && response.status === 403;
     if ([401, 403].includes(response.status) && !linkRefused && !accountRefused) throw new LiveAuthorityUnavailableError("Unavailable");
     if ((!linkRefused && !removedResponse && !accountRefused && response.status !== 200) || response.redirected || !response.body ||
