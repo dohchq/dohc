@@ -478,31 +478,6 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
   }
 });
 
-test("a temporary preparation runner requires an explicit manual run on the task branch", () => {
-  const document = load(workflow);
-  assert.equal(document.on.workflow_dispatch.inputs.proof_runner.default, "github");
-  assert.deepEqual(document.on.workflow_dispatch.inputs.proof_runner.options, ["github", "isolated-linux"]);
-  for (const event of ["pull_request", "workflow_dispatch"]) {
-    for (const repository of ["dohchq/dohc", "contributor/dohc"]) {
-      for (const ref of ["refs/heads/perf/verification-js5-rust10", "refs/heads/main", "refs/heads/other"]) {
-        for (const proofRunner of [undefined, "github", "isolated-linux", "unknown"]) {
-          const context = workflowContext({event});
-          Object.assign(context.github, {repository, ref});
-          context.inputs.proof_runner = proofRunner;
-          const selected = event === "workflow_dispatch" && repository === "dohchq/dohc"
-            && ref === "refs/heads/perf/verification-js5-rust10" && proofRunner === "isolated-linux";
-          for (const [name, job] of Object.entries(document.jobs)) {
-            const runsOn = job["runs-on"];
-            const labels = runsOn.startsWith("${{") ? workflowExpression(runsOn, context) : [runsOn];
-            assert.deepEqual(labels, selected && name === "javascript-prepare"
-              ? ["verification-perf-landlock"] : ["ubuntu-24.04"], `${event} ${repository} ${ref} ${proofRunner} ${name}`);
-          }
-        }
-      }
-    }
-  }
-});
-
 test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () => {
   const {jobs, concurrency} = load(workflow);
   for (const draft of [false, true]) for (const fork of [false, true]) {
@@ -1122,21 +1097,14 @@ test("a checkout that keeps no HEAD reflog is refused, not passed", () => {
   assert.equal(formatTreeState({ ...A, reflog: null }), "UNATTRIBUTABLE");
 });
 
-test("workflows reject generic self-hosted labels and restrict the task label to preparation", async () => {
+test("workflows reject self-hosted runner labels", async () => {
   const directory = fileURLToPath(new URL("../.github/workflows/", import.meta.url));
   const files = (await readdir(directory, { recursive: true })).filter(file => /\.ya?ml$/i.test(file));
   assert.ok(files.length > 0);
   const unsafe = [];
   for (const file of files) {
     const source = await readFile(join(directory, file), "utf8");
-    if (/self-hosted/i.test(source) || (file !== "pr-checks.yml" && source.includes("verification-perf-landlock"))) unsafe.push(file);
-    const document = load(source);
-    for (const [name, job] of Object.entries(document.jobs ?? {})) {
-      const labels = JSON.stringify(job) ?? "";
-      if (labels.includes("verification-perf-landlock") && (file !== "pr-checks.yml" || name !== "javascript-prepare")) {
-        unsafe.push(`${file}:${name}`);
-      }
-    }
+    if (/self-hosted/i.test(source)) unsafe.push(file);
   }
   assert.deepEqual(unsafe, [], "unrestricted runner labels");
 });

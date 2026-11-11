@@ -10,8 +10,6 @@ The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
 An absent variable or `false` runs PR checks and default manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
 Shared preparation and confinement default to GitHub's `ubuntu-24.04` image.
-Manual runs on `perf/verification-js5-rust10` can select an isolated preparation runner with `proof_runner=isolated-linux`.
-Other branches and events keep the default preparation runner.
 
 Inspect the switch:
 

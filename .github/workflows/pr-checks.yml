@@ -1,6 +1,5 @@
 # GitHub runners are the default. The global switch or an explicit manual
 # runner_provider=blacksmith selection moves jobs to Blacksmith.
-# Preparation and confinement can use a task runner for manual branch measurements.
 # The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
@@ -24,11 +23,6 @@ on:
         description: Runner provider for this manual measurement
         type: choice
         options: [github, blacksmith]
-        default: github
-      proof_runner:
-        description: Preparation runner for this branch-only measurement
-        type: choice
-        options: [github, isolated-linux]
         default: github
       runner_size:
         description: Blacksmith vCPUs, ignored on GitHub's runners
@@ -226,7 +220,7 @@ jobs:
     name: shared preparation + confinement
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.repository == 'dohchq/dohc' && github.ref == 'refs/heads/perf/verification-js5-rust10' && inputs.proof_runner == 'isolated-linux' && '["verification-perf-landlock"]' || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 5
     env:
       DOHC_CONFINEMENT_SUITES: exclude
