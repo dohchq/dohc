@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SaveFailureReason, SyncStatusResult } from "../../ipc/bridgeContract";
-import { PRIVACY_DENIED_WORDS, VOLUME_SHARES_NEW_FILES_WORDS } from "../../ipc/errorWords";
+import { DOCUMENT_TOO_DENSE_WORDS, PRIVACY_DENIED_WORDS, VOLUME_SHARES_NEW_FILES_WORDS } from "../../ipc/errorWords";
 import { deferred } from "../../testing/deferred";
 import { CsvView } from "../CsvView";
 import { documentVersionKey } from "../documentVersionKey";
@@ -237,6 +237,31 @@ describe("document save notices", () => {
     expect(notice!.details).toContainEqual(["Cause", "The disk adds sharing permissions to new files."]);
     expect(notice!.retry).not.toBeNull();
     expect(notice!.action).toBeUndefined();
+  });
+
+  it("says a note too dense to check can't be saved, and offers Copy as Markdown in place of a Try again that can't succeed", async () => {
+    const { result } = renderHook(() => {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return shell.shellErrors;
+    });
+    emit(failed("document-too-dense"));
+    expect(result.current).toHaveLength(1);
+    const [notice] = result.current;
+    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.message).toBe(DOCUMENT_TOO_DENSE_WORDS);
+    expect(notice!.details).toContainEqual(["Cause", "document-too-dense"]);
+    expect(notice!.retry).toBeNull();
+    expect(notice!.action).toMatchObject({ label: "Copy as Markdown", reads: true });
+    // With the note closed there is no editor to read it from, so the copy
+    // says so and offers to open it.
+    act(() => notice!.action!.run());
+    await waitFor(() => expect(result.current).toHaveLength(2));
+    const notOpen = result.current.find((error) => error.identity !== notice!.identity)!;
+    expect(notOpen.message).toBe("dohc could not copy a.md as Markdown, because a.md is not open.");
+    notOpen.action!.run();
+    expect(open).toHaveBeenCalledWith("notes/a.md");
+    expect(result.current.find((error) => error.identity === notice!.identity)).toBeDefined();
   });
 
   it("says why a plain-text file can't be kept private on a volume that shares new files", async () => {
