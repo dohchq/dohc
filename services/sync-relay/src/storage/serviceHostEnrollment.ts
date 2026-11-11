@@ -113,11 +113,15 @@ export interface ServiceHostEnrollment {
   readonly updatedAtMs: number;
   readonly hostDrainedAtMs: number | null;
   readonly acceptedCursor?: number;
+  /** On the row a Stop returns: whether this Stop retired it, as its transaction found the row. A retired row stays unchanged. */
+  readonly changed?: boolean;
 }
 export interface EnrollServiceHostDocumentInput {
   workspaceId: string; path: string; shareId: string; ownerUserId: string; nowMs: number; guard(): void;
   /** The host's snapshot of a document it holds for an unadmitted live edit. Its Resume retires that activation. */
   held?: ServiceHostHeldActivation;
+  /** Hears, inside the transaction, whether this enrollment enabled the document. One a share already made live is unchanged. */
+  changed?(changed: boolean): void;
 }
 export interface ServiceHostHeldActivation {
   readonly activationId: string; readonly replicationEpoch: string; readonly streamIdentity: string;
@@ -331,6 +335,7 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
       if (input.held) retireHeldActivation(storage, current, identity, input.held, nowMs);
       storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
         .run(Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
+      input.changed?.(current.retired || !current.enabled || current.ownerStop !== null);
       return read(storage, workspaceId, path)!;
     }
     if (input.held) throw relayError("conflict", HELD_CHANGED);
@@ -341,6 +346,7 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
     storage.db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,accounted_bytes) VALUES (?,?,?,?,?,?,?,1,?,?,?)`)
       .run(workspaceId, objectId, path, ownerUserId, shareId, identity.replicationEpoch, identity.streamIdentity, nowMs, nowMs, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, workspaceId);
+    input.changed?.(true);
     return read(storage, workspaceId, path)!;
 }
 export const HELD_CHANGED = "This document changed while live editing was resuming. Try again.";
@@ -502,7 +508,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     if (input.retire) endServiceHostRun(storage, current, nowMs);
     // Stop retires at once, so the release that clears upload proof never sees this row. The retirement it opened keeps that proof until it completes.
     forgetIdleServiceHostUploads(storage, workspaceId);
-    return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
+    return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor}),
+      ...(input.retire ? {changed: !current.retired} : {})};
   });
 }
 

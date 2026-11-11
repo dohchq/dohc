@@ -195,7 +195,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
-import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -221,6 +221,7 @@ import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
+import { createPathMarks, PendingShareMarks } from "./workbench/pendingShareMarks";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, sourcePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
@@ -237,6 +238,7 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { useKeptTyping } from "./shell/useKeptTyping";
 import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
@@ -963,6 +965,11 @@ export function DesktopWorkspaceShell(props: {
     privacySettingsAction,
     keepCollectionsHere,
   } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
+  const shellErrorsRef = useRef(shellErrors);
+  shellErrorsRef.current = shellErrors;
+  // A document's "Stopping live editing" row, while it stands, already says its Stop waits and keeps its actions.
+  const stoppingRowStands = (id: string, objectId: string) => shellErrorsRef.current.some(error =>
+    error.identity === `owner-live-quarantine:${id}:${objectId}` && error.title?.startsWith("Stopping live editing"));
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -1172,6 +1179,8 @@ export function DesktopWorkspaceShell(props: {
     const identity = `live-stop-edits-pending:${objectId}`;
     const report = () => {
       if (!current()) return;
+      // The Stop answered, so it no longer waits.
+      clearIdentity(`live-stop-waiting:${id}:${objectId}`);
       const needsResume = liveStopOffersResume(refusal);
       const withheld = refusal.code === "edits-pending" && refusal.pending === "conflict-parent-withheld";
       reportShellFailure({identity,
@@ -1202,6 +1211,9 @@ export function DesktopWorkspaceShell(props: {
         if (next) {
           refusal = next;
           report();
+        // Try again took the row, so a Stop that waits says so as Live documents does.
+        } else if (isLiveStopWaiting(error)) {
+          if (!stoppingRowStands(id, objectId)) reportShellFailure({identity: `live-stop-waiting:${id}:${objectId}`, title: `Stopping live editing for ${path}`, message: LIVE_STOP_WAITING, retry});
         } else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
       });
     };
@@ -1237,6 +1249,7 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
+        if (stoppingRowStands(failedFor, waiting.objectId)) return;
         // Copy details keeps what the error said. A plain relay error has words and no cause.
         const {cause, words} = readError(error);
         const said = cause ?? words;
@@ -2198,6 +2211,14 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  // Closed shared notes whose edits wait for the server. Rows read the marks
+  // themselves, so a change leaves the Explorer and every other row alone; an
+  // open note's editor shows its own state.
+  const [pendingShareMarks] = useState(createPathMarks);
+  const pendingShare = syncStatus?.ownerPendingShare;
+  useEffect(() => {
+    pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
+  }, [pendingShareMarks, pendingShare, openTabs]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -2327,7 +2348,8 @@ export function DesktopWorkspaceShell(props: {
                 const answer=await readLiveStopRefusalForRow(workspaceId,row.objectId,refusal);
                 if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
                 reportPendingLiveStop(workspaceId,row.path,row.objectId,answer.refusal,answer.path);
-              } else {
+              } else if (!isLiveStopWaiting(error)) {
+                // A Stop that still waits leaves the row, which says so and keeps Save recovery copy.
                 reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
               }
             }).finally(() => {
@@ -2354,6 +2376,8 @@ export function DesktopWorkspaceShell(props: {
         continue;
       }
       if (row.recovery==="stopping") {
+        // It says the Stop waits, so the dialog's notice of that wait goes.
+        clearIdentity(`live-stop-waiting:${workspaceId}:${row.objectId}`);
         reportShellFailure({title:`Stopping live editing for ${row.path}`,tone:"warning",quiet:true,
           message:"dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.",details,retry:stopAgain,action:save,target,identity});
         continue;
@@ -5676,6 +5700,7 @@ export function DesktopWorkspaceShell(props: {
       if (note !== null) reportShellError(note, new Error(note), null);
     });
   }, [openNoticeRowTarget, pendingOpen, reportShellError]);
+  const keptTyping = useKeptTyping();
   const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
@@ -5815,7 +5840,7 @@ export function DesktopWorkspaceShell(props: {
     : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const explorerView = (
-    <>
+    <PendingShareMarks.Provider value={pendingShareMarks}>
       <Explorer
         workspaceId={workspaceId}
         mode={wb.explorerMode}
@@ -5873,7 +5898,7 @@ export function DesktopWorkspaceShell(props: {
         onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
-    </>
+    </PendingShareMarks.Provider>
   );
 
   // The editor is the one live conversation surface. It owns presence,
@@ -6616,6 +6641,8 @@ export function DesktopWorkspaceShell(props: {
               onOpenHistory={openHistoryView}
               onOpenConflicts={() => setConflictReviewOpen(true)}
               onRefreshShareView={() => void refreshShareView()}
+              keptTyping={keptTyping.keptTyping}
+              onDismissKeptTyping={keptTyping.dismiss}
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}

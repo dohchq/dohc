@@ -8,7 +8,7 @@ import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/exc
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
-import { hasRetainedLiveDraft, hasWorkspaceLiveDrafts, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts, workspaceDraftStore } from "./liveDraftRecovery";
+import { hasRetainedLiveDraft, hasWorkspaceLiveDrafts, listKeptTyping, listLiveDraftRecovery, removeKeptTyping, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts, workspaceDraftStore } from "./liveDraftRecovery";
 import { readTypingCheckpoints, writeTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 const snapshotSha = (update: Uint8Array) => createHash("sha256").update(update).digest("hex");
 
@@ -33,6 +33,54 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(false);
   expect(await hasRetainedLiveDraft(directory, "workspace", "b.md", "other")).toBe(false);
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(false);
+});
+
+it("lists typing kept for workspaces no longer listed, and removes one record only for its workspace", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-kept-typing-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  await writeTypingCheckpoint(directory, {
+    version: 2, checkpointId: "joining", workspaceId: "removed", versionId: "main",
+    objectId: "object", path: "plan.txt", expectedClaimId: null,
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: null,
+    text: "typed while joining", updateBase64: Buffer.from(update).toString("base64"),
+    admittedBaseBase64: Buffer.from(update).toString("base64"), updates: [],
+  });
+  await preserveLiveDraft(directory, "removed", {path: "notes.txt", objectId: "notes", contentKind: "plaintext", text: "set aside", update});
+  await preserveLiveDraft(directory, "listed", {path: "a.txt", objectId: "object", contentKind: "plaintext", text: "still listed", update});
+  // A record whose workspace id no list can name hides no other.
+  await preserveLiveDraft(directory, "Not An Id", {path: "b.txt", objectId: "b", contentKind: "plaintext", text: "unnamed", update});
+  const kept = await listKeptTyping(directory, workspaceId => workspaceId === "listed");
+  expect(kept.map(({workspaceId, path, text}) => ({workspaceId, path, text})).sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+    {workspaceId: "removed", path: "notes.txt", text: "set aside"},
+    {workspaceId: "removed", path: "plan.txt", text: "typed while joining"},
+  ]);
+  const [listedRecord] = await listLiveDraftRecovery(directory, "listed");
+  // A record id names one workspace's record and no other's.
+  await expect(removeKeptTyping(directory, "removed", listedRecord!.recordId)).rejects.toThrow();
+  expect(await listLiveDraftRecovery(directory, "listed")).toEqual([listedRecord]);
+  const plan = kept.find(record => record.path === "plan.txt")!;
+  await removeKeptTyping(directory, "removed", plan.recordId);
+  expect((await listKeptTyping(directory, workspaceId => workspaceId === "listed")).map(record => record.path)).toEqual(["notes.txt"]);
+  // Removing it again finds nothing and changes nothing.
+  await removeKeptTyping(directory, "removed", plan.recordId);
+  // An interrupted rewrite of a checkpoint shares its record id. Only the
+  // saved record lists, so a dismissal deletes exactly the text it showed,
+  // and the interrupted write stays for the store's own recovery.
+  await writeTypingCheckpoint(directory, {
+    version: 2, checkpointId: "rewritten", workspaceId: "removed", versionId: "main",
+    objectId: "object", path: "draft.txt", expectedClaimId: null,
+    expectedStateVectorSha256: "a".repeat(64), expectedDiskSha256: null,
+    text: "saved", updateBase64: Buffer.from(update).toString("base64"),
+    admittedBaseBase64: Buffer.from(update).toString("base64"), updates: [],
+  });
+  const saved = (await listKeptTyping(directory, workspaceId => workspaceId === "listed")).find(record => record.path === "draft.txt")!;
+  const interrupted = join(directory, `${saved.recordId}.json.interrupted.tmp`);
+  await writeFile(interrupted, (await readFile(join(directory, `${saved.recordId}.json`), "utf8")).replace('"saved"', '"newer"'));
+  const listed = (await listKeptTyping(directory, workspaceId => workspaceId === "listed")).filter(record => record.path === "draft.txt");
+  expect(listed.map(record => record.text)).toEqual(["saved"]);
+  await removeKeptTyping(directory, "removed", saved.recordId);
+  expect(await readFile(interrupted, "utf8")).toContain('"newer"');
+  expect(await listKeptTyping(join(directory, "absent"), () => false)).toEqual([]);
 });
 
 it("lists and discards only set-aside drafts while pending typing checkpoints still protect the file and workspace", async () => {

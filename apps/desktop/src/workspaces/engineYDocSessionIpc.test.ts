@@ -30,6 +30,7 @@ import {
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { DOCUMENT_TOO_DENSE_WORDS } from "../ipc/errorWords";
 import { isPrivacyDenial } from "./privacyDenial";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
 import type { RegistryEntry } from "./registryStore";
@@ -139,6 +140,7 @@ interface TestHarnessOptions {
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
+  onPendingShareMayChange?: (workspaceId: string) => void;
 }
 
 function rendererSession(
@@ -200,6 +202,7 @@ function harness(
     isSharedView: () => readOnly,
     sharedCaptureFor: options.sharedCaptureFor,
     ownerDraftState: options.ownerDraftState,
+    onPendingShareMayChange: options.onPendingShareMayChange,
     resolveDocumentPath,
     onError,
   });
@@ -248,6 +251,26 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: false, seq: 0});
     } finally {
       unregister();
+      await h.ipc.shutdown();
+    }
+  });
+
+  it("asks for the waiting notes again only when an open note starts or stops waiting for the server", async () => {
+    const sender = new FakeSender(7);
+    const onPendingShareMayChange = vi.fn();
+    const h = harness(providerSession(), { onPendingShareMayChange });
+    try {
+      await h.ipc.open(sender, openPayload);
+      const save = h.capturedOpen()!.onSaveState!;
+      save("saved", 0, "status");
+      save("settling", 1, "start");
+      expect(onPendingShareMayChange).not.toHaveBeenCalled();
+      save("pending-share", 1, "outcome");
+      save("pending-share", 2, "outcome");
+      expect(onPendingShareMayChange).toHaveBeenCalledExactlyOnceWith(DOCUMENT.workspaceId);
+      save("saved-to-host", 2, "status");
+      expect(onPendingShareMayChange).toHaveBeenCalledTimes(2);
+    } finally {
       await h.ipc.shutdown();
     }
   });
@@ -915,6 +938,24 @@ describe("engine Y.Doc IPC adapter", () => {
       h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: refusal }));
       expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
         .toEqual({ reason: "volume-shares-new-files" });
+      await h.ipc.shutdown();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names a save the engine refused because the note is too dense to check, whatever the file allows", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-dense-"));
+    mkdirSync(join(root, "notes"));
+    writeFileSync(join(root, "notes", "a.md"), "# A\n");
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      const refusal = new DaemonRefusalError({ code: "INTERNAL", message: "document-too-dense", retry: "no" }, undefined);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: refusal }));
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "document-too-dense" });
       await h.ipc.shutdown();
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2350,6 +2391,17 @@ describe("engine Y.Doc IPC adapter", () => {
       );
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("tells the caller why a note too dense to check can't be saved, and that retrying won't help", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(
+        new DaemonRefusalError({ code: "INTERNAL", message: "document-too-dense", retry: "no" }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        `The edit is in notes/a.md. ${DOCUMENT_TOO_DENSE_WORDS} Retrying won't help.`,
+      );
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
     });
 
     // #2719: the editor says live editing is paused, so an agent must hear the same.

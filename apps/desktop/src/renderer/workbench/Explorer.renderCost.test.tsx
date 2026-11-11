@@ -4,6 +4,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
 import { Explorer, type ExplorerProps } from "./Explorer";
+import { createPathMarks, PendingShareMarks } from "./pendingShareMarks";
 import { buildTree } from "./path-tree";
 import { basenameOf } from "../path";
 import { parseTab } from "./workbenchState";
@@ -189,6 +190,23 @@ describe("Explorer render cost", () => {
     // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
     expect(basenameOfCalls()).toBe(baseline + 4);
+  });
+
+  it("re-renders only the row whose pending-share mark changes, in a large tree", () => {
+    const marks = createPathMarks();
+    render(
+      <PendingShareMarks.Provider value={marks}>
+        <Explorer {...explorerProps({ files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })) })} />
+      </PendingShareMarks.Provider>,
+    );
+    const baseline = basenameOfCalls();
+    act(() => marks.set(["file-0003.md"], []));
+    expect(basenameOfCalls()).toBe(baseline + 1);
+    // The same answer again, as a status poll brings, renders nothing.
+    act(() => marks.set(["file-0003.md"], []));
+    expect(basenameOfCalls()).toBe(baseline + 1);
+    act(() => marks.set([], []));
+    expect(basenameOfCalls()).toBe(baseline + 2);
   });
 
   it("mounts only a bounded window for a large tree", () => {

@@ -13,6 +13,7 @@ import { HOST_STOP_CASES, hostStopWireError } from "../../testing/liveStopHost.t
 import { pendingStopHarness } from "../../testing/ownerLiveStop.test-helper";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
+import { DOCUMENT_TOO_DENSE_WORDS } from "../../ipc/errorWords";
 import {
   REPLACED_DOCUMENT_SAVED,
   REPLACED_DOCUMENT_UNSAVED,
@@ -1237,6 +1238,10 @@ it("keeps generic reasons out of saveError and gives refusal text precedence ove
   expect(retained.snapshot.saveError).toBeNull();
   act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
   expect(retained.snapshot.saveError).toBeNull();
+  // A note too dense to check says why, since another edit cannot save it.
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0,
+    saveFailure: { reason: "document-too-dense" } }));
+  expect(retained.snapshot.saveError).toBe(DOCUMENT_TOO_DENSE_WORDS);
   act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
     authorCapacity: true, editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "refusal", message: "refusal message" } }));
   expect(retained.snapshot.saveError).toBe("refusal message");

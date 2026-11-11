@@ -522,6 +522,20 @@ it("reports only a conflict-parent hold, after document state and existing block
 // Proves: a document the session host blocked reads as refused until its
 // owner's Resume, which gives it exactly one more attempt. Enrolling its share
 // again is not a Resume, and a reading never clears the block.
+// Proves: of two Stops, and of two Resumes, sent at once, exactly one says it
+// changed live editing, so the desktop credits one author. A Resume of a page
+// a share already made live changes nothing.
+it("tells exactly one of two concurrent Stops, and of two Resumes, that it made the change", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const changed = async (response: Promise<Response>) => (await (await response).json()).changed;
+  expect(await changed(f.handle(f.request("POST", {path: binding.currentPath})))).toBe(false);
+  const stop = () => changed(f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration})));
+  expect((await Promise.all([stop(), stop()])).sort()).toEqual([false, true]);
+  const resume = () => changed(f.handle(f.request("POST", {path: binding.currentPath})));
+  expect((await Promise.all([resume(), resume()])).sort()).toEqual([false, true]);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, retired: false});
+});
+
 it("reports a document the session host refused until the owner resumes it", async () => {
   const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
@@ -535,7 +549,7 @@ it("reports a document the session host refused until the owner resumes it", asy
   expect(f.host.unblock).not.toHaveBeenCalled();
   const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
   expect(resumed.status).toBe(202);
-  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "preparing"});
+  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "preparing", changed: true});
   expect(f.host.unblock).toHaveBeenCalledTimes(1);
   expect(f.host.unblock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: scope.workspaceId, objectId: enrolled.objectId}));
   expect(f.host.unblock.mock.invocationCallOrder[0]).toBeLessThan(f.host.reconcile.mock.invocationCallOrder.at(-1)!);
@@ -610,7 +624,7 @@ it("reports a document whose hosted replica diverged, and nothing about its stor
   expect(await response.json()).toEqual({ok: true, diverged: true, documents: [diverged]});
   const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
   expect(resumed.status).toBe(202);
-  expect(await resumed.json()).toEqual({ok: true, ...diverged});
+  expect(await resumed.json()).toEqual({ok: true, ...diverged, changed: true});
   f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "workspace-changed"}]});
 });
@@ -817,7 +831,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const f = await fixture(), first = f.storage.enrollServiceHostDocument(f.input);
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
-  expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0});
+  expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0, changed: true});
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -911,7 +925,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
     .get("c".repeat(64), scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.currentPath, namespace, "d".repeat(64))!.journal_cursor);
   f.host.pending.delete(binding.objectId);
   const stopped = await stop();
-  expect(await stopped.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: cursor});
+  expect(await stopped.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: cursor, changed: true});
   expect(retirement()).toMatchObject({objectId: binding.objectId, acceptedThrough: cursor});
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
 });
@@ -931,7 +945,8 @@ it("reports a Stop whose reply was lost as done and replays it without preparing
   const fence = readServiceActivationRetirement(f.storage as StorageContext, enrolled)!;
   const replayed = await stop();
   expect(replayed.status).toBe(200);
-  expect(await replayed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: fence.acceptedThrough});
+  // The replay retired nothing, so it credits no one: the lost reply's credit stays lost.
+  expect(await replayed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: fence.acceptedThrough, changed: false});
   expect(f.host.prepared).toHaveLength(1);
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toEqual(fence);
 });
@@ -954,7 +969,7 @@ it("retires an unenrolled desktop without a generation and resolves a moved targ
   f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET path='docs/moved.md'").run();
   const response=await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:binding.objectId,retire:true}));
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired",acceptedCursor:0});
+  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired",acceptedCursor:0,changed:true});
   expect((await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:"wrong-object",retire:true}))).status).toBe(404);
 });
 

@@ -121,6 +121,7 @@ interface DesktopCliServerDependencies<State> {
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
+    pendingShare(workspaceId: string): readonly string[];
     /** With an incident, saves exactly that row's kept edits. */
     save(workspace: RegistryEntry, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
     retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
@@ -679,6 +680,7 @@ export function createDesktopCliServer<State>(
                 list: () => withOwnerLiveRecovery(async operation =>
                   ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier, saveOnly }) =>
                     ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}), ...(saveOnly ? { saveOnly } : {}) }))),
+                pendingShare: () => withOwnerLiveRecovery(async operation => ownerLiveRecovery.pendingShare(operation.workspace.workspaceId)),
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);

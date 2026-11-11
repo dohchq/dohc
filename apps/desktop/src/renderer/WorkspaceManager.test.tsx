@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MenuCommand, ReadCrashReportResult, UpdateCheckResult } from "../ipc/bridgeContract";
+import type { KeptTyping, MenuCommand, ReadCrashReportResult, UpdateCheckResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
@@ -57,6 +57,9 @@ const bridge = {
   dismissCrashReport: vi.fn(async () => undefined),
   markCrashReportRead: vi.fn(async () => undefined),
   onCrashReportChanged: vi.fn(() => () => undefined),
+  onNoticesChanged: vi.fn(() => () => undefined),
+  listKeptTyping: vi.fn(async (): Promise<KeptTyping[]> => []),
+  dismissKeptTyping: vi.fn(async () => undefined),
   windowRole: "workspace",
   platform: "linux" as NodeJS.Platform,
 };
@@ -136,6 +139,21 @@ describe("workspace manager", () => {
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Back" }));
     expect(onDismissShareHandoff).toHaveBeenCalledOnce();
+  });
+
+  // A first join that fails leaves no workspace, so the manager is the only
+  // place its kept typing can show.
+  it("offers typing kept from a workspace no longer listed, with no workspace open", async () => {
+    const kept = { workspaceId: "joined-then-failed", recordId: "b".repeat(64), path: "plan.md", text: "typed while joining" };
+    bridge.listKeptTyping.mockResolvedValueOnce([kept]);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    fireEvent.click(await screen.findByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-kept-typing");
+    expect(row.textContent).toContain("plan.md");
+    fireEvent.click(within(row).getByTestId("recovery-dismiss"));
+    fireEvent.click(within(row).getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(bridge.dismissKeptTyping).toHaveBeenCalledWith({ workspaceId: kept.workspaceId, recordId: kept.recordId }));
+    await waitFor(() => expect(screen.queryByTestId("notice-kept-typing")).toBeNull());
   });
 
   it("suggests ~/dohc as the workspace location", async () => {

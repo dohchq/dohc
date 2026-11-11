@@ -305,7 +305,9 @@ export function createServiceHostEnrollmentRoutes(options: {
         const row = objectId === undefined ? fence() : await host.stop({workspaceId, objectId}, fence, request.signal);
         if (row === "waiting") throw relayError("edits-pending");
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor} : state(row))});
+        // `changed` says whether this request retired the document, as its transaction found the row.
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor,
+          changed: row.changed === true} : state(row))});
       }
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||
@@ -315,12 +317,16 @@ export function createServiceHostEnrollmentRoutes(options: {
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
-      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {})})));
-      // A Resume gives a blocked document one more attempt in the store it has.
-      if (input.path !== undefined) host.unblock(rows[0]!);
+      let enabled = false;
+      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {}),
+        ...(input.path === undefined ? {} : {changed: (value: boolean) => {enabled = value;}})})));
+      // A Resume gives a blocked document one more attempt in the store it has. It changed live editing
+      // when it enabled the document or ended that block; a document a share already made live is unchanged.
+      const unblocked = input.path !== undefined && host.unblock(rows[0]!);
       host.reconcile();
       const documents = rows.map(state);
-      return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
+      return response({ok: true, ...(input.path === undefined ? {documents} : {...documents[0], changed: enabled || unblocked})},
+        documents.every(row => row.status === "ready") ? 200 : 202);
     } catch (error) {
       if (error instanceof KeptEditsConflict) return response({ok: false, code: error.code, error: error.message}, 409);
       if (error instanceof RecoveryCopyRefusal) return response({ok: false, code: "kept-edits-unrecoverable", reason: error.reason, error: error.message}, 409);

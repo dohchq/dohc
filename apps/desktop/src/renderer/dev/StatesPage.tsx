@@ -96,6 +96,7 @@ import { EmptyEditorGroup } from "../workbench/EmptyEditorGroup";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, Explorer, TreeRow, explorerMenuItems, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
+import { PendingShareMarks, type PathMarks } from "../workbench/pendingShareMarks";
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
 import { doneNotice, undoRefusedNotice } from "../workbench/explorerOperationNotices";
@@ -452,6 +453,8 @@ const treeRowCallbacks = {
   onRowDragLeave: noop,
   onRowDragEnd: noop,
 };
+
+const EVERY_PATH_MARKED: PathMarks = { subscribe: () => () => undefined, has: () => true };
 
 function Row(props: {
   name: string;
@@ -2083,6 +2086,9 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="picked, active" picked active />
           <Row name="focused, picked" picked force="focus-visible" />
           <Row name="drop target" folder drop />
+          <PendingShareMarks.Provider value={EVERY_PATH_MARKED}>
+            <Row name="pending share.md" />
+          </PendingShareMarks.Provider>
           <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
           <Row name="quarterly-planning-and-budget-review-2026" folder />
         </ul>
