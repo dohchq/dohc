@@ -5,7 +5,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu } from "../ui/Menu";
 import { CopyMessageLink } from "./messageLinks";
-import { ChatMessageList, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import { ChatMessageList, STREAM_COLUMN, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { EMPTY_ART } from "./EmptyArt";
 import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
@@ -322,9 +322,11 @@ export function ThreadedChat(props: {
               </button>
             </div>
           ) : null}
-          {props.belowList}
-          {props.notice}
-          {props.composer(narrow ? "narrow" : "stream")}
+          <div className={`flex shrink-0 flex-col ${narrow ? "" : STREAM_COLUMN}`}>
+            {props.belowList}
+            {props.notice}
+            {props.composer(narrow ? "narrow" : "stream")}
+          </div>
         </div>
       ) : null}
       {openRootId ? (

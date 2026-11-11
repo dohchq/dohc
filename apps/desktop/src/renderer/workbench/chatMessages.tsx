@@ -492,6 +492,11 @@ const DAY_DIVIDER_TOP = 10;
 // edge, so the copy steps aside while the next day's divider passes under it.
 const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
 
+// A stream keeps one column in the middle of a wide pane: the text's 720px,
+// its face and the insets. Rows, day lines, the working row and the composer
+// share it, so a row's actions and the composer stay beside the words.
+export const STREAM_COLUMN = "mx-auto w-full max-w-[808px]";
+
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
 // A narrow row has no room beside its name, so its hover bar rises above it.
@@ -499,13 +504,13 @@ const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%
 // divider's inset, so faces and day lines keep one left edge.
 export const DENSITY = {
   stream: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", column: STREAM_COLUMN, divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
   },
   thread: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", column: "", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", column: "", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
   },
 } as const;
 
@@ -807,7 +812,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
         data-open={open ? "true" : undefined}
-        className={`relative flex flex-col ${
+        className={`relative flex flex-col ${sizes.column} ${
           props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
@@ -957,7 +962,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
         style={{ right: scrollbarWidth }}
       >
-        <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        <div className={DENSITY[density].column}>
+          <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        </div>
       </div>
     ) : null}
     <LegendList

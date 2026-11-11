@@ -301,6 +301,7 @@ export function WorkingRow(props: { testIdPrefix: string; working: ChatWorking; 
   const sizes = DENSITY[props.density];
   const ink = useAgentInk(working.presentation);
   return (
+    <div className={sizes.column}>
     <div data-testid={`${props.testIdPrefix}-working`} className={`grid ${sizes.row} pb-2 pt-1.5`}>
       <span className="flex justify-end">
         <ChatAvatar presentation={working.presentation} name={working.agentName} kind="agent" size={sizes.avatar} />
@@ -313,6 +314,7 @@ export function WorkingRow(props: { testIdPrefix: string; working: ChatWorking; 
           {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
         </span>
       </div>
+    </div>
     </div>
   );
 }
