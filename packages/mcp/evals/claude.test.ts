@@ -1,10 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { join, resolve } from "node:path";
-import { readTranscript, sampleEnvironment, workspacePaths } from "./claude";
+import { claudeArguments, readTranscript, sampleEnvironment, workspacePaths } from "./claude";
 
 const line = (event: unknown) => JSON.stringify(event);
 
 describe("eval samples", () => {
+  // Claude Code keeps a sample inside its workspace, and away from the person's own MCP
+  // servers, only while it gets these flags. A sample that loses one runs a real agent on
+  // the developer's machine without that limit.
+  it("starts every sample restricted to its workspace, with only dohc's MCP server and no shell", () => {
+    const args = claudeArguments({ prompt: "Do the task.", model: "claude-haiku-5-5", mcpConfigPath: "/sample/mcp.json" });
+    expect(args).toContain("--restricted");
+    expect(args).toContain("--strict-mcp-config");
+    expect(args.slice(args.indexOf("--mcp-config"), args.indexOf("--mcp-config") + 2)).toEqual(["--mcp-config", "/sample/mcp.json"]);
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,Edit,Write");
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe("mcp__dohc,Read,Glob,Grep,Edit,Write");
+    expect(args.join(" ")).not.toMatch(/bypassPermissions|dangerously/);
+  });
+
   it("drops an enclosing agent session's route, token, and effort from a sample's environment", () => {
     expect(sampleEnvironment({
       PATH: "/bin",

@@ -11,6 +11,7 @@ Each sample starts Claude Code in a temporary copy of the case's workspace, with
 - The server is `createDohcMcpServer` from this checkout, so the agent reads the tool list this checkout advertises.
 - A stand-in answers for the dohc app (`desktop.ts`). Document and file writes change the temporary workspace. Every other request gets the answer the case lists.
 - Claude Code runs with `--restricted` and `--strict-mcp-config`. Your own settings, instructions, plugins, and MCP servers stay out of the run. The agent has `Read`, `Glob`, `Grep`, `Edit`, and `Write` inside the temporary folder, and no shell.
+- Claude Code enforces that limit, not this eval. With Claude Code 2.1.322 on Windows, a sample asked to read, write, and edit a file beside its workspace was refused each time, and the file was unchanged. A test keeps the flags on every sample. Check the limit again when you move to a Claude Code version that changes `--restricted`.
 - The run uses the Claude Code sign-in on your machine. It needs no API key. A sample drops every `ANTHROPIC_`, `CLAUDE`, and `T3CODE_` environment variable, so a run started from inside another agent session does not inherit that session's model route or effort.
 
 The grader (`grade.ts`) is plain logic. It checks the calls, the final answer, and the workspace's files against the case. No model judges a result.
