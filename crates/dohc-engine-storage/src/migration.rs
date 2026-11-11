@@ -6394,7 +6394,7 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-work-reference-chats");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 95);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 96);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let (a, b) = ("A".repeat(43), "B".repeat(43));
