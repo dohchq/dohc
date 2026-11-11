@@ -18,6 +18,55 @@ import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
+it("cancels the old workspace invocation after the window switches workspaces", async () => {
+  const f = fixture(), invocationId = "00000000-0000-4000-8000-000000000097";
+  let started!: (signal: AbortSignal) => void;
+  const ready = new Promise<AbortSignal>(resolve => { started = resolve; });
+  f.host.invoke.mockImplementationOnce((request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+    started(request.signal);
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+  }));
+  const pending = f.handler("window", { action: "invoke", workspaceId: "workspace", datasetPath: "data/dataset.json", operationId: f.revision.definition.operations[0]!.operationId,
+    revision: 1, revisionSha256: f.revision.revisionSha256, input: {}, idempotencyKey: "old-workspace", invocationId }).catch(error => error);
+  const signal = await ready;
+  f.stale();
+  try {
+    await f.handler("window", { action: "cancelInvoke", workspaceId: "workspace", invocationId });
+    expect(signal.aborted).toBe(true);
+  } finally { f.abort.abort(); await pending; }
+});
+
+it("keeps cancellation sent while the Collection address is still resolving", async () => {
+  const f = fixture(), invocationId = "00000000-0000-4000-8000-000000000098";
+  const pending = f.handler("window", { action: "invoke", workspaceId: "workspace", datasetPath: "data/dataset.json", operationId: f.revision.definition.operations[0]!.operationId,
+    revision: 1, revisionSha256: f.revision.revisionSha256, input: {}, idempotencyKey: "early", invocationId }).catch(error => error);
+  await f.handler("window", { action: "cancelInvoke", workspaceId: "workspace", invocationId });
+  expect(await pending).toBeInstanceOf(Error);
+  expect(f.host.invoke).not.toHaveBeenCalled();
+});
+
+it("cancels only the caller's running invocation through its worker signal", async () => {
+  const f = fixture();
+  let started!: (signal: AbortSignal) => void;
+  const ready = new Promise<AbortSignal>(resolve => { started = resolve; });
+  f.host.invoke.mockImplementationOnce((request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+    started(request.signal);
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+  }));
+  const invocationId = "00000000-0000-4000-8000-000000000099";
+  const input = { action: "invoke", workspaceId: "workspace", datasetPath: "data/dataset.json", operationId: f.revision.definition.operations[0]!.operationId,
+    revision: 1, revisionSha256: f.revision.revisionSha256, input: {}, idempotencyKey: "same-retry", invocationId };
+  const pending = f.handler("window", input).catch(error => error);
+  const signal = await ready;
+  const cancel = { action: "cancelInvoke", workspaceId: "workspace", invocationId };
+  await f.handler("other-window", cancel); expect(signal.aborted).toBe(false);
+  expect(await f.handler("window", cancel)).toEqual({ kind: "invoke-cancel-requested", outcome: "unknown" });
+  expect(signal.aborted).toBe(true);
+  expect((await pending).message).toBe("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.");
+  expect(await f.handler("window", input)).toMatchObject({ kind: "invoked" });
+  expect(await f.handler("window", cancel)).toEqual({ kind: "invoke-cancel-requested", outcome: "unknown" });
+});
+
 function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
   automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
   // Main's own host, which export opens first as main's does.
@@ -34,7 +83,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     ] }], operations: [{ operationId: "00000000-0000-4000-8000-000000000005", name: "submit", label: "Submit", tableId: "00000000-0000-4000-8000-000000000002",
       kind: "create", access: "link", readOnly: false, fieldIds: ["00000000-0000-4000-8000-000000000004"] }] };
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
-  const host = { prepareRecovery:vi.fn(async()=>({transferId:datasetId,manifestSha256:"a".repeat(64),sourceCursor:{workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:revision.revisionSha256,revision:0,digest:"b".repeat(64)},revision})), claimRecovery:vi.fn(), discardRecovery:vi.fn(async()=>{}), list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => ({ result: [], revision: 1, replayed: false })),
+  const host = { prepareRecovery:vi.fn(async()=>({transferId:datasetId,manifestSha256:"a".repeat(64),sourceCursor:{workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:revision.revisionSha256,revision:0,digest:"b".repeat(64)},revision})), claimRecovery:vi.fn(), discardRecovery:vi.fn(async()=>{}), list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async (_request: { signal: AbortSignal }) => ({ result: [], revision: 1, replayed: false })),
     approvedArtifacts: vi.fn(() => ({ active: true, revision, schemaSql: "SCHEMA", operationSource: "OPERATIONS" })) };
   const createSources = vi.fn(async (_workspace: typeof workspace, files: Record<string, string>, _signal: AbortSignal, _progress?: SourceCreationProgress) => {
     for (const [path, source] of Object.entries(files)) sources.set(path, source);

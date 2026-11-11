@@ -13,7 +13,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
   expected: cursor, reviewToken: hash, acknowledge: true, reference: hash,
   grantId: id, grant: { revision: 1, revisionSha256: hash, operationIds: [id], discover: true }, principalKey: "principal",
   revision: 1, revisionSha256: hash, fieldId: id, tableId: id, operationId: id,
-  idempotencyKey: "request-1", name: "photo.png", contentType: "image/png", bytesBase64: "",
+  idempotencyKey: "request-1", invocationId: id, name: "photo.png", contentType: "image/png", bytesBase64: "",
   fileId: "abcdefghijklmnop", createOperationId: id, fieldIds: [id], labelFieldId: id,
   definition: {
     formatVersion: 1, datasetId: id, name: "Equipment", schemaPath: "equipment/schema.sql", operationsPath: "equipment/actions.ts",

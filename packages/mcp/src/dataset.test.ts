@@ -3,6 +3,13 @@ import { DohcCliError } from "@dohc/cli/errors";
 import { dataset, type ToolContext } from "./tools";
 const request = {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Camera"},idempotencyKey:"add-1"};
 describe("dataset MCP transport", () => {
+  it("cancels a named invocation through the same Collection handler without promising rollback", async () => {
+    const reply = {kind:"invoke-cancel-requested",outcome:"unknown"};
+    const send = vi.fn(async () => reply), context: ToolContext = {root:"/workspace",home:"/home",request:send};
+    const input = {action:"cancelInvoke",workspaceId:request.workspaceId,invocationId:"00000000-0000-4000-8000-000000000099"};
+    expect(await dataset(context,input)).toEqual(reply);
+    expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({verb:"dataset",args:expect.objectContaining({request:input})}));
+  });
   it("rejects opaque IDs and folder paths before transport", async () => {
     const send = vi.fn(), context: ToolContext = { root: "/workspace", home: "/home", request: send };
     for (const selection of [{ datasetId: "00000000-0000-4000-8000-000000000001" }, { datasetPath: "equipment" }, { datasetPath: "../equipment/dataset.json" }]) {

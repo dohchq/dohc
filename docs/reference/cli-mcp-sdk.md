@@ -1670,6 +1670,17 @@ Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge
 
 Returns `{ kind: "attempt-cancelled", cancelled: true }`.
 
+#### `dohc dataset cancelInvoke`
+
+Request cancellation of a running Collection action.
+
+Use the invocationId sent with invoke. The action may already have changed records. Check records or History. Retry with the same input and idempotencyKey.
+
+- `workspaceId`: `string`. Required.
+- `invocationId`: `UUID`. Required.
+
+Returns `{ kind: "invoke-cancel-requested", outcome: "unknown" }`.
+
 #### `dohc dataset export`
 
 Save a private recovery archive of a Collection.
@@ -1909,7 +1920,7 @@ Returns `{ kind: "migration-discarded" }`.
 
 Run an approved operation.
 
-Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey.
+Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey. Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -1919,6 +1930,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `input`: `any JSON`. Required.
 - `idempotencyKey`: `string`. Required.
+- `invocationId`: `UUID`
 
 Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }` or `{ kind: "refused", code, message }`.
 

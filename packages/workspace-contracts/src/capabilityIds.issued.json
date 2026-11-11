@@ -287,5 +287,6 @@
   "document.typing.kept.dismiss",
   "chat.unread.list",
   "file.protected.restore",
-  "file.protected.discard"
+  "file.protected.discard",
+  "dataset.operation.cancel"
 ]
