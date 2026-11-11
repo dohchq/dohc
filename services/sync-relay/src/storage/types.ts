@@ -736,6 +736,7 @@ export interface SyncRelayStorage {
   listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
   showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
+  endAccountReasonsOfHiddenOrDisownedCopies(): void;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
   accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;

@@ -26,9 +26,9 @@ const patch = (workspaceId: string, init: RequestInit, body: unknown = { showOnP
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 
-async function relay(options: { accountApi?: boolean; resolve?: ResolveAccountSession } = {}) {
+async function relay(options: { resolve?: ResolveAccountSession } = {}) {
   const storage = await testStorage() as StorageContext;
-  const h = testHandler(storage, { accountApi: options.accountApi ?? true, resolveAccountSession: options.resolve ?? resolveAccountSession });
+  const h = testHandler(storage, { resolveAccountSession: options.resolve ?? resolveAccountSession });
   await claimWorkspace(h, "ana", "trip");
   await claimWorkspace(h, "ana", "notes");
   await claimWorkspace(h, "ben", "budget");
@@ -58,9 +58,12 @@ describe("the account's workspace list", () => {
     ]);
   });
 
-  it("is not served while the account API is off", async () => {
-    const { h } = await relay({ accountApi: false });
+  it("serves no account routes on a server without account sign-ins", async () => {
+    const { storage } = await relay();
+    const h = testHandler(storage);
     await denialBytes(await h(list(account("ana"))));
+    await denialBytes(await h(request(null, "/sync/account/sessions", account("ana"))));
+    await denialBytes(await h(request(null, "/sync/trip/ops/groups", account("ana", { method: "POST", body: "{}" }))));
   });
 
   it("refuses a request without a Bearer session, one with a cookie, and a fenced account", async () => {
