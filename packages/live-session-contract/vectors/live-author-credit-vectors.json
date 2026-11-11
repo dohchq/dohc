@@ -1,0 +1,136 @@
+{
+  "deliveries": [
+    {
+      "case": "new structs credit the snapshot",
+      "authorSnapshot": [{"kind": "human", "humanId": "alice", "humanName": "Alice"}],
+      "firstSeen": [{"clientId": 3, "startClock": 0, "endClock": 1}],
+      "firstSeenDeletes": [],
+      "credits": [{"kind": "human", "humanId": "alice", "humanName": "Alice"}]
+    },
+    {
+      "case": "a deletion alone credits the snapshot",
+      "authorSnapshot": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 0}],
+      "firstSeen": [],
+      "firstSeenDeletes": [{"clientId": 3, "startClock": 1, "endClock": 2}],
+      "credits": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 0}]
+    },
+    {
+      "case": "content without a snapshot credits the unattributed marker",
+      "authorSnapshot": [],
+      "firstSeen": [{"clientId": 4, "startClock": 0, "endClock": 1}],
+      "firstSeenDeletes": [],
+      "credits": [{"kind": "unattributed"}]
+    },
+    {
+      "case": "a repeated delivery that changes nothing credits nobody",
+      "authorSnapshot": [{"kind": "agent", "agentId": "review-agent", "onBehalfOf": "owner", "depth": 2}],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    },
+    {
+      "case": "an automation's delivery that changes nothing credits nobody",
+      "authorSnapshot": [{"kind": "automation", "automationId": "collection:Tasks#mark", "attribution": {"actorKind": "automation", "onBehalfOf": "presser", "depth": 1, "run": {"claimId": "claim", "automationName": "Mark done"}}}],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    },
+    {
+      "case": "a delivery with no snapshot and no content credits nobody",
+      "authorSnapshot": [],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    },
+    {
+      "case": "a v1 delivery from a shared author with nothing first seen credits nobody",
+      "note": "Relays and self-hosted servers before #1586 (October 5, 2026) journaled v1 deliveries, which carry no author snapshot and no deletion ranges, so a deletion alone arrived with nothing first seen. The engine credited the sharing principal for it until #2251; the relay's author window never did. Both now credit nobody.",
+      "canonicalVersion": 1,
+      "authority": {"principalKind": "named", "principalId": "bob", "grantId": "grant-1", "grantGeneration": 1},
+      "authorSnapshot": [],
+      "firstSeen": [],
+      "firstSeenDeletes": [],
+      "credits": []
+    }
+  ],
+  "firstSeen": {
+    "baseline": [1, 4, 253, 148, 133, 157, 4, 0, 40, 1, 4, 109, 101, 116, 97, 13, 115, 99, 104, 101, 109, 97, 86, 101, 114, 115, 105, 111, 110, 1, 125, 1, 7, 1, 4, 98, 111, 100, 121, 3, 9, 112, 97, 114, 97, 103, 114, 97, 112, 104, 7, 0, 253, 148, 133, 157, 4, 1, 6, 4, 0, 253, 148, 133, 157, 4, 2, 5, 72, 101, 108, 108, 111, 0],
+    "cases": [
+      {
+        "case": "a new edit is first seen whole",
+        "deliveries": [
+          {
+            "update": [1, 1, 101, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 5, 97, 100, 100, 101, 100, 1, 119, 10, 65, 108, 105, 99, 101, 32, 116, 101, 120, 116, 0],
+            "firstSeen": [{"clientId": 101, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          }
+        ]
+      },
+      {
+        "case": "the same bytes again add nothing",
+        "deliveries": [
+          {
+            "update": [1, 1, 101, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 5, 97, 100, 100, 101, 100, 1, 119, 10, 65, 108, 105, 99, 101, 32, 116, 101, 120, 116, 0],
+            "firstSeen": [{"clientId": 101, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          },
+          {
+            "update": [1, 1, 101, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 5, 97, 100, 100, 101, 100, 1, 119, 10, 65, 108, 105, 99, 101, 32, 116, 101, 120, 116, 0],
+            "firstSeen": [],
+            "firstSeenDeletes": []
+          }
+        ]
+      },
+      {
+        "case": "a deletion alone is first seen as its deletes",
+        "deliveries": [
+          {
+            "update": [1, 1, 101, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 5, 97, 100, 100, 101, 100, 1, 119, 10, 65, 108, 105, 99, 101, 32, 116, 101, 120, 116, 0],
+            "firstSeen": [{"clientId": 101, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          },
+          {
+            "update": [0, 1, 101, 1, 0, 1],
+            "firstSeen": [],
+            "firstSeenDeletes": [{"clientId": 101, "startClock": 0, "endClock": 1}]
+          }
+        ]
+      },
+      {
+        "case": "a deletion carried again beside a new edit adds only the edit",
+        "deliveries": [
+          {
+            "update": [1, 1, 101, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 5, 97, 100, 100, 101, 100, 1, 119, 10, 65, 108, 105, 99, 101, 32, 116, 101, 120, 116, 0],
+            "firstSeen": [{"clientId": 101, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          },
+          {
+            "update": [0, 1, 101, 1, 0, 1],
+            "firstSeen": [],
+            "firstSeenDeletes": [{"clientId": 101, "startClock": 0, "endClock": 1}]
+          },
+          {
+            "update": [1, 1, 202, 1, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 3, 98, 111, 98, 1, 119, 8, 66, 111, 98, 32, 116, 101, 120, 116, 1, 101, 1, 0, 1],
+            "firstSeen": [{"clientId": 202, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          }
+        ]
+      },
+      {
+        "case": "an edit that repeats an earlier one in part adds only the rest",
+        "deliveries": [
+          {
+            "update": [1, 1, 175, 2, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 3, 111, 110, 101, 1, 119, 9, 67, 97, 114, 111, 108, 32, 111, 110, 101, 0],
+            "firstSeen": [{"clientId": 303, "startClock": 0, "endClock": 1}],
+            "firstSeenDeletes": []
+          },
+          {
+            "update": [1, 2, 175, 2, 0, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 3, 111, 110, 101, 1, 119, 9, 67, 97, 114, 111, 108, 32, 111, 110, 101, 40, 1, 11, 102, 114, 111, 110, 116, 109, 97, 116, 116, 101, 114, 3, 116, 119, 111, 1, 119, 9, 67, 97, 114, 111, 108, 32, 116, 119, 111, 0],
+            "firstSeen": [{"clientId": 303, "startClock": 1, "endClock": 2}],
+            "firstSeenDeletes": []
+          }
+        ]
+      }
+    ]
+  }
+}
