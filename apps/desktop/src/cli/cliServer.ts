@@ -61,6 +61,7 @@ import {
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import { versionNameRefusal } from "../ipc/errorWords";
+import { nextStepWords } from "../ipc/bridgeContract";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
@@ -111,6 +112,7 @@ import {
   type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import type { ChatDispatchService } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
@@ -464,6 +466,8 @@ export interface CliServerOptions {
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
+  // Try again for a conversation's stopped agent request, as the chat runs it.
+  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun">;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -3026,6 +3030,28 @@ async function dispatchWorkspace(
       }
       return shown.thread;
     }
+
+    // Try again, for anyone who may post in the conversation: the same
+    // checks a reply makes, then the same two-attempt limit the chat's button
+    // keeps.
+    case "chatRetry": {
+      if (!options.chatRuns) return { ok: false as const, reason: "Agent runs are not available here." };
+      const { threadId } = await readReplyThread(context, chats, request.args.thread);
+      await options.chatWrites.assertMayPost(context, threadId);
+      const { failedRun } = await options.chatRuns.dispatchStateForThread(context.workspaceId, threadId);
+      if (!failedRun) return { ok: false as const, reason: "No agent request in this conversation has stopped." };
+      if (!failedRun.retryable) {
+        const nextStep = failedRun.nextStep ? ` ${nextStepWords(failedRun.nextStep, undefined)}` : "";
+        return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
+      }
+      try {
+        if (!await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId)) {
+          return { ok: false as const, reason: "This request can't run again now. Check dohc chat show for its state." };
+        }
+      } catch (error) { return mcpFailure(error, "dohc could not run this request again."); }
+      await notifyWrite(options, context);
+      return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
+    }
   }
 
   const channels = request.verb === "reply" ? [] : await loadChannels(chats);
@@ -3536,6 +3562,7 @@ async function workspaceContextForRequest(
     request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
+    request.verb === "chatRetry" ||
     request.verb === "react" ||
     request.verb === "export" ||
     (request.verb === "show" && !request.args.peek);

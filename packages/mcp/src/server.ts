@@ -44,6 +44,7 @@ import {
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
+  retryChatRun,
   readRecord,
   setRecordFields,
   waitForMessages,
@@ -742,6 +743,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async ({ model, ...args }) => text(await replyToChat(ctx, args, agentName(), reported(model))),
+  );
+
+  register(
+    "dohc_retry_chat_run",
+    {
+      description:
+        "Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.",
+      inputSchema: { threadId: z.string().min(1).max(200) },
+    },
+    async (args) => text(await retryChatRun(ctx, args)),
   );
 
   register(
