@@ -227,6 +227,8 @@ describe("LiveDocumentsDialog", () => {
     const first = await screen.findByTestId("live-document-row-note.md-old-1");
     expect(actions("note.md")).toEqual(["Stop live editing"]);
     expect(within(first).queryAllByRole("button").map(button => button.textContent)).toEqual(["Save recovery copy"]);
+    // It holds none of the note's current edits, so the note stays editable and the row never says Paused.
+    expect(within(first).getByText("Not written")).toBeTruthy();
     expect(first.textContent).toContain("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
     await userEvent.setup().click(within(first).getByRole("button", {name: "Save recovery copy of note.md"}));
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
@@ -1348,7 +1350,8 @@ describe("LiveDocumentsDialog", () => {
       expect(kept.textContent).toContain("It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.");
       expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
       const copied = screen.getByTestId("live-document-row-docs/b.md");
-      expect(within(copied).getByText("Paused")).toBeTruthy();
+      // An earlier copy's edits don't hold the note, so the row never says Paused.
+      expect(within(copied).getByText("Kept on the server")).toBeTruthy();
       expect(copied.textContent).toContain("A recovery copy of them is saved, so the server may now release them.");
       expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
     });

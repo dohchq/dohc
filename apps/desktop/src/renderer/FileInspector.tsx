@@ -308,8 +308,8 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
-  // Main takes no live edits to this note from this computer for now.
-  liveEditingPaused?: boolean;
+  // Live editing is paused for this note: the server refused its edits, or too many wait.
+  liveEditingPaused?: "refused" | "full";
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
   accessEnded?: boolean;

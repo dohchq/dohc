@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { OwnerLiveQuarantine, SyncStatusResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { LIVE_EDITING_PAUSED_REASON } from "./readOnlyReasons";
+import { LIVE_EDITING_PAUSED_REASON, LIVE_EDITS_WAITING_REASON } from "./readOnlyReasons";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // While this computer's queue for a note takes no more edits, the engine
@@ -29,9 +29,9 @@ describe("a note whose live editing is paused", () => {
     } };
   }
 
-  const expectPaused = async (toggle: () => Promise<HTMLElement>) => {
+  const expectPaused = async (toggle: () => Promise<HTMLElement>, reason = LIVE_EDITING_PAUSED_REASON) => {
     await waitFor(async () => expect((await toggle()).getAttribute("aria-disabled")).toBe("true"));
-    expect((await toggle()).getAttribute("title")).toBe(LIVE_EDITING_PAUSED_REASON);
+    expect((await toggle()).getAttribute("title")).toBe(reason);
   };
 
   it("stays read-only while Try again waits, and edits once the queue sends", async () => {
@@ -93,7 +93,7 @@ describe("a note whose live editing is paused", () => {
     bridge.getSyncStatus = vi.fn(async () => ({ ...SYNC_STATUS, ownerLivePausedPaths: ["a.md"] }));
     renderShell(bridge);
     const note = await openNote(bridge);
-    await expectPaused(note.toggle);
+    await expectPaused(note.toggle, LIVE_EDITS_WAITING_REASON);
     await note.status(SYNC_STATUS);
     await waitFor(async () => expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true"));
   });

@@ -288,7 +288,7 @@ export function MarkdownView(props: {
   // Main takes no live edits to this note from this computer until Try again
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
-  liveEditingPaused?: boolean;
+  liveEditingPaused?: "refused" | "full";
   // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
@@ -907,7 +907,7 @@ export function MarkdownView(props: {
     // Its set-aside row says why until the person dismisses it.
     notSaved: engine.permanentFailureWhileEditing &&
       !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
-    livePaused: !!props.liveEditingPaused,
+    livePaused: props.liveEditingPaused,
   }).join(" ");
 
   useEffect(() => {

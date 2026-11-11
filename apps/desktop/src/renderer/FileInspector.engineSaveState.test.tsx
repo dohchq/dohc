@@ -87,7 +87,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   });
 
   it("says Read-only, and why, while live editing is paused", async () => {
-    render(<FileInspector workspaceId="ws-1" path="a.md" liveEditingPaused />);
+    render(<FileInspector workspaceId="ws-1" path="a.md" liveEditingPaused="refused" />);
     const chip = await screen.findByTestId("markdown-save-state");
     expect(chip.getAttribute("data-state")).toBe("read-only");
     expect(chip.textContent).toBe("Read-only");

@@ -38,7 +38,6 @@ import type {
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
   MyShareChangeRow,
-  OwnerLiveQuarantine,
   RebuildEngineStoreResult,
   ShareAccess,
   ShareHandoffStatus,
@@ -196,6 +195,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
+import { queueHoldsNote } from "./liveQueueState";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -455,12 +455,6 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
-
-// A refused queue's states that Live documents shows as held: Paused, Trying
-// again, Stopping, Can't read edits. A finished Stop (stopped-kept, not-written,
-// cannot-write) has released the note, and Live documents says it edits again.
-const HELD_QUEUE_RECOVERY: ReadonlySet<OwnerLiveQuarantine["recovery"]> =
-  new Set(["paused", "copied", "retrying", "stopping", "unreadable"]);
 
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
@@ -2234,13 +2228,14 @@ export function DesktopWorkspaceShell(props: {
   // their editors stay read-only rather than set each keystroke aside. Main
   // lists them until Try again delivers, the queue drains or a Stop releases
   // the note. A row kept after a restore, or in an earlier copy of the
-  // workspace, holds no current queue. Rebuilt only when a status read changes
-  // the lists, so a render looks a path up once.
+  // workspace, holds no current queue; Live documents labels rows by the same
+  // rule. Rebuilt only when a status read changes the lists, so a render looks
+  // a path up once.
   const livePausedPaths = syncStatus?.ownerLivePausedPaths;
   const liveQuarantines = syncStatus?.ownerLiveQuarantines;
-  const liveEditingPaused = useMemo(() => new Set([
-    ...(livePausedPaths ?? []),
-    ...(liveQuarantines ?? []).filter((row) => !row.saveOnly && !row.earlier && HELD_QUEUE_RECOVERY.has(row.recovery)).map((row) => row.path),
+  const liveEditingPaused = useMemo(() => new Map<string, "refused" | "full">([
+    ...(livePausedPaths ?? []).map((path) => [path, "full"] as const),
+    ...(liveQuarantines ?? []).filter(queueHoldsNote).map((row) => [row.path, "refused"] as const),
   ]), [livePausedPaths, liveQuarantines]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
@@ -7215,7 +7210,7 @@ export function DesktopWorkspaceShell(props: {
                   isMountedSharePath(tabPath)
                 }
                 // The lists name this workspace's own notes, never a received share's.
-                liveEditingPaused={!shareView && !isMountedSharePath(tabPath) && liveEditingPaused.has(tabPath)}
+                liveEditingPaused={shareView || isMountedSharePath(tabPath) ? undefined : liveEditingPaused.get(tabPath)}
                 receivedShare={!!shareView || isMountedSharePath(tabPath)}
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}

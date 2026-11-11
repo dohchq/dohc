@@ -6,6 +6,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
+import { keptEditsLabel } from "./liveQueueState";
 
 export type LiveDocumentRow = {
   path: string;
@@ -179,13 +180,10 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
-  if (row.quarantine === "unreadable") return "Can't read edits";
-  if (row.quarantine === "paused" && row.earlier) return "Kept on the server";
-  if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
-  if (row.quarantine === "retrying") return "Trying again";
-  if (row.quarantine === "stopping") return "Stopping";
-  if (row.quarantine === "stopped-kept") return "Stopped";
-  // not-written and cannot-write keep an earlier Stop's edits; the session says whether the document is live now.
+  // The note's editor reads the same states, so the two never disagree.
+  const kept = row.quarantine === undefined ? null
+    : keptEditsLabel({ recovery: row.quarantine, ...(row.saveOnly ? { saveOnly: true } : {}), ...(row.earlier ? { earlier: true } : {}) });
+  if (kept !== null) return kept;
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
