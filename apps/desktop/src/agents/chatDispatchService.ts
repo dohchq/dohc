@@ -966,8 +966,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       title: runNoticeTitle(words.lead, await runPlace(workspace, run.threadId)),
       body,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
-      // A workspace whose sync is paused keeps its replies on this computer,
-      // so their notices and words stay here too.
+      // While sync is paused, a run's notice and its reply's words stay on
+      // this computer.
       ...(options.runNotices.syncing(workspaceId) ? {} : { onlyHere: true as const }),
     });
   }
