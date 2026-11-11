@@ -489,7 +489,7 @@ it("keeps activation polling when logging throws and resets repeated errors afte
 it("gives several unfinished targets in one workspace one catch-up pull a pass", async () => {
   const f = await fixture();
   await configureActivation(f, {maxDocumentsPerPass: 3, pollIntervalMs: 20,
-    targets: ["a", "b", "c"].map(name => ({workspaceId: "workspace", path: `${name}.md`, shareId: "share"}))});
+    targets: ["a", "b", "c"].map(name => ({workspaceId: "workspace", path: `${name}.md`}))});
   const events: string[] = [];
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
@@ -584,7 +584,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     store.complete({document, host: earlier, access, nativeState: {adoptionId: capture.activationId, pendingBytes: 0}, guard() {}});
   }
 
-  const target ={workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
+  const target ={workspaceId: "workspace", path: "docs/a.md"};
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
   await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
     ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
@@ -3949,7 +3949,7 @@ for (const c of [
   const documents = [o.sibling, sibling];
   if (c.moves === 2) documents.push(await replacementActivation(o, {name: "ordinary", path: "docs/d.md", activationId: `ordinary-activation-${"d".repeat(64)}`}));
   for (const row of documents.slice(1)) o.f.storage.enrollServiceHostDocument({workspaceId: row.workspaceId, ownerUserId: "owner",
-    shareId: row.shareId, path: row.path, nowMs: 35, guard() {}});
+    shareId: "share", path: row.path, nowMs: 35, guard() {}});
   const documentFor = (row: typeof o.sibling) => {
     const capture = [o.engine.capture, ...o.otherActivations.values()].find(value => value.source.objectId === row.objectId)!;
     return {workspaceId: row.workspaceId, mainVersionId: "main" as const, objectId: row.objectId, lineageClaimId: capture.source.lineageClaimId};
@@ -3974,7 +3974,7 @@ for (const c of [
     departedAt.set(row.objectId, {settlement: settlements.mock.calls.length, request: requests().length});
     move(row, `elsewhere/${row.objectId}.md`);
     expect(o.f.storage.serviceHostDocumentEnabled(row)).toBe(true);
-    expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: row.workspaceId, objectId: row.objectId, ownerUserId: "owner", shareId: row.shareId, path: row.path})).toBe(true);
+    expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: row.workspaceId, objectId: row.objectId, ownerUserId: "owner", shareId: "share", path: row.path})).toBe(true);
     expect(o.f.storage.serviceActivationRetirement(row)).toBeNull();
     await o.host.update({workspaces, documents: documents.slice(index + 1), departing: documents.slice(0, index + 1)});
     await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(row))).toBe(false));
@@ -6202,7 +6202,7 @@ it("hears a departed list reaching thousands of waiting documents in linear time
     return pull.call(this, signal, page => {const started = performance.now(); onPage?.(page); heard.push(performance.now() - started);});
   });
   const departing = Array.from({length: 40_000}, (_, index) => ({workspaceId: "workspace", objectId: `object-d${String(index).padStart(5, "0")}`,
-    path: `docs/d${index}.md`, shareId: "share"}));
+    path: `docs/d${index}.md`}));
   const ids = departing.map(row => row.objectId);
   o.replies.pass = {departed: ids}; o.replies.commit = {departed: ids};
   await o.host.update({workspaces, documents: [o.sibling], departing});
