@@ -106,7 +106,7 @@ impl LiveChangeAction {
 
 /// The relay's status of the document when the desktop began the change.
 /// `absent` means the relay listed no such document.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LiveStatus {
     Ready,
