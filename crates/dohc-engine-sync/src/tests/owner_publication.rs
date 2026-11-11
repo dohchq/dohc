@@ -1346,3 +1346,267 @@ fn a_stuck_167_1_delete_and_the_moments_after_it_publish_after_the_sweep() {
         assert!(published(digest), "{digest} reaches the relay");
     }
 }
+
+/// The origin under which the relay's service host publishes a first-open base.
+const FIRST_OPEN_BASE_ORIGIN: &str =
+    "service-host:first-open:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A note whose base arrived from `origin`, and the edit this desktop then
+/// queued on that base's lineage.
+struct FirstOpenNote {
+    _scratch: ScratchDir,
+    store: EngineStore,
+    lineage: String,
+    edit: ReplicationEnvelope,
+}
+
+fn first_open_note(origin: &str) -> FirstOpenNote {
+    let (scratch, _path, mut store) = open_store();
+    seed_identity(&mut store);
+    seed_replication_version(&mut store, "main", "main");
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "From an agent")
+        .unwrap();
+    let lineage = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let base = envelope(
+        origin,
+        0,
+        "ydoc.update",
+        json!({
+            "versionId":"main","objectId":"note","path":"notes/note.md","contentKind":"richdoc",
+            "updateBlobSha256":lineage,"lineageClaimId":lineage,"isBaseState":true
+        }),
+    );
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(applied.refusals.is_empty());
+    let key = DocKey::new("ws", "main", "note").unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .expect("the imported base");
+    assert_eq!(marker.base_origin_id.as_deref(), Some(origin));
+    let update = doc.richdoc_append_paragraph("A desktop edit");
+    let digest = store.put_binary_blob(&update).unwrap();
+    let payload = json!({
+        "versionId":"main","objectId":"note","path":"notes/note.md","contentKind":"richdoc",
+        "updateBlobSha256":digest,"lineageClaimId":lineage,"isBaseState":false
+    });
+    let TxnOutcome::Committed(seq) = journal_local_replication_op(
+        &mut store,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "ydoc.update",
+        &payload,
+        10,
+        &NoFaults,
+    )
+    .unwrap() else {
+        panic!("the edit must commit")
+    };
+    FirstOpenNote {
+        _scratch: scratch,
+        store,
+        lineage,
+        edit: envelope("local", seq, "ydoc.update", payload),
+    }
+}
+
+fn prefix_under(
+    store: &EngineStore,
+    ops: &[ReplicationEnvelope],
+    gate: Option<&OwnerGate>,
+) -> OwnerPublicationPrefix {
+    owner_publication_prefix(
+        store,
+        "ws",
+        ops,
+        1_000_000,
+        Some(OrdinaryPublication { gate, now_ms: 20 }),
+    )
+    .unwrap()
+}
+
+fn waits_for_first_enrollment(note: &FirstOpenNote) -> OwnerAdmissionPending {
+    OwnerAdmissionPending {
+        workspace_id: "ws".into(),
+        origin_id: "local".into(),
+        origin_seq: note.edit.origin_seq,
+        version_id: "main".into(),
+        object_id: "note".into(),
+        path: "notes/note.md".into(),
+        reason: Some(OwnerAdmissionReason::FirstEnrollment),
+    }
+}
+
+/// Whether any push so far carried `edit`'s bytes.
+fn sent(client: &RelaySyncClient<FakeRelay>, edit: &ReplicationEnvelope) -> bool {
+    client
+        .transport()
+        .pushes
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|push| &push.ops)
+        .any(|op| op.payload.get("updateBlobSha256") == edit.payload.get("updateBlobSha256"))
+}
+
+#[test]
+fn a_gated_push_holds_an_edit_to_a_first_open_note_and_sends_nothing_for_it() {
+    let mut note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    let expected = waits_for_first_enrollment(&note);
+    let gate = OwnerGate::default();
+    let prefix = prefix_under(&note.store, std::slice::from_ref(&note.edit), Some(&gate));
+    assert_eq!(prefix.allowed_ops, 0);
+    assert_eq!(prefix.pending, Some(expected.clone()));
+
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let outcome = client
+        .resume_push_workspace(
+            &mut note.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            20,
+            1_000_000,
+            Some(&gate),
+            &mut PushWorkspaceProgress::default(),
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        owner_admission_pending,
+        ..
+    } = outcome
+    else {
+        panic!("push failed")
+    };
+    assert_eq!(owner_admission_pending, [expected]);
+    assert!(read_pushed_seq(&note.store, "ws", "local").unwrap() < note.edit.origin_seq);
+    assert!(!sent(&client, &note.edit));
+}
+
+/// A member's desktop, a share view and the proposal path send no gate.
+#[test]
+fn an_edit_to_a_first_open_note_publishes_when_the_push_sends_no_gate() {
+    let mut note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    let ops = std::slice::from_ref(&note.edit);
+    assert_eq!(prefix_under(&note.store, ops, None).allowed_ops, 1);
+    assert_eq!(
+        owner_publication_prefix(&note.store, "ws", ops, 1_000_000, None)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let SyncPassOutcome::Complete {
+        owner_admission_pending,
+        ..
+    } = client
+        .push_workspace(
+            &mut note.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            20,
+            1_000_000,
+        )
+        .unwrap()
+    else {
+        panic!("push failed")
+    };
+    assert!(owner_admission_pending.is_empty());
+    assert!(sent(&client, &note.edit));
+}
+
+#[test]
+fn a_released_note_publishes_under_a_gate_and_only_that_note() {
+    let note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    let ops = std::slice::from_ref(&note.edit);
+    let released = |objects: &[&str]| OwnerGate {
+        released: objects.iter().map(|object| (*object).to_owned()).collect(),
+    };
+    let own = prefix_under(&note.store, ops, Some(&released(&["note"])));
+    assert_eq!(own.allowed_ops, 1);
+    let other = prefix_under(&note.store, ops, Some(&released(&["other"])));
+    assert_eq!(other.allowed_ops, 0);
+    assert_eq!(other.pending, Some(waits_for_first_enrollment(&note)));
+}
+
+#[test]
+fn a_stopped_note_publishes_under_a_gate() {
+    let mut note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    note.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO owner_live_stops(workspace_id,main_version_id,object_id,relay_database_namespace,state,binding_json,requested_at_ms,updated_at_ms) VALUES('ws','main','note','relay','released','{}',1,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let gate = OwnerGate::default();
+    let prefix = prefix_under(&note.store, std::slice::from_ref(&note.edit), Some(&gate));
+    assert_eq!(prefix.allowed_ops, 1);
+    assert!(prefix.pending.is_none());
+}
+
+/// Only the relay's first open gates a note. A base another device published,
+/// or an edit on a lineage other than the first-open base's, publishes.
+#[test]
+fn a_note_without_a_first_open_base_publishes_under_a_gate() {
+    let gate = OwnerGate::default();
+    let peer = first_open_note("peer");
+    let based = prefix_under(&peer.store, std::slice::from_ref(&peer.edit), Some(&gate));
+    assert_eq!(based.allowed_ops, 1);
+    let note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    let mut elsewhere = note.edit.clone();
+    assert_ne!(note.lineage, "f".repeat(64));
+    elsewhere.payload["lineageClaimId"] = json!("f".repeat(64));
+    let other = prefix_under(&note.store, &[elsewhere], Some(&gate));
+    assert_eq!(other.allowed_ops, 1);
+}
+
+/// A Markdown save names the note by its text digest and carries no lineage,
+/// so the gate leaves it to the existing proof.
+#[test]
+fn a_text_save_to_a_first_open_note_is_not_gated() {
+    let note = first_open_note(FIRST_OPEN_BASE_ORIGIN);
+    let saved = envelope(
+        "local",
+        note.edit.origin_seq + 1,
+        "moment.append",
+        json!({
+            "versionId":"main","objectId":"note","path":"notes/note.md",
+            "payloadAfterBlobSha256":dohc_engine_storage::hex_sha256(b"From an agent\n")
+        }),
+    );
+    let gate = OwnerGate::default();
+    let prefix = prefix_under(&note.store, &[saved], Some(&gate));
+    assert_eq!(prefix.allowed_ops, 1);
+    assert!(prefix.pending.is_none());
+}
+
+/// Under a gate, a note this desktop already delivers live keeps waiting for
+/// the host to accept its bytes, with no reason.
+#[test]
+fn a_bound_note_under_a_gate_waits_for_the_host_without_a_reason() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("not yet accepted");
+    let op = candidate(&mut store, &observed, &update, 1);
+    let gate = OwnerGate::default();
+    let prefix = prefix_under(&store, std::slice::from_ref(&op), Some(&gate));
+    assert_eq!(prefix.allowed_ops, 0);
+    let pending = prefix.pending.expect("the edit waits");
+    assert_eq!(pending.object_id, "owner");
+    assert_eq!(pending.reason, None);
+}
