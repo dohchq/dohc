@@ -944,13 +944,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   // The list draws a row again only when this changes, so a rename shows on rows already drawn.
   const listExtraData = useMemo(() => ({ props, personalNames }), [props, personalNames]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
-    return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""}`}>
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
     </div>;
   }
   if (props.loading || props.messages.length === 0) {
     // Loading rows and the empty line start where the messages will.
-    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${anchor === "end" ? "justify-end" : ""}`}>
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""} ${anchor === "end" ? "justify-end" : ""}`}>
       <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
         {props.loading ? (
           <SkeletonRows label="Loading..." className="pt-1" />

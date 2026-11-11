@@ -76,8 +76,20 @@ export function ThreadedChat(props: {
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const [narrow, setNarrow] = useState(false);
   const [atEnd, setAtEnd] = useState(true);
-  // The room the list keeps for its scrollbar, which the composer keeps too.
+  // The width this platform's scrollbar takes, which is none where scrollbars
+  // float over the content. The list keeps that room while its column is on,
+  // and the composer keeps the same, so the two stay level. An empty box that
+  // always scrolls gives the width before the first paint, list or no list.
   const [gutter, setGutter] = useState(0);
+  const watchGutter = useCallback((probe: HTMLDivElement | null) => {
+    if (!probe) return;
+    const measure = () => setGutter(probe.offsetWidth - probe.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(probe);
+    return () => observer.disconnect();
+  }, []);
   // Messages the reader had seen when last at the end.
   const seenCount = useRef(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -123,10 +135,8 @@ export function ThreadedChat(props: {
     // at the end is never counted while the list catches up.
     const onResize = () => {
       if (reachesEnd()) setAtEnd(true);
-      setGutter(node.offsetWidth - node.clientWidth);
     };
     onScroll();
-    onResize();
     node.addEventListener("scroll", onScroll, { passive: true });
     const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
     resized?.observe(node);
@@ -343,6 +353,7 @@ export function ThreadedChat(props: {
               </button>
             </div>
           ) : null}
+          <div ref={watchGutter} aria-hidden className="h-0 shrink-0 overflow-y-scroll [scrollbar-gutter:stable]" />
           <div className="flex shrink-0 flex-col" style={narrow ? undefined : { paddingRight: gutter }}>
             <div className={`flex flex-col ${narrow ? "" : STREAM_COLUMN}`}>
               {props.belowList}
