@@ -18,7 +18,7 @@ import type {
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { posix } from "node:path";
-import { AUTOMATION_AUTHOR_TEXT_MAX, ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
+import { AUTOMATION_AUTHOR_TEXT_MAX, EngineMomentAuthor, ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
@@ -82,6 +82,16 @@ function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): stri
       return automation.collection === undefined ? automation.name : `${automation.name} in ${automation.collection}`;
     }
   }
+}
+
+export function heldChangeAuthorsForIpc(authors: unknown[], names: EngineMomentAuthorNames): {name: string | null}[] {
+  const parsed = authors.map(author => EngineMomentAuthor.safeParse(author));
+  names.prepare?.(parsed.flatMap(author => author.success ? [author.data] : []));
+  return parsed.map(result => {
+    if (!result.success || result.data.kind === "unattributed") return {name: null};
+    const author = result.data;
+    return {name: author.kind === "human" ? ("humanName" in author ? author.humanName : names.person(author)) ?? null : authorLabel(author, names)};
+  });
 }
 
 // The person who made a moment, when one person did: a snapshot's account holder, this

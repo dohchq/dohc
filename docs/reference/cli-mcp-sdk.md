@@ -426,6 +426,18 @@ A shared view holds no saves of its own, so it does not offer this tool.
 
 Returns `{ ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null } | { ok: false, reason }`.
 
+### `dohc_held_note_change`
+
+Review, drop, or undo a held note change. Only a local agent in the owner's workspace may use this. Review names the authors and returns a token. Drop requires that token, saves the waiting text in History, and returns an Undo token. Undo restores the waiting text as held. Neither action rewrites the file or grants conversion consent. Refusals: held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `action`: `"review" | "drop" | "undo"`. Required.
+- `token`: `string`
+
+Returns `{ ok: true, path, token, authors, held, historyMomentId } | { ok: false, reason }`.
+
 ### `dohc_edit_document`
 
 Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
@@ -1009,6 +1021,21 @@ Show a change dohc held: the file's text and what saving the change would write.
 Prints null when nothing is held for the file.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { path, file, held } | { path, tooLarge: true } | { path, unavailable } | null }`.
+
+#### `dohc document held-change`
+
+```sh
+dohc document held-change <path> [options]
+```
+
+Review, drop, or undo a held change on the owner's computer.
+
+held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.
+
+- `--action <review|drop|undo>`: Review returns the token needed for Drop.
+- `--token <token>`: Use the review token for Drop or the Drop token for Undo.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, token, authors, held, historyMomentId }`.
 
 #### `dohc document edit`
 

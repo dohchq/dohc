@@ -440,6 +440,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "collectionSetFields":
       return `Updated ${lineSafe((result as Extract<CliResultByVerb["collectionSetFields"], { ok: true }>).recordPath)}`;
+    case "heldNoteChange":
+      return JSON.stringify(result, null, 2);
     case "documentEdit":
     case "documentCreate": {
       const document = result as CliResultByVerb["documentEdit" | "documentCreate"];

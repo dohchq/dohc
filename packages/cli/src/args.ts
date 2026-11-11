@@ -44,6 +44,7 @@ type CliCommandBody =
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "liveDocuments"; cursor?: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
+  | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -347,6 +348,29 @@ const DOCUMENT_VERBS = {
     operands: "<path>",
     notes: ["Prints null when nothing is held for the file."],
     parse: input => ({ verb: "documentHeld", path: parsePath(input, "document held") }),
+  },
+  "held-change": {
+    capabilityId: "document.held.change",
+    summary: "Review, drop, or undo a held change on the owner's computer.",
+    operands: "<path>",
+    flags: [{name: "--action", value: "review|drop|undo", text: "Review returns the token needed for Drop."},
+      {name: "--token", value: "token", text: "Use the review token for Drop or the Drop token for Undo."}],
+    notes: [
+      "held-change-stale: Run review again and use its new token for drop.",
+      "held-change-missing: Read the note again; there is no held change to drop.",
+      "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+      "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+      "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    ],
+    parse: (input: VerbInput): CliCommandBody => {
+      const path = parsePath(input, "document held-change");
+      const action = lastValue(input, "--action") ?? "review";
+      const token = lastValue(input, "--token");
+      if (action !== "review" && action !== "drop" && action !== "undo") fail("--action must be review, drop, or undo");
+      if (action !== "review" && !token) fail("Drop and Undo require --token");
+      if (token !== undefined && !/^[0-9a-f]{64}$/u.test(token)) fail("--token must be the 64-character token returned by Review or Drop");
+      return {verb: "heldNoteChange", path, action, ...(token ? {token} : {})};
+    },
   },
   edit: {
     capabilityId: "document.edit",

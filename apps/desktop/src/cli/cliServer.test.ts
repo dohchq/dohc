@@ -4249,6 +4249,30 @@ describe("CLI socket server", () => {
       .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
   });
 
+  it("lets a local agent review, drop, and undo through the shared held operation", async () => {
+    const token = "a".repeat(64);
+    let waiting = true;
+    const calls: unknown[] = [];
+    context.heldNoteChange = async input => {
+      calls.push(input);
+      if (input.action === "drop") waiting = false;
+      if (input.action === "undo") waiting = true;
+      return {path: input.path, token, authors: [], held: waiting, historyMomentId: "history"};
+    };
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md"};
+    expect(await invoke("heldNoteChange", {...args, action: "review"})).toMatchObject({ok: true, held: true, token});
+    expect(await invoke("heldNoteChange", {...args, action: "drop", token})).toMatchObject({ok: true, held: false});
+    expect(await invoke("heldNoteChange", {...args, action: "undo", token})).toMatchObject({ok: true, held: true});
+    expect(calls.slice(1)).toEqual(["drop", "undo"].map(action => ({path: "tracked.md", action, token,
+      author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local"}})));
+    expect(await invoke("heldNoteChange", {...args, actor: "human", action: "drop", token})).toMatchObject({ok: false});
+    expect(waiting).toBe(true);
+    context.readOnly = true;
+    registryWorkspace.readOnly = true;
+    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("read-only shared view");
+    expect(waiting).toBe(true);
+  });
+
   it("returns a pending document edit as success and replays it without another edit", async () => {
     const warning = "Saved locally. The shared file update is pending. Do not repeat this edit.";
     const edit = vi.fn(async (input: { path: string }) => ({ path: input.path, changed: true, warning }));
