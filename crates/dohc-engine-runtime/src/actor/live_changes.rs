@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
     /// Record who asked to stop or resume live editing of a document, before
-    /// the desktop acts. `None` when the relay already shows the result.
+    /// the desktop acts. `None`, recording nothing, when the relay already
+    /// shows the result or another change is under way; the desktop still acts.
     pub async fn begin_live_change(
         &self,
         workspace_id: String,

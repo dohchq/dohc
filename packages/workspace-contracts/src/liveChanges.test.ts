@@ -6,9 +6,9 @@ describe("liveChangeOutcome", () => {
     expect(liveChangeOutcome({ action: "stopped" }, { stopOwed: true })).toBeNull();
   });
 
-  it("refuses every other interrupted change, so no status credits it", () => {
-    expect(liveChangeOutcome({ action: "stopped" }, { stopOwed: false })).toBe("refused");
-    for (const stopOwed of [false, true]) expect(liveChangeOutcome({ action: "resumed" }, { stopOwed })).toBe("refused");
+  it("leaves every other interrupted change unrecorded, so no status credits it", () => {
+    expect(liveChangeOutcome({ action: "stopped" }, { stopOwed: false })).toBe("unrecorded");
+    for (const stopOwed of [false, true]) expect(liveChangeOutcome({ action: "resumed" }, { stopOwed })).toBe("unrecorded");
   });
 
   it("names the states each action already shows", () => {

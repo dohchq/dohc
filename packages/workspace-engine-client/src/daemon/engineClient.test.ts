@@ -199,7 +199,7 @@ describe("private owner delivery transport", () => {
       expect(sent).toEqual([["ydoc.liveChange.begin", begin], ["ydoc.liveChange.begin", {...begin, before: "retired", author: {kind: "agent", agentId: "a", onBehalfOf: "person-1", depth: 1}}],
         ["ydoc.liveChange.finish", {objectId: "doc", changeId: "c1", outcome: "applied"}], ["ydoc.liveChange.list", {objectIds: ["doc"]}]]);
       await expect(transport.ownerLiveChangeBegin(request, begin)).rejects.toThrow("Invalid live change response.");
-      await expect(transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "refused"})).rejects.toThrow("Invalid live change response.");
+      await expect(transport.ownerLiveChangeFinish(request, {objectId: "doc", changeId: "c1", outcome: "unrecorded"})).rejects.toThrow("Invalid live change response.");
       await expect(transport.ownerLiveChangeList(request, [])).rejects.toThrow("Invalid live change list.");
     } finally {transport.close();}
   });

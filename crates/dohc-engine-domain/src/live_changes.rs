@@ -2,14 +2,17 @@
 //!
 //! The desktop begins a change before it acts and finishes it with its own
 //! operation's response. A begun change is pending; an applied one replaces
-//! the document's last change, and a refused one leaves the last change as it
-//! was. A pending change that an interrupted action left behind is listed until
-//! the desktop finishes it. Each change names its pending record, so a late
-//! finish of an older change never settles a newer one.
+//! the document's last change, and an unrecorded one leaves the last change as
+//! it was. A pending change that an interrupted action left behind is listed
+//! until the desktop finishes it. Each change names its pending record, so a
+//! late finish of an older change never settles a newer one.
+//!
+//! The record yields to the action, never the reverse: when begin records
+//! nothing, the desktop still acts.
 //!
 //! The relay keeps no author, so no relay status can credit a change: one
-//! interrupted after the relay applied it is refused, and the document shows
-//! no author rather than another actor's.
+//! interrupted after the relay applied it goes unrecorded, and the document
+//! shows no author rather than another actor's.
 //!
 //! The records are local provenance only. They grant nothing and outlive their
 //! document: nothing else deletes them. Live editing itself is the relay's and
@@ -121,7 +124,9 @@ pub enum LiveStatus {
 #[serde(rename_all = "camelCase")]
 pub enum LiveChangeOutcome {
     Applied,
-    Refused,
+    /// The change is dropped without credit, whether the relay refused it or
+    /// the desktop cannot tell that its own request applied.
+    Unrecorded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -174,7 +179,10 @@ pub struct LiveDocumentChanges {
 /// already shows what the action would produce, or while the document has a
 /// pending change: an action that changes nothing must not take credit for the
 /// state another change made, and replacing a change already under way would
-/// lose its record if the relay applies it.
+/// lose its record if the relay applies it. The one exception is a Stop begun
+/// over a pending Resume, which replaces it: a pending Resume can only end
+/// unrecorded, and its late response finds no pending change to credit.
+/// `None` never stops the action; the desktop acts without a record.
 pub fn begin_live_change(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -193,7 +201,10 @@ pub fn begin_live_change(
     let inserted = committed(store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         tx.execute(
             "INSERT INTO live_document_changes(workspace_id,slot,object_id,change_id,action,path,at_ms,author_json) \
-             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7) ON CONFLICT(workspace_id,slot,object_id) DO NOTHING",
+             VALUES(?1,'pending',?2,?3,?4,?5,?6,?7) ON CONFLICT(workspace_id,slot,object_id) \
+             DO UPDATE SET change_id=excluded.change_id,action=excluded.action,path=excluded.path,\
+             at_ms=excluded.at_ms,author_json=excluded.author_json \
+             WHERE live_document_changes.action='resumed' AND excluded.action='stopped'",
             params![
                 workspace_id,
                 input.object_id,
@@ -213,7 +224,7 @@ pub fn begin_live_change(
 }
 
 /// Settles the pending change `change_id` names. Applied, it becomes the
-/// document's last change; refused, it is dropped and the last change stays.
+/// document's last change; unrecorded, it is dropped and the last change stays.
 /// Returns false when the document has no such pending change, as for a
 /// change already settled.
 pub fn finish_live_change(

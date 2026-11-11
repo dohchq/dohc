@@ -30,19 +30,20 @@ export function liveChangeAlreadyShown(action: LiveChangeAction, status: LiveDoc
 }
 
 /**
- * Settles a change an interrupted action left pending: "refused", or null to
- * leave it to Stop reconciliation.
+ * Settles a change an interrupted action left pending: "unrecorded", or null
+ * to leave it to Stop reconciliation. "unrecorded" drops the change without
+ * credit; it says nothing about whether the relay applied it.
  *
- * Only an action's own response credits it, since the relay keeps no author:
- * a Stop, ended access and account deletion all retire a document, and a
- * Resume and a share's enrollment both make one ready. So a change is never
+ * A change is credited only when its own response says this request made the
+ * change, since the relay keeps no author: a Stop, ended access and account
+ * deletion all retire a document, and a Resume and a share's enrollment both
+ * make one ready. A response that says the document was already in that state,
+ * or that does not say, leaves the change unrecorded. So a change is never
  * applied here. A Stop this computer still owes waits for reconciliation to
- * send it again, which must first read the document and refuse the change
- * when the relay already shows it retired, since the relay answers a Stop of
- * a retired document as it answers one that retires it. Every other change
- * is refused rather than left pending, since nothing later would settle it.
- * Skip changes this dohc is still making.
+ * send it again, and that response settles it. Every other change is left
+ * unrecorded rather than pending, since nothing later would settle it. Skip
+ * changes this dohc is still making.
  */
-export function liveChangeOutcome(pending: Pick<PendingLiveChange, "action">, facts: { stopOwed: boolean }): "refused" | null {
-  return pending.action === "stopped" && facts.stopOwed ? null : "refused";
+export function liveChangeOutcome(pending: Pick<PendingLiveChange, "action">, facts: { stopOwed: boolean }): "unrecorded" | null {
+  return pending.action === "stopped" && facts.stopOwed ? null : "unrecorded";
 }

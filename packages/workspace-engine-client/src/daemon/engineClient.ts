@@ -872,8 +872,9 @@ export class EngineClient implements EngineTransport {
   /**
    * Records who asked to stop or resume live editing of a document, before the
    * desktop acts. Null when `before` already shows the action's result, or
-   * while the document has a pending change: the engine records nothing, and
-   * there is nothing to finish. A self-reported
+   * while the document has a pending change that a Stop does not replace (a
+   * Stop replaces a pending Resume): the engine records nothing, and there is
+   * nothing to finish. Null never stops the action. A self-reported
    * agent name the engine cannot store is left out, so it never fails the change.
    */
   async ownerLiveChangeBegin(request: OwnerYDocDeliveryRequest, input: {objectId: string; path: string; action: LiveChangeAction; author: ChangeAuthor; before: LiveDocumentStatus}, signal?: AbortSignal) {
@@ -884,7 +885,7 @@ export class EngineClient implements EngineTransport {
     return begun.data;
   }
   /** Settles the pending change `changeId` names; false when the document has no such pending change. */
-  async ownerLiveChangeFinish(request: OwnerYDocDeliveryRequest, input: {objectId: string; changeId: string; outcome: "applied" | "refused"}, signal?: AbortSignal): Promise<boolean> {
+  async ownerLiveChangeFinish(request: OwnerYDocDeliveryRequest, input: {objectId: string; changeId: string; outcome: "applied" | "unrecorded"}, signal?: AbortSignal): Promise<boolean> {
     const response = await this.sendRequest({...request, method: "ydoc.liveChange.finish", params: input}, signal);
     const value = response.result as {finished?: unknown} | null;
     if (!value || Object.keys(value).join() !== "finished" || typeof value.finished !== "boolean") throw new TypeError("Invalid live change response.");

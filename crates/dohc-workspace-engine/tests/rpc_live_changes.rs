@@ -103,7 +103,7 @@ fn last(action: &str, author: Value, change: &Value) -> Value {
 }
 
 #[tokio::test]
-async fn an_applied_change_becomes_the_last_and_a_refused_one_keeps_it() {
+async fn an_applied_change_becomes_the_last_and_an_unrecorded_one_keeps_it() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open(&transport, &scratch, false).await;
@@ -123,10 +123,10 @@ async fn an_applied_change_becomes_the_last_and_a_refused_one_keeps_it() {
     let stopped = json!([{ "objectId": "doc", "last": last("stopped", person(), &stop) }]);
     assert_eq!(list(&transport, &handle, &["doc"]).await, stopped);
     // A finished change is not finished again.
-    assert!(!finish(&transport, &handle, "doc", &stop, "refused").await);
+    assert!(!finish(&transport, &handle, "doc", &stop, "unrecorded").await);
 
     let resume = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
-    assert!(finish(&transport, &handle, "doc", &resume, "refused").await);
+    assert!(finish(&transport, &handle, "doc", &resume, "unrecorded").await);
     assert_eq!(list(&transport, &handle, &["doc"]).await, stopped);
 }
 
@@ -176,17 +176,20 @@ async fn an_action_the_relay_already_shows_records_nothing() {
 }
 
 #[tokio::test]
-async fn a_change_under_way_is_never_replaced() {
+async fn a_pending_stop_is_never_replaced() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open(&transport, &scratch, false).await;
     let first = begin(&transport, &handle, "doc", "stopped", person(), "ready").await;
-    // A second actor's change while the first is under way records nothing,
-    // so the first keeps its record if the relay applies it.
-    assert_eq!(
-        begin(&transport, &handle, "doc", "resumed", agent(), "retired").await,
-        Value::Null
-    );
+    // Another Stop or a Resume while the first Stop is under way records
+    // nothing, so the first keeps its record if the relay applies it.
+    for action in ["stopped", "resumed"] {
+        assert_eq!(
+            begin(&transport, &handle, "doc", action, agent(), "paused").await,
+            Value::Null,
+            "{action}"
+        );
+    }
     assert!(
         !finish(
             &transport,
@@ -201,10 +204,35 @@ async fn a_change_under_way_is_never_replaced() {
     let next = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
     assert_ne!(next["changeId"], first["changeId"]);
     // A late finish of the settled change never settles the next one.
-    assert!(!finish(&transport, &handle, "doc", &first, "refused").await);
+    assert!(!finish(&transport, &handle, "doc", &first, "unrecorded").await);
     let listed = list(&transport, &handle, &["doc"]).await;
     assert_eq!(listed[0]["pending"]["changeId"], next["changeId"]);
     assert_eq!(listed[0]["last"], last("stopped", person(), &first));
+}
+
+#[tokio::test]
+async fn a_stop_replaces_a_pending_resume() {
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open(&transport, &scratch, false).await;
+    let resume = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
+    assert_eq!(
+        begin(&transport, &handle, "doc", "resumed", person(), "paused").await,
+        Value::Null
+    );
+    let stop = begin(&transport, &handle, "doc", "stopped", person(), "paused").await;
+    assert_ne!(stop["changeId"], resume["changeId"]);
+    // The Resume's late response credits nobody and leaves the Stop pending.
+    assert!(!finish(&transport, &handle, "doc", &resume, "applied").await);
+    assert_eq!(
+        list(&transport, &handle, &["doc"]).await[0]["pending"]["changeId"],
+        stop["changeId"]
+    );
+    assert!(finish(&transport, &handle, "doc", &stop, "applied").await);
+    assert_eq!(
+        list(&transport, &handle, &["doc"]).await,
+        json!([{ "objectId": "doc", "last": last("stopped", person(), &stop) }])
+    );
 }
 
 #[tokio::test]
