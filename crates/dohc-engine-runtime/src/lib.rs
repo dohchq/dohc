@@ -41,7 +41,7 @@ pub use actor::{
     RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord,
     SharingDeclined, TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions,
     YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState,
-    YdocSettleOutcome, YdocSettlement,
+    YdocSettleOutcome, YdocSettlement, YdocWriteState,
 };
 #[cfg(unix)]
 pub use actor::{

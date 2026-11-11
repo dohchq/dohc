@@ -6427,16 +6427,19 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
-/// #2813. A close commits, then the write its drain owes the file fails
-/// because the file was changed outside dohc. The close reports that, and a
-/// retried close must report it too: it must not read the session's absence
-/// as a clean close while the file is behind the note.
+/// #2813. A close commits, then the write its drain owes the file conflicts
+/// with an edit made outside dohc. The close reports it, and so does the
+/// first retry, so the report reaches whoever is closing; it must not read
+/// as a clean close. That write never lands, so the next retry answers
+/// closed rather than trap the note. A session id the workspace never had
+/// still answers as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_retried_close_reports_the_write_the_first_one_could_not_make() {
+async fn a_close_that_conflicts_with_an_outside_edit_reports_it_then_closes() {
     let QueuedWinner {
         scratch,
         transport,
         handle,
+        connection,
         session_id,
         ..
     } = queue_winning_lineage_behind_session("loser from B").await;
@@ -6445,22 +6448,70 @@ async fn a_retried_close_reports_the_write_the_first_one_could_not_make() {
 
     let close = json!({ "sessionId": session_id, "settle": false });
     let first = call_error(&transport, &handle, 5, "ydoc.close", close.clone()).await;
-    let retried = call_error(&transport, &handle, 6, "ydoc.close", close).await;
-    assert_ne!(
-        retried.message, "ydoc-session-not-found",
-        "the retry must not read as a clean close"
+    assert_eq!(
+        first.message, "file-write-incomplete",
+        "the close names an unwritten file, not a fault"
     );
+    let retried = call_error(&transport, &handle, 6, "ydoc.close", close.clone()).await;
     assert_eq!(
         (retried.code, retried.message),
         (first.code, first.message),
         "the retry reports the same failure"
     );
+    let closed = call(&transport, &handle, 7, "ydoc.close", close.clone()).await;
+    assert_eq!(closed, json!({ "closed": true }), "a later retry closes");
+    let gone = call_error(&transport, &handle, 8, "ydoc.close", close).await;
+    assert_eq!(
+        gone.message, "ydoc-session-not-found",
+        "the record is dropped"
+    );
+    let unknown = call_error(
+        &transport,
+        &handle,
+        9,
+        "ydoc.close",
+        json!({ "sessionId": "no-such-session", "settle": false }),
+    )
+    .await;
+    assert_eq!(unknown.code, ErrorCode::InvalidParams);
+    assert_eq!(unknown.message, "ydoc-session-not-found");
+
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
         "changed outside dohc",
         "the outside edit stays"
     );
-    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    let conflicted: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM materialization_jobs WHERE status='conflict'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("conflicted writes");
+    assert!(conflicted > 0, "the note's write is kept as a conflict");
+    let notes = scratch
+        .path()
+        .join(CLOSE_WINNER_PATH)
+        .parent()
+        .unwrap()
+        .to_owned();
+    let copies: Vec<String> = std::fs::read_dir(&notes)
+        .expect("notes dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".conflict"))
+        .collect();
+    assert_eq!(
+        copies.len(),
+        1,
+        "the note's text is kept beside the file: {copies:?}"
+    );
+    call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
 
 fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {

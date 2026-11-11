@@ -85,6 +85,7 @@ pub use versions::{ActiveVersionSwitch, HistoryPageRead};
 pub use ydoc::{
     ArtifactAssetDescriptor, YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome,
     YdocOpenState, YdocResyncState, YdocSeedMaterialization, YdocSettleOutcome, YdocSettlement,
+    YdocWriteState,
 };
 
 use crate::error::RuntimeError;
