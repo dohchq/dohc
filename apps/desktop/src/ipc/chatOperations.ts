@@ -17,6 +17,8 @@ import {
   ListChatThreadAttachmentsResult,
   ListChatChannelsPayload,
   ListChatChannelsResult,
+  ListChatUnreadPayload,
+  ListChatUnreadResult,
   ListChatFollowsPayload,
   ListChatFollowsResult,
   SetChatFollowPayload,
@@ -109,6 +111,12 @@ export const chatOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Chats stopped because this window changed workspaces.",
     payload: ListChatChannelsPayload, result: ListChatChannelsResult,
+  },
+  listChatUnread: {
+    capabilityId: "chat.unread.list", channel: "desktop:list-chat-unread",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Chats stopped because this window changed workspaces.",
+    payload: ListChatUnreadPayload, result: ListChatUnreadResult,
   },
   listChatFollows: {
     capabilityId: "chat.follows.list", channel: "desktop:list-chat-follows",

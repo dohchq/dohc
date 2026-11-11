@@ -24,6 +24,7 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
     chatOperations.listChannelThreads,
     chatOperations.listChatBookmarks,
     chatOperations.listChatChannels,
+    chatOperations.listChatUnread,
     chatOperations.listChatFollows,
     chatOperations.listChatMessages,
     chatOperations.listChatReactions,

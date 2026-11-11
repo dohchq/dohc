@@ -1749,11 +1749,20 @@ it.each<[string, string[], StopRelay]>([
   ["edits-pending and an unread list", ["DELETE", "GET"], pendingRow()],
   ...["workspace-changed", "document-unavailable", "session-host-diverged"].map((reason): [string, string[], StopRelay] =>
     [`edits-pending for a ${reason} row`, ["DELETE", "GET"], pendingRow({status: "unavailable", reason})]),
-])("keeps a Stop request after %s, so Stop reconciliation sends it again", async (_answer, methods, relay) => {
+])("keeps a Stop request after %s, so Stop reconciliation sends it again, and logs why", async (_answer, methods, relay) => {
   const h = pendingStopHarness("workspace", "live.md", "object");
   h.relay.mockImplementation(relay);
-  await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
-    .rejects.toMatchObject({name: "LiveStopWaitingError", message: "dohc is waiting for the server to stop live editing and will keep trying."});
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const error: unknown = await h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}})
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toMatchObject({name: "LiveStopWaitingError", message: "dohc is waiting for the server to stop live editing and will keep trying."});
+    // Electron drops the cause on its way to the renderer, so main's log keeps it.
+    expect(warn).toHaveBeenCalledWith("[desktop] owner live Stop is waiting for the server:", (error as Error).cause);
+    expect((error as Error).cause).toBeInstanceOf(Error);
+  } finally {
+    warn.mockRestore();
+  }
   expect(h.recorded()?.state).toBe("requested");
   expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
   expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(methods);

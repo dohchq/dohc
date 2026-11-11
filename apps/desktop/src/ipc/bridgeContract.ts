@@ -2569,6 +2569,21 @@ export const ListChatChannelsResult = z.object({
 });
 export type ListChatChannelsResult = z.infer<typeof ListChatChannelsResult>;
 
+// Each chat's unread count, read from this computer alone: no relay pass, so
+// a tab strip can ask after every workspace change.
+export const ListChatUnreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListChatUnreadPayload = z.infer<typeof ListChatUnreadPayload>;
+
+export const ListChatUnreadResult = z.object({
+  chats: z.array(z.object({
+    channelId: z.string().min(1),
+    unreadCount: z.number().int().min(0),
+  })),
+});
+export type ListChatUnreadResult = z.infer<typeof ListChatUnreadResult>;
+
 const CHAT_FOLLOW_TARGET_KIND = z.enum(["person", "agent", "channel", "thread"]);
 const CHAT_FOLLOW_STATE = z.enum(["following", "unfollowed"]);
 
