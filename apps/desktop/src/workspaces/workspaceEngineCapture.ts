@@ -8005,8 +8005,9 @@ export function createWorkspaceEngineCapture(
         untracked = files.filter((_, index) => results[index]?.status !== "found");
       }
       // Protected files, such as .env, follow each version in the secret store.
+      // A store that can't answer leaves them to be asked about.
       if (!untracked.some(isSecretPath)) return untracked;
-      const secrets = new Set((await secretStoreFor().listSecretFiles({ workspaceId, versionId })).map(stat => stat.path));
+      const secrets = new Set((await secretStoreFor().listSecretFiles({ workspaceId, versionId }).catch(() => [])).map(stat => stat.path));
       return untracked.filter(file => !secrets.has(file));
     },
 

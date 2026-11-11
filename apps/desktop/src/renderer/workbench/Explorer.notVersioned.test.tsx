@@ -193,3 +193,29 @@ it("a second refusal waits behind the first question, and neither is lost", asyn
   }));
   expect(props.onError).not.toHaveBeenCalled();
 });
+
+it("pressing Delete again asks once, and a question never follows the person to another workspace", async () => {
+  const marks = createNotVersionedMarks();
+  marks.set(["clip.mp4"]);
+  const props = explorerProps();
+  const { rerender } = render(
+    <NotVersionedMarks.Provider value={marks}>
+      <Explorer {...props} />
+    </NotVersionedMarks.Provider>,
+  );
+  fireEvent.click(row("clip.mp4"));
+  fireEvent.keyDown(row("clip.mp4"), { key: "Delete" });
+  fireEvent.keyDown(row("clip.mp4"), { key: "Delete" });
+  fireEvent.click(await screen.findByTestId("cancel-not-versioned"));
+  await waitFor(() => expect(screen.queryByTestId("not-versioned-confirm")).toBeNull());
+
+  fireEvent.keyDown(row("clip.mp4"), { key: "Delete" });
+  await screen.findByTestId("not-versioned-confirm");
+  rerender(
+    <NotVersionedMarks.Provider value={marks}>
+      <Explorer {...props} workspaceId="workspace-2" />
+    </NotVersionedMarks.Provider>,
+  );
+  await waitFor(() => expect(screen.queryByTestId("not-versioned-confirm")).toBeNull());
+  expect(deleteWorkspacePath).not.toHaveBeenCalled();
+});

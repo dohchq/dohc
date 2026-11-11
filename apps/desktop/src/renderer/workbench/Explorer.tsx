@@ -399,6 +399,7 @@ function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
 // A rename, move or delete, in a version, that reaches files the version does
 // not track: what it would change, and the change to run once the person agrees.
 type AskNotVersioned = {
+  workspaceId: string;
   action: "delete" | "rename" | "move";
   sources: string[];
   paths: string[];
@@ -735,10 +736,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const notVersionedMarks = useContext(NotVersionedMarks);
   // One question at a time. A change refused while another waits queues
-  // behind it, so neither is lost.
+  // behind it, so neither is lost; the same change asked again does not.
   const [notVersionedAsks, setNotVersionedAsks] = useState<AskNotVersioned[]>([]);
+  // As with the menu, a question asked in one workspace never shows in the next.
+  if (notVersionedAsks.some((ask) => ask.workspaceId !== workspaceId)) {
+    setNotVersionedAsks((asks) => asks.filter((ask) => ask.workspaceId === workspaceId));
+  }
   const askNotVersioned = notVersionedAsks[0] ?? null;
-  const queueNotVersioned = useCallback((ask: AskNotVersioned) => setNotVersionedAsks((asks) => [...asks, ask]), []);
+  const queueNotVersioned = useCallback((ask: AskNotVersioned) => setNotVersionedAsks((asks) =>
+    asks.some((queued) => queued.action === ask.action && queued.sources.join("\n") === ask.sources.join("\n")) ? asks : [...asks, ask]), []);
   const answerNotVersioned = useCallback(() => setNotVersionedAsks((asks) => asks.slice(1)), []);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   // The newest menu request is the only one that may open; closing the menu
@@ -1196,6 +1202,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (unversioned.length > 0) {
           const asked = unversioned.map(({ change }) => change);
           queueNotVersioned({
+            workspaceId,
             action: asked.every(({ kind }) => kind === "delete-file" || kind === "delete-folder") ? "delete" : action,
             sources: asked.map(sourcePath),
             paths: [...new Set(unversioned.flatMap(({ paths }) => paths))],
@@ -1257,7 +1264,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options.answered?.(succeeded);
       return succeeded;
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh, queueNotVersioned],
+    [onBeginChanges, onError, onPathsChanged, onRefresh, queueNotVersioned, workspaceId],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row
@@ -1347,10 +1354,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (confirmed) return false;
       const paths = notVersionedMarks.under(sources);
       if (paths.length === 0) return false;
-      queueNotVersioned({ action, sources, paths, go });
+      queueNotVersioned({ workspaceId, action, sources, paths, go });
       return true;
     },
-    [notVersionedMarks, queueNotVersioned],
+    [notVersionedMarks, queueNotVersioned, workspaceId],
   );
 
   const performMoves = useCallback(
