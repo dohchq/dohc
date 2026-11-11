@@ -836,8 +836,9 @@ function deletedPayload(targetLength: number): { checkpoint: Uint8Array; resend:
   throw new Error('Exact encoded payload construction did not converge')
 }
 
+const payload = deletedPayload(20_971_520)
+
 it.each(['exact', 'over'] as const)('commits a real %s byte-trigger checkpoint including its candidate and charges quota once', boundary => {
-  const payload = deletedPayload(20_971_520)
   expect(hash(payload.checkpoint)).toBe('5eb79d5c003665f71fd1cb052bb2e7f8507ed35b07ae7e9a53312f701d18f47f')
   expect(hash(payload.resend)).toBe('8f71392008b8bf8cb5eb9f697088a3a068a06a2f5a6e255f2d14482839579cc9')
   const diagnosticPolicy = { maxStructVisits: 36, maxValueNodeVisits: 66,
