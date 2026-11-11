@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "workspaces": [
+    {
+      "workspaceId": "ws_fixture",
+      "name": "Trip",
+      "rootPath": "/nonexistent/Trip",
+      "lastOpenedAt": 1762819200000
+    }
+  ]
+}
