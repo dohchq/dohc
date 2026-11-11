@@ -302,7 +302,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, historyOperations.listVersionLastChanges.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, captureRecoveryOperations.retrySecretKey.channel, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  captureRecoveryOperations.retryHistoryCapture.channel, captureRecoveryOperations.retrySecretKey.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
