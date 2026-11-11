@@ -2,10 +2,19 @@
 // tester's profile: the settings folder it resolves, and the app name Electron
 // gives the secret that protects a saved sign-in. It starts the pinned
 // Electron once, with no window, in a temporary home holding a copy of
-// fixtures/app-name-profile laid out under the old folder name. Electron runs
-// with a mock keychain (macOS) or a plain password store (Linux), so it never
-// reaches the real keychain or keyring, and it never resolves the real
-// settings folder. Chromium may still use the system's temporary folder.
+// fixtures/app-name-profile laid out under the old folder name. It never
+// resolves the real settings folder. Chromium may still use the system's
+// temporary folder.
+//
+// Keep Electron's mock keychain switch: the probe passes use-mock-keychain on
+// the command line and appends it again as its first statement. A temporary
+// HOME doesn't move the macOS login keychain, and Electron creates the
+// "<app name> Safe Storage" item there the first time anything asks for the
+// key. With the switch, Chromium gives that request an in-memory keychain
+// instead (os_crypt KeychainKeyProvider and the sync OSCrypt Electron
+// restores). The switch doesn't change app.name, so the item name this check
+// derives stays the app's. On Linux, --password-store=basic does the same
+// for the keyring. Neither switch is used anywhere in the app.
 //
 //   pnpm --filter @dohc/desktop exec node scripts/check-app-name.mjs
 import { spawnSync } from "node:child_process";
@@ -27,6 +36,8 @@ const PROBE = `
 import { app } from "electron";
 import { readdirSync } from "node:fs";
 import { nameApp } from "./appName.mjs";
+// First, in case the command line lost it: see the header comment.
+app.commandLine.appendSwitch("use-mock-keychain");
 const home = process.env.HOME;
 const appData = app.getPath("appData");
 // Stop before resolving a settings folder outside the temporary home.
@@ -75,7 +86,7 @@ async function check() {
     const electron = createRequire(import.meta.url)("electron");
     const env = { ...process.env, HOME: home, CFFIXED_USER_HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache") };
     delete env.ELECTRON_RUN_AS_NODE;
-    // Keep Electron off the real keychain and keyring. Neither switch changes app.name or userData.
+    // Keep Electron off the real keychain and keyring (see the header comment).
     const keyStore = process.platform === "darwin" ? "--use-mock-keychain" : "--password-store=basic";
     const run = spawnSync(electron, [keyStore, probe], { env, encoding: "utf8", timeout: 60_000 });
     const line = run.stdout.split("\n").find((text) => text.startsWith("{"));
