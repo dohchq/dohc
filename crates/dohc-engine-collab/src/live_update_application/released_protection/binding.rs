@@ -548,7 +548,7 @@ impl RetainedAuthors {
         let [author] = value.as_array()?.as_slice() else {
             return None;
         };
-        let (actor, attribution) = author_credit(author)?;
+        let (actor, attribution) = crate::author_coverage::author_credit(author)?;
         let expected: Value =
             match dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref()) {
                 Some(json) => serde_json::from_str(&json).ok()?,
@@ -564,42 +564,6 @@ impl RetainedAuthors {
     pub fn to_json(&self) -> Value {
         serde_json::from_str(&self.0).expect("canonical authors are JSON")
     }
-}
-
-/// The actor and attribution one author entry names, if each validates as
-/// a local write's would; neither for the unattributed marker.
-fn author_credit(author: &Value) -> Option<crate::owner_outbox::EntryCredit> {
-    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
-    let (field, actor_kind) = match author.get("kind")?.as_str()? {
-        "unattributed" => return Some((None, None)),
-        "agent" => ("agentId", ChangeActorKind::Agent),
-        "automation" => ("automationId", ChangeActorKind::Automation),
-        "human" => ("humanId", ChangeActorKind::Human),
-        _ => return None,
-    };
-    let actor = author.get(field)?.as_str()?.to_owned();
-    let on_behalf_of = match author.get("onBehalfOf") {
-        None => None,
-        Some(value) => Some(value.as_str()?.to_owned()),
-    };
-    let depth = match author.get("depth") {
-        None => 0,
-        Some(value) => u32::try_from(value.as_u64()?).ok()?,
-    };
-    let agent_run_id = match author.get("agentRunId") {
-        None => None,
-        Some(value) => Some(value.as_str()?.to_owned()),
-    };
-    let attribution = ChangeAttribution {
-        actor_kind,
-        on_behalf_of,
-        depth,
-        run: None,
-        agent_run_id,
-    };
-    crate::validate_actor_origin_id(&actor).ok()?;
-    attribution.validate().ok()?;
-    Some((Some(actor), Some(attribution)))
 }
 
 impl ReleasedLineageBinding {

@@ -5094,23 +5094,25 @@ fn preserve_base_sides_in_tx(
         && !quiet_adoption
         && hex_sha256(local.content.as_bytes()) != incoming_sha
     {
-        // The winner holds exactly the text the local lineage was seeded
-        // from, so the local edits are the only change since that seed and
-        // merging the three gives the local text. When the file already
-        // holds it, continue the winner with that text and publish it there.
-        // An untouched seed differs only by construction and has none.
-        if !losing_seed_untouched
+        // The relay's first open built the winner from exactly the text the
+        // local lineage was seeded from, so the local edits are the only
+        // change since that seed. When they changed only frontmatter entries
+        // and the file already shows them, continue the winner with those
+        // entries. An untouched seed differs only by construction and has none.
+        if origin_id.starts_with(dohc_engine_collab::FIRST_OPEN_ORIGIN_PREFIX)
+            && !losing_seed_untouched
             && losing_seed_source == Some(incoming_sha.as_str())
+            && markdown_body(&local.content) == markdown_body(incoming_content)
             && validate_retryable_ydoc_identity(tx, key, path)?
                 .snapshot
                 .is_some_and(|snapshot| {
                     snapshot.blob_sha256 == hex_sha256(local.content.as_bytes())
                 })
-            && carry_local_onto_winner_in_tx(
+            && carry_frontmatter_onto_winner_in_tx(
                 tx,
                 key,
                 path,
-                &incoming_sha,
+                doc,
                 &local.content,
                 losing_authors,
                 now_ms,
@@ -5203,63 +5205,132 @@ fn preserve_base_sides_in_tx(
     Ok((BaseSides::Winner, recovered_paths))
 }
 
-/// Rewrite the winner just installed to the local text and publish that as a
-/// local edit. A winner the rewrite cannot take leaves everything as it was and
-/// answers false, so the caller opens its conflict instead.
-fn carry_local_onto_winner_in_tx(
+/// Continue the winner just installed with the local lineage's frontmatter
+/// entries, key by key, and publish that update credited to the local
+/// author. The winner keeps its body items, so a peer continuing the same
+/// winner with another key keeps its change. Answers false with nothing
+/// changed when the local authors can't be credited as one, or when the
+/// continued winner doesn't show exactly `local`; the caller then opens its
+/// conflict. Only a storage failure is an error.
+fn carry_frontmatter_onto_winner_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     path: &str,
-    winner_sha: &str,
+    local_doc: &dohc_engine_collab::Ydoc,
     local: &str,
     losing_authors: Option<&str>,
     now_ms: i64,
 ) -> Result<bool, SyncError> {
-    let YdocLineageCompleteness::Complete(state) = ydoc_lineage_completeness_in_tx(tx, key)? else {
+    let credit = match losing_authors {
+        None => Some((None, None)),
+        Some(authors) => dohc_engine_collab::author_coverage::sole_author_credit(authors),
+    };
+    let Some((actor_origin_id, attribution)) = credit else {
         return Ok(false);
     };
-    let complete = CompleteYdocLineage {
-        key: key.clone(),
-        state,
-    };
-    tx.execute_batch("SAVEPOINT dohc_carry_local")
+    tx.execute_batch("SAVEPOINT dohc_carry_frontmatter")
         .map_err(SyncError::persist)?;
-    // The winner's text is the file text the local lineage was seeded from,
-    // so the fold keeps no copy of it.
-    tx.execute(
-        "UPDATE ydoc_docs SET last_settled_sha=?4 \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id, key.version_id, key.object_id, winner_sha],
-    )
-    .map_err(SyncError::persist)?;
-    let carried = match fold_complete_ydoc_lineage_in_tx(
+    let carried = match continue_winner_frontmatter_in_tx(
         tx,
-        &complete,
+        key,
         path,
+        local_doc,
         local,
-        LineageFoldAuthor::default(),
-        now_ms,
-        LineageFoldCause::LocalMutation {
-            unsettled_authors: losing_authors.map(str::to_owned),
+        LineageFoldAuthor {
+            actor_origin_id: actor_origin_id.as_deref(),
+            attribution: attribution.as_ref(),
         },
+        now_ms,
     ) {
-        Ok(LineageFold::Folded { .. }) => true,
-        Ok(LineageFold::NoContent)
-        | Err(
-            SyncError::InvalidInput { .. }
-            | SyncError::RetryableState { .. }
-            | SyncError::LiveDocumentBindingActive
-            | SyncError::BlobTooLarge { .. },
-        ) => false,
-        Err(error) => return Err(error),
+        Ok(carried) => carried,
+        Err(error @ SyncError::Storage(_)) => return Err(error),
+        Err(_) => false,
     };
     tx.execute_batch(if carried {
-        "RELEASE dohc_carry_local"
+        "RELEASE dohc_carry_frontmatter"
     } else {
-        "ROLLBACK TO dohc_carry_local; RELEASE dohc_carry_local"
+        "ROLLBACK TO dohc_carry_frontmatter; RELEASE dohc_carry_frontmatter"
     })
     .map_err(SyncError::persist)?;
     Ok(carried)
+}
+
+fn continue_winner_frontmatter_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    local_doc: &dohc_engine_collab::Ydoc,
+    local: &str,
+    author: LineageFoldAuthor<'_>,
+    now_ms: i64,
+) -> Result<bool, SyncError> {
+    ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
+    require_unfenced_lineage(tx, key)?;
+    let YdocLineageCompleteness::Complete(Some((marker, doc))) =
+        ydoc_lineage_completeness_in_tx(tx, key)?
+    else {
+        return Ok(false);
+    };
+    let Some(lineage_claim_id) = marker.lineage_claim_id.as_deref() else {
+        return Ok(false);
+    };
+    if marker.content_kind != ContentKind::Richdoc
+        || marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact
+    {
+        return Ok(false);
+    }
+    let Some(mut update) = doc
+        .frontmatter_set_entries(&local_doc.frontmatter_json())
+        .map_err(map_fold_edit_error)?
+    else {
+        return Ok(false);
+    };
+    let canonical = doc
+        .project(ContentKind::Richdoc)
+        .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+    if canonical.content != local {
+        let source = doc
+            .preserve_folded_markdown_source(local)
+            .map_err(map_fold_edit_error)?;
+        update = dohc_engine_collab::merge_updates(&[update, source])
+            .map_err(map_fold_edit_error)?;
+    }
+    if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        || project_ydoc_with_store(tx, key, &doc, ContentKind::Richdoc)?.content != local
+    {
+        return Ok(false);
+    }
+    let outcome = dohc_engine_collab::record_update_in_tx(
+        tx,
+        key,
+        &update,
+        author.actor_origin_id,
+        author.attribution,
+        now_ms,
+    )
+    .map_err(map_fold_edit_error)?;
+    if !outcome.deduped
+        && crate::journal::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)?
+    {
+        crate::journal::journal_local_op_in_tx(
+            tx,
+            &key.workspace_id,
+            "ydoc.update",
+            &crate::ydoc_update_payload(
+                key,
+                path,
+                ContentKind::Richdoc,
+                &dohc_engine_storage::hex_sha256(&update),
+                lineage_claim_id,
+                author.actor_origin_id,
+                author.attribution,
+                false,
+            ),
+            now_ms,
+        )?;
+    }
+    settle_ydoc_marker_to_text(tx, key, path, local, now_ms)?;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]

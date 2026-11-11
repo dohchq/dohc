@@ -134,6 +134,52 @@ impl Authors {
     }
 }
 
+/// The actor and attribution one author entry names, if each validates as
+/// a local write's would; neither for the unattributed marker.
+pub(crate) fn author_credit(author: &Value) -> Option<(Option<String>, Option<ChangeAttribution>)> {
+    let (field, actor_kind) = match author.get("kind")?.as_str()? {
+        "unattributed" => return Some((None, None)),
+        "agent" => ("agentId", ChangeActorKind::Agent),
+        "automation" => ("automationId", ChangeActorKind::Automation),
+        "human" => ("humanId", ChangeActorKind::Human),
+        _ => return None,
+    };
+    let actor = author.get(field)?.as_str()?.to_owned();
+    let on_behalf_of = match author.get("onBehalfOf") {
+        None => None,
+        Some(value) => Some(value.as_str()?.to_owned()),
+    };
+    let depth = match author.get("depth") {
+        None => 0,
+        Some(value) => u32::try_from(value.as_u64()?).ok()?,
+    };
+    let agent_run_id = match author.get("agentRunId") {
+        None => None,
+        Some(value) => Some(value.as_str()?.to_owned()),
+    };
+    let attribution = ChangeAttribution {
+        actor_kind,
+        on_behalf_of,
+        depth,
+        run: None,
+        agent_run_id,
+    };
+    crate::validate_actor_origin_id(&actor).ok()?;
+    attribution.validate().ok()?;
+    Some((Some(actor), Some(attribution)))
+}
+
+/// The actor and attribution a local write carries for the one author the
+/// list `json` names, or neither for the unattributed marker. `None` when the
+/// list names several authors, or one no local write could carry.
+pub fn sole_author_credit(json: &str) -> Option<(Option<String>, Option<ChangeAttribution>)> {
+    let authors: Value = serde_json::from_str(json).ok()?;
+    let [author] = authors.as_array()?.as_slice() else {
+        return None;
+    };
+    author_credit(author)
+}
+
 fn reserved_bytes(author: &Value) -> usize {
     let kind = author.get("kind").and_then(Value::as_str);
     let depth = author.get("depth").map(Value::to_string);

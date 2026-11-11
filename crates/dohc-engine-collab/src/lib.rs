@@ -109,6 +109,11 @@ pub use ydoc::{
 // there.
 pub use dohc_engine_storage::hex_sha256;
 
+/// The relay's service host publishes a note's first-open base under an
+/// origin with this prefix (`FIRST_OPEN_ORIGIN_PREFIX` in
+/// `services/sync-relay/src/relayLogInputs.ts`).
+pub const FIRST_OPEN_ORIGIN_PREFIX: &str = "service-host:first-open:";
+
 /// The durable identity of one Y.Doc lineage: a version-scoped object. Versions
 /// are independent content lines, so a lineage is keyed by all three
 /// coordinates (mirrors the TS `ydoc_docs` primary key).

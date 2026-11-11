@@ -1754,6 +1754,50 @@ impl Ydoc {
         })
     }
 
+    /// Bring the frontmatter entries to `target` one key at a time: remove,
+    /// add or set only the keys whose values differ, and leave every other
+    /// entry's item in place, so another peer's change to a different key
+    /// survives the merge. Answers `None` when the entries already match.
+    pub fn frontmatter_set_entries(&self, target: &Value) -> Result<Option<Vec<u8>>, CollabError> {
+        let target = target
+            .as_object()
+            .ok_or(CollabError::FrontmatterEditRefused)?;
+        if self.frontmatter_edits_refused() {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        let current = self.frontmatter_json();
+        let current = current
+            .as_object()
+            .ok_or(CollabError::FrontmatterEditRefused)?;
+        let removed: Vec<&str> = current
+            .keys()
+            .filter(|key| !target.contains_key(key.as_str()))
+            .map(String::as_str)
+            .collect();
+        let set: Vec<(&str, &Value)> = target
+            .iter()
+            .filter(|(key, value)| current.get(key.as_str()) != Some(*value))
+            .map(|(key, value)| (key.as_str(), value))
+            .collect();
+        if removed.is_empty() && set.is_empty() {
+            return Ok(None);
+        }
+        let edited: Vec<&str> = set.iter().map(|(key, _)| *key).collect();
+        self.validate_frontmatter_edit(&Value::Object(target.clone()), &edited, None)?;
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        Ok(Some(self.with_delta(|txn| {
+            for key in &removed {
+                map.remove(txn, key);
+            }
+            for (key, value) in &set {
+                let before = map.entry_id(txn, key);
+                map.insert(txn, *key, json_to_any(value));
+                carry_frontmatter_source_item(&map, &meta, txn, key, before);
+            }
+        })))
+    }
+
     fn validate_frontmatter_edit(
         &self,
         current: &Value,
