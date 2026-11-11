@@ -103,13 +103,7 @@ async function runJavascript(groups, record, save, availability) {
 }
 
 async function restoreNativePreparation() {
-  const { artifact } = await waitForPreparation("js");
-  if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
-  const response = await fetch(`${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/artifacts/${artifact.id}/zip`, {
-    headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!response.ok || !response.body) throw new Error(`Cannot download the prepared artifact: HTTP ${response.status}.`);
+  const { response } = await waitForPreparation("js", { download: true });
   const temporary = mkdtempSync(join(tmpdir(), "dohc-js-prepared-"));
   const zip = join(temporary, "artifact.zip"), archive = join(temporary, "javascript-prepared.tar.zst");
   try {

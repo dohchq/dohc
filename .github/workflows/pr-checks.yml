@@ -247,18 +247,6 @@ jobs:
           shared-key: js-daemon
       - name: Build the native engine and desktop once
         run: node scripts/verification/cloud.mjs prepare
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Archive compiler confinement test binaries
-        run: cargo nextest archive --locked --package dohc-compiler-owner --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --zstd-level=-1
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: compiler-tests-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/compiler-tests.tar.zst
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -279,6 +267,18 @@ jobs:
           name: javascript-prepared-${{ github.run_attempt }}
           path: /tmp/javascript-prepared.tar.zst
           include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Archive compiler confinement test binaries
+        run: cargo nextest archive --locked --package dohc-compiler-owner --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --zstd-level=-1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compiler-tests-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/compiler-tests.tar.zst
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

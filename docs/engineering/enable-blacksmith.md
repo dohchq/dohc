@@ -111,7 +111,8 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
 The `compiler confinement` and `relay confinement` jobs always use GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
 Their engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
-Both download and check the prepared artifacts. They run compiler and replica proofs on separate runners; only the compiler job needs Rust.
+Both download and check the prepared artifacts. Both install Rust because the engine fingerprint reads the compiler version.
+They run compiler and replica proofs on separate runners; only the compiler job needs nextest.
 Workers and aggregates do not wait for confinement. The final verdict requires both jobs and includes their longer execution time in both gates.
 If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
 The relay job runs the replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.

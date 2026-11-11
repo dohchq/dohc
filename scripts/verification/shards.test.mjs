@@ -315,6 +315,7 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
           jobReads++;
           return apiResponse({ jobs: [{ name: jobName, status: clock < 60_000 ? "queued" : "in_progress" }] }, 200, `"jobs-${jobReads}"`);
         }
+        if (url.endsWith("/zip")) return apiResponse("archive");
         assert.ok(clock >= 60_000, "queued builds cannot have published artifacts");
         artifactReads++;
         if (artifactReads === 1) return apiResponse({ artifacts: [{ name: `${artifact}-1`, expired: false }, { name: `${artifact}-2`, expired: true }] }, 200, '"empty"');
@@ -325,7 +326,59 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
     assert.equal(result.artifact.id, 42);
     assert.equal(clock, 65_000);
     assert.equal(jobReads, 2);
-    assert.match(log.mock.calls.at(-1).arguments[0], /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=4 304=1/u);
+    assert.match(log.mock.calls.at(-1).arguments[0], /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=5 304=1/u);
+  });
+
+  test(`${scope} listed artifacts retry download 404s before returning`, async () => {
+    let clock = 0, downloads = 0;
+    const result = await waitForPreparation(scope, { env: apiEnv, download: scope === "js", now: () => clock,
+      pause: async ms => { assert.equal(ms, 2_000); clock += ms; },
+      request: async (url, { headers }) => {
+        if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+        if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+        assert.equal(url, "https://api.example.test/repos/test/repo/actions/artifacts/42/zip");
+        assert.equal(headers["If-None-Match"], undefined);
+        return ++downloads < 3 ? apiResponse(null, 404) : apiResponse("archive");
+      },
+    });
+    assert.equal(downloads, 3);
+    assert.equal(clock, 4_000);
+    assert.equal(result.artifact.id, 42);
+    if (scope === "js") assert.equal(await result.response.json(), "archive", "JS consumes the successful response without another request");
+    else assert.equal(result.response, undefined, "Rust only checks readiness before its download action");
+  });
+
+  test(`${scope} listed artifacts stop download 404s at 30 seconds and do not retry other failures`, async () => {
+    for (const status of [404, 403, 500]) {
+      let clock = 0, downloads = 0;
+      await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+        request: async url => {
+          if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+          if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+          downloads++; return apiResponse(null, status);
+        },
+      }), status === 404 ? /listed but never became downloadable.*30/u : new RegExp(`HTTP ${status}`, "u"));
+      assert.equal(clock, status === 404 ? 30_000 : 0);
+      assert.equal(downloads, status === 404 ? 15 : 1);
+    }
+  });
+
+  test(`${scope} unchanged artifact bodies on 200 permanently slow polling to 10 seconds`, async () => {
+    let clock = 0, reads = 0;
+    const pauses = [];
+    await waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { pauses.push(ms); clock += ms; },
+      request: async (url, { headers }) => {
+        if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+        if (url.endsWith("/zip")) return apiResponse("archive");
+        reads++;
+        if (reads > 1) assert.equal(headers["If-None-Match"], reads === 2 ? '"first"' : '"changed"');
+        if (reads <= 2) return apiResponse({ artifacts: [] }, 200, reads === 1 ? '"first"' : '"changed"');
+        if (reads === 3) return apiResponse(null, 304);
+        return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+      },
+    });
+    assert.deepEqual(pauses, [2_500, 10_000, 10_000]);
+    assert.equal(clock, 22_500);
   });
 
   test(`${scope} preparation stops after 15 minutes with the final build state`, async () => {

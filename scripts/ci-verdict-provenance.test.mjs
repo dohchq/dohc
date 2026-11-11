@@ -526,10 +526,10 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
 test("confinement jobs reuse identified artifacts without occupying worker runners", () => {
   const {jobs} = load(workflow), prepare = jobs["javascript-prepare"];
   assert.equal(prepare["runs-on"], jobs["javascript-workers"]["runs-on"]);
-  assert.ok(!prepare.steps.some(step => step.name === "Compiler and relay confinement"));
   const preparedUpload = prepare.steps.findIndex(step => step.with?.name === "javascript-prepared-${{ github.run_attempt }}");
-  assert.equal(preparedUpload, prepare.steps.length - 1, "prepared upload ends the preparation steps");
-  assert.ok(prepare.steps.findIndex(step => step.with?.name === "compiler-tests-${{ github.run_attempt }}") < preparedUpload);
+  assert.ok(prepare.steps.findIndex(step => step.uses?.startsWith("taiki-e/install-action@")) > preparedUpload);
+  assert.ok(prepare.steps.findIndex(step => step.name === "Archive compiler confinement test binaries") > preparedUpload);
+  assert.ok(prepare.steps.findIndex(step => step.with?.name === "compiler-tests-${{ github.run_attempt }}") > preparedUpload);
   const archive = prepare.steps.find(step => step.name === "Archive compiler confinement test binaries").run;
   assert.match(archive, /cargo nextest archive --locked --package dohc-compiler-owner --archive-file/u);
   assert.doesNotMatch(prepare.steps.find(step => step.name === "Pack prepared artifacts").run, /packages\/app-backend-runtime\/dist/u);

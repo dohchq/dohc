@@ -137,20 +137,23 @@ Preparation waits stop after 15 minutes from the wait's start. Group waits stop 
 A timeout names whether an awaited job is queued or running. Native artifact transfer has a 60 s timeout.
 Preparation checks build state every 60 s and once at the cap. It polls artifacts every 2.5 s once the build is running or complete.
 Artifact polls send the last ETag in `If-None-Match` when available.
+If a 200 response repeats the previous artifact list, that wait polls every 10 s for its remaining duration.
+After listing an artifact, both JavaScript and Rust waits check that its archive is downloadable.
+Only HTTP 404 retries, every 2 s for up to 30 s. Other download failures stop immediately.
+JavaScript consumes the successful response. Rust closes it before its download action transfers the archive.
 [Authenticated 304 responses do not consume GitHub's primary rate limit](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests).
 JavaScript group polls run every 3 s; Rust group polls run every 10 s. These add at most 3 s and 10 s of detection latency.
 Job-list responses change with step status, so every group poll is budgeted as a counted request.
 Each wait logs its last rate-limit headers, non-304 request count, and 304 count, including on failure.
 With about 2 minutes of JavaScript preparation wait, a ready Rust archive, a 40 s JavaScript group wait, and a 3-minute Rust group wait,
-a combined run should use roughly 130 custom REST requests, including native downloads.
-A recent run observed a 5,000-request hourly token limit and roughly 100 requests used with the prior polling intervals.
+a combined run should use roughly 145 custom REST requests, including archive readiness checks and native downloads.
 This estimate assumes unchanged artifact polls return 304. Confirm it from the next run's headers and counters.
 Standard action upload, download, and cache requests are additional.
 Job timeouts are 10 minutes for selection and final verification, 20 for preparation and confinement,
 25 for Rust archive and policy jobs and ordinary workers, and 40 for aggregate jobs.
 Workers have 10 minutes beyond their preparation wait cap. Aggregates have 5 minutes beyond both sequential wait caps for setup and execution.
-The compiler archive adds one package's test compilation, packing, and transfer to preparation, before the prepared artifact is published.
-Only post-job cleanup remains after publication.
+The nextest install, compiler test archive, and its upload follow prepared-artifact publication.
+Workers can start native work while preparation finishes the compiler archive.
 Confinement runs those test binaries without compilation or retries. Its Node staging tests still build the release compiler owner.
 For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
 Read the cache logs before describing a hit or miss. A requested cache condition alone does not establish one.

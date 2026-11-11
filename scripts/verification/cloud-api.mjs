@@ -7,6 +7,7 @@ export function cloudApi({ env = process.env, request = fetch } = {}) {
   const cache = new Map();
   let last, counted = 0, unchanged = 0;
   return {
+    pollMs: CLOUD_POLL_MS,
     async read(path, { conditional = false } = {}) {
       const previous = conditional ? cache.get(path) : undefined;
       const response = await request(base + path, {
@@ -23,8 +24,24 @@ export function cloudApi({ env = process.env, request = fetch } = {}) {
       counted++;
       if (!response.ok) throw new Error(`Cannot read workflow ${path}: HTTP ${response.status}.`);
       const data = await response.json();
+      if (conditional && previous && JSON.stringify(data) === JSON.stringify(previous.data)) this.pollMs = 10_000;
       if (conditional) cache.set(path, { etag: last?.get("etag"), data });
       return data;
+    },
+    async download(id, headersTimeoutMs) {
+      const headersDeadline = new AbortController();
+      const timer = setTimeout(() => headersDeadline.abort(new Error("Artifact download readiness timed out.")), headersTimeoutMs);
+      let response;
+      try {
+        response = await request(`${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/artifacts/${id}/zip`, {
+          headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+          signal: AbortSignal.any([headersDeadline.signal, AbortSignal.timeout(60_000)]),
+        });
+      } finally { clearTimeout(timer); }
+      counted++;
+      // Redirected blob responses have no REST rate-limit headers.
+      if (response.headers.has("x-ratelimit-limit")) last = response.headers;
+      return response;
     },
     async jobs() {
       const result = [];
