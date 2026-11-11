@@ -37,6 +37,23 @@ export function listAccountWorkspaces(storage: StorageContext, ownerUserId: stri
   })));
 }
 
+/**
+ * Ends the account's reason for every copy whose workspace its owner hid from
+ * the phone, or whose workspace the account it was made for no longer owns.
+ * Other copies keep the reason and leave on their usual schedule.
+ */
+export function endAccountReasonsOfHiddenOrDisownedCopies(storage: StorageContext): void {
+  storage.tx(() => {
+    storage.db.prepare(
+      `DELETE FROM sync_relay_automation_workspace_reasons WHERE reason = 'account' AND workspace_id IN (
+         SELECT a.workspace_id FROM sync_relay_automation_workspaces a
+         JOIN sync_relay_workspaces w ON w.workspace_id = a.workspace_id
+         WHERE w.owner_user_id IS NOT a.owner_user_id OR EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
+           WHERE h.workspace_id = a.workspace_id AND h.owner_user_id = a.owner_user_id))`,
+    ).run();
+  });
+}
+
 export function showsOnPhone(storage: StorageContext, ownerUserId: string, workspaceId: string): boolean {
   return storage.db.prepare(
     "SELECT 1 FROM sync_relay_phone_hidden_workspaces WHERE workspace_id = ? AND owner_user_id = ?",

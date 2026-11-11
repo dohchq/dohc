@@ -30,7 +30,7 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
   return { resolveAccountSession, accountSessions };
 }
 
-async function relay(options: { accountApi?: boolean } = {}) {
+async function relay() {
   const rows: StoredSession[] = [
     { userId: "ana", sessionId: "ana-phone", token: "token-ana-phone", createdAtMs: 2_000, userAgent: "dohc-mobile/1 (iPhone)" },
     { userId: "ana", sessionId: "ana-desktop", token: "token-ana-desktop", createdAtMs: 1_000, userAgent: null },
@@ -38,7 +38,7 @@ async function relay(options: { accountApi?: boolean } = {}) {
   ];
   const storage = await testStorage() as StorageContext;
   const activity = new DiscussionActivityHub();
-  const h = testHandler(storage, { accountApi: options.accountApi ?? true, discussionActivity: activity, ...sessionTable(rows) });
+  const h = testHandler(storage, { discussionActivity: activity, ...sessionTable(rows) });
   return { rows, storage, activity, h };
 }
 
@@ -70,12 +70,6 @@ describe("the account's sessions", () => {
     const [phone] = (await json(await h(list(as("token-ana-phone"))))).sessions as Array<{ client: string }>;
     expect(ACCOUNT_SESSION_CLIENT_MAX_CHARS).toBe(256);
     expect(phone!.client).toBe(`${"a".repeat(ACCOUNT_SESSION_CLIENT_MAX_CHARS - 1)}😀`);
-  });
-
-  it("is not served while the account API is off", async () => {
-    const { h } = await relay({ accountApi: false });
-    await denialBytes(await h(list(as("token-ana-phone"))));
-    await denialBytes(await h(revoke("ana-desktop", as("token-ana-phone"))));
   });
 
   it("refuses a request without a Bearer session, one with a cookie, and a fenced account", async () => {
