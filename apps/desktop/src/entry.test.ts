@@ -7,8 +7,10 @@ import { describe, expect, it, vi } from "vitest";
 const profile = vi.hoisted(() => ({ dir: "" }));
 const electron = vi.hoisted(() => ({
   app: {
+    name: "@dohc/desktop",
     isPackaged: true,
     getPath: vi.fn(() => profile.dir),
+    setPath: vi.fn(),
     getAppPath: vi.fn(() => profile.dir),
     getVersion: vi.fn(() => "1.0.0"),
     quit: vi.fn(),
@@ -50,6 +52,11 @@ describe("electron main entry", () => {
     } finally {
       rmSync(profile.dir, { recursive: true, force: true });
     }
+    // The app is named before the lock, and its settings folder stays where it was.
+    expect(electron.app.name).toBe("dohc");
+    expect(electron.app.setPath).toHaveBeenCalledWith("userData", profile.dir);
+    expect(electron.app.setPath.mock.invocationCallOrder[0])
+      .toBeLessThan(electron.app.requestSingleInstanceLock.mock.invocationCallOrder[0]!);
     // The lock comes before any marker read or write.
     expect(electron.app.requestSingleInstanceLock.mock.invocationCallOrder[0])
       .toBeLessThan(marker.beginLaunch.mock.invocationCallOrder[0]!);

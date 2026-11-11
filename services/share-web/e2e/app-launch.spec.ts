@@ -1,7 +1,7 @@
 import { test, expect, chromium } from "@playwright/test";
 import https from "node:https";
-import { createHash, X509Certificate } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { testCertificate } from "./testCertificate";
 import { createAppLaunchHandler } from "../src/appLaunch";
 
 test("real HTTPS top-level handoff keeps app authority outside its opaque child", async () => {
@@ -16,19 +16,8 @@ test("real HTTPS top-level handoff keeps app authority outside its opaque child"
       if(!active)return new Response(null,{status:404});
       return new URL(request.url).pathname.includes("/blobs/")?new Response(bytes,{headers:{"content-type":file.contentType}}):Response.json({publicationId,authorityRevision:1,files:[file]});
     }});
-  const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
-$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-app-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net');$san.AddDnsName('external.example.org')
-$req.CertificateExtensions.Add($san.Build())
-$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
-[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
-[Convert]::ToBase64String($cert.RawData)
-$cert.Dispose();$rsa.Dispose()`;
-  const [pfxText,certText] = execFileSync("pwsh.exe",["-NoProfile","-NonInteractive","-Command",certificateScript],{encoding:"utf8",windowsHide:true}).trim().split(/\r?\n/);
-  const cert = new X509Certificate(Buffer.from(certText!,"base64"));
-  const spki = createHash("sha256").update(cert.publicKey.export({type:"spki",format:"der"})).digest("base64");
-  const server = https.createServer({pfx:Buffer.from(pfxText!,"base64"),passphrase:""},async(req,res)=>{
+  const {tls, spki} = testCertificate("dohc-app-test", ["viewer.example.com", "*.example.net", "external.example.org"]);
+  const server = https.createServer(tls,async(req,res)=>{
     const host=req.headers.host!,path=req.url!;
     if(host==="external.example.org"){res.writeHead(200,{"access-control-allow-origin":"*"});res.end(path==="/page"?"<title>Outside</title>":"received");return;}
     if(host==="viewer.example.com"&&path==="/"){

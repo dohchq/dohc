@@ -138,6 +138,7 @@ interface TestHarnessOptions {
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
+  ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
 }
 
 function rendererSession(
@@ -177,7 +178,9 @@ function harness(
     }),
   };
   const onError = vi.fn();
+  const onLiveEditsPaused = vi.fn();
   const ipc = createEngineYDocSessionIpc({
+    onLiveEditsPaused,
     localPersonId: () => person,
     sessionFor: () =>
       retired
@@ -196,6 +199,7 @@ function harness(
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
     sharedCaptureFor: options.sharedCaptureFor,
+    ownerDraftState: options.ownerDraftState,
     resolveDocumentPath,
     onError,
   });
@@ -203,6 +207,7 @@ function harness(
     ipc,
     capture,
     onError,
+    onLiveEditsPaused,
     session,
     capturedOpen: () => capturedOpen,
     setGeneration: (next: number) => {
@@ -253,6 +258,10 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, openPayload);
     const message = 'dohc could not save an edit to "notes/a.md". Copy it from recovery.';
     h.capturedOpen()?.onEditRefused?.("request-1", message);
+    expect(h.onLiveEditsPaused).not.toHaveBeenCalled();
+    // #2719: a refusal because the file's live editing is paused names it for the workspace notice.
+    h.capturedOpen()?.onEditRefused?.("request-2", message, true);
+    expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
       payload: { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
@@ -2343,6 +2352,19 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(session.close).toHaveBeenCalledOnce();
     });
 
+    // #2719: the editor says live editing is paused, so an agent must hear the same.
+    it("says live editing is paused when the file takes no more edits", async () => {
+      const session = editableSession();
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(
+        new DaemonRefusalError({ code: "INVALID_PARAMS", message: "owner-outbox-frozen", retry: "no" }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        'dohc could not save this edit to "notes/a.md". Live editing is paused for this file. Notices in dohc says why and how to resume.',
+      );
+      expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
+    });
+
     it("settles consent without an append before retrying one capacity-refused edit", async () => {
       const trace: string[] = [];
       const session = editableSession(trace);
@@ -2518,6 +2540,30 @@ describe("engine Y.Doc IPC adapter", () => {
       const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
       expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.\n");
       await h.ipc.shutdown();
+    });
+
+    // #2705: a shared note's file waits for the server, so an agent that reads
+    // it after an edit kept on this device must see the edit, not the file.
+    it("reads a shared note no editor holds from its draft, edits still on their way included", async () => {
+      const draft = Y.encodeStateAsUpdate(markdownToYDoc("# Plan\n\nBefore.\n\nKept here."));
+      const ownerDraftState = vi.fn(async (_workspace: unknown, path: string) => path === "notes/a.md" ? draft : null);
+      const h = harness(editableSession(), { ownerDraftState });
+      const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
+      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.\n\nKept here.\n");
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/b.md" }))
+        .resolves.toEqual({ path: "notes/b.md", state: null });
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+      // The editor that holds the note answers for it, and a shared view never asks.
+      await h.ipc.open(new FakeSender(7), openPayload);
+      ownerDraftState.mockClear();
+      expect(documentMarkdown((await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" })).state!))
+        .toBe("# Plan\n\nBefore.\n");
+      await h.ipc.shutdown();
+      h.setReadOnly(true);
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }))
+        .resolves.toEqual({ path: "notes/a.md", state: null });
+      expect(ownerDraftState).not.toHaveBeenCalled();
     });
   });
 

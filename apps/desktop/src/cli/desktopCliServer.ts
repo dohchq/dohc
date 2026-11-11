@@ -40,7 +40,7 @@ import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthori
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
-import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import type {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
@@ -109,7 +109,7 @@ interface DesktopCliServerDependencies<State> {
   chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   heldChanges: import("../workspaces/workspaceHeldChanges").WorkspaceHeldChanges;
-  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
   shareLinkAgents?: {
@@ -127,6 +127,8 @@ interface DesktopCliServerDependencies<State> {
     /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
     stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
   };
+  /** The Live documents dialog's list (createOwnerLiveDocumentActions), read under the window's admission. */
+  ownerLiveDocuments?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -147,7 +149,7 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
+      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
       | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
       | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
@@ -159,11 +161,14 @@ interface DesktopCliServerDependencies<State> {
     agentWriteRunId(workspaceId: string): string | null;
     dispatchedRunSecret(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
+    getStatus(workspaceId: string): Pick<SyncStatusResult, "syncFailure">;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
   agentDispatchStoreHandleFor(workspace: RegistryEntry): Pick<LiveAgentDispatchStoreHandle, "store">;
   sharedViewOf(workspaceId: string): unknown;
+  // A shared view's projection status, or undefined for any other workspace.
+  shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
     workspaceId: string,
     work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Result | Promise<Result>,
@@ -199,7 +204,8 @@ interface DesktopCliServerDependencies<State> {
     workspaceId: string,
     target?: ChatRelayIdentityTarget,
   ): Promise<unknown>;
-  chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
+  chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> }
+    & NonNullable<CliServerOptions["chatRuns"]>;
   rememberPendingCliRunMessageLink(link: CliRunMessageLink, pending: boolean): void;
 }
 
@@ -215,6 +221,7 @@ export function createDesktopCliServer<State>(
     currentDaemon,
     agentDispatchStoreHandleFor,
     sharedViewOf,
+    shareProjection,
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
     localPerson,
@@ -315,10 +322,12 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
-    // Save recovery copy, Try again and Stop again under the admission the
-    // window's IPC uses: this attachment, the original workspace, and main's
-    // own record of the kept edits, found by path. The caller names nothing else.
+    // Save recovery copy, Try again and Stop again, and the Live documents
+    // list, under the admission the window's IPC uses: this attachment and
+    // the original workspace. Kept edits come from main's own record, found
+    // by path. The caller names nothing else.
     const ownerLiveRecovery = dependencies.ownerLiveRecovery;
+    const ownerLiveDocuments = dependencies.ownerLiveDocuments;
     const withOwnerLiveRecovery = <Result>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<Result>) =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
         operation.assertCurrent();
@@ -397,6 +406,18 @@ export function createDesktopCliServer<State>(
         }, { workspaceId: workspace.workspaceId, ...input });
       }),
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+      sharedFilesHeld: async () => {
+        const projection = await shareProjection(workspace);
+        if (!projection) return null;
+        return projection.state === "pending"
+          ? { count: projection.heldPathCount, files: projection.heldPaths }
+          : { count: 0, files: [] };
+      },
+      // A shared view's marker, even a damaged one, keeps the owner's sync from it.
+      syncFailure: () => {
+        assertOriginalWorkspace(findWorkspace(workspace.workspaceId) ?? workspace);
+        return activity.getStatus(workspace.workspaceId).syncFailure ?? null;
+      },
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
           return decodeWorkspaceResult(
@@ -604,7 +625,7 @@ export function createDesktopCliServer<State>(
                   const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
                   if (waitingVersion === null) return listed;
                   // The conflict's own path, which a waiting move does not change.
-                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
+                  const message = `A newer version of ${conflict.path} from another computer is waiting. It comes in after this conflict is resolved.`;
                   const { code, objectId, originId, originSeq } = waitingVersion;
                   return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
                 };
@@ -648,6 +669,7 @@ export function createDesktopCliServer<State>(
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
             },
+            heldNoteChange: input => capture.heldNoteChange(input),
             retainedCopies: {
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),
@@ -672,6 +694,10 @@ export function createDesktopCliServer<State>(
                   return await ownerLiveRecovery.stopAgain(operation, { path, objectId: kept.objectId, recovery: kept.recovery });
                 }),
               },
+            } : {}),
+            ...(ownerLiveDocuments ? {
+              liveDocuments: (cursor?: string) => withOwnerLiveRecovery(operation =>
+                ownerLiveDocuments(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
             } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
@@ -746,6 +772,7 @@ export function createDesktopCliServer<State>(
         resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
       },
       chatWrites,
+      chatRuns: chatDispatchService,
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),

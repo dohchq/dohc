@@ -57,10 +57,10 @@ it("takes the share link tools' inputs where they mean the same thing", () => {
   expect(workspace).toEqual(properties(personalTools, "dohc_list_files").workspace);
   for (const name of ["dohc_post_channel", "dohc_post_discussion"]) {
     const post = properties(personalTools, name);
-    expect([post.body, post.idempotencyKey], name).toEqual([properties(linkChannel, "dohc_post_channel").body, properties(linkChannel, "dohc_post_channel").idempotencyKey]);
+    expect([post.body, post.idempotencyKey], name).toEqual([properties(linkChannel, "dohc_post_group").body, properties(linkChannel, "dohc_post_group").idempotencyKey]);
   }
   expect(properties(personalTools, "dohc_read_file").blobSha256).toEqual(properties(linkFiles, "dohc_read_file").blobSha256);
-  const read = properties(personalTools, "dohc_read_channel"), linkRead = properties(linkChannel, "dohc_read_channel");
+  const read = properties(personalTools, "dohc_read_channel"), linkRead = properties(linkChannel, "dohc_read_group");
   expect([read.before, read.limit]).toEqual([linkRead.before, linkRead.limit]);
   expect(properties(personalTools, "dohc_wait_for_messages").timeoutMs).toEqual(properties(linkChannel, "dohc_wait_for_messages").timeoutMs);
 });

@@ -30,6 +30,7 @@ import {
   type ValidatedLiveUpdateCut,
   type OrderedLiveUpdateCutRefusal,
 } from './orderedLiveUpdateCut.js'
+import { withinLiveNoteCapacity } from './liveValidationPolicy.js'
 
 const INPUT_FIELDS = ['document', 'currentPath', 'checkpoint'] as const
 const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, 'suffix', 'candidate'] as const
@@ -208,7 +209,7 @@ function validateRegistrationInput(
   if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
   const { cut, topology } = result
   let checkpointCopy: Uint8Array | undefined
-  const projected = projectAndFinalize(cut, topology, 'drop', () => {
+  const projected = projectAndFinalize(cut, ownedPolicy, topology, 'drop', () => {
     if (!includeEvidence) return
     checkpointCopy = copyBytes(checkpoint)
     if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
@@ -332,7 +333,7 @@ function journalValidator(
       let projectedMarkdown: string
       try {
         if (topology.kind !== 'compatible') refuse('invalid-schema')
-        projectedMarkdown = validatePublicState(document, topology, 'refuse', engineReader)
+        projectedMarkdown = validatePublicState(document, ownedPolicy, topology, 'refuse', engineReader)
       } catch (error) {
         if (engineReader && !(error instanceof Refusal)) throw error
         return error instanceof Refusal ? error.reason : 'invalid-schema'
@@ -353,7 +354,7 @@ function journalValidator(
     if (result.kind === 'refused') failure = result
     else {
       const { cut, topology } = result
-      const projected = projectAndFinalize(cut, topology, 'refuse', undefined, engineReader)
+      const projected = projectAndFinalize(cut, ownedPolicy, topology, 'refuse', undefined, engineReader)
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
         if (!includeEvidence) return { kind: 'accepted' }
@@ -440,6 +441,7 @@ type UnverifiedSource = 'drop' | 'refuse'
 
 function projectAndFinalize(
   cut: ValidatedLiveUpdateCut,
+  policy: OrderedLiveUpdateCutPolicy,
   topology: ProjectionTopology,
   unverifiedSource: UnverifiedSource,
   beforeProjection?: () => void,
@@ -451,7 +453,7 @@ function projectAndFinalize(
   try {
     beforeProjection?.()
     if (topology.kind !== 'compatible') refuse('invalid-schema')
-    projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
+    projectedMarkdown = validatePublicState(cut.document, policy, topology, unverifiedSource, engineReader)
   } catch (error) {
     // A journal candidate is an owner's edit: a validator failure retries it instead of refusing it.
     if ((engineReader || unverifiedSource === 'refuse') && !(error instanceof Refusal)) throw error
@@ -771,10 +773,13 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean, engineR
 
 function validatePublicState(
   scratch: Y.Doc,
+  policy: OrderedLiveUpdateCutPolicy,
   topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
   unverifiedSource: UnverifiedSource,
   engineReader = false,
 ): string {
+  // Projection and reimport are the costliest steps, so a note too dense for them is refused first (#3575).
+  if (!withinLiveNoteCapacity(scratch, policy)) refuse('capacity-refused')
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
     || !(scratch.share.get('body') instanceof Y.XmlFragment)

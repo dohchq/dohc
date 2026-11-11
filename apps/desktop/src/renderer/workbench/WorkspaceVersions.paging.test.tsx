@@ -895,7 +895,7 @@ describe("ConflictReviewDialog read failure", () => {
 
 describe("ConflictReviewDialog waiting version", () => {
   const WAITING_COPY =
-    "A newer version from another machine is waiting. It comes in after you resolve this conflict.";
+    "A newer version from another computer is waiting. It comes in after you resolve this conflict.";
   const waitingVersion = {
     code: "resolve-existing-conflict" as const,
     objectId: "object-1",

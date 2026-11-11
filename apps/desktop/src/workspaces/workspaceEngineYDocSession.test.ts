@@ -2271,7 +2271,7 @@ it("reports exactly one notice when local typing reuses a key with other content
 
   expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
   expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"));
+  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"), false);
   expect(replacements).toHaveBeenCalledTimes(1);
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
   expect(journalMarkdown()).not.toContain("Refused typing.");

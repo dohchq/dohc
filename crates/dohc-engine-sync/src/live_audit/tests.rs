@@ -2981,37 +2981,48 @@ fn historical_event_export_reads_the_base_once_then_reuses_its_published_scope()
     assert_eq!(operations(&f.store), published);
 }
 
+/// Accepts a delivery at `cursor` that adds a paragraph to the baseline, and
+/// returns its receipt.
 fn accept_authored(
     f: &mut Fixture,
     cursor: i64,
     authority: dohc_engine_collab::live_update_application::ServerDerivedLiveUpdateAuthority,
     snapshot: Option<Vec<dohc_engine_collab::live_update_application::LiveAuthorEntry>>,
-) {
+) -> dohc_engine_collab::live_update_application::LiveUpdateReceipt {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationResult,
-        LiveUpdateReceipt, RelayAcceptedLiveUpdate, apply_committed,
+        LiveUpdateReceipt, RelayAcceptedLiveUpdate, apply_committed, first_seen_for_test,
     };
+    // Each delivery comes from its own client, so none repeats another's
+    // content and the baseline is all the relay has seen of them.
+    let accepted = dohc_engine_collab::Ydoc::wire();
+    accepted.apply(&f.bytes).unwrap();
+    let editor = dohc_engine_collab::Ydoc::wire();
+    editor.apply(&f.bytes).unwrap();
+    let update = editor.richdoc_append_paragraph(&format!("Paragraph {cursor}"));
+    let (first_seen, deletes) = first_seen_for_test(&accepted, &update);
     let versioned = snapshot.is_some();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: format!("delivery-{cursor}"),
+        update_digest: hex_sha256(&update),
+        journal_cursor: cursor,
+        accepting_host_epoch: 1,
+    };
     let event = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: format!("delivery-{cursor}"),
-                    update_digest: hex_sha256(&f.bytes),
-                    journal_cursor: cursor,
-                    accepting_host_epoch: 1,
-                },
+                receipt: receipt.clone(),
                 binding: f.binding.clone(),
                 authority,
                 received_at_ms: 200 + cursor,
             },
-            first_seen: Vec::new(),
+            first_seen,
             canonical_version: versioned.then_some(2),
             author_snapshot: snapshot,
-            first_seen_deletes: versioned.then(Vec::new),
+            first_seen_deletes: versioned.then_some(deletes),
             checkpoint_coverage: None,
         },
-        update_bytes: f.bytes.clone(),
+        update_bytes: update,
     };
     assert!(matches!(
         apply_committed(
@@ -3032,19 +3043,18 @@ fn accept_authored(
         .unwrap(),
         ApplicationResult::Applied(..)
     ));
+    receipt
 }
 
 /// Settle through `terminal` as the host does, naming every author the
 /// interval admitted, with the proof that publishes it. Returns the settled
 /// moment's authors.
-fn settle_interval(f: &mut Fixture, terminal: i64, moment_id: &str) -> serde_json::Value {
-    let receipt = dohc_engine_collab::live_update_application::LiveUpdateReceipt {
-        delivery_id: format!("delivery-{terminal}"),
-        update_digest: hex_sha256(&f.bytes),
-        journal_cursor: terminal,
-        accepting_host_epoch: 1,
-    };
-    settle_through(f, receipt, moment_id);
+fn settle_interval(
+    f: &mut Fixture,
+    terminal: dohc_engine_collab::live_update_application::LiveUpdateReceipt,
+    moment_id: &str,
+) -> serde_json::Value {
+    settle_through(f, terminal, moment_id);
     moment_authors(&f.store, moment_id).expect("the host credits its interval")
 }
 
@@ -3245,7 +3255,7 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
             }]),
         );
         // The owner and the agent working for them.
-        accept_authored(
+        let terminal = accept_authored(
             &mut f,
             3,
             ServerDerivedLiveUpdateAuthority::Owner {
@@ -3264,13 +3274,15 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
                 },
             ]),
         );
-        let host = settle_interval(&mut f, 3, &moment_id);
+        let host = settle_interval(&mut f, terminal, &moment_id);
         // This device's raw History keeps every claim it admitted. The named
         // grant stands in for the claimed person's snapshot; the owner and
-        // their agent keep theirs. Each frame repeats the baseline's bytes,
-        // so the link's frame without recording context adds no content and
-        // leaves no gap.
-        assert_eq!(kinds(&host), ["agent", "human", "link", "named"]);
+        // their agent keep theirs. The link's frame adds content without a
+        // recording context, so it also leaves a gap.
+        assert_eq!(
+            kinds(&host),
+            ["agent", "human", "link", "named", "unattributed"]
+        );
         let mut ops = operations(&f.store);
         crate::outbound::repair_queued_moment_authors(
             &mut f.store,

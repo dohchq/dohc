@@ -336,6 +336,21 @@ pub fn dismiss_refusal_notice(
     }
 }
 
+/// Clear resolved lineage notices after completing a held Markdown change.
+pub fn clear_markdown_hold_refusals_in_tx(
+    tx: &Transaction<'_>,
+    key: &dohc_engine_collab::DocKey,
+    lineage_claim_id: &str,
+) -> Result<(), SyncError> {
+    clear_lineage_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        lineage_claim_id,
+    )
+}
+
 pub(crate) fn clear_lineage_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,

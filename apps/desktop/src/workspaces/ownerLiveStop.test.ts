@@ -116,6 +116,35 @@ it("finishes both Stops when the first release is held and only the safe peer ma
   expect(complete.mock.calls.map(([row]) => row.document.objectId)).toEqual(["held", "safe"]);
 });
 
+// #3129: a page deleted outside dohc refuses the release's file write after the release committed.
+it.each([true, false])("ends a Stop whose release committed before its file write failed (committed: %s)", async committed => {
+  const row = withDocument({binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+    currentPath: "gone.md", selectorPaths: ["gone.md"], restoreFenceGeneration: 0}, relayDatabaseNamespace: "relay", state: "requested"});
+  let owed = true;
+  const client = {ownerYDocStopList: vi.fn(async () => [{...row, retirementOwed: owed, state: owed ? "requested" : "released"}]),
+    ownerYDocStopRequest: vi.fn(async () => row)} as unknown as EngineClient;
+  const release = vi.fn(async () => {
+    if (committed) owed = false;
+    throw new EngineRequestError(1, {code: "CONFLICT", message: "conflict-stale-target", retry: "no"});
+  });
+  const onError = vi.fn(), onComplete = vi.fn();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const options = {client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal,
+    assertCurrent() {}, retire: async () => 3, release, onError, onComplete};
+  await reconcileOwnerLiveStops(options);
+  await reconcileOwnerLiveStops(options);
+  if (committed) {
+    expect(onComplete).toHaveBeenCalledExactlyOnceWith(row);
+    expect(onError).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+  } else {
+    // A release that did not commit is still owed: reported, and sent again on the next pass.
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+  }
+});
+
 it("finishes a Stop the server answered with edits-pending on a later pass, without another Stop", async () => {
   const h = pendingStopHarness("workspace", "live.md", "object");
   h.relay.mockImplementation(async (_credentials, _path, init) => {

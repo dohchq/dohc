@@ -11,6 +11,7 @@ import { setFrontmatterValue } from './frontmatter-map.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
+import { WORKER_LIVE_VALIDATION_POLICY } from './liveValidationPolicy.js'
 
 const fixturePolicy: OrderedLiveUpdateCutPolicy = {
   maxStructVisits: 1_000_000,
@@ -1043,4 +1044,43 @@ it('hashes source once for proof plus the required evidence digest',()=>{
  const source='---\nzebra: last\nalpha: first\n---\n\nBody\n\n';
  const checkpoint=encode(source,doc=>{const meta=doc.getMap('meta');meta.set('dohcMarkdownSource',source);meta.set('dohcMarkdownSourceSha256',hash(new TextEncoder().encode(source)));meta.set('dohcMarkdownSourceProjectionSha256',hash(new TextEncoder().encode(projection.yDocToMarkdown(doc))));});
  sourceHashProbe.target=new TextEncoder().encode(source);sourceHashProbe.count=0;try {expect(accepted(checkpoint).projectedMarkdown).toBe(source);expect(sourceHashProbe.count).toBe(2);} finally {sourceHashProbe.target=undefined;}
+})
+
+describe('live note capacity (#3575, #2534)', () => {
+  // A one-character paragraph weighs 9: its element, text and string structs plus 6 for the element.
+  const paragraphs = (count: number) => 'x\n\n'.repeat(count)
+  const appendParagraphs = (count: number) => (doc: Y.Doc) => {
+    const body = doc.getXmlFragment('body')
+    body.insert(body.length, Array.from({length: count}, () => {
+      const text = new Y.XmlText()
+      text.insert(0, 'x')
+      const paragraph = new Y.XmlElement('paragraph')
+      paragraph.insert(0, [text])
+      return paragraph
+    }))
+  }
+  function journalOver(base: number, suffix: number[], candidate: number) {
+    const doc = markdownToYDoc(paragraphs(base))
+    try {
+      const checkpoint = Y.encodeStateAsUpdate(doc)
+      const updates = [...suffix, candidate].map(count => {
+        const vector = Y.encodeStateVector(doc)
+        appendParagraphs(count)(doc)
+        return Y.encodeStateAsUpdate(doc, vector)
+      })
+      return {...input(checkpoint), suffix: updates.slice(0, -1), candidate: updates.at(-1)!}
+    } finally { doc.destroy() }
+  }
+
+  it('refuses a registration over the capacity by count, under the struct budget', () => {
+    const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY)
+    expect(register(input(encode(paragraphs(29_000)))).kind).toBe('accepted')
+    expect(register(input(encode(paragraphs(32_000))))).toEqual({kind: 'refused', reason: 'capacity-refused', source: 'registration-input'})
+  }, 60_000)
+
+  it('refuses the journal candidate that takes a note near the capacity over it', () => {
+    const validate = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY)
+    expect(validate(journalOver(29_000, [1_000], 500)).kind).toBe('accepted')
+    expect(validate(journalOver(29_000, [1_000], 2_000))).toEqual({kind: 'refused', reason: 'capacity-refused', source: 'final'})
+  }, 60_000)
 })

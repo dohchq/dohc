@@ -388,3 +388,31 @@ test("settings remains usable down to the minimum supported renderer viewport", 
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+test("a press outside closes the dialog on top, then Settings", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    const page = desktop.page;
+    await openSettings(page);
+    await page.getByTestId(settingsNavPin("agents")).click();
+    await page.getByTestId("agent-add").click();
+    const addSheet = page.getByTestId("agent-add-sheet");
+    await expect(addSheet).toBeVisible();
+    // The bottom-left corner of the window: outside both panels.
+    const pressOutside = async () => page.mouse.click(8, await page.evaluate(() => innerHeight) - 8);
+
+    await pressOutside();
+    await expect(addSheet).toBeHidden();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
+    await expect(page.locator(":root[data-modal-open]")).toHaveCount(1);
+
+    await pressOutside();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
+    await expect(page.locator(":root[data-modal-open]")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

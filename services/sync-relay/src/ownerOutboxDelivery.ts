@@ -126,8 +126,9 @@ export async function ownerOutboxHeadIsSeed(options: OwnerOutboxScope & {
   if (status.pendingBytes === 0 || typeof status.outboxId !== "string") return false;
   const outbox = open(status.outboxId);
   try {
-    const {entry} = await outbox.readDeliveryHead(status.outboxId, options.binding); check();
-    return entry !== null && entry.appendKey === adoptionSeedKey(options.adoption, entry.updateDigest);
+    // The key alone decides; the drain reads the update itself, within its byte budget.
+    const head = await outbox.readDeliveryHeadKey(status.outboxId, options.binding); check();
+    return head !== null && head.appendKey === adoptionSeedKey(options.adoption, head.updateDigest);
   } finally {outbox.dispose();}
 }
 

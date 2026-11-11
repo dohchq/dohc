@@ -619,7 +619,7 @@ it.each([
   const entry = {sequence: 1, appendKey, deliveryId: "edit", updateDigest, byteLength: update.length, createdAtMs: 1};
   const edit = {deliveryId: entry.deliveryId, updateDigest, journalCursor: 5, acceptingHostEpoch: 1} as LiveUpdateReceipt;
   const host = {mode: "device", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"};
-  let pending = true;
+  let pending = true, updateReads = 0;
   const order: string[] = [];
   Object.assign(f.storage, {
     resolveCurrentLiveDocumentBinding: () => ({kind: "current", host, binding, authority: {principalKind: "owner", principalId: "owner"}}),
@@ -658,7 +658,7 @@ it.each([
         pendingEntryCount: pending ? 1 : 0, nextSequence: 2, oldestEntryAtMs: pending ? 1 : null, quarantineReason: null, observedBinding: null,
         retryDeliveryId: null, frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
         firstEntryCursor: pending ? at("entryHeader", 1) : null})), at("base"))
-        : part === "entryHeader" ? page("entryHeader", 1, Buffer.from(JSON.stringify(entry)), at("update", 1)) : page("update", 1, update, null);
+        : part === "entryHeader" ? page("entryHeader", 1, Buffer.from(JSON.stringify(entry)), at("update", 1)) : (updateReads++, page("update", 1, update, null));
       return {id: input.id, result: result as never};
     }
     return register(input);
@@ -672,6 +672,8 @@ it.each([
   expect(order).toEqual(expected);
   expect(outcome).toMatchObject({kind: "done", terminalReceipt: edit});
   expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
+  // #2982: only the drain reads the head's update, within its byte budget.
+  expect(updateReads).toBe(1);
 });
 
 // A native service seed is acknowledged before it is applied. When its

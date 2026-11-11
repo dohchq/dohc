@@ -67,11 +67,15 @@ it("offers the wait tool only with a channel, and posts as the signed-in agent",
   const f = fixture();
   const client = await f.connect();
   const tools = (await client.listTools()).tools;
-  expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(["dohc_wait_for_messages", "dohc_post_channel"]));
-  const postTool = tools.find(tool => tool.name === "dohc_post_channel")!;
+  expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(["dohc_wait_for_messages", "dohc_post_group"]));
+  for (const tool of tools) expect(tool.description).not.toContain("Group channel");
+  const postTool = tools.find(tool => tool.name === "dohc_post_group")!;
   expect(Object.keys(postTool.inputSchema.properties ?? {}).sort()).toEqual(["body", "idempotencyKey", "threadId"]);
 
-  const posted = await client.callTool({name: "dohc_post_channel", arguments: {body: "done", idempotencyKey: "post-1"}});
+  for (const name of ["dohc_read_channel", "dohc_post_channel"]) {
+    await expect(client.callTool({name, arguments: {}})).rejects.toThrow("not found");
+  }
+  const posted = await client.callTool({name: "dohc_post_group", arguments: {body: "done", idempotencyKey: "post-1"}});
   expect(structured(posted)).toMatchObject({ok: true, message: {authorKind: "link", linkAgent: true}});
   expect(f.posts.map(call => call.input)).toEqual([{body: "done", idempotencyKey: "post-1"}]);
   expect(f.viewCalls).not.toContain("/api/view/chat/messages");
@@ -166,7 +170,7 @@ it("ends the relay wait with this request, and answers a refusal like any other 
   const refused = fixture({wait: () => Response.json({ok: false, error: "not found"}, {status: 404})});
   const client = await refused.connect();
   const refusal = await client.callTool({name: "dohc_wait_for_messages", arguments: {}});
-  const read = await client.callTool({name: "dohc_read_channel", arguments: {}});
+  const read = await client.callTool({name: "dohc_read_group", arguments: {}});
   expect(refusal.isError).toBe(true);
   expect(textOf(refusal)).toBe(textOf(read));
 });

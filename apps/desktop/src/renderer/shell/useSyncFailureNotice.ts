@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import { syncFailureWords } from "../../workspaces/syncFailureWords";
 
 type SyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
 
@@ -36,14 +37,10 @@ export function syncFailureNotice(failure: SyncFailure): { title?: string; messa
       message: `dohc can't apply a change to ${path}, because this machine has a different file there. Other changes wait behind it.`,
     };
   }
-  if (failure.cause === "server-busy") {
-    return { message: "The server is busy. dohc keeps trying to sync this workspace." };
-  }
-  return {
-    message: failure.cause === "server-unreachable"
-      ? "dohc could not reach the server."
-      : "dohc could not sync this workspace.",
-  };
+  const words = syncFailureWords(failure);
+  return words.code === "conflict-wait-limit"
+    ? { title: "dohc could not sync this workspace", message: words.message }
+    : { message: words.message };
 }
 
 // A busy server is a state dohc fixes by itself. The title bar shows its ring

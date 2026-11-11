@@ -531,11 +531,12 @@ function scrubFragment(): void {
 
 // The link's secret leaves the address bar at once, but stays in `pending`
 // until its exchange succeeds or is refused, so Try again can repeat the exchange.
-async function establishSession(pending: { secret: string | null }, signal?: AbortSignal): Promise<string> {
+async function establishSession(pending: { secret: string | null }, agentLink: { secret: string | null }, signal?: AbortSignal): Promise<string> {
   const fragment = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(fragment)) pending.secret = fragment;
   const secret = pending.secret;
   if (secret !== null) {
+    agentLink.secret = null;
     const exchange = withBoundedRetry(
       () => fetchShareWeb("/api/exchange", {
         method: "POST",
@@ -561,6 +562,7 @@ async function establishSession(pending: { secret: string | null }, signal?: Abo
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
     }
+    agentLink.secret = secret;
     pending.secret = null;
     history.replaceState(null, "", `/s/${body.session}${location.search}`);
     return body.session;
@@ -1103,6 +1105,7 @@ export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [loadAttempt, setLoadAttempt] = useState(0);
   const pendingExchange = useRef<{ secret: string | null }>({ secret: null });
+  const agentLink = useRef<{ secret: string | null }>({ secret: null });
   const [selectedPath, setSelectedPath] = useState("");
   const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
@@ -1139,7 +1142,7 @@ export function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const session = await establishSession(pendingExchange.current, controller.signal);
+        const session = await establishSession(pendingExchange.current, agentLink.current, controller.signal);
         const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
@@ -1403,7 +1406,7 @@ export function App() {
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
-      <LinkEntry meta={state.meta} hasFiles={state.files.length > 0} canEditFile={canEditFile} />
+      <LinkEntry meta={state.meta} secret={agentLink.current.secret} hasFiles={state.files.length > 0} canEditFile={canEditFile} />
       {new URLSearchParams(location.search).has("app") && <OpenSharedApp key={state.session} session={state.session} publicationId={new URLSearchParams(location.search).get("app") ?? ""} />}
       <PublishedApps session={state.session}/>
       <Freshness

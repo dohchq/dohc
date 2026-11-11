@@ -12,7 +12,7 @@ import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogO
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { readRefusal } from "./storage/relayAdmission";
-import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_HELD_READ_KNOWN_ROWS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
@@ -45,6 +45,7 @@ export function createWorkspaceReplicationRoutes(
     | "appendLogBatch"
     | "prepareLogAppend"
     | "fetchLogPage"
+    | "logHasMoreThan"
     | "fetchLogCoordinate"
     | "getWorkspaceIdentity"
     | "verifyWorkspaceIdentity"
@@ -213,10 +214,16 @@ export function createWorkspaceReplicationRoutes(
       const hold = url.searchParams.get("hold");
       if (hold !== null) {
         const holdMs = parseLogHold(hold);
+        // `known` is the caller's own claim of how many rows past `since` it
+        // appended. It only delays this caller's answer, never another
+        // reader's, and an overstated claim hides at most rows this caller
+        // has not pulled yet.
+        const known = url.searchParams.get("known");
         return await waitForLogChange(request, route.workspaceId, actor.userId, {
           identity,
           requestedSince,
           since,
+          ...(known === null ? {} : { known: parseHeldReadKnown(known) }),
           reportedWatched: url.searchParams.get("watched") === "1",
           ...(reauthenticate === undefined
             ? { holdMs: 0, reauthenticate: async () => {} }
@@ -271,7 +278,10 @@ export function createWorkspaceReplicationRoutes(
 
   // A held read tells a device when its log has an op past `since`, so an
   // idle device can pull only when there is something to pull. It answers
-  // `hasMore` and the current watch boolean, and never serves an op. `hold` is an
+  // `hasMore` and the current watch boolean, and never serves an op. With
+  // `known`, it answers `hasMore` only for more than that many rows, and
+  // echoes the count it applied: zero once an epoch floor hides rows past
+  // `since`, and none above the limit, where it wakes for any row. `hold` is an
   // upper bound. The relay answers at once when the log already has an op,
   // and also when its parked reads are at capacity, so a device must not
   // read an early empty answer as a promise to hold the next one.
@@ -283,6 +293,7 @@ export function createWorkspaceReplicationRoutes(
       identity: OptionalWorkspaceIdentity | null;
       requestedSince: number;
       since: number;
+      known?: number;
       holdMs: number;
       reportedWatched: boolean;
       guard: () => void;
@@ -290,8 +301,10 @@ export function createWorkspaceReplicationRoutes(
     },
   ): Promise<Response> {
     let since = input.since;
+    const known = () => input.known === undefined || input.known > MAX_HELD_READ_KNOWN_ROWS ? undefined
+      : since === input.requestedSince ? input.known : 0;
     const hasMore = () =>
-      storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
+      storage.logHasMoreThan({ workspaceId, sinceRelaySeq: since, count: known() ?? 0 });
     const changed = () => hasMore() || replicaWatches.watched(workspaceId) !== input.reportedWatched;
     const deadlineAtMs = Date.now() + input.holdMs;
     // A wake can leave nothing past `since`, for example a retried link
@@ -326,6 +339,7 @@ export function createWorkspaceReplicationRoutes(
       ops: [],
       nextCursor: input.requestedSince,
       hasMore: hasMore(),
+      ...(known() === undefined ? {} : { known: known() }),
       ...(replicaWatches.watched(workspaceId) ? { watched: true } : {}),
     });
   }
@@ -368,6 +382,13 @@ export function parseLogHold(value: string): number {
     );
   }
   return hold;
+}
+
+function parseHeldReadKnown(value: string): number {
+  if (!/^(?:0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw badRequest("known must be a non-negative integer");
+  }
+  return Number(value);
 }
 
 function parseWorkspaceIdentityValue(value: unknown, name: string): string {

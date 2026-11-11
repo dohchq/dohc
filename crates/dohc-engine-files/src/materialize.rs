@@ -4962,7 +4962,8 @@ impl SecretParentGuard {
     }
 
     /// Write the temp named `name` that replaces `target`. On Unix it is
-    /// owner-only; on Windows it takes the DACL of the file at `target`.
+    /// owner-only; on Windows it takes the DACL of the file at `target`, or
+    /// is private to this user when no file is there.
     fn write_temp(
         &self,
         target: &Path,
@@ -4985,7 +4986,7 @@ impl SecretParentGuard {
         #[cfg(not(unix))]
         {
             let _ = name;
-            write_temp_no_follow(target, display_path, content)
+            write_temp_no_follow(target, display_path, content, true)
         }
     }
 
@@ -5694,7 +5695,8 @@ fn filesystem_job_component(id: &str) -> String {
 /// is flushed and renamed over it, then the folder is flushed. On macOS the
 /// temp for a file that exists, or for a secret, takes none of the folder's
 /// inherited ACL entries; a new ordinary file takes them, as a job's does. On
-/// Windows the temp takes the file's DACL. A temp a stopped write left at
+/// Windows the temp takes the file's DACL, and a new secret is private to
+/// this user. A temp a stopped write left at
 /// that name is removed first. A rename another program's handle blocks is
 /// retried as a job's is, and ends as `FileLocked` if the file stays held.
 pub fn replace_file_whole(
@@ -5741,7 +5743,8 @@ pub fn replace_file_whole(
 
 /// Write an ordinary job's temp beside `target`, which it will replace. On
 /// Unix an `owner_only` temp is 0600 whatever the target allows. On Windows
-/// the temp takes the target's DACL either way.
+/// the temp takes the target's DACL either way, and an `owner_only` temp for
+/// a target that isn't there is private to this user.
 fn write_temp(
     target: &Path,
     tmp: &Path,
@@ -5769,15 +5772,16 @@ fn write_temp(
     }
     #[cfg(not(unix))]
     {
-        let _ = owner_only;
-        write_temp_no_follow(target, tmp, content)
+        write_temp_no_follow(target, tmp, content, owner_only)
     }
 }
 
 /// Create `tmp`, the temp that replaces `target`, as a brand-new entry no
 /// link redirects, and write `content`. On Windows it is created with the
 /// DACL of the file at `target`, so the new version keeps access someone set
-/// on that file; a file whose DACL can't be read refuses the write. A stale
+/// on that file; a file whose DACL can't be read refuses the write. With
+/// `owner_only` and no file at `target`, it is created private to this user
+/// instead of taking its folder's entries, or the write is refused. A stale
 /// regular temp is unlinked and exclusive creation is retried once; a
 /// symlink, junction, or other reparse point is refused.
 #[cfg(not(unix))]
@@ -5785,16 +5789,23 @@ fn write_temp_no_follow(
     target: &Path,
     tmp: &Path,
     content: &[u8],
+    owner_only: bool,
 ) -> Result<std::fs::File, MaterializeError> {
     use std::io::Write as _;
     #[cfg(windows)]
-    let dacl = dohc_windows_files::Dacl::of_file_at(target)
-        .map_err(|_| MaterializeError::PermissionsNotKept)?;
+    let dacl = match dohc_windows_files::Dacl::of_file_at(target) {
+        Ok(None) if owner_only => {
+            let folder = tmp.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+            dohc_windows_files::Dacl::private_file_in(folder)
+        }
+        read => read,
+    }
+    .map_err(|_| MaterializeError::PermissionsNotKept)?;
     #[cfg(windows)]
     let create = || dohc_windows_files::create_new_with_dacl(tmp, dacl.as_ref());
     #[cfg(not(windows))]
     let create = || {
-        let _ = target;
+        let _ = (target, owner_only);
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -7516,6 +7527,53 @@ mod tests {
             write(&scratch);
             assert_eq!(std::fs::read(&target).unwrap(), b"new");
             assert_eq!(dacl_sddl(&target), before, "{name}");
+        }
+    }
+
+    /// #3640: a secret the engine creates, by a job, a secret job or
+    /// `files.replace`, is private to this user, though its folder lets every
+    /// local user read.
+    #[cfg(windows)]
+    #[test]
+    fn a_new_secret_is_private() {
+        fn by_job(scratch: &Scratch) {
+            let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+            enqueue_write_job(&mut store, "write", ".env", b"new", 1);
+            let job = store.load_materialization_job("write").unwrap().unwrap();
+            let outcome = materialize_one(&store, &scratch.root, &job, &options_with(&StdReplacer));
+            assert_eq!(outcome.unwrap(), JobOutcome::Completed);
+        }
+        fn by_replace(scratch: &Scratch) {
+            let root = std::fs::canonicalize(&scratch.root).unwrap();
+            replace_file_whole(&root, ".env", ".dohc-write-1.tmp", b"new").unwrap();
+        }
+        let writes: [(&str, fn(&Scratch)); 3] = [
+            ("job", by_job),
+            ("secret job", write_new_by_secret_job),
+            ("replace", by_replace),
+        ];
+        let user = current_user_sid();
+        for (name, write) in writes {
+            let scratch = Scratch::new("new-secret-dacl");
+            icacls(&scratch.root, &["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"]);
+            write(&scratch);
+            let target = scratch.root.join(".env");
+            assert_eq!(std::fs::read(&target).unwrap(), b"new", "{name}");
+            let dacl = dacl_sddl(&target);
+            let mut entries: Vec<&str> = dacl
+                .strip_prefix("D:P(")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("{name}: not a protected DACL: {dacl}"))
+                .split(")(")
+                .collect();
+            entries.sort_unstable();
+            let mut expected = vec![
+                "A;;FA;;;SY".to_owned(),
+                "A;;FA;;;BA".to_owned(),
+                format!("A;;FA;;;{user}"),
+            ];
+            expected.sort_unstable();
+            assert_eq!(entries, expected, "{name}: {dacl}");
         }
     }
 

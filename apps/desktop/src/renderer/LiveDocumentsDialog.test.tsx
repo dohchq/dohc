@@ -11,6 +11,7 @@ import {
   type LiveDocumentPage,
   type LiveDocumentRow,
   type LiveDocumentStopResult,
+  type LiveDocumentStopRunning,
   type LiveRefusalPage,
   type LiveRefusalRow,
   type LiveStopWaitingNotice,
@@ -1490,6 +1491,107 @@ describe("LiveDocumentsDialog", () => {
   });
 });
 
+
+it.each(["open", "closed"] as const)("answers a Stop from earlier openings once, with the list %s", async ending => {
+  const h = harness(), user = userEvent.setup(), stopping = deferred<LiveDocumentStopResult>();
+  const onStopPending = vi.fn();
+  const stopRunning: { current: LiveDocumentStopRunning | null } = { current: null };
+  h.load.mockResolvedValue(page([row("a.md")]));
+  h.stop.mockReturnValueOnce(stopping.promise);
+  const opening = () => render(<LiveDocumentsDialog workspaceId="ws" {...h} onStopPending={onStopPending} stopRunning={stopRunning} />);
+  const first = opening();
+  await user.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+  first.unmount();
+  const second = opening();
+  await within(await screen.findByTestId("live-document-row-a.md")).findByText("Stopping live editing…");
+  second.unmount();
+  if (ending === "open") {
+    opening();
+    await within(await screen.findByTestId("live-document-row-a.md")).findByText("Stopping live editing…");
+  }
+  await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+  if (ending === "open") {
+    const live = screen.getByTestId("live-document-row-a.md");
+    await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(onStopPending).not.toHaveBeenCalled();
+  } else {
+    expect(onStopPending).toHaveBeenCalledExactlyOnceWith("ws", "a.md", "object:a.md", expect.objectContaining({code: "edits-pending"}));
+  }
+  expect(stopRunning.current).toBeNull();
+  expect(h.stop).toHaveBeenCalledTimes(1);
+});
+
+it("shows a Stop that answered while a closed opening loaded in the next opening's row", async () => {
+  const h = harness(), user = userEvent.setup(), stopping = deferred<LiveDocumentStopResult>(), loading = deferred<LiveDocumentPage>();
+  const onStopPending = vi.fn();
+  const stopRunning: { current: LiveDocumentStopRunning | null } = { current: null };
+  h.load.mockResolvedValueOnce(page([row("a.md")])).mockReturnValueOnce(loading.promise).mockResolvedValue(page([row("a.md")]));
+  h.stop.mockReturnValueOnce(stopping.promise);
+  const opening = () => render(<LiveDocumentsDialog workspaceId="ws" {...h} onStopPending={onStopPending} stopRunning={stopRunning} />);
+  const first = opening();
+  await user.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+  first.unmount();
+  const second = opening();
+  await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(2));
+  await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+  second.unmount();
+  opening();
+  const live = await screen.findByTestId("live-document-row-a.md");
+  await act(async () => loading.resolve(page([row("a.md")])));
+  expect(onStopPending).not.toHaveBeenCalled();
+  await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+  expect(onStopPending).not.toHaveBeenCalled();
+  expect(h.onError).not.toHaveBeenCalled();
+  expect(stopRunning.current).toBeNull();
+  expect(h.stop).toHaveBeenCalledOnce();
+});
+
+it("reports a Stop whose row is past the first page once when Live documents reopens", async () => {
+  const h = harness(), user = userEvent.setup(), stopping = deferred<LiveDocumentStopResult>();
+  const onStopPending = vi.fn();
+  const stopRunning: { current: LiveDocumentStopRunning | null } = { current: null };
+  const later = row("b.md", {status: "retired", quarantine: "not-written", canResume: true});
+  h.load.mockImplementation((_workspaceId: string, retiredAfter?: string) =>
+    Promise.resolve(retiredAfter === "page-2" ? page([later]) : page([row("a.md")], "page-2")));
+  h.stop.mockReturnValueOnce(stopping.promise);
+  const opening = () => render(<LiveDocumentsDialog workspaceId="ws" {...h} onStopPending={onStopPending} stopRunning={stopRunning} />);
+  const first = opening();
+  await user.click(await screen.findByTestId("live-documents-more"));
+  await user.click(await screen.findByRole("button", {name: "Try again to write your kept edits to b.md"}));
+  expect(h.stop).toHaveBeenCalledOnce();
+  first.unmount();
+  opening();
+  await screen.findByTestId("live-document-row-a.md");
+  expect(screen.queryByTestId("live-document-row-b.md")).toBeNull();
+  await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+  // The row the Stop started from still decides what the notice offers.
+  await vi.waitFor(() => expect(onStopPending).toHaveBeenCalledExactlyOnceWith("ws", "b.md", "object:b.md",
+    expect.objectContaining({code: "edits-pending", resume: true})));
+  expect(h.onError).not.toHaveBeenCalled();
+  expect(stopRunning.current).toBeNull();
+  await vi.waitFor(() => expect(screen.getByTestId("live-documents-more")).toHaveProperty("disabled", false));
+});
+
+it("reports a Stop that answers while Live documents is closed once, and shows its row as usual after", async () => {
+  const h = harness(), user = userEvent.setup(), stopping = deferred<LiveDocumentStopResult>();
+  const onStopPending = vi.fn();
+  const stopRunning: { current: LiveDocumentStopRunning | null } = { current: null };
+  h.load.mockResolvedValue(page([row("a.md")]));
+  h.stop.mockReturnValueOnce(stopping.promise);
+  const opening = () => render(<LiveDocumentsDialog workspaceId="ws" {...h} onStopPending={onStopPending} stopRunning={stopRunning} />);
+  const first = opening();
+  await user.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+  first.unmount();
+  await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+  await vi.waitFor(() => expect(onStopPending).toHaveBeenCalledExactlyOnceWith("ws", "a.md", "object:a.md",
+    expect.objectContaining({code: "edits-pending"})));
+  expect(stopRunning.current).toBeNull();
+  opening();
+  await screen.findByRole("button", {name: "Stop live editing for a.md"});
+  expect(onStopPending).toHaveBeenCalledOnce();
+  expect(h.onError).not.toHaveBeenCalled();
+  expect(h.stop).toHaveBeenCalledOnce();
+});
 
 it("focuses the withheld conflict cause once after Stop refuses, without retry or Resume", async () => {
   const h = harness();

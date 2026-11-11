@@ -63,6 +63,7 @@ export interface PushWorkspaceToRelayResult {
   ownerAdmissionPending: OwnerAdmissionPending[];
   pushed: number;
   originsPushed: string[];
+  // Every decline that stands when the push ends, not only the ones it found.
   sharingDeclined: SharingDeclined[];
 }
 

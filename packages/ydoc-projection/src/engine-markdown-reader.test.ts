@@ -421,6 +421,15 @@ it('checks bounds and well-formed source before decoding a checkpoint', () => {
   }
 })
 
+it('answers capacity-refused when the journal runs out of budget', () => {
+  const small = createEngineMarkdownReader({...policy, maxIndexOperations: 10})
+  const base = markdownToYDoc('- parent\n  - child\n')
+  try {
+    expect(small.construct({...context, checkpoint: Y.encodeStateAsUpdate(base), source: new TextEncoder().encode('- parent\n  - other\n')}))
+      .toMatchObject({kind: 'refused', reason: 'capacity-refused'})
+  } finally {base.destroy()}
+})
+
 it('refuses malformed checkpoints and unknown public metadata', () => {
   expect(() => reader.construct({...context, checkpoint: new Uint8Array([255]), source: 'text'})).toThrow()
   const doc = markdownToYDoc('- parent\n  - child\n')
