@@ -2483,10 +2483,12 @@ describe("notices sent to you", () => {
       });
     }
     // DesktopRoot's part: a switch remounts the shell for the other
-    // workspace, and the handoff ends once a shell says it opened.
+    // workspace, and either way of ending the handoff makes it idle. `ends`
+    // records each end, so a path that ends it before Chats opens it, through
+    // either prop, fails these tests.
     function renderHandoff(bridge: ReturnType<typeof handoffBridge>, workspace: Workspace, workspaces: Workspace[]) {
       vi.stubGlobal("dohcDesktop", bridge);
-      const onOpened = vi.fn();
+      const ends: ("opened" | "dismissed")[] = [];
       const onSwitchWorkspace = vi.fn();
       function Host() {
         const [status, setStatus] = useState<ShareHandoffStatus>(DONE);
@@ -2503,19 +2505,23 @@ describe("notices sent to you", () => {
             }}
             handoffStatus={status}
             onShareHandoffOpened={() => {
-              onOpened();
+              ends.push("opened");
+              setStatus({ status: "idle" });
+            }}
+            onDismissShareHandoff={() => {
+              ends.push("dismissed");
               setStatus({ status: "idle" });
             }}
           />
         );
       }
       render(<Host />);
-      return { onOpened, onSwitchWorkspace };
+      return { ends, onSwitchWorkspace };
     }
 
     it("opens Chats here at the invitation, with its Join focused, instead of saying where it waits", async () => {
-      const { onOpened } = renderHandoff(handoffBridge(), WORKSPACE, [WORKSPACE]);
-      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      const { ends } = renderHandoff(handoffBridge(), WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
       const join = await screen.findByTestId("chats-join-shared");
       await waitFor(() => expect(document.activeElement).toBe(join));
@@ -2525,28 +2531,28 @@ describe("notices sent to you", () => {
     it("opens Chats once the saved layout applies, so the layout can't replace it", async () => {
       let restore!: (state: WorkspaceUiState) => void;
       const bridge = handoffBridge(new Promise((resolve) => { restore = resolve; }));
-      const { onOpened } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
       await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
       await act(async () => { await bridge.getRelayReceivedShare.mock.results[0]?.value; });
       // Until Chats shows it, the handoff stays, so a window that closes now
       // leaves it for the next one.
-      expect(onOpened).not.toHaveBeenCalled();
+      expect(ends).toEqual([]);
       act(() => restore(STORED_STATE));
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-      expect(onOpened).toHaveBeenCalledOnce();
+      expect(ends).toEqual(["opened"]);
     });
 
     it("keeps Join from taking focus after a click during the lookup", async () => {
       const bridge = handoffBridge();
       let found!: (answer: { found: true; chats: true }) => void;
       bridge.getRelayReceivedShare.mockImplementation(() => new Promise((resolve) => { found = resolve; }));
-      const { onOpened } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
       await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
       fireEvent.pointerDown(window);
       act(() => found({ found: true, chats: true }));
       const join = await screen.findByTestId("chats-join-shared");
-      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      await waitFor(() => expect(ends).toEqual(["opened"]));
       expect(document.activeElement).not.toBe(join);
     });
 
@@ -2554,23 +2560,23 @@ describe("notices sent to you", () => {
       const older: Workspace = { ...WORKSPACE, workspaceId: "ws-older", lastOpenedAt: 1 };
       const latest: Workspace = { ...WORKSPACE, workspaceId: "ws-latest", lastOpenedAt: 2 };
       let restore!: (state: WorkspaceUiState) => void;
-      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(new Promise((resolve) => { restore = resolve; })), VIEW, [older, VIEW, latest]);
+      const { ends, onSwitchWorkspace } = renderHandoff(handoffBridge(new Promise((resolve) => { restore = resolve; })), VIEW, [older, VIEW, latest]);
       await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(latest));
       // The switch alone doesn't end it: a window that closes, or a workspace
       // that fails to open, before Chats shows it leaves it for the next.
-      expect(onOpened).not.toHaveBeenCalled();
+      expect(ends).toEqual([]);
       act(() => restore(STORED_STATE));
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
       expect(onSwitchWorkspace).toHaveBeenCalledOnce();
-      expect(onOpened).toHaveBeenCalledOnce();
+      expect(ends).toEqual(["opened"]);
     });
 
     it("says to create a workspace first when they have none of their own", async () => {
-      const { onOpened, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [VIEW]);
+      const { ends, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [VIEW]);
       expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toContain("Create one from Manage workspaces first.");
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
-      expect(onOpened).not.toHaveBeenCalled();
+      expect(ends).toEqual([]);
     });
   });
 
