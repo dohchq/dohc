@@ -2517,11 +2517,17 @@ describe("notices sent to you", () => {
 
     it("opens Chats once the saved layout applies, so the layout can't replace it", async () => {
       let restore!: (state: WorkspaceUiState) => void;
-      const { onOpened } = renderHandoff(handoffBridge(new Promise((resolve) => { restore = resolve; })), WORKSPACE, [WORKSPACE]);
-      await waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      const bridge = handoffBridge(new Promise((resolve) => { restore = resolve; }));
+      const { onOpened } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(bridge.getRelayReceivedShare).toHaveBeenCalled());
+      await act(async () => { await bridge.getRelayReceivedShare.mock.results[0]?.value; });
+      // Until Chats shows it, the handoff stays, so a window that closes now
+      // leaves it for the next one.
+      expect(onOpened).not.toHaveBeenCalled();
       act(() => restore(STORED_STATE));
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+      expect(onOpened).toHaveBeenCalledOnce();
     });
 
     it("keeps Join from taking focus after a click during the lookup", async () => {

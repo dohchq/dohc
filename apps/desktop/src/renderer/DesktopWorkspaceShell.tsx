@@ -3288,11 +3288,18 @@ export function DesktopWorkspaceShell(props: {
   // Here it waits for the saved layout, as a work link does, so the layout
   // cannot replace Chats.
   const ownWorkspaceForChats = shareView ? lastOpenedOwnWorkspace(props.workspaces) : props.workspace;
+  // Here the handoff ends once Chats shows the invitation, so a window that
+  // closes before then leaves it for the next window.
+  const handoffInChats = useRef<{ shareId: string; opened: (() => void) | undefined } | null>(null);
   const openHandoffInChats = (invitation: ChatsInvitation) => {
     if (ownWorkspaceForChats === null) return;
     const target = { to: "chats-invitation", ...invitation } as const;
-    if (ownWorkspaceForChats.workspaceId === workspaceId) setOpenedFromLink(target);
-    else props.onSwitchWorkspace(ownWorkspaceForChats, target);
+    if (ownWorkspaceForChats.workspaceId === workspaceId) {
+      handoffInChats.current = { shareId: invitation.shareId, opened: props.onShareHandoffOpened };
+      setOpenedFromLink(target);
+      return;
+    }
+    props.onSwitchWorkspace(ownWorkspaceForChats, target);
     props.onShareHandoffOpened?.();
   };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
@@ -5641,9 +5648,15 @@ export function DesktopWorkspaceShell(props: {
           else openChatsNavInTab(place.nav);
           return null;
         }
-        case "chats-invitation":
+        case "chats-invitation": {
           openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
+          const handoff = handoffInChats.current;
+          if (handoff?.shareId === target.shareId) {
+            handoffInChats.current = null;
+            handoff.opened?.();
+          }
           return null;
+        }
         case "automation":
           return openAutomation(target.automation, target.run ?? null, null, false, signal);
         case "automation-controls":
