@@ -666,7 +666,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       recipient = await launch(recipientTemp);
       // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
       probes.set({ stopWatching: watchReadOnly(recipient.page, testInfo, "recipient"), owner: owner!.page, recipient: recipient.page,
-        ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH });
+        ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH,
+        stackDir: ownerTemp.baseDir, relayOutput: () => stack?.relayOutput() ?? "no stack" });
       const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
       const page = recipient.page;
       await expect(editor(page)).toContainText(H1);

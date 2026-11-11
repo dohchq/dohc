@@ -139,7 +139,8 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     const recipient = await launch(recipientTemp);
     // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
     probes.set({stopWatching: watchReadOnly(recipient.page, info, "recipient"), owner: page, recipient: recipient.page,
-      ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH});
+      ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH,
+      stackDir: ownerTemp.baseDir, relayOutput: () => stack?.relayOutput() ?? "no stack"});
     await test.step("the recipient opens the Edit share and adds R1", async () => {
       const received = recipient.page;
       await received.getByTestId("first-run-open-share").click();

@@ -1,9 +1,16 @@
 // RETEST INSTRUMENTATION (never merge): diagnostic probes for the Restore shared file retest (#2761, #3090).
 // Every probe records annotations or attachments, has its own deadline, and never fails the test.
 import type { Page, TestInfo } from "@playwright/test";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type { DohcDesktopBridge, NoticeRow } from "../../src/ipc/bridgeContract";
 import { withEngineDb } from "./engineDb";
 import { readHistoryMoments } from "./history";
+
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => { exec(sql: string): void; close(): void };
+};
 
 const COULD_NOT_UPDATE = /could not update/;
 const PROBE_MS = 10_000;
@@ -36,9 +43,51 @@ export async function recordHistory(page: Page, info: TestInfo, workspaceId: str
       names: [row.liveAuthorName, row.personAuthorName, row.agentAuthorName].filter(Boolean),
     }))) });
     await info.attach(name, { contentType: "application/json", body: JSON.stringify(moments, null, 2) });
+    // Every row's whole engine record (origin, origin replica, attribution, settlement reference), by id.
+    const records = await withDeadline(page.evaluate(async ({ workspaceId, ids }) => {
+      const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+      return Promise.all(ids.map(async momentId => ({ momentId, ...await api.readEngineMoment({ workspaceId, momentId }) })));
+    }, { workspaceId, ids: moments.map(row => row.id) }), "readEngineMoment", 30_000);
+    await info.attach(`RETEST owner engine moments ${when}`, { contentType: "application/json", body: JSON.stringify(records, null, 2) });
   } catch (error) {
     info.annotations.push({ type: name, description: `read failed: ${fail(error)}` });
   }
+}
+
+/**
+ * A consistent copy of each SQLite store (VACUUM INTO), written under the test's output folder so the run's packed
+ * output keeps it after teardown deletes the workspaces. A store that cannot be read is named in an annotation.
+ */
+export function copyDatabases(info: TestInfo, stores: { label: string; file: string }[], when: string): void {
+  const type = `RETEST database copies ${when}`;
+  const copied: string[] = [];
+  for (const { label, file } of stores) {
+    const target = info.outputPath("retest-databases", `${when.replace(/[^a-z0-9]+/gi, "-")}`, `${label}.sqlite`);
+    try {
+      if (!existsSync(file)) { copied.push(`${label}: no file at ${file}`); continue; }
+      mkdirSync(dirname(target), { recursive: true });
+      const db = new DatabaseSync(file, { readOnly: true });
+      try { db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`); } finally { db.close(); }
+      copied.push(`${label}: ${statSync(target).size} bytes`);
+    } catch (error) {
+      copied.push(`${label}: copy failed: ${fail(error)}`);
+    }
+  }
+  info.annotations.push({ type, description: copied.join("; ") });
+}
+
+/** The owner's engine store, the service host's (one per hosted store), and the relay's, under the stack's folder. */
+export function retestStores(ownerRoot: string, stackDir: string): { label: string; file: string }[] {
+  const hostRoot = join(stackDir, "relay-deployment", "live-host");
+  const hosts = existsSync(hostRoot)
+    ? readdirSync(hostRoot, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name !== "automations")
+      .map(entry => ({ label: `service-host-${entry.name}`, file: join(hostRoot, entry.name, ".dohc", "engine", "engine.db") }))
+    : [];
+  return [
+    { label: "owner-engine", file: join(ownerRoot, ".dohc", "engine", "engine.db") },
+    ...hosts,
+    { label: "relay", file: join(stackDir, "relay-data", "relay.sqlite") },
+  ];
 }
 
 /** A screenshot attachment, or an annotation saying why there is none. */
@@ -162,7 +211,8 @@ export function watchReadOnly(page: Page, info: TestInfo, who: string): () => Pr
  * the test fails before it, before teardown closes the apps.
  */
 export function closingProbes(info: TestInfo): {
-  set: (probe: { stopWatching: () => Promise<void>; owner: Page; recipient: Page; ownerRoot: string; recipientRoot: string; workspaceId: string; path: string }) => void;
+  set: (probe: { stopWatching: () => Promise<void>; owner: Page; recipient: Page; ownerRoot: string; recipientRoot: string; workspaceId: string; path: string;
+    stackDir: string; relayOutput: () => string }) => void;
   run: (when: string) => Promise<void>;
 } {
   let pending: Parameters<ReturnType<typeof closingProbes>["set"]>[0] | undefined;
@@ -185,6 +235,13 @@ export function closingProbes(info: TestInfo): {
       const later = `${when}, ${LATE_READ_MS / 1000} s later`;
       await recordHistory(probe.owner, info, probe.workspaceId, probe.path, later);
       await recordEngineRefusals(probe.ownerRoot, info, "owner", later);
+      // The whole stores, read offline: the owner's engine, the service host's engine and the relay.
+      copyDatabases(info, retestStores(probe.ownerRoot, probe.stackDir), later);
+      try {
+        await info.attach(`RETEST relay output ${later}`, { contentType: "text/plain", body: probe.relayOutput() });
+      } catch (error) {
+        info.annotations.push({ type: `RETEST relay output ${later}`, description: `read failed: ${fail(error)}` });
+      }
     },
   };
 }
