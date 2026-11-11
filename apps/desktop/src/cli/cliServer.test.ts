@@ -12,7 +12,7 @@ import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, retryChatRun, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import {
@@ -3798,6 +3798,10 @@ describe("CLI socket server", () => {
     // The agent names no run; the server it calls names the run it works for.
     const ctx: ToolContext = { root: nestedRoot, home: stateDir, runId: "run_live", request: (value) => invoke(value.verb, value.args) };
     await expect(startGroupChat(ctx, { group: "general", body: "Publish the trip app." })).resolves.toEqual({
+      ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
+    });
+    // Nor does it run a stopped request there again.
+    await expect(retryChatRun(ctx, { threadId: "thread-1" })).resolves.toEqual({
       ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
     });
     expect(calls.openWorkspace).toBe(opened);

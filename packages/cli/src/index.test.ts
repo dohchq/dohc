@@ -165,6 +165,29 @@ describe("executeCli", () => {
     expect(result.stdout).toBe("replied th_8f2k1c msg_new\n");
   });
 
+  // The server refuses a run's retry outside the run's own workspace, so the
+  // run's id goes with it, and a refusal exits with its reason.
+  it("sends the run's id with chat retry and exits on a refusal", async () => {
+    const requests: CliRequestWithoutToken[] = [];
+    const answers = [{ ok: true, status: "queued", threadId: "th_8f" }, { ok: false, reason: "No agent request in this conversation has stopped." }];
+    const retry = () => executeCli({
+      argv: ["chat", "retry", "th_8f", "--as-agent"],
+      cwd: "/workspace/project",
+      env: { DOHC_RUN_ID: "run_ambient" },
+      request: async (request) => {
+        requests.push(request);
+        return answers.shift();
+      },
+    });
+    expect(await retry()).toMatchObject({ exitCode: 0 });
+    expect(await retry()).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("No agent request in this conversation has stopped.") });
+    expect(requests[0]).toEqual({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "chatRetry",
+      args: { cwd: PROJECT, actor: "agent", runId: "run_ambient", thread: "th_8f" },
+    });
+  });
+
   it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {
     const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => ({ threadId: "th_1", messageId: "msg_1" }));
     await executeCli({ argv: ["chat", "post", "general", "--as-agent", "--agent", "Scout", "done"], cwd: "/workspace", env: {}, request });

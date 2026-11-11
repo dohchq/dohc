@@ -2464,9 +2464,10 @@ export async function retryAutomationRun(
   });
 }
 
-// The desktop runs it only for someone who may post in the conversation.
+// The desktop runs it only for someone who may post in the conversation, and
+// a run only in its own workspace.
 export async function retryChatRun(ctx: ToolContext, args: { threadId: string }) {
-  const result = await requestCli(ctx, "chatRetry", { thread: args.threadId });
+  const result = await requestCli(ctx, "chatRetry", { ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}), thread: args.threadId });
   return result.ok ? { ...result, threadId: engineThreadId(result.threadId) } : result;
 }
 

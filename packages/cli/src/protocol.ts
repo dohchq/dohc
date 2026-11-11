@@ -103,7 +103,7 @@ const streamPageArgs = {
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
-const chatRetryArgsSchema = z.object({ ...argsBase, thread: z.string().min(1) }).strict();
+const chatRetryArgsSchema = z.object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) }).strict();
 // One part of what an agent reports about itself: printable text with no
 // surrounding space.
 export const MAX_REPORTED_AGENT_CHARS = 64;
