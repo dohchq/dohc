@@ -11,6 +11,10 @@ export type NoticeTarget =
   // A conversation, at a message or at a run's last message when one is named.
   // `channel` is the Group or DM that holds the thread, when the opener knows it.
   | { to: "chat"; thread: string; channel?: string; message?: string; run?: string }
+  // A Group, DM, or agent chat as a whole.
+  | { to: "chat-channel"; channel: string }
+  // A Collection's views, by its folder.
+  | { to: "collection"; path: string }
   // Chats at a Group invitation or message request. `inputs` is the input
   // count when Open was chosen, so a later input keeps the person's focus.
   | { to: "chats-invitation"; shareId: string; inputs: number }
@@ -51,8 +55,11 @@ export function workLinkTarget(message: WorkspaceActivatedMessage): Extract<Noti
   };
 }
 
+export const CHAT_LOOKUP_FAILED_NOTE = "dohc could not open this chat.";
+
 // Only a chat or an automation is looked up, so only they can fail this way.
 export function targetLookupFailedNote(target: NoticeTarget): string {
+  if (target.to === "chat-channel") return CHAT_LOOKUP_FAILED_NOTE;
   return target.to === "chat" ? RUN_THREAD_LOOKUP_FAILED_NOTE : AUTOMATION_LOOKUP_FAILED_NOTE;
 }
 

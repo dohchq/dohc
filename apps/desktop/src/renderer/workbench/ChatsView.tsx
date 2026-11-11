@@ -119,6 +119,7 @@ import { bridge } from "../bridge";
 import {
   type ChatMessageListHandle,
   MentionText,
+  hasChatLinks,
   chatAuthorLabel,
   usePersonalAgentNames,
   type ChatReactionControls,
@@ -4401,7 +4402,7 @@ export function ChatsView(props: {
                       unreadCount: 0,
                     })
                   : false;
-                const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
+                const hasFileMentions = hasChatLinks(item.message.body);
                 const time = formatChatTime(item.message.createdAtMs);
                 const itemView = reactions.view(item.thread.id, item.message.id);
                 const itemReactions = itemView.reactions.filter(

@@ -289,5 +289,7 @@
   "file.protected.restore",
   "file.protected.discard",
   "dataset.operation.cancel",
-  "version.unversioned.list"
+  "version.unversioned.list",
+  "work.reference.describe",
+  "work.reference.make"
 ]

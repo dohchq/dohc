@@ -164,6 +164,12 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
+  link: [
+    ["chat", "link", "--group", "#trip"],
+    ["chat", "link", "--thread", "th_1"],
+    ["chat", "link", "--message", "msg_1"],
+    ["chat", "link", "--path", "plans/trip.md"],
+  ],
   "create-group": [["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"]],
   threads: [["chat", "threads", "general"]],
   watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
@@ -192,6 +198,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_chat_links:{cli:"chatLinks"},
+  dohc_link:{cli:"link"},
   dohc_chat_file_mentions: { cli: "chatFileMentions" },
   dohc_links_edges: { cli: "linksEdges" },
   dohc_links_in: { cli: "linksIn" },

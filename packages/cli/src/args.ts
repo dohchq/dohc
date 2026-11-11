@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -23,6 +23,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "link"; target: CliLinkTarget }
   | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
   | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
@@ -613,6 +614,36 @@ const CHAT_VERBS = {
     parse: ({ operands }) => {
       noExtraArgs(operands, "groups");
       return { verb: "groups" };
+    },
+  },
+  link: {
+    capabilityId: "work.reference.make",
+    summary: "Make a link to put in a chat message.",
+    operands: "",
+    flags: [
+      { name: "--group", value: "group", text: "Link a Group, DM, or agent chat, by name, #slug, or id." },
+      { name: "--thread", value: "id", text: "Link a thread." },
+      { name: "--message", value: "id", text: "Link a message." },
+      { name: "--path", value: "path", text: "Link a file, or a Collection by its folder." },
+    ],
+    notes: [
+      "Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names.",
+      "The link keeps working after a rename or a move. Someone who cannot see what it names sees it as unavailable.",
+    ],
+    parse: input => {
+      noExtraArgs(input.operands, "link");
+      const given = ([["group", "--group"], ["thread", "--thread"], ["message", "--message"], ["path", "--path"]] as const)
+        .flatMap(([kind, flag]) => {
+          const value = lastValue(input, flag);
+          return value === undefined ? [] : [{ kind, value }];
+        });
+      if (given.length !== 1) fail("link needs exactly one of --group, --thread, --message, and --path");
+      const { kind, value } = given[0]!;
+      const target: CliLinkTarget = kind === "group" ? { kind, group: value }
+        : kind === "thread" ? { kind, thread: value }
+        : kind === "message" ? { kind, message: value }
+        : { kind, path: value };
+      return { verb: "link", target };
     },
   },
   "create-group": {

@@ -354,9 +354,9 @@ function replyToolCall(threadId: string, runId: string): string {
 // (codexRunConfig.ts). Both leave out the workspace's instruction files.
 // Both tools' profiles refuse anything that needs approval, so the run hears
 // it before a refusal turns its reply into an explanation. A file chip,
-// `@[path]`, opens from chat; nothing in a message opens a folder,
-// Collection, or chat yet, so the run names those. Only a run with every dohc
-// tool hears of them.
+// `@[path]`, opens from chat, and a link from `dohc_link` opens a chat,
+// thread, message, or Collection. Only a run with every dohc tool hears of
+// them.
 function buildRunnerPrompt(
   threadMarkdown: string,
   threadId: string,
@@ -379,6 +379,9 @@ function buildRunnerPrompt(
   const report = form === "mcp"
     ? "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
     : "Report outcomes, not tool logs. ";
+  const links = form === "mcp" && dohcTools === "all"
+    ? "To link a chat, thread, message, or Collection, call `dohc_link` and write the `link` it returns. "
+    : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -389,7 +392,7 @@ function buildRunnerPrompt(
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${links}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {

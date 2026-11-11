@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
-import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentions, scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import {
   fileReferenceKey,
@@ -35,12 +35,13 @@ export const CHAT_MARKDOWN_MAX_CHARS = 2 * CHAT_MARKDOWN_MAX_LENGTH;
 
 export const SAFE_HREF = /^(?:https?:\/\/|mailto:)/iu;
 
-// A mention or a page reference, at its range in the message's source. The
-// ranges come from the scanners the engine indexes with, so a chip appears
-// exactly where the engine saw a mention, and never inside code.
+// A mention, a page reference, or a work link, at its range in the message's
+// source. The ranges come from the scanners the engine indexes with, so a
+// chip appears exactly where the engine saw a mention, and never inside code.
 export type Chip =
   | { kind: "mention"; start: number; end: number; mentionKind: MentionCandidate["kind"] }
-  | { kind: "file"; start: number; end: number; path: string; heading?: string; target: FileMentionNavigationTarget };
+  | { kind: "file"; start: number; end: number; path: string; heading?: string; target: FileMentionNavigationTarget }
+  | { kind: "work"; start: number; end: number; reference: string };
 
 export function chatChips(
   body: string,
@@ -48,7 +49,7 @@ export function chatChips(
   attachments: readonly ChatAttachmentRecord[],
 ): Chip[] {
   if (!body.includes("@")) return [];
-  const fileTokens = extractChatFileReferenceTokens(body);
+  const { files: fileTokens, works } = scanChatLinks(body);
   const targets = resolveFileMentionNavigationTargets(fileTokens, attachments);
   const mentions = chatMentions(body, candidates, fileTokens);
   // Both lists are in source order and never overlap; merge them in one walk.
@@ -59,7 +60,10 @@ export function chatChips(
     chips.push({ kind: "mention", start: mention.start, end: mention.end, mentionKind: mention.candidate.kind });
   }
   while (file < fileTokens.length) chips.push(fileChip(fileTokens[file++]!));
-  return chips;
+  if (works.length === 0) return chips;
+  // A work link holds no "@" name, so no chip overlaps it.
+  for (const work of works) chips.push({ kind: "work", start: work.start, end: work.end, reference: work.reference });
+  return chips.sort((a, b) => a.start - b.start);
 
   function fileChip(token: (typeof fileTokens)[number]): Chip {
     return {

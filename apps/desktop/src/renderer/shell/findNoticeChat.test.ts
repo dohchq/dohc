@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { findNoticeChat } from "./findNoticeChat";
+import { findNoticeChannel, findNoticeChat } from "./findNoticeChat";
 import { workLinkTarget } from "../../notices/noticeTarget";
 
 const group = { id: "group-1", name: "trip", slug: "trip", kind: "channel" as const, type: "both" as const,
@@ -14,11 +14,12 @@ const record = (id: string, channelId: string) => ({ id, channelId, title: id, c
 
 const listChatChannels = vi.fn();
 const listChannelThreads = vi.fn();
+const syncDms = vi.fn();
 beforeEach(() => {
   listChatChannels.mockResolvedValue({ channels: [group, otherGroup, dm], fileThreads: [fileThread] });
   listChannelThreads.mockImplementation(async ({ channelId, lane }: { channelId: string; lane: "chat" | "posts" }) =>
     ({ threads: [record(`${channelId}-${lane}`, channelId)] }));
-  vi.stubGlobal("dohcDesktop", { listChatChannels, listChannelThreads });
+  vi.stubGlobal("dohcDesktop", { listChatChannels, listChannelThreads, syncDms });
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -71,5 +72,24 @@ describe("a notice that names no chat", () => {
     expect(new Set(listChannelThreads.mock.calls.map(([payload]) => payload.channelId))).toEqual(new Set(["group-1", "group-2"]));
     await expect(findNoticeChat("notes", { to: "chat", thread: "file-thread" })).resolves.toEqual({ open: "file", thread: fileThread });
     await expect(findNoticeChat("notes", { to: "chat", thread: "dm-thread" })).resolves.toBeNull();
+  });
+});
+
+describe("where a work link's chat opens", () => {
+  it("opens a Group as its channel", async () => {
+    await expect(findNoticeChannel("notes", "group-1")).resolves.toEqual({ open: "chats", nav: { level: "channel", channel: group } });
+    expect(syncDms).not.toHaveBeenCalled();
+  });
+
+  it("opens a DM through its record", async () => {
+    const record = { channelId: "dm-1", name: "sam@example.com" };
+    syncDms.mockResolvedValue({ dms: [{ channelId: "dm-other" }, record] });
+    await expect(findNoticeChannel("notes", "dm-1")).resolves.toEqual({ open: "chats", nav: { level: "dm", dm: record } });
+  });
+
+  it("finds nothing for a chat this workspace does not list, or a DM without a record", async () => {
+    syncDms.mockResolvedValue({ dms: [] });
+    await expect(findNoticeChannel("notes", "group-gone")).resolves.toBeNull();
+    await expect(findNoticeChannel("notes", "dm-1")).resolves.toBeNull();
   });
 });

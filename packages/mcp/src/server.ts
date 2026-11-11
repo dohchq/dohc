@@ -28,7 +28,7 @@ import {
 import {
   MCP_TOOL_CAPABILITIES,
   heldNoteChange,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
+  chatLinks, chatFileMentions, makeLink, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
   disconnectLinkAgent,
@@ -708,6 +708,21 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     try { return text(await waitForMessages(ctx, args, extra.signal)); }
     finally { waits -= 1; }
   });
+
+  register(
+    "dohc_link",
+    {
+      description:
+        "Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.",
+      inputSchema: {
+        group: z.string().min(1).max(500).optional(),
+        thread: z.string().min(1).max(200).optional(),
+        message: z.string().min(1).max(200).optional(),
+        path: z.string().min(1).max(4096).optional(),
+      },
+    },
+    async (args) => text(await makeLink(ctx, args)),
+  );
 
   register(
     "dohc_read_chat",

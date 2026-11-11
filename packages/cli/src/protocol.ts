@@ -63,6 +63,16 @@ export const documentAgentNameSchema = z
 const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
+// What a work link names: a Group, DM, or agent chat by name, #slug, or id; a
+// thread or message by id; or a file or Collection folder by path.
+export const linkTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("group"), group: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("thread"), thread: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("message"), message: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("path"), path: z.string().min(1).max(4_096) }).strict(),
+]);
+export type CliLinkTarget = z.infer<typeof linkTargetSchema>;
+const linkArgsSchema = z.object({ ...argsBase, target: linkTargetSchema }).strict();
 // The name and purpose limits are the New group dialog's.
 const groupCreateArgsSchema = z
   .object({
@@ -626,6 +636,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("link"), args: linkArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
@@ -735,6 +746,7 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  link: ["work.reference.make"],
   chatLinks: ["chat.read"],
   chatFileMentions: ["chat.read"],
   linksEdges: ["links.edges"],
@@ -1984,6 +1996,13 @@ export const cliResultSchemas = {
   ]),
   chatLinks: ChatLinksPage,
   chatFileMentions: ChatFileMentionsPage,
+  // `link` goes in a message body as it is, and shows as a chip that opens
+  // what it names for anyone who can see it.
+  link: z.object({
+    reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
+    kind: z.enum(["chat", "thread", "message", "file", "collection"]),
+  }).strict(),
   linksEdges: LinksEdgesResult,
   linksIn: LinksInResult,
   linksResolve: LinksResolveResult,

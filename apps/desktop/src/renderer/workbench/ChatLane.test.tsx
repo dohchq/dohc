@@ -7,7 +7,7 @@ import { ChatLane } from "./ChatLane";
 import { ipcErrorMessage } from "../ipcError";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
-import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
@@ -59,9 +59,9 @@ describe("ChatLane", () => {
   it("does not render message bodies while typing a draft", async () => {
     render(lane());
     await screen.findByText("Old message");
-    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    const scans = vi.mocked(scanChatLinks).mock.calls.length;
     fireEvent.change(screen.getByTestId("chats-lane-composer"), { target: { value: "A draft" } });
-    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+    expect(vi.mocked(scanChatLinks).mock.calls.length).toBe(scans);
   });
 
   it("does not load conversation content or mark it read on an unchanged revision", async () => {

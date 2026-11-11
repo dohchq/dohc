@@ -12,6 +12,8 @@ import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
+import { formatChatWorkReferenceToken } from "@dohc/workspace-contracts/chat-mentions";
+import type { WorkTargetInput } from "@dohc/workspace-engine-client/daemon";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import {
@@ -52,6 +54,7 @@ import {
   cliTransportResponseSchema,
   parseCliResult,
   type CliActor,
+  type CliLinkTarget,
   type CliNoticeOpens,
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
@@ -420,6 +423,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // Makes, or finds, the work reference that names `target` in this workspace.
+  makeWorkReference?(target: WorkTargetInput): Promise<string>;
   // The shared files this shared view holds back, or null outside a shared view.
   sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
   // Why the last sync pass failed, until a pass succeeds.
@@ -2111,7 +2116,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["link", "heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2159,6 +2164,11 @@ async function dispatch(
       case "fileChats":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
+      case "link": {
+        const target = request.args.target;
+        rebased = target.kind === "path" ? { ...request, args: { ...request.args, target: { ...target, path: paths.rebase(target.path, "read") } } } : request;
+        break;
+      }
       case "fileChatStart":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
@@ -2253,6 +2263,44 @@ async function dispatch(
   }
 }
 
+// A work link for a chat message. A path names a Collection by its folder,
+// or else a file. A read-only workspace makes none: its references would not
+// reach the owner's server.
+async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, chats: ChatsHost): Promise<CliResultByVerb["link"]> {
+  if (context.readOnly || !context.makeWorkReference) throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
+  const make = context.makeWorkReference;
+  const made = async (kind: CliResultByVerb["link"]["kind"], input: WorkTargetInput) => {
+    const reference = await make(input);
+    return { reference, link: formatChatWorkReferenceToken(reference), kind };
+  };
+  switch (target.kind) {
+    case "group": {
+      const channel = resolveChannel(target.group, await loadChannels(chats));
+      return made("chat", { kind: "chat", channelId: channel.engine.id });
+    }
+    case "thread": {
+      const thread = resolveThread(target.thread, await loadThreads(chats, await loadChannels(chats)));
+      return made("thread", { kind: "thread", threadId: thread.thread.id });
+    }
+    case "message": {
+      const threads = await loadThreads(chats, await loadChannels(chats));
+      const found = resolveThreadOrMessage(target.message, threads, await loadMessagesByThread(chats, threads));
+      if (!found.rootMessage) throw new CliCommandError(`no such message: ${target.message}`);
+      return made("message", { kind: "message", messageId: found.rootMessage.id });
+    }
+    case "path":
+      try {
+        return await made("collection", { kind: "documentCollection", path: target.path });
+      } catch {
+        try {
+          return await made("file", { kind: "file", path: target.path });
+        } catch {
+          throw new CliCommandError(`dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`);
+        }
+      }
+  }
+}
+
 async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -2264,6 +2312,8 @@ async function dispatchWorkspace(
   }
   const chats = chatsHost(context, options);
   switch (request.verb) {
+    case "link":
+      return await makeLink(request.args.target, context, chats);
     case "notices": {
       if (!options.notices) throw new CliCommandError("Notices are unavailable.");
       // Only where a row opens is a path. Its title and text stay as sent.
