@@ -106,13 +106,10 @@ When their passing evidence covers the head, it replaces running the gates local
 PR checks distribute the complete selected JavaScript inventory across workers.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
 Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
-Both restore and check the prepared engine, desktop artifacts, and runtime bundles. Only the compiler job installs Rust and nextest.
+Both restore and check the prepared engine and desktop artifacts. The relay job builds its runtime bundles. Only the compiler job installs Rust and nextest.
 Workers and aggregates do not wait for confinement. Only the final verdict waits for it.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
-Shard costs use measured group wall times from `shard-times.json` when the task membership matches, with file estimates for new groups.
-Native placement predicts each worker's finish using preparation arrival, its two initial slots and third slot after preparation, and exclusive resources.
-These estimates change placement only; each worker still verifies its complete assigned inventory.
 The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
@@ -151,7 +148,6 @@ Job timeouts are 10 minutes for selection and final verification, 20 for prepara
 25 for Rust archive and policy jobs and ordinary workers, and 40 for aggregate jobs.
 Workers have 10 minutes beyond their preparation wait cap. Aggregates have 5 minutes beyond both sequential wait caps for setup and execution.
 The compiler archive adds one package's test compilation, packing, and transfer to preparation, before the prepared artifact is published.
-The prepared artifact also carries the runtime bundles; confinement checks them through the existing build receipt instead of rebuilding them.
 Only post-job cleanup remains after publication.
 Confinement runs those test binaries without compilation or retries. Its Node staging tests still build the release compiler owner.
 For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.

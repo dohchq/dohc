@@ -9,12 +9,10 @@ const fileId = path => slash(relative(repoRoot, path));
 export const JS_SHARDS = 12;
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
-const durations = JSON.parse(readFileSync(new URL("./shard-times.json", import.meta.url)));
-export const javascriptGroupKey = tasks => `vitest-group:${JSON.stringify(tasks.map(task => task.id).sort())}`;
 
 // Partition the same execution units that the runner schedules. A large file
 // stays whole; small files share their package and project initialization.
-export function javascriptGroups(tasks, timings = durations) {
+export function javascriptGroups(tasks) {
   const packages = Map.groupBy(tasks.filter(task => task.kind === "vitest"), task => JSON.stringify([task.package, task.project, Boolean(task.native)]));
   const groups = [];
   for (const [key, files] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
@@ -27,7 +25,7 @@ export function javascriptGroups(tasks, timings = durations) {
     }
     groups.push(...chunks.map((chunk, index) => ({ ...chunk, id: `vitest-group:${key}:${index}`, kind: "vitest", pkg: files[0].package,
       native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : files[0].package === "@dohc/mobile" ? "mobile-editor" : null,
-      weight: timings[javascriptGroupKey(chunk.tasks)] ?? Math.max(...chunk.tasks.map(task => task.weight), chunk.weight / (files[0].package === "@dohc/app-backend-runtime" ? 1 : 2)) + 4 })));
+      weight: Math.max(...chunk.tasks.map(task => task.weight), chunk.weight / (files[0].package === "@dohc/app-backend-runtime" ? 1 : 2)) + 4 })));
   }
   groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), resource: task.resource, weight: task.weight })));
   return groups;
@@ -45,35 +43,10 @@ export function partitionTasks(tasks, count) {
   return shards.map(shard => shard.tasks);
 }
 
-function predictedFinish(groups, nativeReadySeconds) {
-  const pending = groups.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id)), active = [], resources = new Set();
-  const runtime = pending.filter(group => group.tasks?.some(task => task.id.includes("stage-app-backend-runtime.test.mjs")));
-  for (const group of runtime) pending.splice(pending.indexOf(group), 1);
-  let time = 0;
-  while (pending.length || active.length) {
-    let index;
-    while (active.length < (time >= nativeReadySeconds ? 3 : 2)
-      && (index = pending.findIndex(group => (!group.native || time >= nativeReadySeconds) && (!group.resource || !resources.has(group.resource)))) >= 0) {
-      const [group] = pending.splice(index, 1);
-      active.push({ group, finish: time + group.weight });
-      if (group.resource) resources.add(group.resource);
-    }
-    time = Math.min(...active.map(row => row.finish), ...(time < nativeReadySeconds ? [nativeReadySeconds] : []));
-    for (let i = active.length - 1; i >= 0; i--) if (active[i].finish <= time) {
-      resources.delete(active[i].group.resource); active.splice(i, 1);
-    }
-  }
-  return time + runtime.reduce((sum, group) => sum + group.weight, 0);
-}
-
-export function partitionJavascript(groups, count = JS_SHARDS, nativeReadySeconds = durations["native preparation"] ?? 60) {
-  if (new Set(groups.map(group => group.id)).size !== groups.length) throw new Error("Duplicate verification task IDs.");
-  const shards = partitionTasks(groups.filter(group => !group.native), count);
-  for (const group of groups.filter(group => group.native).toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
-    const finishes = shards.map(shard => predictedFinish([...shard, group], nativeReadySeconds));
-    shards[finishes.indexOf(Math.min(...finishes))].push(group);
-  }
-  return shards;
+export function partitionJavascript(groups, count = JS_SHARDS) {
+  const native = partitionTasks(groups.filter(group => group.native), count);
+  const pure = partitionTasks(groups.filter(group => !group.native), count);
+  return native.map((groups, index) => [...groups, ...pure[index]]);
 }
 
 export function assertTaskCoverage(expected, records) {
@@ -157,6 +130,7 @@ export async function javascriptTasks({ changed = null, repositoryTests = "test:
   const packages = readWorkspacePackages(repoRoot);
   const selected = changed && affectedPackages(changed, packages, packageReferences(repoRoot, packages));
   const tasks = [];
+  const durations = JSON.parse(readFileSync(new URL("./shard-times.json", import.meta.url)));
   for (const pkg of packages.filter(pkg => !selected || selected.includes(pkg.name))) {
     const script = pkg.manifest.scripts?.[pkg.name === "@dohc/desktop" ? "test:unit" : pkg.name === "@dohc/app-backend-runtime" ? "test:prepared" : "test"];
     if (!script) continue;
