@@ -1610,3 +1610,143 @@ fn a_bound_note_under_a_gate_waits_for_the_host_without_a_reason() {
     assert_eq!(pending.object_id, "owner");
     assert_eq!(pending.reason, None);
 }
+
+/// A note whose host checkpoint already holds an edit while the edit's own
+/// entry, queued at `queued_at_ms`, waits for the host's acknowledgement, as
+/// right after enrollment. Also returns the edit's ordinary op.
+fn queued_edit(
+    queued_at_ms: i64,
+) -> (ScratchDir, EngineStore, ObservedOwnerBinding, ReplicationEnvelope) {
+    let (dir, mut store, observed, checkpoint) = fixture();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("typed while it prepared");
+    let op = candidate(&mut store, &observed, &update, 0);
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::owner_outbox::draft::append_draft_in_tx(
+                tx,
+                "ws",
+                &observed.binding,
+                1,
+                "typed".into(),
+                update.clone(),
+                queued_at_ms,
+            )?;
+            // The host's checkpoint takes the edit before the entry's
+            // acknowledgement arrives.
+            apply_frame_in_tx(
+                tx,
+                "ws",
+                &OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: 1,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: 0,
+                    journal_cursor: 1,
+                    update_bytes: update.clone(),
+                },
+                queued_at_ms,
+            )
+        })
+        .unwrap();
+    (dir, store, observed, op)
+}
+
+/// Whether a push at `now_ms` keeps `op` back to wait for the host, which it
+/// does without a reason. With no clock, as a share proposal proves, no
+/// queued entry keeps it back.
+fn waits_at(store: &EngineStore, op: &ReplicationEnvelope, now_ms: Option<i64>) -> bool {
+    let gate = None;
+    let ordinary = now_ms.map(|now_ms| OrdinaryPublication { gate, now_ms });
+    let ops = std::slice::from_ref(op);
+    let prefix = owner_publication_prefix(store, "ws", ops, 1_000_000, ordinary)
+        .unwrap();
+    match prefix.pending {
+        Some(pending) => {
+            assert_eq!((prefix.allowed_ops, pending.reason), (0, None));
+            true
+        }
+        None => {
+            assert_eq!(prefix.allowed_ops, 1);
+            false
+        }
+    }
+}
+
+/// The edit waits for its own entry for two minutes after it was queued,
+/// then publishes by containment. An entry dated after the push counts as
+/// expired.
+#[test]
+fn an_edit_the_host_holds_waits_for_its_queued_entry_for_two_minutes() {
+    let (_dir, store, _observed, op) = queued_edit(1_000);
+    for (now_ms, waits) in [
+        (1_000, true),
+        (121_000, true),
+        (121_001, false),
+        (999, false),
+    ] {
+        assert_eq!(waits_at(&store, &op, Some(now_ms)), waits, "at {now_ms}");
+    }
+    assert!(!waits_at(&store, &op, None));
+}
+
+#[test]
+fn an_edit_publishes_once_the_host_acknowledges_its_queued_entry() {
+    use dohc_engine_collab::owner_outbox::{OwnerDeliveryReceipt, acknowledge};
+    let (_dir, mut store, _observed, op) = queued_edit(1_000);
+    assert!(waits_at(&store, &op, Some(1_000)));
+    let (outbox, delivery_id, update_digest): (String, String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    acknowledge(
+        &mut store,
+        "ws",
+        &outbox,
+        &[OwnerDeliveryReceipt {
+            delivery_id,
+            update_digest,
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    assert!(!waits_at(&store, &op, Some(1_000)));
+}
+
+/// A restore sets aside the queue it replaces with its entries still
+/// pending. A queue that was set aside keeps no edit back.
+#[test]
+fn an_edit_in_a_queue_a_restore_set_aside_publishes_by_containment() {
+    use dohc_engine_collab::owner_outbox::{OwnerOutboxQuarantineInput, quarantine};
+    let (_dir, mut store, _observed, op) = queued_edit(1_000);
+    assert!(waits_at(&store, &op, Some(1_000)));
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |row| {
+                row.get(0)
+            })
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    quarantine(
+        &mut store,
+        "ws",
+        OwnerOutboxQuarantineInput {
+            outbox_id,
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        1_000,
+    )
+    .unwrap();
+    assert!(!waits_at(&store, &op, Some(1_000)));
+}
