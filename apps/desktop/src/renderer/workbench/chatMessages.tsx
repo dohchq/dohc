@@ -773,10 +773,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }, [indexes, props.messages, messageKey]);
   const hasReactionButtons = Boolean(props.reactionControls && !props.reactionControls.readOnly);
   const canOpenPath = props.onOpenPath !== undefined;
+  // A work link opens without a file opener, so its row is actionable either way.
   const actionableIndexes = useMemo(() => {
-    if (hasReactionButtons || !canOpenPath) return [];
-    return props.messages.flatMap((message, index) =>
-      hasChatLinks(message.body) ? [index] : []);
+    if (hasReactionButtons) return [];
+    return props.messages.flatMap((message, index) => {
+      const { files, works } = scanChatLinks(message.body);
+      return works.length > 0 || (canOpenPath && files.length > 0) ? [index] : [];
+    });
   }, [props.messages, hasReactionButtons, canOpenPath]);
   const pinned = useMemo(() => {
     const focusedIndex = focusedMessage ? indexes.get(focusedMessage) : undefined;

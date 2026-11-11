@@ -170,7 +170,7 @@ export function ChatHeader(props: {
           data-testid={`${props.testId}-title`}
           className={`min-w-0 truncate text-ink ${props.large ? "text-[15px] font-semibold" : "text-[13px] font-medium"}`}
         >
-          <WorkLinkText text={props.label} testId={`${props.testId}-title`} />
+          <WorkLinkText text={props.label} interactive testId={`${props.testId}-title`} />
         </span>
         {props.description ? (
           <span className="min-w-0 flex-1 truncate text-[12px] text-muted">

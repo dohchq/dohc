@@ -638,8 +638,9 @@ by Friday"
             Some("Trip".to_owned())
         )
     );
-    // An untitled thread reads as its first message's first line.
-    let first_line = Some("Book the flights".to_owned());
+    // An untitled thread's link reads as the title chats show for it. Its
+    // first line is blank, so that is the untitled fallback.
+    let first_line = Some("New chat".to_owned());
     assert_eq!(
         titled(&store, &thread),
         (

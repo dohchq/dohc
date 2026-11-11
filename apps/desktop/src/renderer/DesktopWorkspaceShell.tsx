@@ -5813,11 +5813,16 @@ export function DesktopWorkspaceShell(props: {
     [openNoticeTarget, reportShellError, workspaceId],
   );
   // What a notice's Open asked of this workspace when it switched here, once
-  // the saved layout applied, so the layout cannot replace it.
+  // the saved layout applied, so the layout cannot replace it. A newer open
+  // cancels an older one still looking up its target.
+  const pendingOpenLookup = useRef<AbortController | null>(null);
   useEffect(() => {
     if (pendingOpen === null) return;
     setPendingOpen(null);
-    void openNoticeRowTarget(pendingOpen, new AbortController().signal).then((note) => {
+    pendingOpenLookup.current?.abort();
+    const lookup = new AbortController();
+    pendingOpenLookup.current = lookup;
+    void openNoticeRowTarget(pendingOpen, lookup.signal).then((note) => {
       if (note !== null) reportShellError(note, new Error(note), null);
     });
   }, [openNoticeRowTarget, pendingOpen, reportShellError]);

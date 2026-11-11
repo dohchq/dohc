@@ -4510,7 +4510,7 @@ export function ChatsView(props: {
                         {isComment ? (
                           <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
                             <MessageSquare size={12} aria-hidden className="shrink-0" />
-                            <span className="truncate"><WorkLinkText text={item.thread.title} /></span>
+                            <span className="truncate"><WorkLinkText text={item.thread.title} interactive={false} /></span>
                           </span>
                         ) : null}
                         {hasFileMentions ? null : body}

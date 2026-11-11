@@ -904,7 +904,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             data-testid="chats-thread-post-title"
             className={hasExplicitTitle ? "mb-0 mt-1 text-[16px] font-semibold leading-[22px] text-ink" : "sr-only"}
           >
-            <WorkLinkText text={nav.thread.title} />
+            <WorkLinkText text={nav.thread.title} interactive={hasExplicitTitle} />
           </h1>
           {/* A plain post is its body; the title above repeats it for the
               heading only. */}

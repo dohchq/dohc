@@ -447,6 +447,20 @@ describe("work reference registration and resolution", () => {
       .not.toMatchObject({target: {channelId: "later"}});
   });
 
+  it("finds a chat's create by its channel and by its wire through an index", async () => {
+    const {storage} = await fixture();
+    const db = inspectDatabase(storagePath(storage), {readOnly: true});
+    try {
+      for (const [field, index] of [["channelId", "idx_sync_relay_work_reference_chats"], ["wireId", "idx_sync_relay_work_reference_chat_wires"]]) {
+        const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+          AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq LIMIT 1`).all(ws, "chat-1") as {detail: string}[];
+        expect(plan.map((row) => row.detail).join(" ")).toContain(`USING INDEX ${index} (workspace_id=? AND <expr>=?)`);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
   it("registers a new target in the same batch as its referencing message", async () => {
     const {handler} = await fixture();
     const fresh = {...target, objectId: "fresh"};

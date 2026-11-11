@@ -2247,7 +2247,7 @@ async function dispatch(
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
-    if (request.verb === "moments" || request.verb === "appPublication") throw new CliCommandError(reason);
+    if (request.verb === "moments" || request.verb === "appPublication" || request.verb === "link") throw new CliCommandError(reason);
     if (request.verb === "fileWrite") return { ok: false, written: [], reason };
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
@@ -2292,9 +2292,13 @@ async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, cha
       try {
         return await made("collection", { kind: "documentCollection", path: target.path });
       } catch {
+        // Not a Collection: try the path as a file. Only a file the engine
+        // cannot find is missing; another failure, such as a cancelled
+        // workspace, says what it is.
         try {
           return await made("file", { kind: "file", path: target.path });
-        } catch {
+        } catch (error) {
+          if (!(error instanceof Error && error.message === "work-target-not-found")) throw error;
           throw new CliCommandError(`dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`);
         }
       }

@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LegendListProps } from "@legendapp/list/react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { ChatMessageList } from "./chatMessages";
+import { createWorkReferenceLinks, WorkReferences } from "./workReferences";
 import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
 
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
+vi.mock("../bridge", () => ({ bridge: vi.fn() }));
 vi.mock("@legendapp/list/react", () => ({
   LegendList: function LegendList(props: LegendListProps<ChatMessageRecord>) {
     // Reuse unchanged row renders so this test isolates focus-neighbor work.
@@ -63,6 +65,18 @@ describe("chat focus neighbors", () => {
     focus(screen.getAllByTestId("focus-message-body-file-mention")[1]!);
     expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("75,0,150");
     expect(scanChatLinks).not.toHaveBeenCalled();
+  });
+
+  it("pins the nearest work links without a file opener, because a work link opens either way", async () => {
+    const work = (index: number) => `@[work:${String(index).padStart(43, "w")}]`;
+    const withWork = messages.map((message, index) => index % 150 === 0 ? { ...message, body: `See ${work(index)}.` } : message);
+    const links = createWorkReferenceLinks("ws", { open: vi.fn(), failed: vi.fn() }, async (references) =>
+      references.map((reference) => ({ reference, kind: "chat" as const, label: "Trip", open: { to: "chat-channel" as const, channel: "c-1" } })));
+    render(<WorkReferences.Provider value={links}><ChatMessageList testIdPrefix="focus" messages={withWork}
+      loading={false} emptyLabel="Empty" reactionControls={readOnly} /></WorkReferences.Provider>);
+    const chips = await screen.findAllByRole("button", { name: "Open Trip" });
+    focus(chips[1]!);
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("150,0,300");
   });
 
   it("pins adjacent messages when every row has a reaction button", () => {

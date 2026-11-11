@@ -11,6 +11,7 @@
 //! transaction, so a crash leaves both or neither.
 
 use crate::DomainError;
+use crate::chats::chat_thread_display_title;
 use crate::collections::is_record_id;
 use crate::store::{get_active_version_in, validate_addressable_plaintext_path};
 use base64::Engine as _;
@@ -913,12 +914,8 @@ fn chat_name(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// The most characters a thread's title takes from its first message.
-const THREAD_TITLE_CHARS: usize = 120;
-
-/// A thread's title, or `None` when this workspace has no such thread. A
-/// thread with no title reads as its first message's first line, as chats
-/// show it.
+/// A thread's title as chats show it, or `None` when this workspace has no
+/// such thread.
 fn thread_title(
     conn: &Connection,
     workspace_id: &str,
@@ -937,19 +934,7 @@ fn thread_title(
         })
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    Ok(row.map(|(title, first)| {
-        if !title.trim().is_empty() {
-            return title;
-        }
-        let line = first
-            .as_deref()
-            .unwrap_or("")
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("");
-        line.chars().take(THREAD_TITLE_CHARS).collect()
-    }))
+    Ok(row.map(|(title, first)| chat_thread_display_title(&title, first.as_deref())))
 }
 
 fn version(

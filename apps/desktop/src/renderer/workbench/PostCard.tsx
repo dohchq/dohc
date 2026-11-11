@@ -302,14 +302,14 @@ export function PostCard(props: {
               plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
             }`}
           >
-            <WorkLinkText text={heading} testId="chats-post-title" />
+            <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
           </span>
           {excerpt ? (
             <span
               data-testid="chats-post-excerpt"
               className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
             >
-              <WorkLinkText text={excerpt} testId="chats-post-excerpt" />
+              <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
             </span>
           ) : null}
           {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (

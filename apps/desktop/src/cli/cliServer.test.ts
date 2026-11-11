@@ -1336,6 +1336,9 @@ describe("CLI socket server", () => {
     const made: unknown[] = [];
     context.makeWorkReference = async target => {
       if (target.kind === "documentCollection") throw new Error("not a Collection");
+      const path = target.kind === "file" && "path" in target ? target.path : undefined;
+      if (path === "missing.md") throw new Error("work-target-not-found");
+      if (path === "stopped.md") throw new Error("The workspace engine is not running.");
       made.push(target);
       return String(made.length).padStart(43, "R");
     };
@@ -1359,6 +1362,10 @@ describe("CLI socket server", () => {
       { kind: "file", path: "plans/trip.md" },
     ]);
     await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
+    // Only a path the engine cannot find is missing; another failure says what it is.
+    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow("dohc could not find missing.md");
+    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow("The workspace engine is not running.");
+    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow("path rejected (traversal)");
 
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
     await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({ kind: "chat", link: `@[work:${"R".repeat(42)}5]` });

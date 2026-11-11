@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ResolveWorkLinkPayload, WorkLinkPlace } from "../ipc/bridgeContract";
+import type { ResolveWorkLinkPayload, WorkLinkPlace, WorkspaceActivatedMessage } from "../ipc/bridgeContract";
 import { deferred, type Deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
-import type { NoticeTarget } from "../notices/noticeTarget";
+import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { CHAT_NOT_FOUND_NOTE, RUN_THREAD_LOOKUP_FAILED_NOTE, type NoticeTarget } from "../notices/noticeTarget";
 import { openWorkLinkInDohc } from "./workLinkOpener";
 
 const LINK = `https://dohc.example/l/${"a".repeat(43)}`;
@@ -76,5 +76,26 @@ describe("a work link clicked in dohc", () => {
     await act(async () => answers[0]!.resolve(placeIn(THIRD)));
     await expect(older).resolves.toBe(true);
     expect(onSwitchWorkspace).toHaveBeenCalledExactlyOnceWith(OTHER_WORKSPACE, AT_MESSAGE);
+  });
+
+  it("lets only the newest open act, so an older lookup answered later changes nothing", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const older = deferred<never>();
+    bridge.listChatChannels
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementation(async () => ({ channels: [], fileThreads: [] }));
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const activated = bridge.onWorkspaceActivated.mock.calls.at(-1)![0] as
+      (workspace: Workspace, file?: string, message?: WorkspaceActivatedMessage) => void;
+    const open = (thread: string) => act(() => activated(WORKSPACE, undefined, { channelId: null, threadId: thread, messageId: `${thread}-m` }));
+
+    await open("thread-a");
+    await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalledTimes(1));
+    await open("thread-b");
+    expect(await screen.findByText(CHAT_NOT_FOUND_NOTE, { exact: false })).toBeTruthy();
+
+    await act(async () => older.reject(new Error("engine stopped")));
+    expect(screen.queryByText(RUN_THREAD_LOOKUP_FAILED_NOTE, { exact: false })).toBeNull();
   });
 });
