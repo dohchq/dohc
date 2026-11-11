@@ -4214,6 +4214,47 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  it("keeps and restores no protected text through a folder swapped for an outside link after the check", async () => {
+    const root = await createTestScratch("relay-protected-copy-");
+    const outside = await createTestScratch("relay-protected-copy-");
+    await write(outside, ".env", "TOKEN=outside\n");
+    await write(root, "real/.env", "TOKEN=inside\n");
+    const type = process.platform === "win32" ? "junction" : "dir";
+    const link = join(root, "linked");
+    try { await symlink(join(root, "real"), link, type); } catch { return; }
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    // The first read of linked/.env itself finds the folder already swapped.
+    let swap = true;
+    vi.mocked(lstat).mockImplementation((async (path: PathLike) => {
+      if (swap && String(path) === join(link, ".env")) {
+        swap = false;
+        await actual.rm(link);
+        await actual.symlink(outside, link, type);
+      }
+      return await actual.lstat(path);
+    }) as typeof lstat);
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({ workspace: WORKSPACE_ID, versionId: "main", path: "linked/.env", text: "TOKEN=theirs\n", origin: "sync" });
+    const sessions = mockLiveSessions(loopback);
+    const engine = capture(root, { rustEngineSessions: sessions, onError: () => undefined });
+    try {
+      await engine.runRelaySync(materializePage => deliverRelayPage(materializePage, {
+        fastForwardedPaths: [{ versionId: "main", path: "linked/.env", operation: "write" as const, contentKind: "secret" as const }],
+      })).catch(() => undefined);
+      expect((await protectedCopyFiles(root)).join()).not.toContain("TOKEN=outside");
+
+      swap = true;
+      await actual.rm(link);
+      await actual.symlink(join(root, "real"), link, type);
+      const copies = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
+      await copies.keep("linked/.env", "TOKEN=mine\n", "main");
+      for (const [, id] of await copies.list()) await engine.restoreProtectedCopy(id).catch(() => undefined);
+      const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
+      expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: "linked/.env", text: "TOKEN=outside\n" })).toBe(false);
+    } finally { await engine.stop(); }
+  });
+
   it("keeps one protected copy across a stopped write, its redelivery and a later pull, and reports it after the restart", async () => {
     const { root, loopback, page } = await protectedPullFixture("write", ["TOKEN=saved\n"], "TOKEN=mine\n");
     const writer = createDefaultDiskWriter(root);

@@ -1706,10 +1706,12 @@ async function diskContentOf(path: string, size: number, read: () => Promise<Buf
 }
 
 // readDiskSecretState for text dohc keeps or restores. The leaf check alone
-// would read through a folder that links outside the workspace.
+// would read through a folder that links outside the workspace. It reads the
+// path the check resolved, so a folder swapped for a link after the check
+// can't redirect the read.
 async function readContainedSecretState(rootPath: string, path: string): ReturnType<typeof readDiskSecretState> {
-  await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Protected file path", access: "entry" });
-  return await readDiskSecretState(rootPath, path);
+  const { resolvedAbsolute } = await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Protected file path", access: "entry" });
+  return await readDiskSecretState(dirname(resolvedAbsolute), basename(resolvedAbsolute));
 }
 
 // Like readDiskTextState but for secret-classified paths: `.env` has no text
