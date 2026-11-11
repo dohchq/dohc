@@ -2362,10 +2362,13 @@ impl EngineService {
                 Ok(record_facts) => record_facts,
                 Err(error) => {
                     let failure = map_runtime(error);
+                    // Keep the record even without its head, so the retry
+                    // still reports the write rather than a missing session.
                     let head = actor
                         .ydoc_head_moment(session_key.clone())
                         .await
-                        .map_err(map_runtime)?;
+                        .ok()
+                        .flatten();
                     lock(&unfinished_closes).insert(
                         session_id,
                         UnfinishedClose {
