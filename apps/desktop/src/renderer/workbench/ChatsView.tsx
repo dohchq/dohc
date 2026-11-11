@@ -365,6 +365,14 @@ interface DmSyncRequest {
   asked: boolean;
 }
 
+// The sync that holds the slot: the pass queued behind it, and the calls
+// waiting for that pass.
+interface DmSyncDrain {
+  token: number;
+  queued: DmSyncRequest | null;
+  waiting: ((answered: boolean) => void)[];
+}
+
 interface OpenDmSyncRequest extends DmSyncRequest {
   dm: DmRecord;
 }
@@ -1421,22 +1429,13 @@ export function ChatsView(props: {
   // asked for it.
   //
   // Each call resolves with whether the pass that covered it answered: the
-  // sync finished, and its whole listing reached this view.
-  const dmSync = useRef<{ token: number; queued: DmSyncRequest | null; waiting: ((answered: boolean) => void)[] } | null>(null);
+  // sync finished, and its whole listing reached this view. The call that
+  // starts the drain resolves with its own pass too, not when the drain ends,
+  // since polls can keep queueing passes behind a slow sync.
+  const dmSync = useRef<DmSyncDrain | null>(null);
   const dmSyncHold = useRef<DmSyncHold>({ issued: 0, settled: 0, until: 0 });
   const keepAcceptedNoticeRef = useRef(false);
-  const refreshDms = useCallback(async (cause: DmSyncCause): Promise<boolean> => {
-    const active = dmSync.current;
-    if (active !== null && active.token === liveToken.current) {
-      active.queued = queueDmSync(active.queued, cause);
-      return new Promise<boolean>((resolve) => active.waiting.push(resolve));
-    }
-    let answered = false;
-    const mine: { token: number; queued: DmSyncRequest | null; waiting: ((answered: boolean) => void)[] } = {
-      token: liveToken.current,
-      queued: queueDmSync(null, cause),
-      waiting: [(value) => { answered = value; }],
-    };
+  const drainDms = useCallback(async (mine: DmSyncDrain) => {
     // The calls the running pass covers. A pass that commits nothing leaves
     // them unanswered.
     let covering: ((answered: boolean) => void)[] = [];
@@ -1444,7 +1443,6 @@ export function ChatsView(props: {
       for (const waiter of covering) waiter(value);
       covering = [];
     };
-    dmSync.current = mine;
     try {
       while (
         mine.queued !== null &&
@@ -1490,8 +1488,18 @@ export function ChatsView(props: {
       for (const waiter of mine.waiting) waiter(false);
       mine.waiting = [];
     }
-    return answered;
   }, [workspaceId]);
+  const refreshDms = useCallback((cause: DmSyncCause) => new Promise<boolean>((resolve) => {
+    const active = dmSync.current;
+    if (active !== null && active.token === liveToken.current) {
+      active.queued = queueDmSync(active.queued, cause);
+      active.waiting.push(resolve);
+      return;
+    }
+    const mine: DmSyncDrain = { token: liveToken.current, queued: queueDmSync(null, cause), waiting: [resolve] };
+    dmSync.current = mine;
+    void drainDms(mine);
+  }), [drainDms]);
 
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {

@@ -2977,6 +2977,31 @@ describe("notices sent to you", () => {
       await waitFor(() => expect(ends).toEqual(["opened"]));
     });
 
+    it("says the invitation isn't there once its own reads answer, though another message sync is still out", async () => {
+      const { bridge, shares, syncs } = heldBridge();
+      const { ends, setStatus } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, NO_INVITATION);
+      await screen.findByTestId("handoff-chats-absent");
+      // Chats is idle when a newer link reveals the invitation again, so this
+      // reveal starts the message sync. Activity queues another pass behind it.
+      const [read, synced] = [shares.length, syncs.length];
+      act(() => setStatus({ status: "redeeming", statusId: "status-2" }));
+      act(() => setStatus({ status: "done", statusId: "status-2", shareId: "share-1" }));
+      await waitFor(() => expect([shares.length > read, syncs.length > synced]).toEqual([true, true]));
+      act(() => bridge.emitWorkspaceActivity());
+      const own = syncs.slice(synced);
+      expect(own).toHaveLength(1);
+      // The reveal's own reads answer without it; the queued pass stays out.
+      await answerEvery(shares, NO_INVITATION);
+      await answerEvery(own, dmSyncResult());
+      await waitFor(() => expect(syncs.length).toBeGreaterThan(synced + 1));
+      expect(await screen.findByTestId("handoff-chats-absent")).toBeTruthy();
+      expect(ends).toEqual([]);
+    });
+
     it("says to create a workspace first when they have none of their own", async () => {
       const { ends, onSwitchWorkspace } = renderHandoff(handoffBridge(), VIEW, [VIEW]);
       expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toContain("Create one from Manage workspaces first.");
