@@ -11,7 +11,7 @@ import { setFrontmatterValue } from './frontmatter-map.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
-import { WORKER_LIVE_VALIDATION_POLICY } from './liveValidationPolicy.js'
+import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from './liveValidationPolicy.js'
 
 const fixturePolicy: OrderedLiveUpdateCutPolicy = {
   maxStructVisits: 1_000_000,
@@ -1082,5 +1082,36 @@ describe('live note capacity (#3575, #2534)', () => {
     const validate = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY)
     expect(validate(journalOver(29_000, [1_000], 500)).kind).toBe('accepted')
     expect(validate(journalOver(29_000, [1_000], 2_000))).toEqual({kind: 'refused', reason: 'capacity-refused', source: 'final'})
+  }, 60_000)
+
+  // A note refused for its weight offers Copy as Markdown, which serializes the open note with this
+  // function. The notes that reach the limit are mostly deleted blocks: a 100-block note that another
+  // program saved about 190 times, each save deleting the body and inserting every block (#3741).
+  it('serializes a note over the capacity, heavy with deleted blocks, to its current text', () => {
+    const block = (n: number) => n % 10 === 0 ? `## Section ${n / 10}`
+      : n % 7 === 0 ? `- item ${n} one\n- item ${n} two\n- item ${n} three`
+      : `Paragraph ${n} says something ordinary about the week, with enough words to be a real line of a note.`
+    const note = (save: number) => Array.from({length: 100}, (_, n) => n === 50 ? `${block(n)} Save ${save}.` : block(n)).join('\n\n') + '\n'
+    const owner = new Y.Doc({gc: false})
+    Y.applyUpdate(owner, Y.encodeStateAsUpdate(markdownToYDoc(note(0))))
+    const body = owner.getXmlFragment('body')
+    let saves = 0
+    while (withinLiveNoteCapacity(owner, WORKER_LIVE_VALIDATION_POLICY)) {
+      const blocks = markdownToYDoc(note(++saves)).getXmlFragment('body').toArray() as Y.XmlElement[]
+      owner.transact(() => {
+        body.delete(0, body.length)
+        body.insert(0, blocks.map(child => child.clone()))
+      })
+    }
+    // The open note holds the same history, deleted blocks included.
+    const open = new Y.Doc({gc: false})
+    Y.applyUpdate(open, Y.encodeStateAsUpdate(owner))
+    const started = performance.now()
+    const markdown = projection.yDocToMarkdown(open)
+    const elapsed = performance.now() - started
+    expect(saves).toBeGreaterThan(150)
+    expect(markdown).toBe(note(saves))
+    // It walks the deleted blocks once; well under the time that would stall the window.
+    expect(elapsed).toBeLessThan(1_000)
   }, 60_000)
 })
