@@ -7,7 +7,6 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SecondaryButton } from "../ui/controls";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, X } from "lucide-react";
-import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   useCallback,
   useContext,
@@ -47,6 +46,8 @@ import { useColorScheme } from "../useColorScheme";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
 import { ShellErrorReporter } from "../shell/useShellError";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import { AppsSettings } from "./AppsSettings";
+import { pinnedAppsFor } from "../../settings/pinnedApps";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
@@ -172,6 +173,10 @@ export function SettingsDialog(props: {
    * view runs no owner live delivery, so it has no such list to manage.
    */
   onOpenLiveDocuments?: () => void;
+  /** Closes Settings and opens one of this workspace's apps in its tab. */
+  onOpenApp?: (appRoot: string) => void;
+  /** Pins an app to the sidebar or unpins it. The shell reports a failure. */
+  onSetAppPinned?: (appRoot: string, pinned: boolean) => void;
 }) {
   const { onWorkspaceSettingsRead } = props;
   // A shared view never runs app code, so it has no trust to change.
@@ -823,48 +828,37 @@ export function SettingsDialog(props: {
             </SettingsSection>
           </div>
         );
-      case "workbench":
+      case "apps":
         return (
-          <div data-testid={settingsSectionPin("workbench")}>
-            <SettingsSection>
-              <SettingRow
-                title="App previews"
-                modified={isModified(
-                  workspaceSettings.sites.defaultPreviewMode,
-                  DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-                )}
-                onReset={() =>
-                  void saveWorkspaceSettings({
-                    sites: {
-                      defaultPreviewMode:
-                        DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-                    },
-                  })
-                }
-                testId="settings-row-site-preview-mode"
-              >
-                <select
-                  aria-label="Default app preview mode"
-                  data-testid="site-preview-mode-select"
-                  value={workspaceSettings.sites.defaultPreviewMode}
-                  onChange={(event) =>
-                    void saveWorkspaceSettings({
-                      sites: {
-                        defaultPreviewMode: event.target
-                          .value as WorkspaceSettings["sites"]["defaultPreviewMode"],
-                      },
-                    })
-                  }
-                  className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
-                >
-                  {WORKSPACE_PREVIEW_MODES.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
-                    </option>
-                  ))}
-                </select>
-              </SettingRow>
-            </SettingsSection>
+          <div data-testid={settingsSectionPin("apps")}>
+            <AppsSettings
+              workspaceId={props.workspaceId}
+              sharedView={!!props.sharedView}
+              defaultPreviewMode={workspaceSettings.sites.defaultPreviewMode}
+              defaultModified={isModified(
+                workspaceSettings.sites.defaultPreviewMode,
+                DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+              )}
+              onDefaultChange={(defaultPreviewMode) =>
+                void saveWorkspaceSettings({ sites: { defaultPreviewMode } })
+              }
+              onDefaultReset={() =>
+                void saveWorkspaceSettings({
+                  sites: {
+                    defaultPreviewMode:
+                      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+                  },
+                })
+              }
+              {...(!props.sharedView
+                ? { trust: { trusted: workspaceTrust.trusted, onOpen: () => { setQuery(""); setActiveSection("privacy"); } } }
+                : {})}
+              pinned={pinnedAppsFor(userSettings, props.workspaceId)}
+              {...(props.onSetAppPinned ? { onSetPinned: props.onSetAppPinned } : {})}
+              {...(props.onOpenApp ? { onOpenApp: props.onOpenApp } : {})}
+              {...(props.onError ? { onError: props.onError } : {})}
+              {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+            />
           </div>
         );
       case "files":
@@ -1221,8 +1215,8 @@ export function SettingsDialog(props: {
         <section className="min-h-0 flex-1 overflow-auto px-12 pt-10 pb-[calc(var(--dohc-toast-room,0px)+3rem)] scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
           {/* Only Sharing matched: no section's heading stands over its results. */}
           <h3
-            // The Agents page shows its own title.
-            hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
+            // The Agents and Apps pages show their own titles.
+            hidden={activeSection === "agents" || activeSection === "apps" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
             className="m-0 mb-6 text-base font-semibold text-ink"
           >
             {activeMeta.label}

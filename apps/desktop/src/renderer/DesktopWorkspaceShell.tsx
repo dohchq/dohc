@@ -7795,6 +7795,11 @@ export function DesktopWorkspaceShell(props: {
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
             {...(settingsAgent ? { openAgent: settingsAgent } : {})}
             onClose={closeSettings}
+            onOpenApp={(appRoot) => {
+              closeSettings();
+              openAppTab(appRoot);
+            }}
+            onSetAppPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
             cloud={settingsCloud}
             onOpenSharing={(target) => {
               closeSettings();

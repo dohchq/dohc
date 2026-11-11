@@ -12,7 +12,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
+import { needsBuiltArtifact } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -34,6 +34,13 @@ import { ipcErrorMessage } from "./ipcError";
 import { isWorkspaceRestricted, withErrorWords } from "../ipc/errorWords";
 import { RestrictedModeState, TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
+import {
+  availableModes,
+  modeLabel,
+  preferredMode,
+  rememberMode,
+  type WorkspacePreviewMode,
+} from "./previewModes";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
@@ -41,9 +48,6 @@ const SHARE_BUILD_REPLACED_MESSAGE =
   "dohc did not share this app. Another view started its preview again before the build finished.";
 const NO_SHARE_OUTPUT_MESSAGE =
   "This app has no static entry file or build output to share.";
-
-type WorkspacePreviewMode =
-  WorkspaceSettingsResult["settings"]["sites"]["defaultPreviewMode"];
 
 type LoadState =
   | { status: "loading" }
@@ -54,40 +58,6 @@ type LoadState =
     }
   | { status: "missing" }
   | { status: "error"; message: string };
-
-function modeLabel(mode: SitePreviewMode): string {
-  if (mode === "dev") return "Dev";
-  if (mode === "build") return "Build";
-  return "Static";
-}
-
-function availableModes(
-  site: SitePackageInfo,
-  sharedView = false,
-): SitePreviewMode[] {
-  const modes: SitePreviewMode[] = [];
-  if (sharedView || site.authority.kind === "share") {
-    const sharedStaticEntry = presentBuildOutput(site) ??
-      (!needsBuiltArtifact(site)
-        ? site.entryPath
-        : null);
-    return sharedStaticEntry ? ["static"] : [];
-  }
-  if (site.entryPath) modes.push("static");
-  if (
-    site.configuredScripts.dev ||
-    site.scripts.dev ||
-    site.configuredScripts.start ||
-    site.scripts.start
-  ) modes.push("dev");
-  if (
-    site.configuredScripts.build ||
-    site.scripts.build ||
-    site.buildOutputs.length > 0 ||
-    presentBuildOutput(site)
-  ) modes.push("build");
-  return modes;
-}
 
 // Reference-stable no-op for the 1s dev-log poll: an unchanged log ring must
 // keep the previous array so setState bails out instead of re-rendering the
@@ -105,63 +75,6 @@ function sameLogs(
       return a.at === b.at && a.stream === b.stream && a.text === b.text;
     })
   );
-}
-
-const SITE_PREVIEW_MODE_STORAGE_PREFIX = "dohc.site-preview-mode.v1";
-
-function storedModeKey(workspaceId: string, siteRoot: string): string {
-  return `${SITE_PREVIEW_MODE_STORAGE_PREFIX}:${workspaceId}:${siteRoot}`;
-}
-
-function readStoredMode(
-  workspaceId: string,
-  siteRoot: string,
-  modes: SitePreviewMode[],
-): SitePreviewMode | null {
-  try {
-    const stored = window.localStorage.getItem(storedModeKey(workspaceId, siteRoot));
-    return modes.includes(stored as SitePreviewMode) ? (stored as SitePreviewMode) : null;
-  } catch {
-    return null;
-  }
-}
-
-function rememberMode(workspaceId: string, siteRoot: string, mode: SitePreviewMode) {
-  try {
-    window.localStorage.setItem(storedModeKey(workspaceId, siteRoot), mode);
-  } catch {
-    // Preview startup must not depend on storage being available.
-  }
-}
-
-function preferredMode(
-  site: SitePackageInfo,
-  modes: SitePreviewMode[],
-  workspaceId: string,
-  defaultPreviewMode: WorkspacePreviewMode,
-  sharedView = false,
-): SitePreviewMode | null {
-  const stored = readStoredMode(workspaceId, site.root, modes);
-  if (stored) return stored;
-  if (sharedView || site.authority.kind === "share") {
-    return modes.includes("static") ? "static" : null;
-  }
-  if (
-    site.configuredPreviewMode &&
-    modes.includes(site.configuredPreviewMode)
-  ) {
-    return site.configuredPreviewMode;
-  }
-  if (
-    defaultPreviewMode !== "auto" &&
-    modes.includes(defaultPreviewMode)
-  ) {
-    return defaultPreviewMode;
-  }
-  if (modes.includes("dev")) return "dev";
-  if (site.kind !== "static" && modes.includes("build")) return "build";
-  if (modes.includes("static")) return "static";
-  return modes.includes("build") ? "build" : null;
 }
 
 export interface SiteShareTarget {
