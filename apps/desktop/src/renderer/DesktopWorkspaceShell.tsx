@@ -3408,12 +3408,19 @@ export function DesktopWorkspaceShell(props: {
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
   const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings.settings) : [], [props.userSettings]);
+  // The navigator's unread badges come from one fetch at its mount, and the
+  // editor is what performs the reads — without this the panel keeps showing
+  // counts the user already cleared until something remounts it.
+  const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
+  const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const chatEditors = useChatEditorTabs({
     workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => group.activeTab ? [group.activeTab] : []),
     enabled: captureAvailable,
     agents: settingsAgents,
+    readRevision: chatsReadRevision + chatsDmReadRevision,
   });
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
@@ -3434,12 +3441,6 @@ export function DesktopWorkspaceShell(props: {
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
-  // The navigator's unread badges come from one fetch at its mount, and the
-  // editor is what performs the reads — without this the panel keeps showing
-  // counts the user already cleared until something remounts it.
-  const [chatsReadRevision, setChatsReadRevision] = useState(0);
-  const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
-  const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
@@ -6777,6 +6778,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
                       tabGlyphs={chatEditors.glyphs}
+                      tabUnread={chatEditors.unread}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}

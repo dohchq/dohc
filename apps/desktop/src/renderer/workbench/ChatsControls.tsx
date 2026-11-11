@@ -54,6 +54,8 @@ export function UnreadPill(props: { count: number; testId: string; tone?: "ink" 
   return (
     <span
       data-testid={props.testId}
+      // ARIA names no span without a role, so it would read the bare number.
+      role="img"
       aria-label={`${props.count} unread`}
       className={`min-w-4 shrink-0 rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums ${
         props.tone === "quiet" ? "bg-line/70 text-ink" : "bg-ink text-bg"

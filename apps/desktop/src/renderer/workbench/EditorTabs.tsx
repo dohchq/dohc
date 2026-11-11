@@ -9,6 +9,7 @@ import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { ChevronDown, Columns2, Share2, X } from "lucide-react";
 import { shortcutAria, shortcutText } from "../../shortcuts/shortcutRegistry";
 import { NARROW_GROUP_HIDDEN, NARROW_GROUP_NO_MIN_WIDTH } from "./tabRowActions";
+import { UnreadPill } from "./ChatsControls";
 import {
   memo,
   useEffect,
@@ -188,6 +189,8 @@ const Tab = memo(function Tab(props: {
   icon: string | undefined;
   active: boolean;
   dirty: boolean;
+  // A hidden conversation's unread messages.
+  unread: number;
   onActivate: (groupId: string, path: string) => void;
   onPress: ((groupId: string, path: string) => void) | undefined;
   onClose: (groupId: string, path: string) => void;
@@ -263,6 +266,11 @@ const Tab = memo(function Tab(props: {
       <span className="flex items-center gap-2">
         <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? `text-muted transition-colors duration-150 ${INACTIVE_GROUP_GLYPH}` : "text-subtle"} />
         <span className="max-w-44 truncate">{name}</span>
+        {/* Ink when the user was addressed, as in Chats: a person or their
+            agent. A group's count is quiet. */}
+        {props.active ? null : (
+          <UnreadPill count={props.unread} tone={props.glyph === "group" ? "quiet" : "ink"} testId="tab-unread" />
+        )}
       </span>
       {/* The close's slot. An unsaved tab shows its dot here, so it is as
           wide as a saved one. Hover, keyboard focus on the tab, or focus on
@@ -757,6 +765,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   tabLabels?: ReadonlyMap<string, string>;
   // A tab whose object its path doesn't name, such as an agent's chat.
   tabGlyphs?: ReadonlyMap<string, ObjectKind>;
+  // Hidden conversations' unread message counts, by path.
+  tabUnread?: ReadonlyMap<string, number>;
   /** The listing by path: a file tab's header-checked kind and page emoji. */
   files?: ReadonlyMap<string, WorkspaceFileEntry>;
   // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
@@ -1035,6 +1045,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             label={props.tabLabels?.get(tab.path)}
             {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
             active={tab.path === props.activeTab}
+            unread={props.tabUnread?.get(tab.path) ?? 0}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
               props.recoveryPaths.has(tab.path)
