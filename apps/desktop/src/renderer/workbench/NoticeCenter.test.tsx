@@ -1392,6 +1392,26 @@ describe("notice center", () => {
     expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
   });
 
+  // #2719: a note whose waiting edits reached their limit is named at once,
+  // and delivering them is what lifts the pause.
+  it.each([
+    { paths: ["notes/plan.md"], body: '"notes/plan.md" has too many edits waiting to reach the server.' },
+    { paths: ["a.md", "b.md"], body: "2 files have too many edits waiting to reach the server." },
+  ])("names $paths when its waiting edits pause live editing", async ({ paths, body }) => {
+    const onRetryLiveDelivery = vi.fn();
+    renderNotices({
+      syncStatus: { ...liveDeliveryStatus("retrying", "unsent-edits-limit"), ownerLivePausedPaths: paths },
+      onRetryLiveDelivery,
+    });
+
+    const toast = screen.getByTestId("owner-live-delivery-toast");
+    expect(toast.textContent).toContain("Live editing paused");
+    expect(toast.textContent).toContain(body);
+    expect(toast.textContent).not.toContain("Your edits are saved on this device.");
+    await userEvent.click(screen.getByTestId("owner-live-delivery-toast-action"));
+    expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
+  });
+
   // A document that moved, or a workspace that changed, is not a connection
   // to dial again: the way forward is the live-document list, and nothing
   // here re-binds a document identity on the user's behalf.

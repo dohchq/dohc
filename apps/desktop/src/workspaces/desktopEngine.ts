@@ -82,7 +82,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required" | "unsent-edits-limit";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -180,6 +180,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let activeOwnerWorkspace: string | undefined;
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
+  // Notes that take no edits because too many wait to reach the server. The engine lifts it once a pass delivers them.
+  const pausedOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
   const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // The ready documents from each workspace's last complete live-host list, for the move guard.
@@ -318,7 +320,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     ownerDeliveryGeneration += 1;
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
     failedOwnerDocuments.clear();
-    frozenOwnerDocuments.clear();
+    frozenOwnerDocuments.clear(); pausedOwnerDocuments.clear();
     ownerStopFailures.clear();
     liveDocumentPaths.clear();
     const previous = ownerDelivery;
@@ -404,6 +406,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
               for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
+              const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
+              for (const path of paused) if (!documents.some(document => document.binding.currentPath === path) || refusedPaths(workspaceId).has(path)) paused.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
               frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
@@ -436,9 +440,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const blocked = result === "frozen" && !refusedPaths(workspaceId).has(path);
               if (result === "retry" || blocked) failures.add(path); else failures.delete(path);
               if (blocked) frozen.add(path); else if (result !== "retry") frozen.delete(path);
+              if (result === "acknowledged" || result === "empty") paused.delete(path);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
-                frozen.size && !ownerMustAct ? "document-unavailable" : reason);
+                frozen.size && !ownerMustAct ? "document-unavailable" : paused.size && !reason ? "unsent-edits-limit" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {
@@ -1048,6 +1053,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}) {
       if (ownerStopFailures.get(workspaceId)?.delete(target.objectId)) notifyRenderer({workspaceId});
+    },
+    /** The engine refused an edit to `path` because its queue for the server takes no more. A refused queue has its own notice. */
+    noteOwnerLiveEditsPaused(workspaceId: string, path: string): void {
+      const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
+      if (!dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) || paused.has(path) || refusedPaths(workspaceId).has(path)) return;
+      pausedOwnerDocuments.set(workspaceId, paused.add(path));
+      const reason = ownerDeliveryReason.get(workspaceId) ?? "unsent-edits-limit";
+      if (ownerDeliveryStatus.get(workspaceId) === "retrying" && ownerDeliveryReason.get(workspaceId) === reason) dependencies.notifyOwnerDeliveryChanged?.(workspaceId);
+      else setOwnerDeliveryStatus(workspaceId, "retrying", reason);
+    },
+    ownerLivePausedPaths(workspaceId: string): string[] {
+      return [...(pausedOwnerDocuments.get(workspaceId) ?? [])];
     },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;

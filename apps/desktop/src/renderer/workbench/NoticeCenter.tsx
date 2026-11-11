@@ -576,7 +576,18 @@ export const AUTOMATION_HOLDS_UNREADABLE =
 type LiveDeliveryRecovery = "retry" | "live-documents" | "restart";
 function liveDeliveryCopy(
   reason: SyncStatusResult["ownerLiveDeliveryReason"],
+  pausedPaths: readonly string[] = [],
 ): { title: string; body: string; recovery: LiveDeliveryRecovery; Icon: typeof Bell } {
+  // Delivering the waiting edits lifts it, so Try again is the way forward.
+  if (reason === "unsent-edits-limit") {
+    const subject = pausedPaths.length === 1 ? `"${pausedPaths[0]}" has` : pausedPaths.length > 1 ? `${pausedPaths.length} files have` : "A file has";
+    return {
+      title: "Live editing paused",
+      body: `${subject} too many edits waiting to reach the server. They are saved on this device, and live editing is paused there until they arrive.`,
+      recovery: "retry",
+      Icon: RefreshCw,
+    };
+  }
   if (reason === "document-unavailable") {
     return {
       title: "Live editing paused",
@@ -1382,9 +1393,10 @@ export function NoticeCenter(props: {
   }
   // Keyed, so an unchanged status keeps one copy object: the notice list and
   // the toast below both hang off its identity.
+  const pausedPaths = props.syncStatus?.ownerLivePausedPaths?.join("\n") ?? "";
   const liveDelivery = useMemo(
-    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason) : null),
-    [liveDeliveryKey, liveDeliveryReason],
+    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason, pausedPaths ? pausedPaths.split("\n") : []) : null),
+    [liveDeliveryKey, liveDeliveryReason, pausedPaths],
   );
   // One report for the row and the toast, so a person who copies from either
   // pastes the same facts — including when the notice was raised.

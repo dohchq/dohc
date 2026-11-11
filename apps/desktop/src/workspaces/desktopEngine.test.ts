@@ -1367,6 +1367,48 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close();}
   });
 
+  // #2719: the engine refuses a note's next edit once too many wait to reach the server, before any pass reports it.
+  it("names a note whose edits the engine paused until a pass delivers them", async () => {
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
+    quarantineMock.read.mockResolvedValue([]);
+    ownerDeliveryMock.pass.mockResolvedValue("retry");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+      const passes = ownerDeliveryMock.pass.mock.calls.length;
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("unsent-edits-limit");
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/plan.md"]);
+      expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(passes);
+      // A pass that still cannot deliver keeps the pause; the second waits for the first to finish.
+      for (const more of [1, 2]) {
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(passes + more));
+      }
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("unsent-edits-limit");
+      ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
+  it("leaves a note the server refused to its own notice", async () => {
+    const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
+    quarantineMock.read.mockResolvedValue([{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "current",
+      binding, headDeliveryId: "current-head", recovery: "paused"}]);
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(1));
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+      expect(f.engine.ownerLiveDeliveryReason("owner")).not.toBe("unsent-edits-limit");
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
   it.each(["empty", "acknowledged"])("discovers the set-aside queue when enrollment commits in a %s pass", async outcome => {
     const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
     quarantineMock.read.mockResolvedValue([]);
