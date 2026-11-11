@@ -3675,6 +3675,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("merge_bases.sql"),
         sets_user_version: None,
     },
+    // Who last stopped or resumed live editing of each owner document.
+    Migration {
+        ordinal: 94,
+        id: "v2-live-document-changes",
+        sql: include_str!("live_document_changes.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5702,6 +5709,10 @@ mod tests {
             (
                 "v2-merge-bases",
                 "3ea47abe3fbbb37351f430d6d9eb299af3f9c23bda34407a6653357ea3752122",
+            ),
+            (
+                "v2-live-document-changes",
+                "9156bc9ad8216b5b49f6d14cf6f21830650d9e7518e994a59512f10399253902",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

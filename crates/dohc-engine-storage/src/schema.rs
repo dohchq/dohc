@@ -195,6 +195,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "owner_ydoc_outbox_entries",
     "owner_ydoc_outbox_refusals",
     "owner_live_stops",
+    "live_document_changes",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
