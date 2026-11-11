@@ -438,7 +438,7 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
          AND e.owner_user_id=w.owner_user_id
          AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity
          AND a.owner_user_id=e.owner_user_id
-         AND a.completion_json IS NOT NULL
+         AND a.retired_at_ms IS NULL AND a.completion_json IS NOT NULL
          AND d.lineage_state='current' AND d.admission_state='open'
          AND EXISTS (
            SELECT 1 FROM sync_relay_object_moments m
