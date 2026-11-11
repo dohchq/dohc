@@ -23,7 +23,7 @@ export interface LocalAppLaunchBackend {
 }
 export interface LocalAppLaunchHost {
   launch(publicationId: string, signal: AbortSignal): Promise<string>;
-  /** keepAlive: dohc's own tab, which renews the session, gates the app frame's navigations in main, and credits a click in the frame. Main keeps its URL. */
+  /** keepAlive: dohc's own tab, which renews the session, gates the app frame's navigations in main, and credits a click in the frame. Main returns its URL only to the window that asked, and admits only a webview loading it; `/session` accepts only this origin. */
   launchSession(publicationId: string, signal: AbortSignal, options?: { keepAlive?: boolean }): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
 }
