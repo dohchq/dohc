@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
-import { resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
+import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
@@ -112,23 +115,34 @@ test("asks before removing an agent, and manages archived agents in Settings", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest(temp, "agent-archive");
+    // Nova and Scout are in Settings; opening the workspace starts their chats.
+    const launch = { command: `node "${fakeRunner.replaceAll('"', '\\"')}" ask` };
+    const settings: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      agents: {
+        nova: { name: "Nova", hue: "olive", launch, changesFiles: true, enabled: true, timeoutMinutes: 1 },
+        scout: { name: "Scout", hue: "teal", launch, changesFiles: true, enabled: true, timeoutMinutes: 1 },
+      },
+    };
+    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
     await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect.poll(() => page.evaluate(async () => {
+      const api = (window as unknown as { dohcDesktop: {
+        getWorkspaceRegistry(): Promise<{ workspaces: { workspaceId: string }[] }>;
+        listChatChannels(payload: { workspaceId: string }): Promise<{ channels: { kind: string; agentId?: string }[] }>;
+      } }).dohcDesktop;
+      const workspace = (await api.getWorkspaceRegistry()).workspaces[0];
+      if (!workspace) return [];
+      const { channels } = await api.listChatChannels({ workspaceId: workspace.workspaceId });
+      return channels.flatMap((channel) => channel.kind === "agent" && channel.agentId ? [channel.agentId] : []).sort();
+    }), { timeout: 30_000 }).toEqual(["nova", "scout"]);
     const panel = await openChatsView(page);
-
     const agents = panel.getByTestId("chats-my-agent");
-    for (const [name, count] of [["Nova", 1], ["Scout", 2]] as const) {
-      await panel.getByTestId("chats-add-agent-open").click();
-      await page.getByTestId("chats-add-agent-agent-name").fill(name);
-      await page.getByText("Advanced", { exact: true }).click();
-      await page.getByTestId("chats-add-agent-command").fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
-      await page.getByTestId("chats-add-agent-submit").click();
-      await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-      await expect(agents).toHaveCount(count);
-    }
+    await expect(agents).toHaveCount(2);
     const menu = page.getByTestId("chat-row-menu");
     const nova = agents.filter({ hasText: "Nova" });
     const scout = agents.filter({ hasText: "Scout" });
