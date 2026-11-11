@@ -963,6 +963,8 @@ export function DesktopWorkspaceShell(props: {
     privacySettingsAction,
     keepCollectionsHere,
   } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
+  const shellErrorsRef = useRef(shellErrors);
+  shellErrorsRef.current = shellErrors;
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -1239,9 +1241,9 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
-        // The document's "Stopping live editing" row already says it waits, and keeps its actions.
-        const rows = shownQuarantines.current;
-        if (rows.workspaceId === failedFor && rows.shown.get(`owner-live-quarantine:${failedFor}:${waiting.objectId}`)?.startsWith("stopping")) return;
+        // The document's "Stopping live editing" row, while it stands, already says it waits and keeps its actions.
+        const row = `owner-live-quarantine:${failedFor}:${waiting.objectId}`;
+        if (shellErrorsRef.current.some(error => error.identity === row && error.title?.startsWith("Stopping live editing"))) return;
         // Copy details keeps what the error said. A plain relay error has words and no cause.
         const {cause, words} = readError(error);
         const said = cause ?? words;

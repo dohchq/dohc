@@ -3508,6 +3508,25 @@ describe("owner live documents", () => {
     expect(within(row).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
     expect(within(row).getByRole("button", {name: "Try again"})).toBeTruthy();
   });
+  // A dismissed row says nothing, so Live documents reports the wait itself.
+  it("reports a waiting Stop from Live documents after its Stopping row was dismissed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValue(waitingStop());
+    bridge.getSyncStatus.mockResolvedValue(stoppingStatus());
+    const title = `Stopping live editing for ${LIVE_ROW.path}`;
+    const user = userEvent.setup(); renderShell(bridge);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center")).findByText(title)).closest("li")!;
+    await user.click(within(row).getByRole("button", {name: "Dismiss notice"}));
+    await waitFor(() => expect(screen.queryByText(title)).toBeNull());
+    if (screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    const toast = (await screen.findByText(LIVE_STOP_WAITING)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
+    expect(within(toast).getByText(title)).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+  });
   it("keeps the Stopping row as it was when its Try again waits again", async () => {
     const bridge = makeBridge(Promise.resolve(null)), again = deferred<StopOwnerLiveDocumentResult>();
     bridge.getSyncStatus.mockResolvedValue(stoppingStatus());
