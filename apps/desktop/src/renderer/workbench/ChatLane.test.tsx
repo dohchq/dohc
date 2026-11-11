@@ -446,14 +446,17 @@ describe("ChatLane", () => {
   });
 
   it("stops counting arrivals when the pane grows until every message fits", async () => {
-    const resized: Array<() => void> = [];
+    // Each observer and what it watches, so a resize reaches only the list's.
+    const observers: Array<{ targets: Set<Element>; fire: () => void }> = [];
     vi.stubGlobal("ResizeObserver", class {
+      private readonly entry: { targets: Set<Element>; fire: () => void };
       constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) {
-        resized.push(() => callback([{ contentRect: { width: 1200 } }]));
+        this.entry = { targets: new Set(), fire: () => callback([{ contentRect: { width: 1200 } }]) };
+        observers.push(this.entry);
       }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
+      observe(target: Element) { this.entry.targets.add(target); }
+      unobserve(target: Element) { this.entry.targets.delete(target); }
+      disconnect() { this.entry.targets.clear(); }
     });
     try {
       render(lane());
@@ -473,7 +476,7 @@ describe("ChatLane", () => {
       // The window grows: the list holds everything, and nothing scrolls.
       Object.defineProperty(list, "clientHeight", { configurable: true, value: 2000 });
       list.scrollTop = 0;
-      act(() => { for (const fire of resized) fire(); });
+      act(() => { for (const observer of observers) if (observer.targets.has(list)) observer.fire(); });
       expect(screen.queryByTestId("chats-lane-new-messages")).toBeNull();
     } finally {
       vi.unstubAllGlobals();

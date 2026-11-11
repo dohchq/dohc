@@ -431,10 +431,10 @@ export function MessageReactions(props: {
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
-          className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[12px] leading-none transition-colors duration-75 disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
             group.mine
               ? "border-accent/60 bg-accent/15 text-ink"
-              : "border-transparent bg-panel-2 text-muted hover:border-line hover:text-ink"
+              : "border-line bg-bg text-muted hover:border-ink/40 hover:text-ink"
           }`}
         >
           <span aria-hidden>{group.emoji}</span>
@@ -492,9 +492,9 @@ const DAY_DIVIDER_TOP = 10;
 // edge, so the copy steps aside while the next day's divider passes under it.
 const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
 
-// A stream keeps one column in the middle of a wide pane: the text's 720px,
-// its face and the insets. Rows, day lines, the working row and the composer
-// share it, so a row's actions and the composer stay beside the words.
+// A conversation keeps one column in the middle of a wide pane: the text's
+// 720px, its face and the insets. Rows, day lines, the working row and the
+// composer share it, so a row's actions and the composer stay beside the words.
 export const STREAM_COLUMN = "mx-auto w-full max-w-[808px]";
 
 // A row is a face column and the text, at the spacing each place gives it.
@@ -504,13 +504,13 @@ export const STREAM_COLUMN = "mx-auto w-full max-w-[808px]";
 // divider's inset, so faces and day lines keep one left edge.
 export const DENSITY = {
   stream: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", column: STREAM_COLUMN, divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
   },
   thread: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", column: "", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", column: "", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
   },
 } as const;
 
@@ -594,6 +594,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   density?: ChatDensity;
   // The pane's background, which the pinned day covers messages with.
   surface?: "bg" | "panel";
+  // Keeps the rows in the middle column of a wide pane. The host puts its
+  // composer in the same column.
+  column?: boolean;
 }) {
   const density = props.density ?? "stream";
   const anchor = props.anchor ?? "end";
@@ -812,7 +815,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
         data-open={open ? "true" : undefined}
-        className={`relative flex flex-col ${sizes.column} ${
+        className={`relative flex flex-col ${props.column ? STREAM_COLUMN : ""} ${
           props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
@@ -948,7 +951,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   if (props.loading || props.messages.length === 0) {
     // Loading rows and the empty line start where the messages will.
     return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${anchor === "end" ? "justify-end" : ""}`}>
-      <div className={`px-5 ${DENSITY[density].column}`}>
+      <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
         {props.loading ? (
           <SkeletonRows label="Loading..." className="pt-1" />
         ) : (
@@ -965,7 +968,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
         style={{ right: scrollbarWidth }}
       >
-        <div className={DENSITY[density].column}>
+        <div className={props.column ? STREAM_COLUMN : undefined}>
           <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
         </div>
       </div>
@@ -988,7 +991,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     onLayout={event => setViewportHeight(event.nativeEvent.layout.height)}
     recycleItems={false}
     alwaysRender={pinned}
-    className="min-h-0 flex-1 overflow-y-auto"
+    // The column keeps its place when a scrollbar appears.
+    className={`min-h-0 flex-1 overflow-y-auto ${props.column ? "[scrollbar-gutter:stable]" : ""}`}
     // A narrow row's hover bar rises above it, so the first row needs the room.
     style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
     role="list"
