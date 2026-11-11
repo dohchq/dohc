@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,8 +190,7 @@ describe("readLoginShellPath cleanup", () => {
   });
 });
 
-// A real login shell in a Finder-like environment, with a profile that prints
-// its own output.
+// Use the fixture profile without the host's /etc/profile, which can replace HOME.
 describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
   let home: string | undefined;
   afterEach(() => {
@@ -209,13 +209,22 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
     expect(() => process.kill(-pid, 0)).toThrow();
   }
 
+  function readProfile(dir: string, timeoutMs?: number): Promise<string[] | null> {
+    return readLoginShellPath({
+      shell: "/bin/bash", env: { HOME: dir, SHELL: "/bin/bash" }, ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      spawn: (shell, command, env) => spawn(shell, ["--noprofile", "-ilc", `. "$HOME/.bash_profile"; ${command}`], {
+        env, stdio: ["ignore", "pipe", "ignore"], detached: true,
+      }),
+    });
+  }
+
   it("reads the PATH a login profile sets, past the profile's own output", async () => {
     const dir = profile([
       'echo "Last login: today on ttys000: /not/a/path"',
       'export PATH="/opt/dohc-test/bin:relative/bin:$PATH"',
       "",
     ].join("\n"));
-    const entries = await readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir, SHELL: "/bin/bash" } });
+    const entries = await readProfile(dir);
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");
     expect(entries).not.toContain("relative/bin");
     expect(entries).not.toContain("/not/a/path");
@@ -231,7 +240,7 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
       "",
     ].join("\n"));
     const started = Date.now();
-    const entries = await readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir }, timeoutMs: 10_000 });
+    const entries = await readProfile(dir, 10_000);
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");
     // The PATH arriving ended it; the deadline did not.
     expect(Date.now() - started).toBeLessThan(10_000);
@@ -241,7 +250,7 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
   it("gives up on a profile that hangs before printing, and ends its group", async () => {
     const dir = profile('echo $$ > "$HOME/shell.pid"\nsleep 30\n');
     const started = Date.now();
-    await expect(readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir }, timeoutMs: 1_000 })).resolves.toBeNull();
+    await expect(readProfile(dir, 1_000)).resolves.toBeNull();
     expect(Date.now() - started).toBeLessThan(5_000);
     await vi.waitFor(() => groupGone(join(dir, "shell.pid")));
   });

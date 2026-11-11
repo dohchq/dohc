@@ -105,9 +105,11 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths = kindInp
       directory = dirname(directory);
       for (const name of ["config", "config.toml"]) {
         const path = join(directory, ".cargo", name);
-        hash.update(path + "\0");
-        hash.update(existsSync(path) ? readFileSync(path) : "<deleted>");
-        hash.update("\0");
+        if (existsSync(path)) {
+          hash.update(path + "\0");
+          hash.update(readFileSync(path));
+          hash.update("\0");
+        }
       }
     }
     const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
