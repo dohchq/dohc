@@ -6428,18 +6428,23 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(outbox, [(b.clone(), 7)]);
-        let insert = |reference: &str, kind: &str, thread: Option<&str>, channel: Option<&str>| {
+        let insert = |reference: &str,
+                      kind: &str,
+                      target: &str,
+                      thread: Option<&str>,
+                      channel: Option<&str>| {
             conn.execute(
-                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id,                  thread_id, channel_id, created_at_ms) VALUES (?1, 'ws', ?2, 'target', ?3, ?4, 1)",
-                rusqlite::params![reference, kind, thread, channel],
+                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id,                  thread_id, channel_id, created_at_ms) VALUES (?1, 'ws', ?2, ?3, ?4, ?5, 1)",
+                rusqlite::params![reference, kind, target, thread, channel],
             )
         };
-        assert!(insert(&"C".repeat(43), "chat", None, None).is_ok());
-        assert!(insert(&"D".repeat(43), "thread", None, Some("channel")).is_ok());
+        assert!(insert(&"C".repeat(43), "chat", "target", None, None).is_ok());
+        assert!(insert(&"D".repeat(43), "thread", "target", None, Some("channel")).is_ok());
         assert!(
-            insert(&"E".repeat(43), "thread", None, None).is_err(),
+            insert(&"E".repeat(43), "thread", "target", None, None).is_err(),
             "a second reference to one thread"
         );
+        // Each bad shape names another target, so only its shape can refuse it.
         for (kind, thread, channel) in [
             ("chat", None, Some("channel")),
             ("chat", Some("thread"), None),
@@ -6447,7 +6452,7 @@ mod tests {
             ("folder", None, None),
         ] {
             assert!(
-                insert(&"F".repeat(43), kind, thread, channel).is_err(),
+                insert(&"F".repeat(43), kind, "other", thread, channel).is_err(),
                 "{kind} {thread:?} {channel:?}"
             );
         }
