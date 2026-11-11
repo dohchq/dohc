@@ -24,7 +24,7 @@ function answer(r) {
       keepsMeaning: mode !== 'witness-unsafe'});
   }
   const fault = r.currentPath;
-  if (fault === 'crash') return process.exit(17);
+  if (fault === 'crash' || mode === 'request-crash') return process.exit(17);
   if (fault === 'hang') return;
   if (fault === 'memory') {const allocations = []; for (let i = 0; i < 80; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
   // Commits about 711 MiB on Windows, above the real reader's highest accepted peak of 659 MiB.

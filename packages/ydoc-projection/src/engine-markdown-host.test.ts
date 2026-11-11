@@ -306,6 +306,57 @@ it('constructs and proves 5000 mixed paragraphs with the shared live validation 
     await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 }, 60000)
+const words = 'the quiet river carried small boats past the old mill while people walked'.split(' ')
+const phrase = (n: number, length: number) => Array.from({length}, (_, i) => words[(n * 7 + i * 3) % words.length]).join(' ')
+function written(bytes: number, block: (n: number) => string) {
+  const blocks: string[] = []
+  for (let size = 0; size < bytes; size += blocks.at(-1)!.length + 2) blocks.push(block(blocks.length))
+  return blocks
+}
+// Tables, nested lists and quotes: many block elements for their bytes.
+const dense = (n: number) => n % 3 === 0
+  ? ['| a | b | c | d | e |', '| --- | --- | --- | --- | --- |', ...Array.from({length: 6}, (_, r) =>
+    `| ${Array.from({length: 5}, (_, c) => `${words[(n + r + c) % words.length]} ${r}.${c}`).join(' | ')} |`)].join('\n')
+  : n % 3 === 1 ? `- ${phrase(n, 5)}\n  - ${phrase(n + 1, 5)}\n    - **${phrase(n + 2, 3)}**\n  1. ${phrase(n + 3, 4)}\n- ${phrase(n + 4, 5)}`
+  : `> ${phrase(n, 20)}\n>\n> - ${phrase(n + 1, 6)}\n> - ${phrase(n + 2, 6)}`
+const ordinary = (n: number) => [`## Section ${n}`, `${phrase(n, 30)} with **a bold phrase**, an *aside* and [a link](https://example.com/${n}).`,
+  `- ${phrase(n, 8)}\n- ${phrase(n + 1, 9)}`, `${phrase(n, 40)}.`][n % 4]!
+// A note typed a character at a time, out of order, so no two edits merge.
+function typed(paragraphs: number, length: number) {
+  const doc = markdownToYDoc('Typed')
+  const body = doc.getXmlFragment('body')
+  for (let p = 0; p < paragraphs; p++) {
+    const text = new Y.XmlText(), paragraph = new Y.XmlElement('paragraph')
+    doc.transact(() => {
+      paragraph.insert(0, [text]); body.insert(body.length, [paragraph])
+      for (let i = length - 1; i >= 0; i--) text.insert(0, words[(p + i) % words.length]![0]!)
+    })
+  }
+  return doc
+}
+it.each([
+  ['dense', () => markdownToYDoc(written(490_000, dense).join('\n\n'))],
+  ['typed', () => typed(1_500, 100)],
+])('refuses a %s note over the reader capacity before its heap fills', async (_, build) => {
+  const host = await start(), base = build()
+  try {
+    await hello(host)
+    const source = Buffer.from(`Edited\n\n${yDocToMarkdown(base)}`)
+    request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
+    expect(await host.json()).toEqual({id: 2, kind: 'refused', reason: 'capacity-refused'})
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 60000)
+it('constructs an ordinary 1.5 MB note under the reader capacity', async () => {
+  const blocks = written(1_500_000, ordinary), host = await start(), base = markdownToYDoc(blocks.join('\n\n'))
+  try {
+    await hello(host)
+    blocks[blocks.length >> 1] = `Edited ${blocks[blocks.length >> 1]}`
+    request(host.child, 2, 'construct', Buffer.from(blocks.join('\n\n')), Y.encodeStateAsUpdate(base))
+    expect((await success(host, 2)).result.kind).toBe('constructed')
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 120000)
 it('ends the child on an allocation RangeError without sending a document verdict', async () => {
   const preload = join(directory, 'allocation-failure.cjs')
   await writeFile(preload, `const decode = TextDecoder.prototype.decode;
