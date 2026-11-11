@@ -86,6 +86,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
   dohc_list_live_documents: ["share.live.documents.list"],
+  dohc_stop_live_editing: ["share.live.document.stop"],
+  dohc_resume_live_editing: ["share.live.document.resume"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -2424,6 +2426,20 @@ export async function stopAgain(ctx: ToolContext, args: { path: string; incident
 export async function listLiveDocuments(ctx: ToolContext, args: { cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
   return requestCli(ctx, "liveDocuments", args.cursor === undefined ? {} : { cursor: args.cursor });
+}
+
+export async function stopLiveEditing(ctx: ToolContext, args: { path: string; objectId?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop live editing." };
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "liveStop", { path: resolved.normalized, ...(args.objectId === undefined ? {} : { objectId: args.objectId }) });
+}
+
+export async function resumeLiveEditing(ctx: ToolContext, args: { path: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to resume live editing." };
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "liveResume", { path: resolved.normalized });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

@@ -373,8 +373,13 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
 
-// The owner's Live documents list. The cursor is the list's own nextCursor.
+// The owner's Live documents list, and its Stop and Resume for one document.
+// The cursor is the list's own nextCursor. A list row's objectId lets Stop
+// reach the server's document when this computer's file moved or is gone.
+const liveDocumentObjectIdSchema = z.string().min(1).max(512);
 const liveDocumentsArgsSchema = z.object({ ...argsBase, cursor: documentPathArg.optional() }).strict();
+const liveStopArgsSchema = z.object({ ...argsBase, path: documentPathArg, objectId: liveDocumentObjectIdSchema.optional() }).strict();
+const liveResumeArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 
 const heldNoteChangeArgsSchema = z.discriminatedUnion("action", [
   z.object({...argsBase, path: documentPathArg, action: z.literal("review")}).strict(),
@@ -681,6 +686,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema}).strict(),
   z.object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveStop"), args: liveStopArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveResume"), args: liveResumeArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -780,6 +787,8 @@ export const CLI_CAPABILITIES = {
   stopAgain: ["share.live.document.stop"],
   heldNoteChange: ["document.held.change"],
   liveDocuments: ["share.live.documents.list"],
+  liveStop: ["share.live.document.stop"],
+  liveResume: ["share.live.document.resume"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1679,7 +1688,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
     ok: z.literal(true),
     documents: z.array(z.object({
       path: z.string().min(1),
-      objectId: z.string().min(1).max(512),
+      objectId: liveDocumentObjectIdSchema,
       status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
       reason: liveDocumentReasonSchema.optional(),
       canResume: z.boolean(),
@@ -2042,6 +2051,8 @@ export const cliResultSchemas = {
   stopAgain: stopAgainResultSchema,
   heldNoteChange: heldNoteChangeResultSchema,
   liveDocuments: liveDocumentsResultSchema,
+  liveStop: stopAgainResultSchema,
+  liveResume: retryKeptEditsResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

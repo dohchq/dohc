@@ -387,6 +387,30 @@ export function createOwnerLiveDocumentActions<
   };
 }
 
+/**
+ * Live documents' Stop for one row, from the window or an agent: the
+ * document the row names, or the one at its path now. Windows showing the
+ * workspace hear that it stopped.
+ */
+export async function stopNamedOwnerLiveDocument<
+  Workspace extends { workspaceId: string; shareView?: unknown },
+  Operation extends { workspace: Workspace; assertCurrent(): void },
+>(
+  actions: ReturnType<typeof createOwnerLiveDocumentActions<Workspace, Operation>>,
+  dependencies: Pick<OwnerLiveDocumentActionDependencies<Workspace>, "liveDocument"> & {
+    sendRendererActivity(scope: {workspaceId: string; liveDocumentStopped: string}): void;
+  },
+  input: {workspaceId: string; path: string; objectId?: string; again?: OwnerLiveStopAgain},
+  operation: Operation,
+): Promise<StopOwnerLiveDocumentResult> {
+  const objectId = input.again?.objectId ?? input.objectId ??
+    (await dependencies.liveDocument(operation.workspace, {path: input.path}))?.objectId;
+  operation.assertCurrent();
+  const result = await actions.stop({...input, ...(objectId !== undefined ? {objectId} : {})}, operation);
+  if (objectId !== undefined) dependencies.sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: objectId});
+  return result;
+}
+
 export function createRelaySharesIpcHandlers<
   Sender extends { id: number },
   Event extends { sender: Sender },
@@ -1262,14 +1286,7 @@ export function createRelaySharesIpcHandlers<
     listOwnerLiveDocuments: (input, { operation }) => ownerLiveDocuments.list(input, operation),
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
-    stopOwnerLiveDocument: async (input, { operation }) => {
-      const objectId = input.again?.objectId ?? input.objectId ??
-        (await dependencies.liveDocument(operation.workspace, {path: input.path}))?.objectId;
-      operation.assertCurrent();
-      const result = await ownerLiveDocuments.stop({...input, ...(objectId !== undefined ? {objectId} : {})}, operation);
-      if (objectId !== undefined) dependencies.sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: objectId});
-      return result;
-    },
+    stopOwnerLiveDocument: (input, { operation }) => stopNamedOwnerLiveDocument(ownerLiveDocuments, dependencies, input, operation),
     resumeOwnerLiveDocument: (input, { operation }) => ownerLiveDocuments.resume(input, operation),
     retryOwnerLiveQuarantine: async (input, { operation }) => {
       operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);

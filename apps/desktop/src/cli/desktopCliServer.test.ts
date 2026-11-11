@@ -1,8 +1,9 @@
 import { LIVE_STOP_WAITING, liveStopError } from "../ipc/liveEditingStop";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, moveWorkspacePath, PENDING_SHARE_READ_WARNING, readWorkspaceFile, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, moveWorkspacePath, PENDING_SHARE_READ_WARNING, readWorkspaceFile, resumeLiveEditing, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, stopLiveEditing, workspaceStatus } from "@dohc/mcp/tools";
 import { OwnerLiveDocument, type OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
+import { stopNamedOwnerLiveDocument } from "../ipc/relaySharesIpc";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { createShareLinkAgentActions } from "../ipc/shareLinkAgentActions";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
@@ -2161,9 +2162,9 @@ it("refuses kept edits on a retired desktop attachment before reaching the engin
   expect(f.stopAgain).not.toHaveBeenCalled();
 });
 
-// Both agent doors read the Live documents list through the desktop CLI
-// server, wired as main wires it: the dialog's own list, with a stand-in
-// server that hosts notes/plan.md.
+// Both agent doors reach Live documents' list, Stop and Resume through the
+// desktop CLI server, wired as main wires them: the dialog's own actions,
+// with a stand-in server that hosts notes/plan.md.
 async function liveDocumentsFixture(options: { caller?: string } = {}) {
   const f = await keptEditsFixture(options);
   const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", {
@@ -2176,11 +2177,20 @@ async function liveDocumentsFixture(options: { caller?: string } = {}) {
   const retired: Record<string, unknown>[] = [{ path: "notes/old.md", objectId: "object-old", status: "retired" }];
   h.relay.mockImplementation(async (_credentials, path, init) => {
     expect(path.startsWith("/sync/workspace/live-host")).toBe(true);
-    expect(init?.method).toBeUndefined();
+    const body = init?.body === undefined ? undefined : JSON.parse(String(init.body)) as { path: string; objectId?: string };
+    if (init?.method === "DELETE") return { ok: true, objectId: body!.objectId, path: body!.path, status: "retired", acceptedCursor: 3 };
+    if (init?.method === "POST") return { ok: true, objectId: "object-plan", path: body!.path, status: "preparing" };
     return path.includes("retired=1") ? { ok: true, documents: retired, nextCursor: null } : { ok: true, documents };
   });
-  f.dependencies.ownerLiveDocuments = (operation, input) =>
-    h.actions.list(input, operation as unknown as { workspace: { workspaceId: string }; assertCurrent(): void });
+  const activity = vi.fn();
+  const authors: unknown[] = [];
+  const operationOf = (operation: { workspace: RegistryEntry; assertCurrent(): void }) => operation as unknown as { workspace: { workspaceId: string }; assertCurrent(): void };
+  f.dependencies.ownerLiveDocuments = {
+    list: (operation, input) => h.actions.list(input, operationOf(operation)),
+    stop: (operation, { author, ...input }) => (authors.push(author), stopNamedOwnerLiveDocument(h.actions, { liveDocument: async () => h.document, sendRendererActivity: activity },
+      { workspaceId: operation.workspace.workspaceId, ...input }, operationOf(operation))),
+    resume: (operation, { author, ...input }) => (authors.push(author), h.actions.resume({ workspaceId: operation.workspace.workspaceId, ...input }, operationOf(operation))),
+  };
   await f.create().startDesktopCliServer();
   const transport = async (input: CliRequestWithoutToken) => {
     const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
@@ -2196,8 +2206,19 @@ async function liveDocumentsFixture(options: { caller?: string } = {}) {
     return answer;
   };
   const ctx = { root: cwd, home: join(f.root, "state"), request: transport };
-  const doors = { cli: () => cli("live"), mcp: () => listLiveDocuments(ctx, {}) };
-  return { ...f, h, doors };
+  const doors = {
+    cli: {
+      list: () => cli("live"),
+      stop: (path: string, objectId?: string) => objectId === undefined ? cli("stop", path) : cli("stop", path, "--object-id", objectId),
+      resume: (path: string) => cli("resume", path),
+    },
+    mcp: {
+      list: () => listLiveDocuments(ctx, {}),
+      stop: (path: string, objectId?: string) => stopLiveEditing(ctx, objectId === undefined ? { path } : { path, objectId }),
+      resume: (path: string) => resumeLiveEditing(ctx, { path }),
+    },
+  };
+  return { ...f, h, activity, authors, transport, doors };
 }
 
 // Agents read reason codes, so each one the window's list can carry has its documented next step.
@@ -2209,27 +2230,75 @@ describe.each(["cli", "mcp"] as const)("live documents through %s", door => {
   it("lists each live document with its state and reason, as Live documents does", async () => {
     const f = await liveDocumentsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
-    expect(await f.doors[door]()).toEqual({ ok: true, nextCursor: null, documents: [
+    expect(await f.doors[door].list()).toEqual({ ok: true, nextCursor: null, documents: [
       { path: "notes/old.md", objectId: "object-old", status: "retired", canResume: true },
       { path: "notes/plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "outbox:delivery:0" },
       { path: "notes/held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
     ] });
+  });
+  it("stops and resumes live editing for a page, as this computer's unnamed agent", async () => {
+    const f = await liveDocumentsFixture(); f.kept.workspace = [];
+    expect(await f.doors[door].stop("notes/plan.md")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "none" });
+    expect(f.h.relay.mock.calls.filter(call => call[2]?.method === "DELETE").map(call => JSON.parse(String(call[2]!.body))))
+      .toEqual([{ path: "notes/plan.md", objectId: "object-plan", retire: true, restoreFenceGeneration: 0 }]);
+    expect(f.h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    expect(f.activity).toHaveBeenCalledWith({ workspaceId: "workspace", liveDocumentStopped: "object-plan" });
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({ ok: true, path: "notes/plan.md" });
+    expect(f.h.relay.mock.calls.filter(call => call[2]?.method === "POST").map(call => JSON.parse(String(call[2]!.body)))).toEqual([{ path: "notes/plan.md" }]);
+    expect(f.h.ownerLiveStop.mock.lastCall?.[1]).toBe("clear");
+    expect(f.authors).toEqual([0, 1].map(() => ({ kind: "agent", agentId: expect.any(String), onBehalfOf: expect.any(String), depth: 0 })));
+  });
+  it("says when a Stop still keeps edits the server refused", async () => {
+    const f = await liveDocumentsFixture();
+    expect(await f.doors[door].stop("notes/plan.md")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "kept" });
+  });
+  it("refuses a list row's document that is no longer the one at the path", async () => {
+    const f = await liveDocumentsFixture();
+    expect(await f.doors[door].stop("notes/plan.md", "object-other")).toMatchObject({ ok: false, reason: expect.stringContaining("This document changed") });
+    expect(f.h.relay).not.toHaveBeenCalled();
+  });
+  it("returns the server's refusal of a Stop", async () => {
+    const f = await liveDocumentsFixture();
+    f.h.relay.mockImplementation(async (_credentials, _path, init) => {
+      if (init?.method === "DELETE") throw liveStopError({ code: "edits-pending" });
+      return { ok: true, documents: [{ path: "notes/plan.md", objectId: "object-plan", status: "paused" }] };
+    });
+    const words = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
+    expect(await f.doors[door].stop("notes/plan.md")).toEqual({ ok: false, reason: door === "cli" ? `dohc: ${words}\n` : words });
   });
   it("refuses a received share, a received workspace, and a received marker before reaching the server", async () => {
     const shared = await liveDocumentsFixture({ caller: "shared-with-me/received" });
     const received = await liveDocumentsFixture(); vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({});
     const marked = await liveDocumentsFixture(); marked.workspace.shareView = {} as RegistryEntry["shareView"];
     for (const f of [shared, received, marked]) {
-      expect(await f.doors[door]()).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+      const path = f === shared ? "plan.md" : "notes/plan.md";
+      for (const answer of [await f.doors[door].list(), await f.doors[door].stop(path), await f.doors[door].resume(path)]) {
+        expect(answer).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+      }
       expect(f.h.relay).not.toHaveBeenCalled();
+      expect(f.h.ownerLiveStop).not.toHaveBeenCalled();
+      expect(f.authors).toEqual([]);
     }
   });
 });
 
-it("refuses the Live documents list on a retired desktop attachment before reaching the server", async () => {
+it("records a socket Stop and Resume as an agent's, whatever actor the caller sends", async () => {
+  const f = await liveDocumentsFixture(); f.kept.workspace = [];
+  const cwd = f.root;
+  for (const verb of ["liveStop", "liveResume"] as const) {
+    expect(await f.transport({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd, actor: "human", path: "notes/plan.md" } }))
+      .toMatchObject({ ok: true });
+  }
+  expect(f.authors).toEqual([0, 1].map(() => expect.objectContaining({ kind: "agent" })));
+});
+
+it("refuses Live documents on a retired desktop attachment before reaching the server", async () => {
   const f = await liveDocumentsFixture(); const context = await f.create().openCliWorkspace(f.workspace);
   await f.authorities.invalidate("workspace");
-  await expect(context.liveDocuments!()).rejects.toThrow("This workspace changed while this ran. Try again.");
+  const author = { kind: "agent" as const, agentId: "agent", onBehalfOf: "person", depth: 0 };
+  await expect(context.liveDocuments!.list()).rejects.toThrow("This workspace changed while this ran. Try again.");
+  await expect(context.liveDocuments!.stop("notes/plan.md", author)).rejects.toThrow("This workspace changed while this ran. Try again.");
+  await expect(context.liveDocuments!.resume("notes/plan.md", author)).rejects.toThrow("This workspace changed while this ran. Try again.");
   expect(f.h.relay).not.toHaveBeenCalled();
 });
 

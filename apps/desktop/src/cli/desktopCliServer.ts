@@ -128,8 +128,15 @@ interface DesktopCliServerDependencies<State> {
     /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
     stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
   };
-  /** The Live documents dialog's list (createOwnerLiveDocumentActions), read under the window's admission. */
-  ownerLiveDocuments?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
+  /**
+   * The Live documents dialog's list, Stop and Resume (createOwnerLiveDocumentActions), under the window's admission.
+   * A Stop or Resume names its author, whom the CLI server knows: never the caller's claim.
+   */
+  ownerLiveDocuments?: {
+    list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
+    stop(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; objectId?: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<StopOwnerLiveDocumentResult>;
+    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<void>;
+  };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -323,10 +330,10 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
-    // Save recovery copy, Try again and Stop again, and the Live documents
-    // list, under the admission the window's IPC uses: this attachment and
-    // the original workspace. Kept edits come from main's own record, found
-    // by path. The caller names nothing else.
+    // Save recovery copy, Try again and Stop again, and Live documents' list,
+    // Stop and Resume, under the admission the window's IPC uses: this
+    // attachment and the original workspace. Kept edits come from main's own
+    // record, found by path. The caller names nothing else.
     const ownerLiveRecovery = dependencies.ownerLiveRecovery;
     const ownerLiveDocuments = dependencies.ownerLiveDocuments;
     const withOwnerLiveRecovery = <Result>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<Result>) =>
@@ -698,8 +705,12 @@ export function createDesktopCliServer<State>(
               },
             } : {}),
             ...(ownerLiveDocuments ? {
-              liveDocuments: (cursor?: string) => withOwnerLiveRecovery(operation =>
-                ownerLiveDocuments(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
+              liveDocuments: {
+                list: (cursor?: string) => withOwnerLiveRecovery(operation => ownerLiveDocuments.list(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
+                stop: (path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor, objectId?: string) => withOwnerLiveRecovery(operation =>
+                  ownerLiveDocuments.stop(operation, { path, author, ...(objectId === undefined ? {} : { objectId }) })),
+                resume: (path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor) => withOwnerLiveRecovery(operation => ownerLiveDocuments.resume(operation, { path, author })),
+              },
             } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),

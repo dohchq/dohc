@@ -123,6 +123,12 @@
     "liveDocuments": [
       "share.live.documents.list"
     ],
+    "liveStop": [
+      "share.live.document.stop"
+    ],
+    "liveResume": [
+      "share.live.document.resume"
+    ],
     "documentEdit": [
       "document.edit"
     ],
@@ -294,6 +300,8 @@
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
     "document live": "share.live.documents.list",
+    "document stop": "share.live.document.stop",
+    "document resume": "share.live.document.resume",
     "chat groups": "group.list",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",

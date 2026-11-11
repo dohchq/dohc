@@ -415,7 +415,7 @@ import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion"
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers, type OwnerLiveDocumentActionDependencies } from "./ipc/relaySharesIpc";
+import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers, stopNamedOwnerLiveDocument, type OwnerLiveDocumentActionDependencies } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -5051,7 +5051,7 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
-let ownerLiveDocumentsForCli: ((operation: DesktopWorkspaceOperation, input: { retiredAfter?: string }) => Promise<import("./ipc/bridgeContract").OwnerLiveDocumentsResult>) | undefined;
+let ownerLiveDocumentsForCli: NonNullable<Parameters<typeof createDesktopCliServer<DesktopWorkspaceOperation["state"]>>[0]["ownerLiveDocuments"]> | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -5106,6 +5106,10 @@ const agentWaits = createAgentWaits((agentIds) => {
   }
 });
 
+const liveDocumentsForCli = () => {
+  if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
+  return ownerLiveDocumentsForCli;
+};
 const { startDesktopCliServer } = createDesktopCliServer({
   notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
@@ -5121,10 +5125,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return ownerLiveStopAgainForCli(operation, kept);
     },
   },
-  // The Live documents list, as the dialog reads it.
-  ownerLiveDocuments: (operation, input) => {
-    if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
-    return ownerLiveDocumentsForCli(operation, input);
+  // Live documents' list, Stop and Resume, as the dialog runs them.
+  ownerLiveDocuments: {
+    list: (operation, input) => liveDocumentsForCli().list(operation, input),
+    stop: (operation, input) => liveDocumentsForCli().stop(operation, input),
+    resume: (operation, input) => liveDocumentsForCli().resume(operation, input),
   },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
@@ -6930,7 +6935,13 @@ function registerIpcHandlers(): void {
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
   };
-  ownerLiveDocumentsForCli = (operation, input) => agentOwnerLiveDocuments.list(input, operation);
+  // TODO(#2971): record input.author once the engine keeps who stopped or resumed a document.
+  ownerLiveDocumentsForCli = {
+    list: (operation, input) => agentOwnerLiveDocuments.list(input, operation),
+    stop: (operation, {author: _author, ...input}) => stopNamedOwnerLiveDocument(agentOwnerLiveDocuments, {...ownerLiveDocumentDependencies, sendRendererActivity},
+      {workspaceId: operation.workspace.workspaceId, ...input}, operation),
+    resume: (operation, {author: _author, ...input}) => agentOwnerLiveDocuments.resume({workspaceId: operation.workspace.workspaceId, ...input}, operation),
+  };
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
