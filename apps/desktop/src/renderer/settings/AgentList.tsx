@@ -47,6 +47,7 @@ import {
 import { agentListRows, checkIdentity, placeBack, removeAgentWithUndo, rowId, type AgentListRow } from "./agentRemoval";
 import { RemoveAgentDialog } from "./agentDialogs";
 import { ArchivedAgents, archivedAgentChats, useAgentChats } from "./ArchivedAgents";
+import { archivedChatsFor } from "../../settings/archivedChats";
 import { isPersonalAgentId } from "../workbench/chosenColors";
 
 /** A problem sentence, with each key in backticks set in monospace. */
@@ -524,8 +525,9 @@ export function AgentList(props: {
 
   const rows = agentListRows(settings, props.agentProblems);
   // Agents whose chat is archived here list under Archived, as in Chats,
-  // with removed agents' chats that are still there.
-  const agentChats = useAgentChats(workspaceId, onError);
+  // with removed agents' chats that are still there. The chats are read again
+  // when an agent leaves or a chat is archived, which can add to Archived.
+  const agentChats = useAgentChats(workspaceId, JSON.stringify([Object.keys(settings.agents), archivedChatsFor(settings, workspaceId)]), onError);
   const archivedChats = archivedAgentChats(workspaceId, settings, agentChats, (agentId) =>
     isPersonalAgentId(agentId)
       ? personalKnown ? entries.some((entry) => entry.agent.agentId === agentId) : null
@@ -741,8 +743,13 @@ export function AgentList(props: {
     if (!removed) return;
     setRenaming((current) => (current === agent.id ? null : current));
     // Its page or Archived row goes with it, and focus goes to the Agents heading.
-    focusAfter.current = "heading";
-    setOpened((current) => (current === agent.id ? null : current));
+    setOpened((current) => {
+      if (current !== agent.id) return current;
+      focusAfter.current = "heading";
+      return null;
+    });
+    // From an Archived row the list may already show without it, with focus on nothing.
+    if (document.activeElement === null || document.activeElement === document.body) heading.current?.focus();
   };
 
   const changePersonal = async (entry: PersonalEntry, next: PersonalAgentChange, failure: string): Promise<boolean> => {

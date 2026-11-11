@@ -23,7 +23,6 @@ import { agentListRows } from "./agentRemoval";
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
 let personalListener: ((event: PersonalAgentsEvent) => void) | null = null;
-let activityListener: ((event: { workspaceId?: string }) => void) | null = null;
 const bridgeMock = {
   getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
@@ -36,10 +35,6 @@ const bridgeMock = {
   }),
   setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
   listChatChannels: vi.fn(async (_payload: { workspaceId: string }): Promise<{ channels: ChatChannelRecord[]; fileThreads: [] }> => ({ channels: [], fileThreads: [] })),
-  onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
-    activityListener = listener;
-    return () => { activityListener = null; };
-  }),
   setChatArchived: vi.fn(async (_payload: { workspaceId: string; channelId: string; state: string }): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readAgentsListening: vi.fn(async (_payload: Record<string, never>): Promise<AgentsListeningEvent> => ({ agentIds: [] })),
   onAgentsListening: vi.fn((listener: (event: AgentsListeningEvent) => void) => {
@@ -77,7 +72,6 @@ beforeEach(() => {
   pausedListener = null;
   listeningListener = null;
   personalListener = null;
-  activityListener = null;
 });
 afterEach(cleanup);
 
@@ -1773,18 +1767,35 @@ it("lists archived agents and removed agents' chats under Archived, with their a
   expect(document.activeElement).toBe(within(screen.getByTestId("agents-archived")).getByRole("button", { name: "Codex" }));
 });
 
-it("lists a removed agent's chat that arrives after Settings opened", async () => {
+it("lists a removed agent's chat that arrived after Settings opened, once the agent leaves", async () => {
   bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-  renderList();
+  const { rerender } = renderList();
   await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1));
   expect(screen.queryByTestId("agents-archived")).toBeNull();
-  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-gone", "gone", "Old helper")], fileThreads: [] });
-  // Activity in another workspace doesn't read this one's chats again.
-  act(() => activityListener?.({ workspaceId: "ws-2" }));
-  expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1);
-  act(() => activityListener?.({ workspaceId: "ws-1" }));
+  // Codex's check starts its chat, then Codex leaves Settings.
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
+  const { codex: _codex, ...agents } = SETTINGS.agents;
+  rerender({ settings: { ...SETTINGS, agents } });
   const archived = within(await screen.findByTestId("agents-archived"));
-  expect(archived.getAllByTestId("agent-row-removed").map((element) => element.dataset.agentId)).toEqual(["gone"]);
+  expect(archived.getAllByTestId("agent-row-removed").map((element) => element.dataset.agentId)).toEqual(["codex"]);
+});
+
+it("focuses the Agents heading after Remove from an Archived row, even when the new settings show first", async () => {
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
+  const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, archivedChats: { "ws-1": ["chat-codex"] } } };
+  let finish: (result: DesktopUserSettingsResult) => void = () => undefined;
+  const onSave = vi.fn((next: DesktopUserSettings) => new Promise<DesktopUserSettingsResult | null>((resolve) => {
+    finish = resolve;
+    void next;
+  }));
+  const { rerender } = renderList({ settings, onSave });
+  const archived = within(await screen.findByTestId("agents-archived"));
+  await userEvent.click(archived.getByRole("button", { name: "Remove Codex…" }));
+  await userEvent.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
+  const saved = onSave.mock.lastCall![0];
+  rerender({ settings: saved, onSave });
+  await act(async () => finish({ settings: saved, source: "stored" }));
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
 });
 
 it("brings an agent's chat back to Archived when it is removed again after its chat left the list", async () => {

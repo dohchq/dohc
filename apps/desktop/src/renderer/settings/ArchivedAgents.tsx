@@ -34,9 +34,9 @@ export async function hideAgentChat(input: {
 
 /**
  * This workspace's agent chats, or null until they are read. They are read
- * again on activity here, which is how a chat an agent's check starts arrives.
+ * again when `changed` changes, such as when an agent leaves Settings.
  */
-export function useAgentChats(workspaceId: string, onError: OnError | undefined): readonly ChatChannelRecord[] | null {
+export function useAgentChats(workspaceId: string, changed: string, onError: OnError | undefined): readonly ChatChannelRecord[] | null {
   const [chats, setChats] = useState<{ workspaceId: string; channels: readonly ChatChannelRecord[] } | null>(null);
   const requests = useRequestSequence([workspaceId]);
   const report = useRef(onError);
@@ -56,32 +56,9 @@ export function useAgentChats(workspaceId: string, onError: OnError | undefined)
   }, [requests, workspaceId]);
   useEffect(() => {
     shown.current = workspaceId;
-    // A burst of activity reads once more after the read in flight, not once per event.
-    let reading = false;
-    let again = false;
-    const refresh = () => {
-      if (reading) {
-        again = true;
-        return;
-      }
-      reading = true;
-      void read().finally(() => {
-        reading = false;
-        if (again && shown.current === workspaceId) {
-          again = false;
-          refresh();
-        }
-      });
-    };
-    refresh();
-    const unsubscribe = bridge().onWorkspaceActivity((event) => {
-      if (event.workspaceId === undefined || event.workspaceId === workspaceId) refresh();
-    });
-    return () => {
-      shown.current = null;
-      unsubscribe();
-    };
-  }, [read, workspaceId]);
+    void read();
+    return () => { shown.current = null; };
+  }, [read, workspaceId, changed]);
   return chats?.workspaceId === workspaceId ? chats.channels : null;
 }
 
@@ -129,7 +106,7 @@ export function ArchivedAgents(props: {
 }) {
   const { workspaceId, onError } = props;
   const [hiding, setHiding] = useState<{ workspaceId: string; chat: ChatChannelRecord; name: string } | null>(null);
-  if (hiding && hiding.workspaceId !== workspaceId) setHiding(null);
+  if (hiding && (hiding.workspaceId !== workspaceId || !props.removed.some((chat) => chat.id === hiding.chat.id))) setHiding(null);
   if (props.agents.length === 0 && props.removed.length === 0) return null;
   const unarchive = (agent: Agent, chat: ChatChannelRecord) => {
     void bridge().setChatArchived({ workspaceId, channelId: chat.id, state: "active" }).catch((cause: unknown) =>
@@ -173,7 +150,7 @@ export function ArchivedAgents(props: {
           );
         })}
       </div>
-      {hiding && props.removed.some((chat) => chat.id === hiding.chat.id) ? (
+      {hiding ? (
         <HideAgentChatDialog
           name={hiding.name}
           onCancel={() => setHiding(null)}
