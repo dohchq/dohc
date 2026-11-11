@@ -72,10 +72,21 @@ pub(crate) fn validate(envelope: &ReplicationEnvelope) -> Result<(), SyncError> 
 pub(crate) fn admitted_moment_authors(
     envelope: &ReplicationEnvelope,
 ) -> Result<Option<Value>, SyncError> {
-    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
     let Some(snapshot) = &envelope.admitted_author_snapshot else {
         return Ok(None);
     };
+    let confirmed = envelope.relay_seq.is_some()
+        && matches!(
+            envelope.settlement_admission,
+            Some(SettlementAdmission::Accepted { .. })
+        );
+    native_authors(snapshot, confirmed).map(Some)
+}
+
+/// `snapshot` as moment authors. A `confirmed` human carries the relay's
+/// confirmation.
+fn native_authors(snapshot: &Value, confirmed: bool) -> Result<Value, SyncError> {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
     let authors: Vec<LiveAuthorEntry> = serde_json::from_value(snapshot.clone())
         .map_err(|_| invalid("accepted settlement authors are invalid"))?;
     let mut converted = Vec::with_capacity(authors.len());
@@ -99,12 +110,7 @@ pub(crate) fn admitted_moment_authors(
             }
             human @ LiveAuthorEntry::Human { .. } => {
                 let mut native = serde_json::to_value(human).map_err(SyncError::corrupt)?;
-                if envelope.relay_seq.is_some()
-                    && matches!(
-                        envelope.settlement_admission,
-                        Some(SettlementAdmission::Accepted { .. })
-                    )
-                {
+                if confirmed {
                     native["relayConfirmed"] = Value::Bool(true);
                 }
                 converted.push(native);
@@ -112,7 +118,7 @@ pub(crate) fn admitted_moment_authors(
             other => converted.push(serde_json::to_value(other).map_err(SyncError::corrupt)?),
         }
     }
-    Ok(Some(Value::Array(converted)))
+    Ok(Value::Array(converted))
 }
 
 pub(crate) fn refresh_in_tx(
@@ -165,24 +171,11 @@ pub(crate) fn refresh_in_tx(
     {
         return Err(SyncError::CoordinateDiverged);
     }
-    let moment_authors = admitted_moment_authors(envelope)?
-        .filter(|authors| {
-            authors
-                .as_array()
-                .is_some_and(|authors| !authors.is_empty())
-        })
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(SyncError::corrupt)?;
+    let moment_authors = admitted_moment_authors(envelope)?;
     tx.execute("INSERT INTO live_settlement_publication_admissions(workspace_id,origin_id,origin_seq,moment_id,admission_json,authors_json) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,moment,encoded,authors]).map_err(SyncError::persist)?;
     match admission {
         SettlementAdmission::Accepted { .. } => {
-            tx.execute(
-                "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=?1 AND r.origin_id=?4 AND r.origin_seq=?5 AND (r.imported=0 OR r.apply_disposition='applied'))",
-                params![envelope.workspace_id, moment, moment_authors,envelope.origin_id,envelope.origin_seq],
-            )
-            .map_err(SyncError::persist)?;
+            name_moment_in_tx(tx, envelope, moment, moment_authors)?;
             Ok(None)
         }
         SettlementAdmission::Refused {
@@ -195,6 +188,66 @@ pub(crate) fn refresh_in_tx(
             refuse_in_tx(tx, envelope, moment, settlement_id, reason).map(Some)
         }
     }
+}
+
+/// Give an accepted settlement's moment its admitted authors. Only the moment
+/// its own coordinate wrote or applied takes them; an empty list names no one.
+fn name_moment_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    moment: &str,
+    authors: Option<Value>,
+) -> Result<(), SyncError> {
+    let authors = authors
+        .filter(|authors| {
+            authors
+                .as_array()
+                .is_some_and(|authors| !authors.is_empty())
+        })
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(SyncError::corrupt)?;
+    tx.execute(
+        "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=?1 AND r.origin_id=?4 AND r.origin_seq=?5 AND (r.imported=0 OR r.apply_disposition='applied'))",
+        params![envelope.workspace_id, moment, authors, envelope.origin_id, envelope.origin_seq],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// A host settlement that reached the owner before its live feed waits in the
+/// owner's queue, and its moment is written only when the drain replays it.
+/// Its admission was stored on arrival, when there was no moment to name, and
+/// the drain's replay carries none. Name the moment from the admission stored
+/// for the settlement's own coordinate: workspace, origin and sequence. With
+/// no stored admission, the moment keeps the authors its payload gave it.
+pub(crate) fn name_drained_moment_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let stored: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT moment_id,admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![envelope.workspace_id, envelope.origin_id, envelope.origin_seq],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some((moment, admission, Some(authors))) = stored else {
+        return Ok(());
+    };
+    // A refused admission refuses its settlement on arrival, so none waits.
+    let admission: SettlementAdmission =
+        serde_json::from_str(&admission).map_err(SyncError::corrupt)?;
+    if !matches!(admission, SettlementAdmission::Accepted { .. }) {
+        return Ok(());
+    }
+    let snapshot: Value = serde_json::from_str(&authors).map_err(SyncError::corrupt)?;
+    // Only a relay delivery stores an admission (`validate`), so its humans
+    // are confirmed as they were on arrival.
+    let authors = native_authors(&snapshot, true)?;
+    name_moment_in_tx(tx, envelope, &moment, Some(authors))
 }
 
 fn publication_refusal(envelope: &ReplicationEnvelope) -> ReplicationRefusal {
