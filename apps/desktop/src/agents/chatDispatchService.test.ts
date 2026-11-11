@@ -3169,6 +3169,48 @@ describe("chatDispatchService", () => {
     }
   });
 
+  it("keeps an interrupted run's old log until its workspace opens and recovery records the end", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Keep my log.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId, agentId: "default",
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default", command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    const logs = join(fixture.stateRoot, "run-logs");
+    const log = join(logs, `${interrupted.run.runId}.log`);
+    await mkdir(logs, { recursive: true });
+    const restarted = Date.UTC(2026, 10, 11);
+    const lastWrite = new Date(restarted - 400 * 24 * 60 * 60 * 1000);
+    await writeFile(log, "started");
+    await utimes(log, lastWrite, lastWrite);
+    // A run that did end shows the startup cleanup has run.
+    await writeFile(join(logs, "run-done.log"), "output");
+    await markRunLogEnded(join(logs, "run-done.log"), restarted - 31 * 24 * 60 * 60 * 1000);
+    fixture.now.value = restarted;
+    // Its workspace isn't open when dohc starts.
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      listOpenWorkspaces: () => [],
+      readRunLogKeepDays: async () => 30,
+    });
+    service.start();
+    try {
+      await vi.waitFor(async () => expect(await readdir(logs)).toEqual([`${interrupted.run.runId}.log`]));
+      // Opening it later runs recovery, which records the end as now.
+      await service.scanWorkspace(WORKSPACE_ID);
+      expect(await readFile(`${log}.ended`, "utf8")).toBe(`${restarted}\n`);
+      fixture.now.value = restarted + RUN_LOG_SWEEP_MS;
+      await vi.advanceTimersByTimeAsync(RUN_LOG_SWEEP_MS);
+      expect((await readdir(logs)).sort()).toEqual([`${interrupted.run.runId}.log`, `${interrupted.run.runId}.log.ended`]);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it("retries a failed local-only scan after the daemon recovers", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();
