@@ -1509,7 +1509,7 @@ function ConflictResolver(props: {
               className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
             >
               <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              A newer version from another machine is waiting. It comes in after you resolve this conflict.
+              A newer version from another computer is waiting. It comes in after you resolve this conflict.
             </p>
           ) : null}
           {isBinary ? (

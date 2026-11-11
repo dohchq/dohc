@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorEntry, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
 import { parseLiveUpdateIdentifier, type ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import { isPersonalAgentId } from "../relayLogInputs";
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -30,10 +31,25 @@ export function ensureLiveLinkPublicPrincipal(storage: StorageContext, authority
   return publicId;
 }
 
-/** Only an explicit recording context matching the authenticated principal earns a snapshot. */
+/**
+ * Whether an account or link recording context declares a personal agent.
+ * Only the relay attributes work to a personal agent, so an update that
+ * claims one is refused.
+ */
+export function claimsPersonalAgent(recordingContext: LiveAuthorContext | undefined): boolean {
+  if (recordingContext === undefined) return false;
+  const context = parseLiveAuthorContext(recordingContext);
+  return (context.kind === "account" || context.kind === "link") && isPersonalAgentId(context.agent?.agentId);
+}
+
+/**
+ * Only an explicit recording context matching the authenticated principal
+ * earns a snapshot. Callers refuse a context that `claimsPersonalAgent` first.
+ */
 export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: ServerDerivedLiveUpdateAuthority,
   recordingContext: LiveAuthorContext | undefined, trustedAccount?: TrustedLiveAccount): LiveAuthorSnapshot {
   if (recordingContext === undefined) return [];
+  if (claimsPersonalAgent(recordingContext)) throw new TypeError("A recording context cannot declare a personal agent.");
   const context = parseLiveAuthorContext(recordingContext);
   const authors: LiveAuthorEntry[] = [];
   if (context.kind === "account") {

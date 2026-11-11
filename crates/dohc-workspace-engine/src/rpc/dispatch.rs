@@ -455,6 +455,11 @@ impl EngineService {
                 self.work_references_make(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.liveChange.begin" | "ydoc.liveChange.finish" | "ydoc.liveChange.list" => {
+                let action = request.method.trim_start_matches("ydoc.liveChange.");
+                self.live_change(&ctx, request.workspace, request.params, action)
+                    .await?
+            }
             "workReferences.resolve" => {
                 self.work_references_resolve(&ctx, request.workspace, request.params)
                     .await?
@@ -1284,7 +1289,7 @@ impl EngineService {
             ));
         }
         if projects_collections {
-            if method.starts_with("ydoc.ownerStop.") {
+            if method.starts_with("ydoc.ownerStop.") || method.starts_with("ydoc.liveChange.") {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
                     "received shares do not stop owner documents",
@@ -1838,6 +1843,9 @@ mod tests {
             "ydoc.close",
             "ydoc.evict",
             "ydoc.heldChange",
+            "ydoc.liveChange.begin",
+            "ydoc.liveChange.finish",
+            "ydoc.liveChange.list",
             "ydoc.open",
             "ydoc.recordUpdate",
             "ydoc.resync",

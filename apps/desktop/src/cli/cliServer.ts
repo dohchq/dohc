@@ -158,6 +158,8 @@ import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
 import type { HeldSharePath } from "../workspaces/shareViewFiles";
+import type { CloudSyncFailure } from "../workspaces/relaySyncEngine";
+import { syncFailureWords } from "../workspaces/syncFailureWords";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -312,6 +314,8 @@ export interface CliKeptCopiesPort {
 // that kept them. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
+  /** Shared notes whose edits wait on this computer for the server, so their files hold older text. */
+  pendingShare(): Promise<readonly string[]>;
   /** With an incident, saves exactly the kept edits it names. */
   saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
@@ -393,7 +397,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // The run dohc dispatched that this request proved it is, with the run's
   // secret. The socket sets it per request; without it, the request is no run's.
   run?: CliRunCaller;
-  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  stopSync?(author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   shareLinkAgents?: {
     list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
@@ -413,6 +417,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   readOnly: boolean;
   // The shared files this shared view holds back, or null outside a shared view.
   sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
+  // Why the last sync pass failed, until a pass succeeds.
+  syncFailure?(): CloudSyncFailure | null;
   // A save the engine holds for this path, as the held band's review shows it.
   heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
@@ -2866,6 +2872,21 @@ async function dispatchWorkspace(
       }
     }
 
+    case "syncFailure": {
+      // A sync failure can name any path in the workspace. Only the original
+      // workspace reads it, as with kept edits and History: not a shared view,
+      // and not a received share's folder, which resolves to its owner's.
+      const syncStatusUnavailable = { ok: false as const, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+      if (!context.syncFailure || context.readOnly) return syncStatusUnavailable;
+      if ((await callerPaths(context, request.args.cwd)).shared) return syncStatusUnavailable;
+      try {
+        const failure = context.syncFailure();
+        return { ok: true as const, syncFailure: failure && { ...syncFailureWords(failure), detail: failure.detail } };
+      } catch (error) {
+        return mcpFailure(error, "failed to read why sync stopped");
+      }
+    }
+
     case "collectionsWaiting":
       try {
         return { ok: true as const, waiting: await context.daemonReads.collectionsWaiting() };
@@ -2933,7 +2954,8 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        return { ok: true as const, keptEdits: await keptEdits.list() };
+        const [kept, pendingShare] = await Promise.all([keptEdits.list(), keptEdits.pendingShare()]);
+        return { ok: true as const, keptEdits: kept, pendingShare: [...pendingShare] };
       } catch (error) {
         return mcpFailure(error, "failed to list kept edits");
       }

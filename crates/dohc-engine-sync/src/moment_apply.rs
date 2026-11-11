@@ -250,6 +250,9 @@ fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
 /// an Edit link's. It carries only `moment.append`; the router refuses every
 /// other operation from it.
 pub(crate) const COLLECTION_FILE_ORIGIN_PREFIX: &str = "relay:collection-file:";
+/// The relay-owned origin for one personal agent's Collection writes,
+/// `relay:personal-collection:<agentId>`. It carries only `moment.append`.
+pub(crate) const PERSONAL_COLLECTION_ORIGIN_PREFIX: &str = "relay:personal-collection:";
 const AUTOMATIONS_FILENAME: &str = "automations.yaml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2219,6 +2222,22 @@ fn verify_direct_write_author(
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
 ) -> Result<(), SyncError> {
+    if let Some(agent) = envelope
+        .origin_id
+        .strip_prefix(PERSONAL_COLLECTION_ORIGIN_PREFIX)
+    {
+        return verify_personal_collection_author(tx, envelope, payload, agent);
+    }
+    // Only the relay writes a personal agent's moments, from its own origin.
+    // An accepted settlement's authors were cleared before this check.
+    if payload.authors.iter().flatten().any(|author| {
+        matches!(author, MomentAuthor::Agent { agent_id, .. }
+            if agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX))
+    }) {
+        return Err(SyncError::InvalidInput {
+            reason: "personal agent author requires its relay personal-collection origin",
+        });
+    }
     let lane_grant = envelope
         .origin_id
         .strip_prefix(COLLECTION_FILE_ORIGIN_PREFIX);
@@ -2272,6 +2291,56 @@ fn verify_direct_write_author(
     if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
         return Err(SyncError::InvalidInput {
             reason: "direct-write author may write only a Collection's own files",
+        });
+    }
+    Ok(())
+}
+
+/// A personal agent's write from `relay:personal-collection:<agentId>`: its
+/// one author is that agent, by the name it had, on behalf of the workspace
+/// owner, with no other field, and it writes only a Collection's own files.
+/// This engine does not know the workspace owner or the agent's name, so the
+/// relay alone vouches for them; no push may use this origin.
+fn verify_personal_collection_author(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    lane_agent: &str,
+) -> Result<(), SyncError> {
+    let typed = matches!(
+        payload.authors.as_deref(),
+        Some([MomentAuthor::Agent {
+            agent_id,
+            agent_name: Some(name),
+            on_behalf_of: Some(owner),
+            agent_run_id: None,
+            depth: None,
+        }]) if agent_id == lane_agent && !owner.is_empty() && !name.is_empty()
+    );
+    let exact = envelope
+        .payload
+        .get("authors")
+        .and_then(serde_json::Value::as_array)
+        .filter(|authors| authors.len() == 1)
+        .and_then(|authors| authors[0].as_object())
+        .is_some_and(|author| {
+            author.len() == 4
+                && ["kind", "agentId", "agentName", "onBehalfOf"]
+                    .iter()
+                    .all(|key| author.contains_key(*key))
+        });
+    if !lane_agent.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX)
+        || !typed
+        || !exact
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "personal-collection origin carries only its agent's author",
+        });
+    }
+    require_version(tx, &envelope.workspace_id, &payload.version_id)?;
+    if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
+        return Err(SyncError::InvalidInput {
+            reason: "personal agent may write only a Collection's own files",
         });
     }
     Ok(())

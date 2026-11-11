@@ -457,7 +457,7 @@ const DOCUMENT_VERBS = {
   },
   "kept-edits": {
     capabilityId: "workspace.status",
-    summary: "List live documents whose edits the server refused, and where dohc keeps those edits.",
+    summary: "List live documents whose edits the server refused or has not accepted yet, and where dohc keeps those edits.",
     operands: "",
     notes: ["storedOn is this-computer, or server for a document the server hosts.",
       "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
@@ -466,7 +466,8 @@ const DOCUMENT_VERBS = {
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
       "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
-      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them."],
+      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.",
+      "pendingShare lists shared notes whose edits wait on this computer for the server. Each file holds older text until the server accepts them; document read returns the current text."],
     parse: input => {
       noExtraArgs(input.operands, "document kept-edits");
       return { verb: "liveKeptEdits" };

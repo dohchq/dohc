@@ -182,6 +182,8 @@ export const CAPABILITIES = {
   "automation.host.takeover": capability("Take over scheduled work.", {ipc: ["takeOverScheduleHost"]}),
   "notice.list": capability("List Notices rows and where each opens.", {ipc: ["listNotices"], mcp: {owner: ["dohc_list_notices"], view: ["dohc_list_notices"], comment: ["dohc_list_notices"], edit: ["dohc_list_notices"]}}),
   "notice.mark": capability("Mark Notices.", {ipc: ["markNotices"]}),
+  "document.typing.kept.list": capability("List typing kept for workspaces no longer in the list.", {ipc: ["listKeptTyping"]}),
+  "document.typing.kept.dismiss": capability("Delete typing kept for a workspace no longer in the list.", {ipc: ["dismissKeptTyping"]}),
   "automation.schedule.run": capability("Run a skipped schedule.", {ipc: ["runSkippedScheduleNow"]}),
   "automation.notice.retry": capability("Retry an automation from a Notice.", {ipc: ["retryAutomationNotice"]}),
   "workspace.open.failures.take": capability("Take the launch open failures held for this window.", {ipc: ["takeWorkspacePathOpenFailures"]}),

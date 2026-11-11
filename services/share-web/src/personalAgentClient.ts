@@ -3,7 +3,7 @@
 // in at; the relay derives the account, the agent, its reach and every check
 // from them, so nothing here names one. No cookie or link profile goes with
 // a call: the relay refuses either.
-export type PersonalAgentAction = "workspaces" | "groups" | "files" | "blob" | "chat" | "discussion" | "post" | "wait";
+export type PersonalAgentAction = "workspaces" | "groups" | "files" | "blob" | "chat" | "discussion" | "post" | "wait" | "collection-writes";
 
 export interface PersonalAgentClient {
   call(action: PersonalAgentAction, body: Record<string, unknown>, signal: AbortSignal): Promise<Response>;
@@ -25,6 +25,9 @@ export function createPersonalAgentClient(options: {
         "x-dohc-agent-resource": options.resource,
         "x-dohc-relay-exchange-key": options.exchangeKey,
         "content-type": "application/json",
+        // A write names its workspace ahead of its body, so the relay can refuse it unread.
+        ...(action === "collection-writes" && typeof body.workspaceId === "string"
+          ? {"x-dohc-agent-workspace": encodeURIComponent(body.workspaceId)} : {}),
       },
       body: JSON.stringify(body),
     })),

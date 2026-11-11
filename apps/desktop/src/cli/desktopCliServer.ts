@@ -109,7 +109,7 @@ interface DesktopCliServerDependencies<State> {
   chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   heldChanges: import("../workspaces/workspaceHeldChanges").WorkspaceHeldChanges;
-  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
   shareLinkAgents?: {
@@ -121,6 +121,7 @@ interface DesktopCliServerDependencies<State> {
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
+    pendingShare(workspaceId: string): readonly string[];
     /** With an incident, saves exactly that row's kept edits. */
     save(workspace: RegistryEntry, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
     retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
@@ -162,6 +163,7 @@ interface DesktopCliServerDependencies<State> {
     agentWriteRunId(workspaceId: string): string | null;
     dispatchedRunSecret(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
+    getStatus(workspaceId: string): Pick<SyncStatusResult, "syncFailure">;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -413,6 +415,11 @@ export function createDesktopCliServer<State>(
           ? { count: projection.heldPathCount, files: projection.heldPaths }
           : { count: 0, files: [] };
       },
+      // A shared view's marker, even a damaged one, keeps the owner's sync from it.
+      syncFailure: () => {
+        assertOriginalWorkspace(findWorkspace(workspace.workspaceId) ?? workspace);
+        return activity.getStatus(workspace.workspaceId).syncFailure ?? null;
+      },
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
           return decodeWorkspaceResult(
@@ -620,7 +627,7 @@ export function createDesktopCliServer<State>(
                   const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
                   if (waitingVersion === null) return listed;
                   // The conflict's own path, which a waiting move does not change.
-                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
+                  const message = `A newer version of ${conflict.path} from another computer is waiting. It comes in after this conflict is resolved.`;
                   const { code, objectId, originId, originSeq } = waitingVersion;
                   return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
                 };
@@ -682,6 +689,7 @@ export function createDesktopCliServer<State>(
                 list: () => withOwnerLiveRecovery(async operation =>
                   ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier, saveOnly }) =>
                     ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}), ...(saveOnly ? { saveOnly } : {}) }))),
+                pendingShare: () => withOwnerLiveRecovery(async operation => ownerLiveRecovery.pendingShare(operation.workspace.workspaceId)),
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);

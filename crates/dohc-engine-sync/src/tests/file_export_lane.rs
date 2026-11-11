@@ -649,6 +649,42 @@ fn lane_decline_head_stays_stable_across_two_settles() {
 }
 
 #[test]
+fn a_push_reports_the_declines_that_stand_when_it_ends() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "seed", "doc.md", "seed", "ydoc", 10);
+    source.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,path,sharing_declined_json) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',1,'doc.md',json_object('head_sha256',(SELECT blob_sha256 FROM snapshots WHERE object_id='doc'),'constraint','MAX_YDOC_UPDATE_BYTES','limit_bytes',20,'observed_bytes',21))", []).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    let client = RelaySyncClient::new(RecordingRelay::default());
+    let push = |source: &mut EngineStore, now: i64| {
+        let SyncPassOutcome::Complete {
+            sharing_declined, ..
+        } = client
+            .push_workspace(source, "ws", &NoFaults, &NoLiveLeases, now, 0)
+            .unwrap()
+        else {
+            panic!("push did not complete")
+        };
+        sharing_declined
+            .into_iter()
+            .map(|declined| declined.path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        push(&mut source, 20),
+        ["doc.md"],
+        "a decline this push did not find still stands"
+    );
+    // A new head clears the decline the old one earned.
+    write(&mut source, "doc", "shrunk", "doc.md", "shrunk", "ydoc", 30);
+    assert!(
+        push(&mut source, 40).is_empty(),
+        "a cleared decline must not outlive the push after it"
+    );
+}
+
+#[test]
 fn lane_headless_decline_is_reported_after_settles_with_a_stable_absent_head() {
     let (_scratch, _, mut source) = owner();
     let doc = Ydoc::wire();

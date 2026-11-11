@@ -678,6 +678,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("sharedFilesHeld"), args: z.object(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("syncFailure"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("restoreProtectedCopy"), args: restoreProtectedCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("discardProtectedCopy"), args: discardProtectedCopyArgsSchema }).strict(),
@@ -778,6 +779,7 @@ export const CLI_CAPABILITIES = {
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   sharedFilesHeld: ["workspace.status"],
+  syncFailure: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   restoreProtectedCopy: ["file.protected.restore"],
   discardProtectedCopy: ["file.protected.discard"],
@@ -1657,6 +1659,9 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       earlier: z.literal(true).optional(),
       saveOnly: z.literal(true).optional(),
     }).strict()),
+    // Shared notes whose edits wait on this computer for the server. Each
+    // file holds the text the server last settled until it accepts them.
+    pendingShare: z.array(z.string().min(1)),
   }).strict(),
   rawFailureSchema,
 ]);
@@ -2038,6 +2043,15 @@ export const cliResultSchemas = {
         }).strict()),
         message: z.string().min(1),
       }).strict().nullable(),
+    }).strict(),
+    rawFailureSchema,
+  ]),
+  // Why the last sync pass failed, until a pass succeeds: a stable code, the
+  // sentence a person reads, and the engine's detail for a report.
+  syncFailure: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      syncFailure: z.object({ code: z.string().min(1), message: z.string().min(1), detail: z.string() }).strict().nullable(),
     }).strict(),
     rawFailureSchema,
   ]),

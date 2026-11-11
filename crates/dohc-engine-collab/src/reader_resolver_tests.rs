@@ -581,9 +581,11 @@ fn pending_entries_are_bounded_and_restart_has_no_proofs() {
     pending(lookup(&conn, &key, &doc, &restarted));
 }
 
-const TRANSIENT: [Failure; 4] = [
-    Failure::Crashed,
+/// Failures that get every transient retry. A crash is transient too, but its
+/// second one ends the proof (`a_second_crash_ends_the_proof_then_allows_a_later_action`).
+const RETRIED: [Failure; 4] = [
     Failure::TimedOut,
+    Failure::NotStarted,
     Failure::Overloaded,
     Failure::Superseded,
 ];
@@ -603,7 +605,7 @@ fn fail_next_request(
 
 #[test]
 fn exhausted_transient_proof_remains_retryable() {
-    for failure in TRANSIENT {
+    for failure in RETRIED {
         let (conn, key, doc, source, resolver) = fixture();
         // The first request and its immediate retry both fail.
         fail_next_request(&conn, &key, &doc, &resolver, failure);
@@ -631,7 +633,7 @@ fn exhausted_transient_proof_remains_retryable() {
 
 #[test]
 fn transient_retries_are_bounded_then_allow_a_later_action() {
-    for failure in TRANSIENT {
+    for failure in RETRIED {
         let (conn, key, doc, _, resolver) = fixture();
         let (mut requests, mut backoffs, mut ended) = (0, 0, false);
         for _ in 0..4 * usize::from(MAX_TRANSIENT_RETRIES) {
@@ -668,56 +670,133 @@ fn transient_retries_are_bounded_then_allow_a_later_action() {
 
 #[test]
 fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
-    // One more failing proof than the cache holds, asked for in turn, so each
-    // lookup evicts the proof asked for next.
-    let (conn, key, doc, _, resolver) = fixture();
-    let mut requests = [0; MAX_ENTRIES + 1];
-    let mut backoffs = [0; MAX_ENTRIES + 1];
-    let mut ended = [false; MAX_ENTRIES + 1];
-    for _ in 0..8 * usize::from(MAX_TRANSIENT_RETRIES) {
-        for index in 0..=MAX_ENTRIES {
-            if ended[index] {
-                continue;
-            }
-            conn.execute(
-                "UPDATE snapshots SET latest_moment_id=?1",
-                [index.to_string()],
-            )
-            .unwrap();
-            match lookup(&conn, &key, &doc, &resolver) {
-                Err(CollabError::MarkdownReaderPending(proof)) => {
-                    requests[index] += 1;
-                    proof.result.set(Err(Failure::Crashed)).unwrap();
+    // The same requests and backoffs as a proof that stays in the cache.
+    let retries = usize::from(MAX_TRANSIENT_RETRIES);
+    for (failure, expected_requests, expected_backoffs) in [
+        (Failure::TimedOut, retries + 1, retries - 1),
+        (Failure::NotStarted, retries + 1, retries - 1),
+        (Failure::Crashed, usize::from(MAX_CRASHES), 0),
+    ] {
+        // One more failing proof than the cache holds, asked for in turn, so
+        // each lookup evicts the proof asked for next.
+        let (conn, key, doc, _, resolver) = fixture();
+        let mut requests = [0; MAX_ENTRIES + 1];
+        let mut backoffs = [0; MAX_ENTRIES + 1];
+        let mut ended = [false; MAX_ENTRIES + 1];
+        for _ in 0..8 * retries {
+            for index in 0..=MAX_ENTRIES {
+                if ended[index] {
+                    continue;
                 }
-                Err(CollabError::MarkdownReaderRetryable) => backoffs[index] += 1,
-                Err(CollabError::MarkdownReaderUnavailable) => ended[index] = true,
-                other => panic!("proof {index}: {other:?}"),
+                conn.execute(
+                    "UPDATE snapshots SET latest_moment_id=?1",
+                    [index.to_string()],
+                )
+                .unwrap();
+                match lookup(&conn, &key, &doc, &resolver) {
+                    Err(CollabError::MarkdownReaderPending(proof)) => {
+                        requests[index] += 1;
+                        proof.result.set(Err(failure)).unwrap();
+                    }
+                    Err(CollabError::MarkdownReaderRetryable) => backoffs[index] += 1,
+                    Err(CollabError::MarkdownReaderUnavailable) => ended[index] = true,
+                    other => panic!("{failure:?} proof {index}: {other:?}"),
+                }
             }
         }
+        assert_eq!(
+            ended,
+            [true; MAX_ENTRIES + 1],
+            "{failure:?}: a proof kept retrying"
+        );
+        assert_eq!(
+            requests,
+            [expected_requests; MAX_ENTRIES + 1],
+            "{failure:?}"
+        );
+        assert_eq!(
+            backoffs,
+            [expected_backoffs; MAX_ENTRIES + 1],
+            "{failure:?}"
+        );
+        // A proof out of retries is forgotten. One that crashed twice keeps its
+        // answer, in the cache or in the evicted state.
+        let kept =
+            resolver.entries.lock().unwrap().len() + resolver.saved_retries.lock().unwrap().len();
+        let expected_kept = if failure == Failure::Crashed {
+            MAX_ENTRIES + 1
+        } else {
+            0
+        };
+        assert_eq!(kept, expected_kept, "{failure:?}");
     }
-    assert_eq!(ended, [true; MAX_ENTRIES + 1], "a proof kept retrying");
-    // The same requests and backoffs as a proof that stays in the cache.
-    assert_eq!(
-        requests,
-        [usize::from(MAX_TRANSIENT_RETRIES) + 1; MAX_ENTRIES + 1]
-    );
-    assert_eq!(
-        backoffs,
-        [usize::from(MAX_TRANSIENT_RETRIES) - 1; MAX_ENTRIES + 1]
-    );
-    assert!(resolver.entries.lock().unwrap().is_empty());
-    assert!(resolver.saved_retries.lock().unwrap().is_empty());
+}
+
+/// A note that fills the reader's heap crashes it on every request, so its
+/// second crash ends the proof instead of using a timeout's retries (#3575).
+#[test]
+fn a_second_crash_ends_the_proof_then_allows_a_later_action() {
+    let (conn, key, doc, _, resolver) = fixture();
+    // The first crash is retried at once, as any transient failure is.
+    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+    // Asking again without a change, as recovery does, never reaches the reader.
+    for _ in 0..3 {
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+        assert_eq!(resolver.entries.lock().unwrap().len(), 1);
+    }
+    // The save stays owed. The engine starting gives it a fresh count, so its
+    // first crash is retried again.
+    let restarted = ReaderResolver::new(Arc::new(Reader::new(None)));
+    fail_next_request(&conn, &key, &doc, &restarted, Failure::Crashed);
+    pending(lookup(&conn, &key, &doc, &restarted));
+    // So does a new save, which is a new proof.
+    doc.richdoc_append_paragraph("A later edit");
+    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+    pending(lookup(&conn, &key, &doc, &resolver));
+}
+
+/// Timeouts and readers that never started do not count as crashes, so a
+/// reader that cannot start gets a timeout's retries (#3575).
+#[test]
+fn crashes_between_timeouts_still_end_the_proof_at_the_second() {
+    for other in [Failure::TimedOut, Failure::NotStarted] {
+        let (conn, key, doc, _, resolver) = fixture();
+        fail_next_request(&conn, &key, &doc, &resolver, other);
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+        for failure in [other, other, Failure::Crashed] {
+            assert!(
+                matches!(
+                    lookup(&conn, &key, &doc, &resolver),
+                    Err(CollabError::MarkdownReaderRetryable)
+                ),
+                "{other:?}"
+            );
+            fail_next_request(&conn, &key, &doc, &resolver, failure);
+        }
+        assert!(
+            matches!(
+                lookup(&conn, &key, &doc, &resolver),
+                Err(CollabError::MarkdownReaderUnavailable)
+            ),
+            "{other:?}"
+        );
+    }
 }
 
 /// A terminal failure ends the proof at once, whether it is the first answer
 /// or comes after a backoff, and the cached failure answers every later lookup
 /// without asking the reader again.
 fn assert_terminal(failure: Failure) {
+    let expected = ended(&failure).code();
     for after_backoff in [false, true] {
         let (conn, key, doc, _, resolver) = fixture();
         if after_backoff {
-            fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-            fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+            fail_next_request(&conn, &key, &doc, &resolver, Failure::TimedOut);
+            fail_next_request(&conn, &key, &doc, &resolver, Failure::TimedOut);
             assert!(matches!(
                 lookup(&conn, &key, &doc, &resolver),
                 Err(CollabError::MarkdownReaderRetryable)
@@ -729,7 +808,7 @@ fn assert_terminal(failure: Failure) {
             assert!(
                 matches!(
                     lookup(&conn, &key, &doc, &resolver),
-                    Err(CollabError::MarkdownReaderUnavailable)
+                    Err(error) if error.code() == expected
                 ),
                 "{failure:?} after_backoff={after_backoff}"
             );
@@ -781,6 +860,10 @@ fn invalid_proofs_stay_terminal() {
     assert_terminal(Failure::Unavailable);
 }
 
+// A request too large to send, or a note the reader refused as over its
+// capacity (`PendingProof::resolve`), answers capacity rather than a stopped
+// reader. `real_reader_refuses_a_note_over_its_capacity_once_without_a_crash` drives the
+// refusal through a real reader.
 #[test]
 fn oversized_reader_requests_stay_terminal() {
     assert_terminal(Failure::TooLarge);
@@ -799,8 +882,8 @@ fn stale_targets_stay_terminal_after_a_backoff() {
         "UPDATE blobs SET text='forged'",
     ] {
         let (conn, key, doc, _, resolver) = fixture();
-        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::TimedOut);
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::TimedOut);
         assert!(matches!(
             lookup(&conn, &key, &doc, &resolver),
             Err(CollabError::MarkdownReaderRetryable)

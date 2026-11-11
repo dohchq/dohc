@@ -529,6 +529,18 @@ function isSecretResolvedPath(resolved: { normalized: string; realRelative: stri
   return isSecretWorkspacePath(resolved.normalized) || isSecretWorkspacePath(resolved.realRelative);
 }
 
+// A note's raw read asks the app which notes wait for the server, but never
+// waits on a busy, starting or hung app: past this deadline the read returns
+// with no warning, as when the app is not running.
+const PENDING_SHARE_ASK_MS = 50;
+export const PENDING_SHARE_READ_WARNING = "This shared note has edits that wait for the server, so its file holds older text. " +
+  "dohc_read_document returns the note's current text.";
+function askPendingShare(ctx: ToolContext): Promise<readonly string[]> {
+  const signal = AbortSignal.timeout(PENDING_SHARE_ASK_MS);
+  const deadline = new Promise<readonly string[]>(resolve => signal.addEventListener("abort", () => resolve([]), { once: true }));
+  return Promise.race([requestCli(ctx, "liveKeptEdits", {}, signal).then(kept => kept.ok ? kept.pendingShare : []), deadline]);
+}
+
 export async function readWorkspaceFile(
   ctx: ToolContext,
   args: {
@@ -543,6 +555,10 @@ export async function readWorkspaceFile(
   if (isSecretResolvedPath(resolved)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
+  // Only a note can wait for the server, so only a note's read asks the app,
+  // which answers from what it already knows. No answer adds no warning.
+  const kept = ctx.shareAccess === undefined && liveDocumentKindForPath(resolved.normalized) === "richdoc"
+    ? askPendingShare(ctx) : null;
   try {
     const maxBytes = Math.min(
       HARD_READ_MAX_BYTES,
@@ -565,6 +581,7 @@ export async function readWorkspaceFile(
       truncated: read.truncated,
       content:
         encoding === "base64" ? read.window.toString("base64") : read.window.toString("utf8"),
+      ...((await kept)?.some(path => path === resolved.normalized || path === resolved.realRelative) ? { warning: PENDING_SHARE_READ_WARNING } : {}),
     };
   } catch (error) {
     return {
@@ -1100,7 +1117,7 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting, kept, held] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept, held, failed] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
@@ -1108,6 +1125,8 @@ export async function workspaceStatus(ctx: ToolContext) {
     requestCli(ctx, "collectionsWaiting", {}),
     ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
     requestCli(ctx, "sharedFilesHeld", {}),
+    // A shared view's profile reads no sync failure: it can name the owner's paths.
+    ctx.shareAccess === undefined ? requestCli(ctx, "syncFailure", {}) : null,
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1129,8 +1148,9 @@ export async function workspaceStatus(ctx: ToolContext) {
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
-    ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
+    ...(kept?.ok ? { keptEdits: kept.keptEdits, pendingShare: kept.pendingShare } : {}),
     ...(held.ok && held.heldFiles ? { heldFiles: held.heldFiles } : {}),
+    ...(failed?.ok && failed.syncFailure ? { syncFailure: failed.syncFailure } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

@@ -24,6 +24,7 @@ import {
   createCollectionWriteRoutes,
   createLinkCollectionWriteAdmission,
   createLinkCollectionWriteRoute,
+  createPersonalCollectionWriteRoute,
   type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
@@ -806,6 +807,15 @@ export function createSyncRelayHandler({
     admitBlobBytes: admitLinkBlobBytes,
     maxFiles: linkCurrentFileLimit,
     copies: serverCopies,
+    collectionWrites: createPersonalCollectionWriteRoute({
+      storage,
+      rateLimiter: collectionWriteRateLimiter,
+      admission: linkCollectionWriteAdmission,
+      nowMs,
+      newId,
+      discussionActivity,
+      lookupUserDisplayName,
+    }),
   });
 
   const respondToLinkChat = createLinkChatRoutes({
@@ -1264,14 +1274,15 @@ export function createSyncRelayHandler({
 
 /**
  * The routes whose handlers authenticate before they read the body, and bound
- * its size and receipt time: recovery imports, direct writes, and an
- * account's reads through this server's copies. Classified by
+ * its size and receipt time: recovery imports, direct writes, a personal
+ * agent's included, and an account's reads through this server's copies. Classified by
  * the same parse as dispatch, so every spelling of the path streams.
  */
 export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation";
+      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation" ||
+      (route.route === "personal-agent-tools" && route.action === "collection-writes");
   } catch { return false; }
 }

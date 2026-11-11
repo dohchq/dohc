@@ -59,7 +59,7 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
     { path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" },
     { path: "note.md", reason: "restore-fenced", storedOn: "this-computer", incident: "old-1:delivery:0", recovery: "paused", saveOnly: true },
     { path: "old.md", reason: "restore-fenced", storedOn: "server", incident: "earlier:0", recovery: "copied", earlier: true },
-  ] };
+  ], pendingShare: ["notes/waiting.md"] };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveKeptEdits" ? kept
       : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" }
@@ -70,7 +70,10 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
       "plan.md · server · paused · outbox:delivery:0",
       "note.md · this-computer · paused · saveOnly · old-1:delivery:0",
       "old.md · server · copied · earlier · earlier:0",
+      "notes/waiting.md · pending share: the file holds older text",
     ].join("\n") + "\n", stderr: "" });
+  const json = await executeCli({ argv: ["document", "kept-edits", "--json"], cwd: "/workspace", env: {}, request: async () => kept });
+  expect(JSON.parse(json.stdout)).toMatchObject({ ok: true, pendingShare: ["notes/waiting.md"] });
   expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
   // An incident names exactly which kept edits to save.

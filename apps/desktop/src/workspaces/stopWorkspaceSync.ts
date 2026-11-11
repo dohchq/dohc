@@ -2,7 +2,8 @@ import { runInKeyedLane } from "../keyedLane";
 import type { CloudStopSyncResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
-import type { WorkspaceSyncPause, WorkspaceSyncPauseAuthor, WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
+import type { WorkspaceSyncPause, WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 const syncTransitions = new Map<string, Promise<void>>();
 export function withWorkspaceSyncTransition<Result>(workspaceId: string, work: () => Promise<Result>): Promise<Result> {
@@ -60,7 +61,7 @@ export async function reopenWithoutSync(
 }
 
 export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
-  person(): Promise<WorkspaceSyncPauseAuthor>;
+  person(): Promise<ChangeAuthor>;
   pauseStatus(pause: WorkspaceSyncPause): WorkspaceSyncPauseStatus;
   withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
   prepare(workspace: RegistryEntry): Promise<() => void>;
@@ -73,7 +74,7 @@ export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
   reopenFailed(workspace: RegistryEntry): void;
   nowMs?: () => number;
 }) {
-  return async (operation: SyncStopOperation, actor?: WorkspaceSyncPauseAuthor): Promise<CloudStopSyncResult> => {
+  return async (operation: SyncStopOperation, actor?: ChangeAuthor): Promise<CloudStopSyncResult> => {
     const workspaceId = operation.workspace.workspaceId;
     const author = actor === undefined ? dependencies.person() : Promise.resolve(actor);
     return withWorkspaceSyncTransition(workspaceId, async () => {

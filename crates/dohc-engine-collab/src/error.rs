@@ -22,6 +22,10 @@ pub enum CollabError {
     /// has retries left. Asking again after a backoff starts the next one.
     #[error("dohc could not verify this file. Try again.")]
     MarkdownReaderRetryable,
+    /// The reader refused this note as larger than it can check (#3575).
+    /// Asking again gives the same answer until the note shrinks.
+    #[error("This note is too large or too dense for dohc to check. Split it, or make its tables smaller.")]
+    MarkdownReaderCapacity,
     #[error(
         "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
     )]
@@ -242,6 +246,7 @@ impl CollabError {
             CollabError::MarkdownReaderPending(_) => "markdown-reader-pending",
             CollabError::MarkdownReaderUnavailable => "markdown-reader-unavailable",
             CollabError::MarkdownReaderRetryable => "markdown-reader-retryable",
+            CollabError::MarkdownReaderCapacity => "document-too-dense",
             CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",

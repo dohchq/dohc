@@ -1196,7 +1196,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   harness.unpublished = true;
   const accepted = await proof.liveEdit("beforeStop", "live");
   expect((await proof.route("DELETE", {path: "docs/a.md", retire: true})).body).toEqual({ok: true, path: "docs/a.md", objectId: proof.objectId, status: "retired",
-    acceptedCursor: accepted.journalCursor});
+    acceptedCursor: accepted.journalCursor, changed: true});
   const retiring = {activation_id: P, predecessor_activation_id: null, state_digest: predecessor.source.fullStateDigest, completed: 1,
     retire_accepted_cursor: accepted.journalCursor, retired: 0, boundary: null, stateDropped: 0};
   // Retirement settled the edit and its replica confirmed the document left. The engine still will not release it:
@@ -1420,7 +1420,7 @@ it("retires a paused document's activation at once, and Resume starts a successo
 
   // Resume: one capture starts a successor of the retired activation, which holds the edit. Nothing holds the document.
   const captured = attempts();
-  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing"}});
+  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
   await vi.waitFor(async () => {
     expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]);
     expect(proof.activations()).toEqual([retired, expect.objectContaining({predecessor_activation_id: P, completed: 1})]);

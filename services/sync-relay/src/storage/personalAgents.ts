@@ -43,7 +43,7 @@ export const PERSONAL_AGENT_REACH_LIMIT = 20;
 export const PERSONAL_AGENTS_PER_ACCOUNT_LIMIT = 50;
 export const PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT = 32;
 export const WORKSPACE_DISPLAY_NAME_LIMIT = 255;
-export const PERSONAL_REACH_LEVELS = ["view", "comment"] as const;
+export const PERSONAL_REACH_LEVELS = ["view", "comment", "edit"] as const;
 export type PersonalReachLevel = (typeof PERSONAL_REACH_LEVELS)[number];
 export type PersonalAgentStatus = "active" | "signed_out" | "removed";
 

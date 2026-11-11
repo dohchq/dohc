@@ -1544,6 +1544,8 @@ define_server_error_codes! {
     "notice_rate_limited" => |_| RelayError::HttpStatus(429),
     "notice_refused" => |_| RelayError::Forbidden,
     "payload_too_large" => |_| RelayError::PayloadTooLarge,
+    "personal_agent_edit_needed" => |_| RelayError::Forbidden,
+    "personal_agent_not_collection" => |_| RelayError::Forbidden,
     "personal_agent_out_of_reach" => |_| RelayError::Forbidden,
     "personal_agent_unavailable" => |_| RelayError::HttpStatus(503),
     "personal_agent_view_only" => |_| RelayError::Forbidden,

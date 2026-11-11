@@ -51,7 +51,8 @@ export interface ProposalMomentContext {
   // record.
   summary: string | null;
   // The named recipient or Edit link of a direct write, which only the
-  // relay's collection-file origin may carry. Null for an accepted proposal.
+  // relay's collection-file origin may carry, or the personal agent its
+  // personal-collection origin carries. Null for an accepted proposal.
   author: DirectWriteMomentAuthor | null;
 }
 
@@ -74,7 +75,17 @@ export interface LinkMomentAuthor {
   principalId: string;
 }
 
-export type DirectWriteMomentAuthor = NamedMomentAuthor | LinkMomentAuthor;
+// A personal agent at Edit, by the name it had when it wrote, on behalf of
+// the account that owns the workspace. Only the relay's personal-collection
+// origin carries it, with nothing else.
+export interface PersonalMomentAuthor {
+  kind: "agent";
+  agentId: string;
+  agentName: string;
+  onBehalfOf: string;
+}
+
+export type DirectWriteMomentAuthor = NamedMomentAuthor | LinkMomentAuthor | PersonalMomentAuthor;
 
 export type ProposalMomentResult =
   | { ok: true; payload: Record<string, unknown>; blobSha256: string }

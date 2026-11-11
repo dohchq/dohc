@@ -29,7 +29,7 @@ function counted(count: number, one: string, many: string): string {
 function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
   return [...page.conflicts.flatMap(conflict => [
     `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
-    ...(conflict.waiting ? ["  A newer version from another machine is waiting. It comes in after you resolve this conflict."] : []),
+    ...(conflict.waiting ? ["  A newer version from another computer is waiting. It comes in after you resolve this conflict."] : []),
   ]),
     ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
@@ -456,10 +456,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
     case "liveKeptEdits": {
-      const { keptEdits } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
-      if (keptEdits.length === 0) return "No document has kept edits.";
-      return keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
-        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")).join("\n");
+      const { keptEdits, pendingShare } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
+      const pending = pendingShare.map(path => `${lineSafe(path)} · pending share: the file holds older text`);
+      if (keptEdits.length === 0 && pending.length === 0) return "No document has kept edits.";
+      return [...keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
+        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")), ...pending].join("\n");
     }
     case "saveRecoveryCopy": {
       const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;

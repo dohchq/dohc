@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { splitName } from "../ui/MiddleCutName";
 import { Explorer, type ExplorerProps } from "./Explorer";
+import { createPathMarks, PendingShareMarks } from "./pendingShareMarks";
 
 afterEach(cleanup);
 
@@ -173,5 +174,21 @@ describe("Explorer names", () => {
     const open = within(row).getByRole("button", { name: `${NOTES}, unsaved changes` });
     expect(open.title).toBe(path);
     expect(within(row).getByRole("button", { name: `Close ${NOTES}` })).toBeTruthy();
+  });
+});
+
+describe("pending share mark", () => {
+  it("marks a closed note whose edits wait for the server, and leaves the mark to the tab once it opens", () => {
+    const marks = createPathMarks();
+    marks.set(["plan.md"], []);
+    render(<PendingShareMarks.Provider value={marks}><Explorer {...explorerProps({ files: [file("plan.md"), file("notes.md")] })} /></PendingShareMarks.Provider>);
+    const row = treeRow("plan.md");
+    expect(row.dataset.state).toBe("pending-share");
+    expect(within(row).getByTestId("tree-row-pending-share")).toBeTruthy();
+    expect(row.getAttribute("aria-label")).toBe("plan.md, Saved locally · Pending share");
+    expect(within(treeRow("notes.md")).queryByTestId("tree-row-pending-share")).toBeNull();
+    act(() => marks.set(["plan.md"], ["plan.md"]));
+    expect(within(treeRow("plan.md")).queryByTestId("tree-row-pending-share")).toBeNull();
+    expect(treeRow("plan.md").getAttribute("aria-label")).toBe("plan.md");
   });
 });

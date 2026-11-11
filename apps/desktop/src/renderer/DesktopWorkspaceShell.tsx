@@ -195,7 +195,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -222,6 +222,7 @@ import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
+import { createPathMarks, PendingShareMarks } from "./workbench/pendingShareMarks";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, sourcePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
@@ -238,6 +239,7 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { useKeptTyping } from "./shell/useKeptTyping";
 import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
@@ -706,6 +708,8 @@ export function DesktopWorkspaceShell(props: {
   >(null);
   // The document a notice opened the list for, so the list shows that row.
   const [liveDocumentsReveal, setLiveDocumentsReveal] = useState<string | null>(null);
+  // The list's Stop until it answers, so the list shows it again after a reopen.
+  const liveStopRunning = useRef<LiveDocumentStopRunning | null>(null);
   const openLiveDocuments = useCallback((id: string, reveal: string | null = null) => {
     setLiveDocumentsReveal(reveal);
     setLiveDocumentsWorkspaceId(id);
@@ -2197,6 +2201,14 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  // Closed shared notes whose edits wait for the server. Rows read the marks
+  // themselves, so a change leaves the Explorer and every other row alone; an
+  // open note's editor shows its own state.
+  const [pendingShareMarks] = useState(createPathMarks);
+  const pendingShare = syncStatus?.ownerPendingShare;
+  useEffect(() => {
+    pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
+  }, [pendingShareMarks, pendingShare, openTabs]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -5675,6 +5687,7 @@ export function DesktopWorkspaceShell(props: {
       if (note !== null) reportShellError(note, new Error(note), null);
     });
   }, [openNoticeRowTarget, pendingOpen, reportShellError]);
+  const keptTyping = useKeptTyping();
   const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
@@ -5814,7 +5827,7 @@ export function DesktopWorkspaceShell(props: {
     : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const explorerView = (
-    <>
+    <PendingShareMarks.Provider value={pendingShareMarks}>
       <Explorer
         workspaceId={workspaceId}
         mode={wb.explorerMode}
@@ -5872,7 +5885,7 @@ export function DesktopWorkspaceShell(props: {
         onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
-    </>
+    </PendingShareMarks.Provider>
   );
 
   // The editor is the one live conversation surface. It owns presence,
@@ -6623,6 +6636,8 @@ export function DesktopWorkspaceShell(props: {
               onOpenHistory={openHistoryView}
               onOpenConflicts={() => setConflictReviewOpen(true)}
               onRefreshShareView={() => void refreshShareView()}
+              keptTyping={keptTyping.keptTyping}
+              onDismissKeptTyping={keptTyping.dismiss}
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}
@@ -7838,6 +7853,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
           onStopPending={reportPendingLiveStop}
+          stopRunning={liveStopRunning}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
           setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}

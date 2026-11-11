@@ -19,7 +19,7 @@ type RelayAgent = {
   createdAtMs: number;
   signedInAtMs: number | null;
   lastActionAtMs: number | null;
-  reach: { workspaceId: string; level: "view" | "comment" }[];
+  reach: { workspaceId: string; level: "view" | "comment" | "edit" }[];
 };
 
 interface FakeRelay {
@@ -178,6 +178,18 @@ describe("the personal agents roster in main", () => {
     expect(reads(relay)).toBe(1);
     roster.revisionSeen(KEY, 4);
     expect(reads(relay)).toBe(1);
+  });
+
+  it("reads an agent at Edit and saves a reach at Edit", async () => {
+    const relay = fakeRelay([relayAgent({ reach: [{ workspaceId: "ws-1", level: "edit" }] })]);
+    const { roster } = setup(relay);
+
+    const view = await roster.read(false);
+    expect(view.accounts[0]?.failure).toBeNull();
+    expect(view.accounts[0]?.roster?.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "edit" }]);
+    relay.agents[0]!.reach = [{ workspaceId: "ws-1", level: "view" }];
+    const result = await roster.change(KEY, AGENT_ID, { kind: "reach", reach: [{ workspaceId: "ws-1", level: "edit" }] });
+    expect(result.ok && result.personalAgents.accounts[0]?.roster?.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "edit" }]);
   });
 
   it("reads the whole roster again when a change answer skips a revision", async () => {

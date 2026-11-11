@@ -1,4 +1,5 @@
 import { useCallback, useMemo, type ReactNode } from "react";
+import type { KeptTyping } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
   NoticeCenter,
@@ -157,8 +158,11 @@ export function ConnectionNotices(props: {
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;
   onReadCrashReport?: () => void;
+  // Typing a failed join kept. With no workspace listed, only this host shows it.
+  keptTyping?: readonly KeptTyping[];
+  onDismissKeptTyping?: (kept: KeptTyping) => Promise<void>;
 }) {
-  if (props.notices.length === 0 && !props.crashReport) return null;
+  if (props.notices.length === 0 && !props.crashReport && !props.keptTyping?.length) return null;
   return (
     <div
       data-testid="connection-notices"
@@ -185,6 +189,8 @@ export function ConnectionNotices(props: {
         {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
         {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
         {...(props.onReadCrashReport ? { onReadCrashReport: props.onReadCrashReport } : {})}
+        {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
+        {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
       />
       </ShellErrorReporter.Provider>
     </div>

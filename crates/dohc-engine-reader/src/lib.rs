@@ -32,6 +32,9 @@ pub enum Failure {
     Superseded,
     TooLarge,
     Crashed,
+    /// The reader process stopped before it took the request, so the failure
+    /// says nothing about the note. Asking again starts a new process.
+    NotStarted,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -394,6 +397,12 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
             phase = "response";
             wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
         })();
+        // A crash before the request reached the process is not the note's
+        // crash, and must not use up its proof's crash limit (#3575).
+        let result = result.map_err(|failure| match failure {
+            Failure::Crashed if phase != "response" => Failure::NotStarted,
+            failure => failure,
+        });
         if let Err(failure) = &result {
             eprintln!(
                 "engine: Markdown reader {phase} failed: {failure:?} after {} ms",

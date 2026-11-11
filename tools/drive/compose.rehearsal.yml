@@ -30,8 +30,9 @@ services:
     networks:
       deployment:
         ipv4_address: ${REHEARSAL_POSTGRES_ADDRESS:?Run tools/drive/rehearse.mjs}
-        # A second name for the same server. Its certificate does not cover this name.
-        aliases: [neon-rehearsal]
+        # The deployment reaches the server by the first name, which its certificate covers.
+        # The second is another name for the same server. Its certificate does not cover that name.
+        aliases: [accounts.rehearsal.test, neon-rehearsal]
 
 networks:
   deployment:

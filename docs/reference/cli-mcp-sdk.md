@@ -100,11 +100,11 @@ Returns `{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`.
 
 ### `dohc_workspace_status`
 
-Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.
+Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, heldFiles?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. These fields are absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, pendingShare?, heldFiles?, syncFailure?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. `pendingShare` lists the paths of shared notes whose edits wait on this computer for the server; each file holds older text until the server accepts them, and dohc_read_document returns the current text. A shared view has neither `keptEdits` nor `pendingShare`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. `syncFailure` is `{ code, message, detail }` while sync is failing. A shared view has no `syncFailure`. `code` is stable, such as `server-unreachable` or `conflict-wait-limit`. `message` says what happened and what to do. `detail` is the raw error to report. These fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -405,14 +405,14 @@ Returns `{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`.
 
 ### `dohc_read_file`
 
-Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.
+Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes. A shared note's Markdown file can trail the note while its edits wait for the server, even when the result carries no warning; dohc_workspace_status lists those notes as pendingShare, and dohc_read_document returns their current text.
 
 - `path`: `string`. Required.
 - `encoding`: `"utf8" | "base64"`
 - `maxBytes`: `integer`
 - `offsetBytes`: `integer`
 
-Returns `{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`.
+Returns `{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content, warning? }`. `warning` is present when the file is a shared note whose edits wait for the server, so the file holds older text than the note. `content` is always the file's bytes. No `warning` does not mean the file is current: it is left out when the dohc app does not answer within 50 ms.
 
 ### `dohc_search_files`
 
@@ -1140,11 +1140,11 @@ With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, war
 dohc document kept-edits [options]
 ```
 
-List live documents whose edits the server refused, and where dohc keeps those edits.
+List live documents whose edits the server refused or has not accepted yet, and where dohc keeps those edits.
 
-storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them. pendingShare lists shared notes whose edits wait on this computer for the server. Each file holds older text until the server accepts them; document read returns the current text.
 
-With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[] }`.
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[], pendingShare }`.
 
 #### `dohc document save-recovery-copy`
 

@@ -43,7 +43,7 @@ import { MAX_BLOB_BYTES } from "./wireLimits";
 
 export type PersonalAgentToolRoute = {
   route: "personal-agent-tools";
-  action: "workspaces" | "groups" | "post" | "wait" | "chat" | "discussion" | "files" | "blob";
+  action: "workspaces" | "groups" | "post" | "wait" | "chat" | "discussion" | "files" | "blob" | "collection-writes";
 };
 
 /** The most messages one wait answers with. */
@@ -151,6 +151,8 @@ export function createPersonalAgentToolRoutes(input: {
   maxResponseBytes?: number;
   /** This server's copies of workspaces, which the Groups list reads; undefined while they are off or starting. */
   copies: () => ServerCopies | undefined;
+  /** A Collection write at Edit, which reads its own body. */
+  collectionWrites: (request: Request, authority: PersonalAuthority, fresh: () => Promise<PersonalCredential>) => Promise<Response>;
 }) {
   const { storage, linkAuthority, nowMs, activity } = input;
   const maxResponseBytes = input.maxResponseBytes ?? AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES;
@@ -582,6 +584,10 @@ export function createPersonalAgentToolRoutes(input: {
     if (request.method !== "POST") throw relayError("method_not_allowed");
     const authority = await linkAuthority.personal(request);
     if (!input.limiter.allow(authority.callerKey, nowMs())) throw relayError("link_read_rate_limited");
+    // A write checks the fence again once its larger body is in, and its commit reads that epoch.
+    if (route.action === "collection-writes") {
+      return await input.collectionWrites(request, authority, async () => credential(await linkAuthority.freshPersonal(authority)));
+    }
     const body = await readBody(request);
     switch (route.action) {
       // A post or a read checks the fence again once its body is in, and a
@@ -595,6 +601,7 @@ export function createPersonalAgentToolRoutes(input: {
       case "discussion": return discussion(await linkAuthority.freshPersonal(authority), body);
       case "files": return files(await linkAuthority.freshPersonal(authority), body);
       case "blob": return blob(authority, body, request.signal);
+      default: throw notFound();
     }
   };
 }

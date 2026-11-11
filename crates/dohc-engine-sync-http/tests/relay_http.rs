@@ -1414,6 +1414,8 @@ fn expected_relay_error(code: &str) -> RelayError {
         "link_discussion_blocked"
         | "link_discussion_paused"
         | "notice_refused"
+        | "personal_agent_edit_needed"
+        | "personal_agent_not_collection"
         | "personal_agent_out_of_reach"
         | "personal_agent_view_only"
         | "sign_in_again" => RelayError::Forbidden,
