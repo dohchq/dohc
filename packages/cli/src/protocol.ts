@@ -65,7 +65,7 @@ const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperat
 const groupsArgsSchema = z.object(argsBase).strict();
 // What a work link names: a Group, DM, or agent chat by name, #slug, or id; a
 // thread or message by id; or a file or Collection folder by path.
-export const linkTargetSchema = z.discriminatedUnion("kind", [
+const linkTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("group"), group: z.string().min(1).max(512) }).strict(),
   z.object({ kind: z.literal("thread"), thread: z.string().min(1).max(512) }).strict(),
   z.object({ kind: z.literal("message"), message: z.string().min(1).max(512) }).strict(),
