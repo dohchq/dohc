@@ -1370,33 +1370,52 @@ ${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
     });
   });
 
-  it("restores a note whose server settlement of their earlier edit arrived after their later one", async () => {
-    const f = await capturedFiles(["notes/a.md"], ["shared edit", "shared edit 2"]);
-    const [first] = f.files;
-    // The settlement of their first edit is recorded last, with that edit's time and text.
-    const settlement = "late-settlement";
+  // The server's settlement of `copied` reaches History last: a record-only row
+  // with that moment's time and text, newest by order.
+  const lateSettlement = (f: Awaited<ReturnType<typeof capturedFiles>>, copied: string, settlement: string) => {
+    const objectId = f.files[0]!.objectId;
     const send = f.loopback.sendRequest.bind(f.loopback);
     vi.spyOn(f.loopback, "sendRequest").mockImplementation(async request => {
       const params = request.params as Record<string, unknown> | undefined;
       if (request.method === VERSIONED_METHOD.momentsGet && params?.momentId === settlement) {
-        const response = await send({ ...request, params: { ...params, momentId: first!.momentId } });
+        const response = await send({ ...request, params: { ...params, momentId: copied } });
         const moment = response.result as Record<string, unknown>;
         return { ...response, result: { ...moment, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true } } as typeof response;
       }
       const response = await send(request);
-      if (request.method !== VERSIONED_METHOD.momentsList || params?.objectId !== first!.objectId || params?.beforeMomentOrder !== undefined) return response;
+      if (request.method !== VERSIONED_METHOD.momentsList || params?.objectId !== objectId || params?.beforeMomentOrder !== undefined) return response;
       type Page = { moments: Array<Record<string, unknown>> };
       const page = response.result as Page;
       const all = (await send({ ...request, params: { ...params, limit: 100 } })).result as Page;
-      const row = all.moments.find(moment => moment.momentId === first!.momentId)!;
+      const row = all.moments.find(moment => moment.momentId === copied)!;
       const moments = [{ ...row, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true }, ...page.moments];
       return { ...response, result: { ...page, moments: moments.slice(0, page.moments.length) } } as typeof response;
     });
+  };
+
+  it("restores a note whose server settlement of their earlier edit arrived after their later one", async () => {
+    const f = await capturedFiles(["notes/a.md"], ["shared edit", "shared edit 2"]);
+    lateSettlement(f, f.files[0]!.momentId, "late-settlement");
     try {
       await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
         status: "restored", restored: [{ path: "notes/a.md" }], review: [], unfinished: null,
       });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("keeps a note for review when someone else changed it before the server's late record of their edit", async () => {
+    const f = await capturedFiles(["notes/a.md"]);
+    const edit = f.files[0]!;
+    await f.store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "sync" }, text: "someone else", publish: true });
+    // The ledger names the server's moment, which History records after the other change.
+    lateSettlement(f, edit.momentId, "late-settlement");
+    edit.momentId = "late-settlement";
+    try {
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [], review: [{ path: "notes/a.md", reason: "restore-refused" }], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("someone else");
     } finally { await f.engineCapture.stop(); }
   });
 

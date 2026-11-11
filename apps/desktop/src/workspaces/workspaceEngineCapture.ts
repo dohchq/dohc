@@ -7720,15 +7720,22 @@ export function createWorkspaceEngineCapture(
             const head = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 1});
             if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId) throw new RestoreHeadChangedError(path);
             // A record-only settlement changes no file and can arrive after later
-            // edits, so the file holds the newest moment that changed it.
+            // edits, so the file holds the newest moment that changed it. Only
+            // moments from the restored one on were checked by the caller.
             let changed = expected;
-            for (let beforeMomentOrder: number | null | undefined; expected.syncRecordOnly && beforeMomentOrder !== null;) {
+            search: for (let beforeMomentOrder: number | null | undefined; expected.syncRecordOnly && beforeMomentOrder !== null;) {
               const page = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 100,
                 ...(beforeMomentOrder !== undefined ? {beforeMomentOrder} : {})});
-              const newest = page.moments.find(row => !row.syncRecordOnly);
-              if (newest) {
-                changed = await engine.getMoment({ workspaceId, momentId: newest.id }) ?? expected;
-                break;
+              for (const row of page.moments) {
+                const changes = !row.syncRecordOnly && !isCaptureRecoveryOrigin(row.metadata.origin);
+                if (row.id === moment.id) {
+                  if (changes) changed = moment;
+                  break search;
+                }
+                if (changes) {
+                  changed = await engine.getMoment({ workspaceId, momentId: row.id }) ?? expected;
+                  break search;
+                }
               }
               beforeMomentOrder = page.nextBeforeMomentOrder;
             }
