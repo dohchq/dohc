@@ -123,7 +123,8 @@ Rust's job list excludes JavaScript jobs.
 This measures confinement as if both runners started when preparation finished; neither job has runtime dependencies.
 `seconds` is the larger of these two numbers. No runner-wait discount estimates the workload.
 Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
-A gate is `contended` when any gate job waited more than 30 s for a runner. Confinement's queue does not count.
+A gate is `contended` when a job inside its span waited more than 30 s for a runner. Selection's pre-span wait and confinement's queue do not count.
+Rust also counts waits of non-skipped JavaScript group jobs because its tests need the JavaScript aggregate. JavaScript conclusions do not affect Rust's verdict.
 Within budget, timing is `"within budget"`. An uncontended overrun fails.
 A contended overrun reports timing as `"unmeasured"`, emits a warning with the longest wait, and does not fail for time.
 Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.

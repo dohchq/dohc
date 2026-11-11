@@ -69,7 +69,7 @@ function gateJobNames(scope) {
 
 const confinementNames = Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id.startsWith("confinement-")).flatMap(([, job]) => job.names);
 
-function gateTiming(scope, required, confinement = []) {
+function gateTiming(scope, required, confinement = [], metadata = required) {
   const all = [...required, ...confinement];
   if (all.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
@@ -79,7 +79,13 @@ function gateTiming(scope, required, confinement = []) {
     + Math.max(...confinement.map(job => Date.parse(job.completed_at) - Date.parse(job.started_at)))) / 1000 : null;
   const jobs = all.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
     startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
-  const longest = jobs.filter(job => !confinementNames.includes(job.name)).reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
+  // Rust's workflow needs JavaScript, but only its waits affect Rust's timing.
+  const javascriptNames = [...CLOUD_JOB_GRAPH.javascript.names, ...CLOUD_JOB_GRAPH["javascript-workers"].names];
+  const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
+    && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
+    runnerWaitSeconds: Math.max(0, (Date.parse(job.started_at) - Date.parse(job.created_at)) / 1000) || 0 })) : [];
+  const longest = [...jobs.filter(job => job.name !== "what changed" && !confinementNames.includes(job.name)), ...javascriptWaits]
+    .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
   const contended = longest.runnerWaitSeconds > 30, seconds = Math.max(spanSeconds, confinementSeconds ?? 0);
   const budgetSeconds = scope === "js" ? 300 : 600;
   const timing = seconds <= budgetSeconds ? "within budget" : contended ? "unmeasured" : "over budget";
@@ -101,7 +107,7 @@ export function completedGateTiming(scope, jobs, commit) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
   return requireBudget(scope, gateTiming(scope, required.filter(job => !confinementNames.includes(job.name)),
-    required.filter(job => confinementNames.includes(job.name))));
+    required.filter(job => confinementNames.includes(job.name)), jobs));
 }
 
 export async function verifyCompletedCloud(scope) {
@@ -150,7 +156,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job)));
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), [], all));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;

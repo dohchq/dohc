@@ -245,6 +245,29 @@ test("a failed JavaScript worker leaves Rust's independent verdict visible", () 
   assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
 });
 
+test("contention counts only waits that can occur inside the gate span", t => {
+  t.mock.method(console, "warn", () => {});
+  const jobs = withoutWaits(), start = Date.parse(jobs[0].started_at);
+  jobs[0].created_at = new Date(start - 31_000).toISOString();
+  jobs.find(job => job.name === "typecheck + tests").completed_at = new Date(start + 350_000).toISOString();
+  assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), /exceeding/u);
+  jobs.find(job => job.name === "engine gate").completed_at = new Date(start + 650_000).toISOString();
+  assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
+  const js = jobs.find(job => job.name === "JS worker 1");
+  js.created_at = new Date(Date.parse(js.started_at) - 300_000).toISOString();
+  js.conclusion = "failure";
+  const rust = completedGateTiming("rust", jobs, jobs[0].head_sha);
+  assert.equal(rust.timing, "unmeasured");
+  assert.match(rust.warning, /JS worker 1: 300s/u);
+  for (const absent of [false, true]) {
+    const onlyRust = withoutWaits().filter(job => !absent || !/^JS worker|^typecheck \+ tests$/u.test(job.name));
+    for (const job of onlyRust.filter(job => /^JS worker|^typecheck \+ tests$/u.test(job.name))) {
+      Object.assign(job, { conclusion: "skipped", started_at: null, completed_at: null });
+    }
+    assert.equal(completedGateTiming("rust", onlyRust, jobs[0].head_sha).timing, "within budget");
+  }
+});
+
 test("negative waits clamp to zero and invalid or incomplete evidence always fails", () => {
   const jobs = withoutWaits();
   jobs.forEach(job => { job.created_at = job.completed_at; });
@@ -356,6 +379,29 @@ test("aggregate polling bounds latency by scope and counts each jobs request", a
     assert.equal(clock, interval * 2);
     assert.match(log.mock.calls.at(-1).arguments[0], /counted=3 304=0/u);
   }
+});
+
+test("polling waits for initially missing jobs and rejects invalid HTTP responses", async () => {
+  for (const scope of ["js", "rust"]) {
+    const jobs = passingCloudJobs(), name = scope === "js" ? "JS worker 1" : "Rust tests 1";
+    let reads = 0, pauses = 0;
+    await waitForGate(scope, { readJobs: async () => ++reads === 1 ? jobs.filter(job => job.name !== name) : jobs,
+      pause: async () => { pauses++; } });
+    assert.equal(pauses, 1);
+  }
+  let clock = 0, reads = 0;
+  await waitForPreparation("js", { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+    request: async url => url.includes("/jobs?") ? apiResponse({ jobs: ++reads === 1 ? [] : [{ name: "shared preparation", status: "in_progress" }] })
+      : apiResponse({ artifacts: [{ id: 1, name: "javascript-prepared-2" }] }) });
+  assert.equal(clock, 60_000);
+  for (const status of [304, 503]) {
+    await assert.rejects(waitForPreparation("js", { env: apiEnv, request: async () => apiResponse(null, status) }),
+      status === 304 ? /no cached data/u : /HTTP 503/u);
+    await assert.rejects(waitForGate("js", { env: apiEnv, request: async () => apiResponse(null, status) }),
+      status === 304 ? /no cached data/u : /HTTP 503/u);
+  }
+  await assert.rejects(waitForPreparation("js", { env: apiEnv, request: async url => url.includes("/jobs?")
+    ? apiResponse({ jobs: [{ name: "shared preparation", status: "in_progress" }] }) : apiResponse(null, 304) }), /no cached data/u);
 });
 
 test("aggregate receipts use the same timing rule and remain incomplete", async t => {
