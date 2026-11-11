@@ -27,6 +27,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
+  heldNoteChange,
   chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
@@ -506,6 +507,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // and version from the handshake, and the model it states. It travels
   // beside the author name and never changes it.
   const reported = (model: string | undefined) => reportedAgent(server.server.getClientVersion(), model);
+
+  register("dohc_held_note_change", {
+    description: "Review, drop, or undo a held note change. Only a local agent in the owner's workspace may use this. Review names the authors and returns a token. Drop requires that token, saves the waiting text in History, and returns an Undo token. Undo restores the waiting text as held. Neither action rewrites the file or grants conversion consent. Refusals: held-change-stale: Run review again and use its new token for drop. held-change-missing: Read the note again; there is no held change to drop. held-change-conflict: Resolve the conflict before reviewing and dropping again. held-change-undo-stale: Do not retry undo; recover the waiting text from History. held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+    inputSchema: {path: z.string().min(1).max(4096), action: z.enum(["review", "drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u).optional()},
+  }, async args => text(await heldNoteChange(ctx, args)));
 
   register(
     "dohc_edit_document",

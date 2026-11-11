@@ -3599,8 +3599,9 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
 }
 
 /// The current interval names the agent each accepted delivery declared. A
-/// delivery whose bytes deduplicate natively keeps its agent, and compaction
-/// and reopen change nothing.
+/// repeated delivery whose bytes deduplicate adds no content and credits
+/// nobody, as the relay's author window does, and compaction and reopen
+/// change nothing.
 #[test]
 fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
     fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
@@ -3654,7 +3655,6 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
         "the third delivery's bytes deduplicate"
     );
     let expected = json!([
-        {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":2},
         {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":0},
         {"kind":"unattributed"},
     ]);

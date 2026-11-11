@@ -129,6 +129,7 @@
     "desktop:get-workspace-ui-state",
     "desktop:go-to-workspace-window",
     "desktop:history-names-changed",
+    "desktop:held-note-change",
     "desktop:hold-quit",
     "desktop:import-to-database",
     "desktop:import-workspace-files",
@@ -371,6 +372,7 @@
     "desktop:write-workspace-text"
   ],
   "guards": {
+    "desktop:held-note-change": "active-workspace",
     "desktop:import-to-database": "trusted-sender",
     "desktop:undo-database-import": "trusted-sender",
     "desktop:list-workspace-versions": "active-workspace",

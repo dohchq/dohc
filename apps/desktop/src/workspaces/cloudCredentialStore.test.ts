@@ -196,6 +196,12 @@ describe("cloud credential store", () => {
     expect(await store.load()).toBeNull();
   });
 
+  it("reads a token that decrypts to garbage under another key as logged-out", async () => {
+    await createCloudCredentialStore({ dir, cipher: fakeCipher }).save(credentials);
+    const otherKey = { ...fakeCipher, decrypt: () => "\u0007�\u0000k�" };
+    expect(await createCloudCredentialStore({ dir, cipher: otherKey }).load()).toBeNull();
+  });
+
   it("reads an encrypted token as logged-out when no cipher is injected", async () => {
     await createCloudCredentialStore({ dir, cipher: fakeCipher }).save(credentials);
     const store = createCloudCredentialStore({ dir });

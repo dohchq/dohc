@@ -79,8 +79,8 @@ export function buildMenuTemplate(options: {
 
   // macOS renders the first template entry as the application menu, titled
   // with the app's name. It holds About, updates, Settings, and the system's
-  // Services, Hide, and Quit. The labels name dohc, not app.name, which names
-  // the package or Electron in an unpackaged run.
+  // Services, Hide, and Quit. The labels name dohc themselves, so they don't
+  // depend on app.name.
   const appMenu: MenuItemConstructorOptions = {
     role: "appMenu",
     submenu: [

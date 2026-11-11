@@ -23,6 +23,9 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
+const HELD_CHANGE_REFUSALS = new Set([
+  "held-change-shared-owner", "held-change-stale", "held-change-missing", "held-change-conflict", "held-change-undo-stale",
+]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
@@ -148,6 +151,11 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
     ...CHAT_MENTION_PAGE_CHANGED_WORDS,
+    "held-change-shared-owner": "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.",
+    "held-change-stale": "The note or its file changed. Choose Drop again to review the waiting edits.",
+    "held-change-missing": "There is no held change to drop. Open the note again.",
+    "held-change-conflict": "The note has a conflict. Resolve it before using Drop.",
+    "held-change-undo-stale": "The note changed after Drop. Open History to find the waiting text.",
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
@@ -397,7 +405,8 @@ export function readError(error: unknown): ReadError {
   );
   if (entry && key !== undefined) {
     const words = entry[key] ?? null;
-    return { words, mapped: words !== null, cause: text };
+    return { words, mapped: words !== null, cause: text,
+      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key) ? {canRetry: false as const} : {}) };
   }
   if (!message) return { words: null, mapped: false, cause: null };
   if (RAW_CODE.test(message) || isDump(message)) {

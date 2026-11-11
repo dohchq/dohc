@@ -282,6 +282,7 @@
   "agent.personal.read",
   "agent.personal.change",
   "document.held.read",
+  "document.held.change",
   "file.protected.restore",
   "file.protected.discard"
 ]

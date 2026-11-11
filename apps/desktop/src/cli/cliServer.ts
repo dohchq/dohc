@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
@@ -446,6 +447,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
+  heldNoteChange?: (input: HeldNoteChangeInput) => Promise<HeldNoteChangeResult>;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
   liveDocuments?: CliLiveDocumentsPort;
@@ -2091,7 +2093,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2145,6 +2147,9 @@ async function dispatch(
       case "documentRead":
       case "documentHeld":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        break;
+      case "heldNoteChange":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentEdit":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
@@ -2969,6 +2974,24 @@ async function dispatchWorkspace(
       }
     }
 
+    case "heldNoteChange": {
+      if (!context.heldNoteChange || context.readOnly || request.args.actor !== "agent") {
+        return {ok: false as const, reason: "Only a local agent in the owner's workspace can drop or restore a held change."};
+      }
+      const path = validateUserWritePath(request.args.path);
+      if (!path.ok) return cliPathRejected(path.reason, request.args.path);
+      try {
+        const input = request.args.action === "review" ? {path: path.normalized, action: "review" as const}
+          : {path: path.normalized, action: request.args.action, token: request.args.token, author: {
+            kind: "agent" as const, agentId: editingAgentId(context), onBehalfOf: options.localPersonId(),
+            ...agentWriteRun(context, options),
+            ...(options.agentRunDepth(context.workspaceId) > 0 ? {depth: options.agentRunDepth(context.workspaceId)} : {}),
+          }};
+        const result = await context.heldNoteChange(input);
+        if (input.action !== "review") await notifyWrite(options, context);
+        return {ok: true as const, ...result};
+      } catch (error) { return mcpFailure(error, "dohc could not change the held note."); }
+    }
     case "liveDocuments": {
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
@@ -3623,7 +3646,7 @@ async function workspaceContextForRequest(
     request.verb === "collectionCreateRecord";
   const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
+    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "heldNoteChange" || fileRequest;
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||

@@ -314,7 +314,7 @@ export function MarkdownView(props: {
   // finished one as a fading notice. The shell opens the record's History
   // through onOpenRecordHistory. Absent, the record view shows neither.
   onButtonError?: ReportButtonError;
-  onButtonNotice?: (message: string) => void;
+  onButtonNotice?: (message: string, undo?: () => void) => void;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   // The engine open, opened by the inspector and passed down. It deliberately
   // does not live here: this component is unmounted by the inspector's own
@@ -2439,7 +2439,7 @@ export function MarkdownView(props: {
           <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
         </EngineMayHoldDocumentNotice>
       ) : props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} tooLarge={tooLarge} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} tooLarge={tooLarge} onError={props.onButtonError} onNotice={props.onButtonNotice} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />

@@ -40,9 +40,11 @@ mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 pub use link_documents::{DocumentIsOpen, DocumentResync};
 pub use link_rewrites::RewriteStop;
+mod held_change;
 mod journal;
 mod live_application;
 mod markdown_recovery;
+pub use held_change::{HeldChangeAction, HeldChangeResult};
 mod materialization;
 mod relay;
 #[cfg(unix)]

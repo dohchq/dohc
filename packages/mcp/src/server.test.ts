@@ -11,6 +11,7 @@ import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocum
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
+  "dohc_held_note_change",
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
@@ -98,6 +99,33 @@ it("returns a pending document edit as a successful tool result", async () => {
   const reply = await client.callTool({ name: "dohc_edit_document", arguments: { path: "n.md", replacement: "After." } });
   expect(reply.isError).not.toBe(true);
   expect(JSON.stringify(reply)).toContain(outcome.warning);
+});
+
+it("uses the owner socket operation for held Review, Drop, and Undo", async () => {
+  const root = await workspaceRoot();
+  const requests: unknown[] = [];
+  const token = "a".repeat(64);
+  const {client} = await connectedToolNames({root, home: root, request: async request => {
+    requests.push(request);
+    return {ok: true, path: "note.md", token, authors: [], held: request.verb === "heldNoteChange" && request.args.action !== "drop", historyMomentId: "history"};
+  }});
+  const description = (await client.listTools()).tools.find(tool => tool.name === "dohc_held_note_change")!.description;
+  for (const words of [
+    "held-change-stale: Run review again and use its new token for drop.",
+    "held-change-missing: Read the note again; there is no held change to drop.",
+    "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
+    "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
+    "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
+  ]) expect(description).toContain(words);
+  expect(description).not.toContain("Edit anyway");
+  for (const action of ["review", "drop", "undo"]) {
+    const result = await client.callTool({name: "dohc_held_note_change", arguments: {path: "note.md", action, ...(action === "review" ? {} : {token})}});
+    expect(result.isError).not.toBe(true);
+  }
+  expect(requests).toMatchObject(["review", "drop", "undo"].map(action => ({verb: "heldNoteChange", door: "mcp", args: {cwd: root, actor: "agent", path: "note.md", action}})));
+  const missing = await client.callTool({name: "dohc_held_note_change", arguments: {path: "note.md", action: "drop"}});
+  expect(missing.isError).toBe(true);
+  expect(requests).toHaveLength(3);
 });
 
 describe("share-level tool profiles", () => {

@@ -201,6 +201,15 @@ mod tests {
             self.edit_with_limit(acknowledge, 1_000_000);
         }
         fn edit_with_limit(&mut self, acknowledge: bool, max_pending_bytes: i64) {
+            self.edit_by(acknowledge, max_pending_bytes, None);
+        }
+        /// An edit recorded with `attribution`, or with no author.
+        fn edit_by(
+            &mut self,
+            acknowledge: bool,
+            max_pending_bytes: i64,
+            attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+        ) {
             self.doc
                 .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
                 .unwrap();
@@ -210,7 +219,11 @@ mod tests {
                 &mut WriterDocCache::new(),
                 &self.key,
                 &bytes,
-                crate::LocalAppend::default(),
+                crate::LocalAppend {
+                    actor_origin_id: attribution.map(|_| "agent"),
+                    attribution,
+                    ..Default::default()
+                },
                 &NoFaults,
                 4,
                 |_, _, _| Ok(()),
@@ -1784,6 +1797,7 @@ pub fn adopt_owner_committed(
         crate::author_coverage::fold_in(tx, &key, i64::MAX)?;
         if cut.events.iter().any(|event| {
             event.metadata.author_snapshot.as_ref().is_none_or(Vec::is_empty)
+                && event.metadata.adds_content()
         }) {
             crate::author_coverage::admit_accepted_in(tx, &key, &[])?;
         }

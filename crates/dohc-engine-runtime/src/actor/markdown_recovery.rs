@@ -283,6 +283,13 @@ impl ActorHandle {
                 return Err(RuntimeError::Cancelled);
             }
             let key = &owed.key;
+            if !store
+                .read_with(|conn| obligations::pending_in(conn, &key.workspace_id))?
+                .iter()
+                .any(|current| current.order == owed.order)
+            {
+                return Ok(true);
+            }
             let marker = dohc_engine_collab::read_marker(store, key)?;
             if marker
                 .as_ref()

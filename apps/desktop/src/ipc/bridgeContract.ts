@@ -1737,7 +1737,7 @@ export const SetAgentColorPayload = AgentColorChangedEvent;
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
 const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
 
-const EngineMomentAuthor = z.union([
+export const EngineMomentAuthor = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
@@ -3364,7 +3364,20 @@ const retainedCopiesGuard = {
     "dohc stopped deleting old file copies because this window changed workspaces. Open the workspace and try again.",
 } as const;
 
+export const HeldNoteChangePayload = z.discriminatedUnion("action", [
+  z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING, action: z.literal("review")}).strict(),
+  z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING, action: z.enum(["drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u)}).strict(),
+]);
+export const HeldNoteChangeResult = z.object({
+  path: PATH_STRING, token: z.string(), authors: z.array(z.object({name: z.string().nullable()}).strict()), held: z.boolean(), historyMomentId: z.string().nullable(),
+}).strict();
+export type HeldNoteChangeResult = z.infer<typeof HeldNoteChangeResult>;
+
 export const workspaceVersionOperations = {
+  heldNoteChange: {
+    capabilityId: "document.held.change", channel: "desktop:held-note-change",
+    payload: HeldNoteChangePayload, result: HeldNoteChangeResult, ...versionGuard,
+  },
   listWorkspaceVersions: {
     capabilityId: "version.list",
     channel: "desktop:list-workspace-versions",

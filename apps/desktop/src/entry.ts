@@ -3,9 +3,12 @@
 // launch/launchEntry.ts for the policy.
 import { app, dialog } from "electron";
 import { join } from "node:path";
+import { nameApp } from "./appName";
 import { checkedRelaunchArguments, runLaunchEntry } from "./launch/launchEntry";
 import { beginLaunch, grantCheckedRelaunch, LAUNCH_MARKER_FILE } from "./launch/launchMarker";
 import { updatesEnabled } from "./updates/electronUpdater";
+
+nameApp(app);
 
 await runLaunchEntry({
   argv: process.argv,

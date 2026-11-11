@@ -81,6 +81,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
     restoreProtectedCopy: vi.fn<Capture["restoreProtectedCopy"]>(),
     discardProtectedCopy: vi.fn<Capture["discardProtectedCopy"]>(),
+    heldNoteChange: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["heldNoteChange"]>(),
     listRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listRetainedCopies"]>(),
     deleteRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["deleteRetainedCopies"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
