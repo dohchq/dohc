@@ -1346,6 +1346,18 @@ pub(crate) fn write_result_from_moment(
     let text = blob_text(conn, &blob_sha256)?.ok_or(DomainError::StateCorrupt {
         reason: "deduped write moment blob missing",
     })?;
+    write_result_with_text(conn, workspace_id, moment, text, blob_sha256, deduped)
+}
+
+/// A write result whose head is `moment`, with `text` as the head's content.
+pub(crate) fn write_result_with_text(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    text: String,
+    blob_sha256: String,
+    deduped: bool,
+) -> Result<WriteResult, DomainError> {
     let object = get_file_object(conn, workspace_id, &moment.object_id)?.ok_or(
         DomainError::StateCorrupt {
             reason: "deduped write moment object missing",

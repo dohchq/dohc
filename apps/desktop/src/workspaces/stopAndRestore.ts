@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { durableBatch, DURABLE_BATCH_ITEMS } from "@dohc/automation-executor/durable-batch";
 import { restoreReceiptOf } from "./restoreWriteIdentity";
-import { sharedLiveRestoreDetail } from "../ipc/errorWords";
+import { livePageTitle, sharedLiveRestoreDetail } from "../ipc/errorWords";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -26,6 +26,8 @@ import { sendsMessages } from "@dohc/automation-executor/collection-automation-r
 // hidden: messages those automations sent, changes Undo leaves, and runs
 // another computer's history holds.
 
+const LIVE_STOP_STILL_WAITING = "dohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.";
+const LIVE_EDITS_KEPT = "Check Notices for them, then restore it again.";
 const SCHEMA_FILE = "collection.yaml";
 const AUTOMATIONS_FILE = "automations.yaml";
 
@@ -80,10 +82,18 @@ export interface StopAndRestoreDependencies {
     | { kind: "changed" }
     | { kind: "folder-in-use" }
     // "shared-live": a shared live file, which the review names in History's words.
-    | { kind: "refused"; detail: string; refusal?: "synced-deletion" | "shared-live" }
+    // "live-page-owned": a page this computer has live editing on.
+    | { kind: "refused"; detail: string; refusal?: "synced-deletion" | "shared-live" | "live-page-owned" }
     // History's rules could not be read; `unreadable` names what to fix.
     | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
+  /**
+   * The owner's Stop live editing for the page `objectId` at `path`, as Live
+   * documents runs it. "stopped": every live edit is in the file. "kept": it stopped
+   * and kept edits the file does not have. "waiting": dohc keeps the Stop
+   * and sends it again. Any other refusal throws.
+   */
+  stopLiveEditing?(path: string, objectId: string): Promise<"stopped" | "kept" | "waiting">;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
   /** Removes a workspace folder only when it is empty. */
@@ -249,42 +259,25 @@ export async function restoreDirectWrites(
   // theirs. One already as it was before them, such as after an earlier
   // try, is passed over; any other goes to review.
   const restorable: Array<{ entry: Written; head: string }> = [];
-  for (const entry of written) {
-    const theirs = new Set(entry.all.map((file) => file.momentId));
-    const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
+  const laterReader = () => {
     const laterMoments = new Map<string, VersionedTextMoment | "protected">();
-    const readLater = async (id: string) => {
+    return async (id: string) => {
       const kept = laterMoments.get(id);
       if (kept !== undefined) return kept;
       const later = await dependencies.moment(id);
       if (later !== null) laterMoments.set(id, later);
       return later;
     };
-    const requestId = dependencies.replayRequestId?.(entry.first.momentId);
-    if (requestId) {
-      let receipt: RestoreReceipt | null = null;
-      for (const id of after) {
-        const later = await readLater(id);
-        if (later === null) return {status: "waiting"};
-        if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
-        if (receipt) break;
-      }
-      // History shows the restore committed; only a confirmed publication completes it.
-      if (receipt && !await dependencies.publicationApplied?.(receipt.restoredMomentId, requestId)) receipt = null;
-      else if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
-        receipt = await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId) ?? null;
-      }
-      if (receipt) {
-        const folder = isCreatedSchema(entry) ? posix.dirname(entry.first.path) : undefined;
-        if (known.has(receipt.restoredMomentId)) {if (folder) recoveredFolders.add(folder);}
-        else recovered.push({receipt: {...receipt, ...(entry.first.created ? {removed: true} : {})}, originalMomentId: entry.first.momentId, folder});
-        continue;
-      }
-    }
+  };
+  // The file's newest moment when it goes back; null when passed over or listed for review.
+  // After `stoppedLive`, the review says live editing is off and how to turn it back on.
+  const headIfAllTheirs = async (entry: Written, after: readonly string[],
+    readLater: ReturnType<typeof laterReader>, stoppedLive = false): Promise<{ head: string } | "waiting" | null> => {
+    const theirs = new Set(entry.all.map((file) => file.momentId));
     let snapshotHead = entry.first.momentId;
     for (const id of after) {
       const later = await readLater(id);
-      if (later === null) return { status: "waiting" };
+      if (later === null) return "waiting";
       if (later === "protected" || !later.syncRecordOnly) {
         snapshotHead = id;
         break;
@@ -310,7 +303,7 @@ export async function restoreDirectWrites(
     for (const id of after) {
       if (theirs.has(id)) continue;
       const later = await readLater(id);
-      if (later === null) return { status: "waiting" };
+      if (later === null) return "waiting";
       if (later !== "protected" && later.syncRecordOnly
         && !later.authors?.some(author => author.kind === "unattributed")) {
         const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
@@ -332,18 +325,46 @@ export async function restoreDirectWrites(
         : author?.kind === "link" ? "Another share link participant" : "Another author";
       break;
     }
-    if (allTheirs) {
-      restorable.push({ entry, head: after[0] ?? entry.first.momentId });
-      continue;
-    }
+    if (allTheirs) return { head: after[0] ?? entry.first.momentId };
     const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
     if (head === "protected") {
       refuseProtected(entry.last.path, false);
-      continue;
+      return null;
     }
-    if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) continue;
+    if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) return null;
     const path = head !== null && head.operation !== "delete" ? head.path : entry.last.path;
-    review.set(path, { path, reason: "changed-since", changedBy });
+    review.set(path, stoppedLive
+      ? { path, reason: "restore-refused", detail: `dohc stopped live editing for "${path}" and kept it, because ${changedBy ?? "another author"} changed it too\nResume live editing for it in Live documents.`.slice(0, 500) }
+      : { path, reason: "changed-since", changedBy });
+    return null;
+  };
+  for (const entry of written) {
+    const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
+    const readLater = laterReader();
+    const requestId = dependencies.replayRequestId?.(entry.first.momentId);
+    if (requestId) {
+      let receipt: RestoreReceipt | null = null;
+      for (const id of after) {
+        const later = await readLater(id);
+        if (later === null) return {status: "waiting"};
+        if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
+        if (receipt) break;
+      }
+      // History shows the restore committed; only a confirmed publication completes it.
+      if (receipt && !await dependencies.publicationApplied?.(receipt.restoredMomentId, requestId)) receipt = null;
+      else if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
+        receipt = await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId) ?? null;
+      }
+      if (receipt) {
+        const folder = isCreatedSchema(entry) ? posix.dirname(entry.first.path) : undefined;
+        if (known.has(receipt.restoredMomentId)) {if (folder) recoveredFolders.add(folder);}
+        else recovered.push({receipt: {...receipt, ...(entry.first.created ? {removed: true} : {})}, originalMomentId: entry.first.momentId, folder});
+        continue;
+      }
+    }
+    const found = await headIfAllTheirs(entry, after, readLater);
+    if (found === "waiting") return { status: "waiting" };
+    if (found !== null) restorable.push({ entry, head: found.head });
   }
 
   // The automations the person wrote: in each of their writes, each
@@ -369,6 +390,37 @@ export async function restoreDirectWrites(
   }
 
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
+  // A page they created goes even while it has live editing on. The owner's
+  // Stop ends live editing first and writes its edits into the file, so the
+  // file is checked again before the one retry: a later change by anyone
+  // else, or edits the Stop kept outside the file, keep the page for review.
+  const stopLiveEditingThenRestore = async (entry: Written, refusal: string) => {
+    const path = entry.last.path;
+    const kept = `dohc stopped live editing for "${path}" and kept edits that aren't in its file\n${LIVE_EDITS_KEPT}`;
+    const keep = (detail: string) => {
+      review.set(path, { path, reason: "restore-refused", detail: detail.slice(0, 500) });
+      return null;
+    };
+    let stopped: "stopped" | "kept" | "waiting";
+    try {
+      stopped = await dependencies.stopLiveEditing!(path, entry.first.objectId);
+    } catch (error) {
+      dependencies.assertCurrent();
+      console.warn("[desktop] Stop and restore could not stop live editing:", error);
+      return keep(refusal);
+    }
+    dependencies.assertCurrent();
+    if (stopped === "waiting") return keep(`${livePageTitle(path, "restore")}\n${LIVE_STOP_STILL_WAITING}`);
+    if (stopped === "kept") return keep(kept);
+    const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
+    const found = await headIfAllTheirs(entry, after, laterReader(), true);
+    if (found === "waiting") return keep(`dohc stopped live editing for "${path}"\nRestore it again in a moment.`);
+    if (found === null) return null;
+    dependencies.assertCurrent();
+    const retried = await dependencies.restore(entry.first.momentId, found.head, isCreatedSchema(entry));
+    // A release the engine deferred still holds the page, with its edits outside the file.
+    return retried.kind === "refused" && retried.refusal === "live-page-owned" ? keep(kept) : retried;
+  };
   const restored: RestoreReceipt[] = [];
   const receipts = durableBatch<Receipt>(async batch => {
     await dependencies.recordRestores?.(batch.map(item => item.receipt), batch.map(item => item.originalMomentId));
@@ -410,7 +462,12 @@ export async function restoreDirectWrites(
         dependencies.assertCurrent();
         // The engine checks the folder again in its own queue before it
         // removes the schema.
-        const result = await dependencies.restore(entry.first.momentId, head, isCreatedSchema(entry));
+        let result = await dependencies.restore(entry.first.momentId, head, isCreatedSchema(entry));
+        if (result.kind === "refused" && result.refusal === "live-page-owned" && entry.first.created && dependencies.stopLiveEditing) {
+          const retried = await stopLiveEditingThenRestore(entry, result.detail);
+          if (retried === null) continue;
+          result = retried;
+        }
         if (result.kind === "changed" || result.kind === "folder-in-use") {
           const reason = result.kind === "changed" ? "changed-since" : "folder-in-use";
           review.set(entry.last.path, { path: entry.last.path, reason });
@@ -420,7 +477,8 @@ export async function restoreDirectWrites(
           // History refuses some files, such as a shared live document.
           review.set(entry.last.path, result.refusal === "shared-live"
             ? { path: entry.last.path, reason: "restore-refused", detail: sharedLiveRestoreDetail(entry.last.path) }
-            : { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500), refusal: result.refusal });
+            : { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500),
+              ...(result.refusal === "synced-deletion" ? { refusal: result.refusal } : {}) });
           continue;
         }
         if (result.kind === "rules-unreadable") {

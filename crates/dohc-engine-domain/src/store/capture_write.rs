@@ -7,7 +7,7 @@ use super::{
     object_has_live_alias, record_request, reject_reserved_capture_origin, text_blob_sha256,
     validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
     validate_moment_metadata, validate_plaintext_storable_path, version_exists,
-    write_result_from_moment,
+    write_result_from_moment, write_result_with_text,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -387,9 +387,9 @@ pub fn capture_ingest_in_tx(
 /// A head with a different `metadata_origin` is refused unless
 /// `claim_foreign_head` is set or the head is a local Y.Doc recovery copy the
 /// materializer refused to place, see [`refused_local_recovery_occupies`]. The
-/// request payload hashes the caller's flag only. Equal text returns the
-/// existing head; a claimed equal-text head can still update its stored
-/// origin. The caller supplies the disk observation and owns lease policy and
+/// request payload hashes the caller's flag only. Equal bytes return the
+/// existing head, even a binary one; a claimed equal head can still update its
+/// stored origin. The caller supplies the disk observation and owns lease policy and
 /// related transaction effects.
 /// Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_with_admission_in_tx<E>(
@@ -485,8 +485,13 @@ where
         if recorded.payload_hash != payload_hash {
             return Err(DomainError::IdempotencyKeyReuseMismatch.into());
         }
-        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq)
-            .map_err(E::from);
+        return reconstruct_capture_write(
+            tx,
+            &input.workspace_id,
+            recorded.result_seq,
+            &input.text,
+        )
+        .map_err(E::from);
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
@@ -542,8 +547,7 @@ where
     }
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
-        && before.content_kind == "text"
-        && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
+        && head_sha256(before) == Some(content_sha256.as_str())
     {
         // A claimed dedupe transfers ownership: capture observed the disk
         // transition and the content already matches, so the head becomes
@@ -563,7 +567,7 @@ where
             )
             .map_err(DomainError::sql_persist)?;
         }
-        let result = write_result_for_existing_head(tx, before)?;
+        let result = write_result_for_existing_head(tx, before, &input.text)?;
         record_request(
             tx,
             input.request_id.as_deref(),
@@ -2117,24 +2121,56 @@ fn reconstruct_capture_write(
     conn: &Connection,
     workspace_id: &str,
     moment_order: i64,
+    text: &str,
 ) -> Result<WriteResult, DomainError> {
     let moment =
         moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
             reason: "deduped capture has no moment",
         })?;
-    write_result_from_moment(conn, workspace_id, moment, true)
+    capture_result_for_moment(conn, workspace_id, moment, text)
 }
 
 fn write_result_for_existing_head(
     conn: &Connection,
     snapshot: &SnapshotRecord,
+    text: &str,
 ) -> Result<WriteResult, DomainError> {
     let moment = get_moment(conn, &snapshot.workspace_id, &snapshot.latest_moment_id)?.ok_or(
         DomainError::StateCorrupt {
             reason: "snapshot points at a missing moment",
         },
     )?;
-    write_result_from_moment(conn, &snapshot.workspace_id, moment, true)
+    capture_result_for_moment(conn, &snapshot.workspace_id, moment, text)
+}
+
+/// The sha256 of a head's bytes, whether it stores them as text or binary.
+fn head_sha256(head: &SnapshotRecord) -> Option<&str> {
+    match head.content_kind.as_str() {
+        "text" => head.blob_sha256.as_deref(),
+        "binary" => head.binary_sha256.as_deref(),
+        _ => None,
+    }
+}
+
+/// Text capture's result for a head that already holds `text`. A file recorded
+/// as binary before code files were stored as text (#2666) keeps its binary
+/// head, so its result pairs the captured text with that head's moment.
+fn capture_result_for_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    text: &str,
+) -> Result<WriteResult, DomainError> {
+    if moment.after_content_kind != "binary" {
+        return write_result_from_moment(conn, workspace_id, moment, true);
+    }
+    let sha256 = text_blob_sha256(text);
+    if moment.after_binary_sha256.as_deref() != Some(sha256.as_str()) {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped text capture points at other binary content",
+        });
+    }
+    write_result_with_text(conn, workspace_id, moment, text.to_owned(), sha256, true)
 }
 
 fn reconstruct_capture_delete(

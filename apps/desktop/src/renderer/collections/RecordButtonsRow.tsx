@@ -5,6 +5,7 @@ import { recordLabel } from "@dohc/collection-views/record-label";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
+import { TOPMATTER_MEASURE, TOPMATTER_ROW } from "../pageTopmatter";
 import { SecondaryButton } from "../ui/controls";
 import { RecordButton } from "./RecordButton";
 import { useAutomationButtons, type ReportButtonError } from "./useAutomationButtons";
@@ -93,8 +94,8 @@ export function RecordButtonsRow(props: {
   const label = recordLabel(found.record);
   return (
     // In the page's column, as the title and properties are.
-    <div data-testid="record-buttons" className="box-border w-full px-14 pb-2">
-      <div className="mx-auto flex max-w-[720px] flex-wrap items-center gap-1.5">
+    <div data-testid="record-buttons" className={`${TOPMATTER_ROW} pb-2`}>
+      <div className={`${TOPMATTER_MEASURE} flex flex-wrap items-center gap-1.5`}>
         {buttons === null ? null : found.fields.map((field) => (
           <RecordButton key={field} buttons={buttons} field={field} recordId={found.record.id} recordLabel={label} />
         ))}

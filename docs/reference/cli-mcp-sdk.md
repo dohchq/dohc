@@ -21,6 +21,8 @@ Agent prompts and scripts depend on these names. Before launch, a rename replace
 
 A tool or command that cannot do what was asked returns `{ ok: false, reason }`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
 
+A desktop MCP tool refuses an argument it does not take. The error names that argument and lists the ones the tool takes.
+
 Partial form creation returns `{ kind: "partial", created, failedStage, reason, retry }`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
@@ -643,6 +645,16 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
+### `dohc_retry_chat_run`
+
+Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `threadId`: `string`. Required.
+
+Returns `{ ok: true, status: "queued", threadId } | { ok: false, reason }`.
+
 ### `dohc_query_collection`
 
 Query a collection folder's indexed records: filter, sort, group, and page. Requires the workspace engine and the dohc app.
@@ -1237,6 +1249,18 @@ Use - as the body to read it from stdin. With --work, the thread shows a Work ca
 - `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
+
+#### `dohc chat retry`
+
+```sh
+dohc chat retry <thread> [options]
+```
+
+Run an agent's stopped request in a conversation again, as Try again does.
+
+dohc chat show reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.
+
+With `--json`, prints `{ schemaVersion, ok: true, status: "queued", threadId }` or `{ schemaVersion, ok: false, reason }`.
 
 #### `dohc chat react`
 

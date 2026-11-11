@@ -9,7 +9,7 @@ import {
 } from "react";
 import { useFocusReturn } from "./ui/focusReturn";
 import { focusedElementIn } from "./ui/focusedElement";
-import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
+import { isTopOverlay, pressTopBackdrop, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
 import { isComposingKey } from "./ui/keys";
@@ -80,15 +80,13 @@ export function OverlayFrame(props: {
 }
 
 // Shared modal scaffold: a dimmed backdrop and a panel, with one close and
-// keyboard behavior everywhere. Escape, ⌘W on macOS, and the dialog's own
-// controls close it; a press on the backdrop does nothing, so a stray click never throws
-// away what someone typed. A dialog whose fields save as the person leaves
-// them, such as Settings or a picker, sets closeOnBackdrop. A field marked
-// data-unsaved then keeps the dialog open and takes focus, so its problem
-// shows.
+// keyboard behavior everywhere. Escape, ⌘W on macOS, a press on the backdrop,
+// and the dialog's own controls close it, all through onClose. A dialog that
+// must not close yet, such as one saving, passes no onClose. A field marked
+// data-unsaved keeps the dialog open on a press outside and takes focus, so
+// its problem shows.
 export function Overlay(props: {
   onClose?: () => void;
-  closeOnBackdrop?: boolean;
   children: ReactNode;
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
@@ -106,7 +104,11 @@ export function Overlay(props: {
 
   useEffect(() => {
     const id = idRef.current;
-    pushOverlay(id);
+    pushOverlay(id, () => {
+      const held = panelRef.current?.querySelector<HTMLElement>(HELD_FIELD);
+      if (held) held.focus();
+      else onCloseRef.current?.();
+    });
     return () => removeOverlay(id);
   }, []);
 
@@ -145,18 +147,12 @@ export function Overlay(props: {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, []);
 
-  const closeFromBackdrop = () => {
-    const held = panelRef.current?.querySelector<HTMLElement>(HELD_FIELD);
-    if (held) held.focus();
-    else onCloseRef.current?.();
-  };
-
   return (
     <OverlayFrame
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
-      onBackdropClick={props.closeOnBackdrop ? closeFromBackdrop : undefined}
+      onBackdropClick={pressTopBackdrop}
     >
       {props.children}
     </OverlayFrame>

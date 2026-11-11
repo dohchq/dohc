@@ -299,8 +299,17 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     assert_eq!(moment_count(&store), before);
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), main_sha);
 
-    // A second conflict over the same pair resolves the other way, so both
-    // choices cannot be wired to the same side.
+    // The kept conflict counts as merged, so the version's next bytes conflict
+    // again. That conflict resolves the other way, so both choices cannot be
+    // wired to the same side.
+    let feat_sha = write_binary(
+        &mut store,
+        "feat",
+        "logo.png",
+        b"\x89PNG\xcc\xcc\xcc",
+        "obj-feat-2",
+        "f-2",
+    );
     let reopened = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-2", "conflict-2", "obj-merge-2"),

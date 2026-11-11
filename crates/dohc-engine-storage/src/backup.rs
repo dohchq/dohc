@@ -106,6 +106,7 @@ const COMPARED_TABLES: &[&str] = &[
     "path_aliases",
     "snapshots",
     "fork_base_snapshots",
+    "merge_bases",
     "moments",
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",

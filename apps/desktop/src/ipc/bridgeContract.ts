@@ -1493,7 +1493,9 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required", "unsent-edits-limit"]).optional(),
+  // Files that take no edits until the ones waiting for the server reach it.
+  ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
@@ -2408,6 +2410,8 @@ export const ChatRunRecord = z.object({
   endedAtMs: z.number().optional(),
   exitCode: z.number().int().optional(),
   logPath: PATH_STRING.optional(),
+  // dohc removed the finished run's log after the time the settings file keeps it.
+  logRemoved: z.literal(true).optional(),
 });
 export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
 
@@ -6208,11 +6212,12 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
-// Archives or unarchives one chat in this person's sidebar for one workspace.
+// Moves one chat in this person's sidebar for one workspace: back to its
+// list, to Archived, or, for a removed agent's chat, off Archived.
 export const SetChatArchivedPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
-  archived: z.boolean(),
+  state: z.enum(["active", "archived", "hidden"]),
 }).strict();
 export type SetChatArchivedPayload = z.infer<typeof SetChatArchivedPayload>;
 

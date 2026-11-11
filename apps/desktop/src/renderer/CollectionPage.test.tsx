@@ -39,7 +39,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
-import { publishReopenKey } from "./documentVersionKey";
+import { advanceReopenKey } from "./documentVersionKey";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
 // module evaluates and tracks droppable geometry with IntersectionObserver.
@@ -2162,6 +2162,7 @@ describe("CollectionRecordFieldWrite", () => {
       workspaceId: "ws-1",
       path: "tasks/Plan.md",
       enabled: true,
+      reopenKey: 0,
     });
     expect(doc.getMap("frontmatter").get("status")).toBe("done");
     // The session opens in "saved"; releasing on that snapshot would race
@@ -2180,13 +2181,13 @@ describe("CollectionRecordFieldWrite", () => {
   });
 
   it("opens the record with its open editor's key, so the write joins that editor's session", () => {
-    act(() => publishReopenKey("ws-keyed", 4));
+    act(() => advanceReopenKey("ws-keyed"));
     docMock.current = engineDocState({ opening: true });
     render(<CollectionRecordFieldWrite {...writerProps()} workspaceId="ws-keyed" />);
-    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 4 });
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 1 });
     // A version switch moves the write with its editor.
-    act(() => publishReopenKey("ws-keyed", 5));
-    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 5 });
+    act(() => advanceReopenKey("ws-keyed"));
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 2 });
   });
 
   it("fails a write whose session a new version key replaced before it saved", () => {

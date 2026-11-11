@@ -37,6 +37,8 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_list_automation_runs",
   "dohc_read_automation_run",
   "dohc_retry_automation_run",
+  // Only the computer that ran a request runs it again.
+  "dohc_retry_chat_run",
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
@@ -243,6 +245,27 @@ describe("parseArgs", () => {
 
 
 describe("MCP tool results", () => {
+  it("refuses an argument a tool does not take, and names the ones it does", async () => {
+    const request = vi.fn();
+    const { client, names } = await connectedToolNames({ root: "/workspace", home: "/home", request });
+    const refusal = async (name: string, args: Record<string, unknown>) => {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError, name).toBe(true);
+      return (result.content as { text: string }[])[0]!.text;
+    };
+    // `file` for `path` would otherwise list the whole workspace's history as a success.
+    expect(await refusal("dohc_list_changes", { file: "notes/plan.md", limit: 5 }))
+      .toContain('Unknown argument "file". This tool takes sinceMs, limit, includeFiles, path.');
+    expect(await refusal("dohc_list_groups", { group: "general", kind: "dm" }))
+      .toContain('Unknown arguments "group", "kind". This tool takes no arguments.');
+    for (const name of names) expect(await refusal(name, { notAnArgument: 1 }), name).toContain('Unknown argument "notAnArgument".');
+    for (const [name, args] of [
+      ["dohc_delete_retained_copies", { copies: [{ id: 1, revision: 1, force: true }], acceptLateWriteRisk: true }],
+      ["dohc_query_collection", { collectionPath: "tasks", filter: { field: "status", operator: "equals", value: "done", not: true } }],
+      ["dohc_query_collection", { collectionPath: "tasks", sort: [{ field: "status", direction: "asc", nulls: "last" }] }],
+    ] as const) expect(await refusal(name, args), name).toContain("Unrecognized key");
+    expect(request).not.toHaveBeenCalled();
+  });
   it("marks partial form creation as an error and preserves structured facts", async () => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
       retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };

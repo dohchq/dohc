@@ -545,6 +545,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "automationRun":
       return renderAutomationRun(result as AutomationRunResult);
     case "automationRetry":
+    case "chatRetry":
       return "queued";
     case "automationPress":
       return renderAutomationPress(result as Extract<CliResultByVerb["automationPress"], { ok: true }>);
