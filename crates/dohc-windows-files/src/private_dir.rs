@@ -419,7 +419,7 @@ fn denied_as(shown: &str, reason: NotPrivateReason) -> impl FnOnce(io::Error) ->
 }
 
 /// Whether `err` is a file system saying it can't read or set a DACL.
-fn unsupported(err: &io::Error) -> bool {
+pub(crate) fn unsupported(err: &io::Error) -> bool {
     [ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION]
         .into_iter()
         .any(|code| err.raw_os_error() == Some(code as i32))
@@ -782,7 +782,7 @@ fn closed_item(
 }
 
 /// Memory Windows allocated for the caller, freed once on drop.
-struct Local<T>(*mut T);
+pub(crate) struct Local<T>(pub(crate) *mut T);
 
 impl<T> Drop for Local<T> {
     fn drop(&mut self) {
