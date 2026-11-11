@@ -25,11 +25,11 @@ import { CollectionsElsewhereRow, CollectionsRefusalRow, RANGE_KEYS, rangeBetwee
 import {
   classifyFiles,
   collectionRows,
-  otherRows,
+  fileRows,
   pageRows,
   pageTree,
   pinnedRows,
-  OTHER_FILES_SHOWN,
+  FILES_SHOWN,
   type HomeLookup,
   type HomeRowModel,
   type HomeSectionId,
@@ -110,6 +110,7 @@ type NavItem = { sectionId: HomeSectionId; row?: HomeRowModel; more?: true };
 const SECTION_TEST_IDS: Record<HomeSectionId, string> = {
   pinned: "explorer-pinned",
   pages: "explorer-pages",
+  sketches: "explorer-sketches",
   collections: "explorer-collections",
   apps: "explorer-apps",
   other: "explorer-other-files",
@@ -159,7 +160,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   );
   const tree = useMemo(() => pageTree(kinds.pages), [kinds.pages]);
   const pages = useMemo(() => pageRows(tree, expanded), [tree, expanded]);
-  const others = useMemo(() => otherRows(kinds.others, fileByPath), [kinds.others, fileByPath]);
+  const sketches = useMemo(() => fileRows("sketches", kinds.sketches.shown, fileByPath), [kinds.sketches, fileByPath]);
+  const others = useMemo(() => fileRows("other", kinds.others.shown, fileByPath), [kinds.others, fileByPath]);
   const dataCollections = explorer.dataCollections;
   const lookup = useMemo<HomeLookup>(
     () => ({
@@ -233,6 +235,18 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
     });
   }
+  if (sketches.length > 0) {
+    sections.push({
+      id: "sketches",
+      label: "Sketches",
+      count: kinds.sketches.count,
+      countLabel: (count) => plural(count, "sketch", "sketches"),
+      rows: sketches,
+      ...(kinds.sketches.count > FILES_SHOWN
+        ? { more: { key: "sketches:more", label: "Show all in Files", testId: "sketches-show-all", onActivate: () => props.onShowInFiles(null) } }
+        : {}),
+    });
+  }
   if (showCollections) {
     const more = refusal ? undefined : explorer.onMoreDataCollections;
     sections.push({
@@ -277,10 +291,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     sections.push({
       id: "other",
       label: "Other files",
-      count: kinds.otherCount,
+      count: kinds.others.count,
       countLabel: (count) => plural(count, "file", "files"),
       rows: others,
-      ...(kinds.otherCount > OTHER_FILES_SHOWN
+      ...(kinds.others.count > FILES_SHOWN
         ? { more: { key: "other:more", label: "Show all in Files", testId: "other-files-show-all", onActivate: () => props.onShowInFiles(null) } }
         : {}),
     });
@@ -317,7 +331,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     }
     return { rows, items };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinned, pages, collections, appRows, others, collapsed, sectionsKey]);
+  }, [pinned, pages, sketches, collections, appRows, others, collapsed, sectionsKey]);
 
   // The workspace path of the row the active editor shows. An app or a
   // Collection opens a tab under another path, so Home looks its row up.
@@ -328,7 +342,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     }
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinned, pages, collections, appRows, others, sectionsKey, activePath]);
+  }, [pinned, pages, sketches, collections, appRows, others, sectionsKey, activePath]);
 
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const selectedNoteId = useId();
