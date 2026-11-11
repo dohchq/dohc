@@ -12,6 +12,7 @@ import { AutomationStoreNotOpenedError, type PendingRestore } from "@dohc/automa
 import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
+  LivePageOwnedError,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
   RestoreLocalChangesError,
@@ -33,6 +34,7 @@ import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
 import { isSharedLiveFileRefusal, readError, sharedLiveRestoreDetail } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+import { isLiveStopWaiting } from "./liveEditingStop";
 
 // A refused file's reason, as the person reads it. A file History no longer
 // tracks is refused in dohc's words. Unreadable rules are their own typed
@@ -130,6 +132,11 @@ export function registerStopAndRestoreIpc<
   }>;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
+  /**
+   * The owner's Stop live editing for one page, as Live documents runs it.
+   * "kept" also covers edits its release left outside the file.
+   */
+  stopLiveEditing(operation: Operation, path: string): Promise<{keptEdits: "none" | "kept" | "recovered"}>;
   /** Asks the workspace's sync to pull now. */
   queuePull(workspaceId: string): void;
   /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
@@ -615,7 +622,17 @@ export function registerStopAndRestoreIpc<
                 return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
               }
               if (error instanceof LiveDocumentMutationError && isSharedLiveFileRefusal(error)) return { kind: "refused", detail: refusalDetail(error), refusal: "shared-live" };
+              if (error instanceof LivePageOwnedError) return { kind: "refused", detail: refusalDetail(error), refusal: "live-page-owned" };
               if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError || error instanceof SyncedDeletionRevivalError) return { kind: "refused", detail: refusalDetail(error), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) };
+              throw error;
+            }
+          },
+          stopLiveEditing: async path => {
+            try {
+              const {keptEdits} = await dependencies.stopLiveEditing(operation, path);
+              return keptEdits === "kept" ? "kept" : "stopped";
+            } catch (error) {
+              if (isLiveStopWaiting(error)) return "waiting";
               throw error;
             }
           },
