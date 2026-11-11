@@ -409,6 +409,8 @@ fn a_renamed_file_merges_by_path() {
 }
 
 /// (f) Main undoes a merge; merging again applies the version's change again.
+/// A repeat merge in between, which finds nothing to do, does not hide the
+/// undo.
 #[test]
 fn merging_again_after_main_undoes_the_merge_applies_it_again() {
     let (_scratch, mut store) = open();
@@ -416,6 +418,7 @@ fn merging_again_after_main_undoes_the_merge_applies_it_again() {
     fork(&mut store);
     put(&mut store, "feat", "f.md", "1\n2\nthree\n4\n5");
     assert_eq!(outcome(&merge(&mut store, "f.md")), "write");
+    assert_eq!(outcome(&merge(&mut store, "f.md")), "already same");
 
     put(&mut store, "main", "f.md", LINES);
     assert_eq!(

@@ -661,11 +661,15 @@ where
             Some(("binary", write.head.snapshot.blob_sha256.as_str())),
         )),
         MergeTextFileResult::Delete { comparison, .. } => Some((comparison, None)),
+        // A version unchanged since its base brings nothing; recording it
+        // would overwrite the row that detects an undo of the last merge.
         MergeTextFileResult::Unchanged {
             reason: MergeUnchangedReason::AlreadySame,
             comparison,
             ..
-        } => Some((comparison, content_identity(&comparison.current))),
+        } if !comparison_sides_equal(&comparison.incoming, &comparison.base) => {
+            Some((comparison, content_identity(&comparison.current)))
+        }
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
     };
     if let Some((comparison, target_after)) = merged {
