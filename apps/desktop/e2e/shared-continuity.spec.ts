@@ -14,7 +14,7 @@ import { readHistoryMoments } from "./helpers/history";
 import { appliedServiceHostSeqs, liveDocumentFold, noticedRefusals, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 // RETEST INSTRUMENTATION (never merge): diagnostic probes.
-import { attachShot, closingProbes, recordCouldNotUpdate, watchReadOnly } from "./helpers/retestProbe";
+import { attachShot, closingProbes, recordCouldNotUpdate, recordHistory, watchReadOnly } from "./helpers/retestProbe";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
   revealExplorerPath, waitForWorkspaceFile, writeWorkspaceFiles, type TempWorkspace,
@@ -666,7 +666,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       recipient = await launch(recipientTemp);
       // RETEST INSTRUMENTATION (never merge): when the recipient's note first turns read-only.
       probes.set({ stopWatching: watchReadOnly(recipient.page, testInfo, "recipient"), owner: owner!.page, recipient: recipient.page,
-        ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath });
+        ownerRoot: ownerTemp.rootPath, recipientRoot: recipientTemp.rootPath, workspaceId: workspace.workspaceId, path: PATH });
       const recipientWorkspaceId = await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
       const page = recipient.page;
       await expect(editor(page)).toContainText(H1);
@@ -737,6 +737,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
     });
     // RETEST INSTRUMENTATION (never merge): any "could not update" notice once the owner has the recipient's edit.
+    await recordHistory(owner!.page, testInfo, workspace.workspaceId, PATH, "after the recipient's edit reached the owner");
     await recordCouldNotUpdate(owner!.page, testInfo, "owner", "after the recipient's edit reached the owner");
     await recordCouldNotUpdate(recipient!.page, testInfo, "recipient", "after the recipient's edit reached the owner");
 
