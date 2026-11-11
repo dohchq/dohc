@@ -1066,11 +1066,14 @@ it("reuses history statements and targets the requested catalog row", async () =
   expect(prepared.mock.calls.filter(([sql]) => String(sql).includes("WITH changes") || String(sql).includes("SELECT c.dataset_id") || String(sql).includes("checkpoint_digest AS digest"))).toEqual([]);
 });
 
-it("keeps a Collection still importing, and names only the asking workspace's Collections", async () => {
+it("keeps a Collection still importing, and names only the asking workspace's Collections and imports", async () => {
   const f = await fixture(); await f.activate();
   const importing = f.db.prepare("INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)");
   importing.run("import-here", "workspace", id(20), "0".repeat(64), "{}", "owner", 0);
   importing.run("import-elsewhere", "other-workspace", id(21), "0".repeat(64), "{}", "owner", 0);
+  // A Collection the other workspace keeps, as a copy of this one's catalog row.
+  const columns = f.db.prepare("SELECT name FROM pragma_table_info('dohc_dataset_catalog')").all().map(row => String(row.name));
+  f.db.prepare(`INSERT INTO dohc_dataset_catalog(${columns.join(",")}) SELECT ${columns.map(column => column === "workspace_id" ? "'other-workspace'" : column === "dataset_id" ? "?" : column).join(",")} FROM dohc_dataset_catalog WHERE workspace_id='workspace'`).run(id(22));
   expect(f.host.keptDatasetIds("owner", { workspaceId: "workspace" }).sort()).toEqual([id(1), id(20)]);
   // Without access to the other workspace, the owner here learns nothing of what it keeps.
   expect(() => f.host.keptDatasetIds("owner", { workspaceId: "other-workspace" })).toThrow("revoked");
