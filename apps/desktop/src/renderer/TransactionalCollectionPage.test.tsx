@@ -533,8 +533,9 @@ describe("a Data Collection's table", () => {
     type("Name", "Alicia");
     result.unmount();
     await act(async () => answer.reject(failure));
+    // A change dohc could not confirm keeps a Try again on its row in Notices. A refusal is an answer, so it has none.
     expect(result.onError).toHaveBeenCalledOnce();
-    expect(result.onError).toHaveBeenCalledWith(words, failure, null);
+    expect(result.onError.mock.calls[0]).toEqual(failure.message === "Lost reply" ? [words, failure, expect.any(Function), expect.any(String)] : [words, failure, null]);
     expect(result.onNotice).not.toHaveBeenCalled();
     // The page opens again with what was typed on its cell, and never as saved.
     render(<TransactionalCollectionPage {...result.props} />);
@@ -1769,5 +1770,540 @@ describe("when the Collection's fields change", () => {
     expect(editorInput()).toBe(input);
     expect(document.activeElement).toBe(input);
     expect([input.value, input.selectionStart]).toEqual(["Alicia", 1]);
+  });
+});
+
+/** One of two pages of the same table, by the element that holds it. */
+function tableIn(root: HTMLElement) {
+  const table = () => within(root).getByRole("grid");
+  const at = (field: string, row = 0): HTMLElement => {
+    const column = within(table()).getAllByRole("columnheader").findIndex(header => header.textContent === field);
+    const found = column < 0 ? undefined : table().querySelectorAll<HTMLElement>(`[role="row"][data-index="${row}"] [role="gridcell"]`)[column];
+    if (!found) throw new Error(`no ${field} cell in row ${row}`);
+    return found;
+  };
+  return {
+    cell: at,
+    mark: (field: string, row = 0) => at(field, row).querySelector("[data-cell-status]")?.getAttribute("data-cell-status") ?? null,
+    type(field: string, value: string, row = 0): void {
+      fireEvent.click(at(field, row));
+      const input = table().querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+      fireEvent.change(input, { target: { value } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    },
+  };
+}
+const strip = () => screen.queryByRole("group", { name: "Changes dohc did not confirm" });
+const NOT_FINISHED = "This edit was still open, so dohc did not save it.";
+const RULES_CHANGED = "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.";
+const DISCARDED = "dohc could not confirm this change, and you discarded it. Check the record before you make the change again.";
+const refusal = (words: string) => Object.assign(new Error(words), { code: "operation_refused" });
+
+describe("one queue for a table's changes", () => {
+  it("sends the changes not sent yet after its page closes and never opens again", async () => {
+    const first = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() })
+      : sent(invoke, edit).length === 1 ? first.promise : Promise.resolve({ result: receipt(4) }));
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Amount", "9");
+    view.unmount();
+    await act(async () => first.resolve({ result: receipt(3) }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]!.input).toEqual({ id: 1, expectedVersion: 3, values: { [amount]: 9 } });
+    await waitFor(() => expect(view.onNotice.mock.calls).toEqual([["Saved the edit in People"], ["Saved the edit in People"]]));
+    // The closed page read nothing more.
+    expect(sent(invoke, read)).toHaveLength(1);
+  });
+
+  it("shares one queue between two pages of a table opened one after the other, and each keeps working when the other closes", async () => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    let stored = "Alice";
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page(stored) })
+      : sent(invoke, edit).length === 1 ? answer.promise : Promise.resolve({ result: receipt(4) }));
+    const first = setup({ invoke });
+    await screen.findByText("Alice");
+    const second = render(<TransactionalCollectionPage {...first.props} />);
+    await waitFor(() => expect(screen.getAllByText("Alice")).toHaveLength(2));
+    const a = tableIn(first.container), b = tableIn(second.container);
+    a.type("Name", "Alicia");
+    // The other page shows the same change on its cell.
+    expect(b.mark("Name")).toBe("pending");
+    expect(b.cell("Name").textContent).toContain("Alicia");
+    // The first page closes. The change still ends, and the second page shows it and reads its records again.
+    first.unmount();
+    stored = "Alicia";
+    await act(async () => answer.resolve({ result: receipt(3) }));
+    await waitFor(() => expect(b.mark("Name")).toBeNull());
+    expect(b.cell("Name").textContent).toBe("Alicia");
+    expect(first.onNotice).not.toHaveBeenCalled();
+    b.type("Amount", "9");
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]!.input).toMatchObject({ id: 1, values: { [amount]: 9 } });
+  });
+
+  it("gives two pages of a table that open together one queue, which keeps sending when one of them closes", async () => {
+    const answers = [deferred<{ result: AppBackendJson }>(), deferred<{ result: AppBackendJson }>()];
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() })
+      : answers[sent(invoke, edit).length - 1]!.promise);
+    const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError: vi.fn(), onNotice: vi.fn() };
+    const left = <div key="left" data-testid="left"><TransactionalCollectionPage {...props} /></div>;
+    const right = <div key="right" data-testid="right"><TransactionalCollectionPage {...props} /></div>;
+    const view = render(<>{left}{right}</>);
+    await waitFor(() => expect(screen.getAllByText("Alice")).toHaveLength(2));
+    const a = tableIn(screen.getByTestId("left")), b = tableIn(screen.getByTestId("right"));
+    a.type("Name", "Alicia");
+    expect(b.mark("Name")).toBe("pending");
+    b.type("Amount", "9");
+    expect(a.mark("Amount")).toBe("pending");
+    expect(sent(invoke, edit)).toHaveLength(1);
+    // The left page closes. The right page's change still goes, after the left page's, on its receipt's version.
+    view.rerender(<>{right}</>);
+    await act(async () => answers[0]!.resolve({ result: receipt(3) }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]!.input).toEqual({ id: 1, expectedVersion: 3, values: { [amount]: 9 } });
+    await act(async () => answers[1]!.resolve({ result: receipt(4) }));
+    await waitFor(() => expect([b.mark("Name"), b.mark("Amount")]).toEqual([null, null]));
+    expect(props.onNotice).not.toHaveBeenCalled();
+  });
+
+  it("drops a request sent under the old rules when its page opens again under new ones, and keeps what was typed", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      throw new Error("Lost reply");
+    });
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    view.unmount();
+    const next = dataset(); next.revision = 2; next.revisionSha256 = "b".repeat(64);
+    render(<TransactionalCollectionPage {...view.props} dataset={next} />);
+    await screen.findByText("Alicia");
+    expect(mark("Name")).toBe("refused");
+    expect(why("Name")).toBe(RULES_CHANGED);
+    expect(sent(invoke, edit)).toHaveLength(1);
+  });
+
+  it("keeps a change dohc could not confirm, with its exact request, through Refresh and paging", async () => {
+    let fail = true;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId !== read) { if (fail) throw new Error("Lost reply"); return { result: receipt() }; }
+      const second = request.input !== null && typeof request.input === "object" && "after" in request.input;
+      return { result: second ? { rows: [{ id: 2, version: 4, values: { [name]: "Bea", [amount]: 7, [status]: "New" } }], nextCursor: null } : page("Alice", true) };
+    });
+    setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
+    await loaded();
+    expect(mark("Name")).toBe("unconfirmed");
+    // On the next page no cell shows the change, so the page lists it above the table.
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("Bea");
+    expect(within(strip()!).getByText("dohc could not confirm a change to record 1.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    await screen.findByText("Alicia");
+    expect(strip()).toBeNull();
+    fail = false;
+    fireEvent.click(within(cell("Name")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]).toEqual(sent(invoke, edit)[0]);
+  });
+
+  it("keeps a confirmed value on its cell, and the next change on its receipt's version, when a read that started earlier returns the older record", async () => {
+    const stale = deferred<{ result: AppBackendJson }>(), first = deferred<{ result: AppBackendJson }>(), second = deferred<{ result: AppBackendJson }>();
+    let reads = 0;
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return ++reads === 2 ? stale.promise : Promise.resolve({ result: page(reads > 2 ? "Alicia" : "Alice") });
+      return sent(invoke, edit).length === 1 ? first.promise : second.promise;
+    });
+    const { props, rerender } = setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Amount", "9");
+    // A read in place starts before the first change is confirmed, and answers after it.
+    rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => first.resolve({ result: receipt(7) }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    await act(async () => stale.resolve({ result: page("Alice") }));
+    expect(cell("Name").textContent).toBe("AliciaSaving");
+    expect(sent(invoke, edit)[1]!.input).toEqual({ id: 1, expectedVersion: 7, values: { [amount]: 9 } });
+    await act(async () => second.resolve({ result: receipt(8) }));
+    await waitFor(() => expect([mark("Name"), mark("Amount")]).toEqual([null, null]));
+    expect(cell("Name").textContent).toBe("Alicia");
+  });
+
+  it("reverses only the last edit after several confirmed changes", async () => {
+    let version = 2;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      const fields = Object.keys((request.input as { values: Record<string, AppBackendJson> }).values);
+      return { result: { id: 1, version: ++version, priorValues: Object.fromEntries(fields.map(fieldId => [fieldId, fieldId === name ? "Alice" : 5])) } };
+    });
+    setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Amount", "9");
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    const undo = await screen.findByRole<HTMLButtonElement>("button", { name: "Undo last edit" });
+    await waitFor(() => expect(undo.disabled).toBe(false));
+    fireEvent.click(undo);
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(3));
+    expect(sent(invoke, edit)[2]!.input).toEqual({ id: 1, expectedVersion: 4, values: { [amount]: 5 } });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull());
+  });
+
+  it("sends nothing from Try again while the Collection is offline, and keeps the change for when it is back", async () => {
+    let fail = true;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      if (fail) throw new Error("Lost reply");
+      return { result: receipt() };
+    });
+    const { props, rerender } = setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    rerender(<TransactionalCollectionPage {...props} copy={{ offline: true, savedAtMs: 1 }} />);
+    fireEvent.click(within(cell("Name")).getByRole("button", { name: "Try again" }));
+    expect(mark("Name")).toBe("unconfirmed");
+    expect(sent(invoke, edit)).toHaveLength(1);
+    fail = false;
+    rerender(<TransactionalCollectionPage {...props} copy={{ offline: false, savedAtMs: 2 }} />);
+    fireEvent.click(within(cell("Name")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]).toEqual(sent(invoke, edit)[0]);
+  });
+});
+
+describe("what a change that did not save leaves for the person", () => {
+  it("keeps text typed in a cell and not saved when its page closes, shows it on its cell, and never sends it by itself", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    fireEvent.change(editorInput(), { target: { value: "Bob" } });
+    view.unmount();
+    render(<TransactionalCollectionPage {...view.props} />);
+    await screen.findByText("Bob");
+    expect(mark("Name")).toBe("refused");
+    expect(why("Name")).toBe(NOT_FINISHED);
+    expect(sent(view.invoke, edit)).toHaveLength(0);
+    // The next edit of the cell starts from what was typed, and saves it.
+    fireEvent.click(cell("Name"));
+    expect(editorInput().value).toBe("Bob");
+    fireEvent.keyDown(editorInput(), { key: "Enter" });
+    await waitFor(() => expect(sent(view.invoke, edit)).toHaveLength(1));
+    expect(sent(view.invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Bob" } });
+  });
+
+  it("keeps nothing of an open cell editor in which nothing was typed", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    view.unmount();
+    render(<TransactionalCollectionPage {...view.props} />);
+    await screen.findByText("Alice");
+    expect(mark("Name")).toBeNull();
+  });
+
+  it("lists text typed in an open cell above the table, with Copy and Clear, when its field is removed", async () => {
+    const result = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Amount"));
+    fireEvent.change(editorInput(), { target: { value: "12" } });
+    const without = dataset();
+    without.tables[0]!.fields = without.tables[0]!.fields.filter(entry => entry.fieldId !== amount);
+    for (const entry of without.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== amount);
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={without} />);
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText("Amount of record 1")).toBeTruthy();
+    expect(list.getByLabelText<HTMLInputElement>("Amount").value).toBe("12");
+    expect(list.getByRole("alert").textContent).toBe(NOT_FINISHED);
+    expect(list.getByRole("button", { name: "Copy value" })).toBeTruthy();
+    expect(sent(result.invoke, edit)).toHaveLength(0);
+    fireEvent.click(list.getByRole("button", { name: "Clear value" }));
+    expect(strip()).toBeNull();
+  });
+
+  it("lists text typed in an open cell above the table when a read no longer returns its record", async () => {
+    const { invoke, props, rerender } = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    fireEvent.change(editorInput(), { target: { value: "Bob" } });
+    invoke.mockResolvedValueOnce({ result: { rows: [], nextCursor: null } });
+    rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText("Name of record 1")).toBeTruthy();
+    expect(list.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(sent(invoke, edit)).toHaveLength(0);
+  });
+
+  it("shows the later value when an earlier change to the same cell is refused and the later one is confirmed", async () => {
+    let stored = "Alice";
+    const first = deferred<{ result: AppBackendJson }>(), second = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page(stored) })
+      : sent(invoke, edit).length === 1 ? first.promise : second.promise);
+    setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "first");
+    type("Name", "second");
+    await act(async () => first.reject(refusal("This record changed. Refresh the table.")));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    stored = "second";
+    await act(async () => second.resolve({ result: receipt(3) }));
+    await waitFor(() => expect(mark("Name")).toBeNull());
+    expect(cell("Name").textContent).toBe("second");
+    expect(strip()).toBeNull();
+  });
+
+  it("offers Try again above the table when a cell dohc could not confirm is edited again", async () => {
+    let fail = true;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      if (fail) throw new Error("Lost reply");
+      return { result: receipt(9) };
+    });
+    setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    expect(strip()).toBeNull();
+    // The cell now shows the later value, which waits, so it can't offer the earlier change's Try again.
+    type("Name", "Alison");
+    expect(mark("Name")).toBe("waiting");
+    const list = within(strip()!);
+    expect(list.getByText("dohc could not confirm a change to record 1.")).toBeTruthy();
+    fail = false;
+    fireEvent.click(list.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(3));
+    const writes = sent(invoke, edit);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(writes[2]!.input).toEqual({ id: 1, expectedVersion: 9, values: { [name]: "Alison" } });
+  });
+
+  /** The fixture with a primary key the read returns, so one record can be read by it. */
+  const member = id(9);
+  function keyed(): TransactionalDatasetDescription {
+    const description = dataset();
+    description.tables[0]!.primaryKeyFieldId = member;
+    description.tables[0]!.fields.push({ fieldId: member, name: "Member", type: "text", required: true, unique: true });
+    description.operations.find(operation => operation.operationId === read)!.fieldIds.push(member);
+    return description;
+  }
+  const byKey = (request: TransactionalInvoke) => request.input !== null && typeof request.input === "object" && "filters" in request.input;
+
+  it("holds a record's next change until a read by its key returns its version, when the page's read leaves the record out", async () => {
+    const first = deferred<{ result: AppBackendJson }>();
+    let moved = false;
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return Promise.resolve({ result: byKey(request) ? { rows: [{ id: 1, version: 8, values: { [name]: "Alicia" } }], nextCursor: null } : moved ? { rows: [], nextCursor: null } : page() });
+      return sent(invoke, edit).length === 1 ? first.promise : Promise.resolve({ result: receipt(9) });
+    });
+    setup({ dataset: keyed(), invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Amount", "9");
+    // The first change moves the record out of the page's search, and its receipt reports no version.
+    moved = true;
+    await act(async () => first.resolve({ result: null }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, read).filter(byKey).map(request => request.input)).toEqual([{ limit: 1, filters: [{ fieldId: member, value: 1 }] }]);
+    expect(sent(invoke, edit)[1]!.input).toEqual({ id: 1, expectedVersion: 8, values: { [amount]: 9 } });
+  });
+
+  it("drops the changes queued for a record that is no longer in the Collection, and keeps what was typed", async () => {
+    const first = deferred<{ result: AppBackendJson }>();
+    let gone = false;
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return Promise.resolve({ result: gone ? { rows: [], nextCursor: null } : page() });
+      return sent(invoke, edit).length === 1 ? first.promise : Promise.resolve({ result: receipt(9) });
+    });
+    setup({ dataset: keyed(), invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Amount", "9");
+    gone = true;
+    await act(async () => first.resolve({ result: null }));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText("Amount of record 1")).toBeTruthy();
+    expect(list.getByLabelText<HTMLInputElement>("Amount").value).toBe("9");
+    expect(list.getByRole("alert").textContent).toBe("This record is no longer in the Collection, so dohc did not save this change.");
+    expect(sent(invoke, edit)).toHaveLength(1);
+  });
+
+  it("drops a change its host refuses because the Collection's rules changed, keeps what was typed, and reads the Collection again", async () => {
+    // What the renderer gets from main when the host answers a request that names rules it has replaced.
+    const stale = new Error("Error invoking remote method 'dataset': DatasetHostError [conflict]: The Collection's rules changed. Its owner must approve this access again.");
+    const onRefresh = vi.fn();
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      throw stale;
+    });
+    const { onError } = setup({ invoke, onRefresh });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("refused"));
+    expect(why("Name")).toBe(RULES_CHANGED);
+    expect(cell("Name").textContent).toContain("Alicia");
+    // Nothing offers to send the same request again, and the page asks for the Collection's rules.
+    expect(within(cell("Name")).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(onError.mock.calls.at(-1)![2]).toBeNull();
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(sent(invoke, edit)).toHaveLength(1);
+  });
+
+  it("discards a change dohc could not confirm after Try again fails, keeps what was typed, and sends the next change with the version a fresh read returns", async () => {
+    let version = 2;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: { rows: [{ id: 1, version, values: { [name]: "Alice", [amount]: 5, [status]: "New" } }], nextCursor: null } };
+      // The change to Name lands, and its answer never arrives.
+      if (Object.hasOwn((request.input as { values: Record<string, AppBackendJson> }).values, name)) { version = 5; throw new Error("Lost reply"); }
+      return { result: receipt(6) };
+    });
+    const onSettled = vi.fn();
+    const { onError } = setup({ invoke, onSettled });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    fireEvent.click(within(cell("Name")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    const reads = sent(invoke, read).length;
+    fireEvent.click(within(cell("Name")).getByRole("button", { name: "Discard" }));
+    // The cell keeps what was typed, and says to check the record. Its row in Notices goes.
+    expect(mark("Name")).toBe("refused");
+    expect(why("Name")).toBe(DISCARDED);
+    expect(cell("Name").textContent).toContain("Alicia");
+    expect(onSettled).toHaveBeenCalledWith(onError.mock.calls[0]![3]);
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(sent(invoke, edit)).toHaveLength(2);
+    // The record's next change waits for a read, and goes with the version that read returns and a key of its own.
+    type("Amount", "9");
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(3));
+    expect(sent(invoke, read).length).toBeGreaterThan(reads);
+    expect(sent(invoke, edit)[2]!.input).toEqual({ id: 1, expectedVersion: 5, values: { [amount]: 9 } });
+    expect(sent(invoke, edit)[2]!.idempotencyKey).not.toBe(sent(invoke, edit)[0]!.idempotencyKey);
+  });
+
+  it("offers Discard above the table for a new record dohc could not confirm, and keeps its values there", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      throw new Error("Lost reply");
+    });
+    setup({ invoke });
+    await screen.findByText("Alice");
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    fireEvent.click(list.getByRole("button", { name: "Discard" }));
+    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
+    expect(list.getByRole("alert").textContent).toBe(DISCARDED);
+    fireEvent.click(list.getByRole("button", { name: "Clear value" }));
+    expect(strip()).toBeNull();
+    expect(sent(invoke, create)).toHaveLength(1);
+  });
+
+  /** A new record whose first answer is lost, and which the Collection then refuses. */
+  function refusedCreate() {
+    let writes = 0;
+    return vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      if (++writes === 1) throw new Error("Lost reply");
+      throw refusal("Name is taken.");
+    });
+  }
+  function createBob(): void {
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+  }
+
+  it("opens the New record form again with what was typed when the Collection refuses the record after Try again", async () => {
+    const invoke = refusedCreate();
+    setup({ invoke });
+    await screen.findByText("Alice");
+    createBob();
+    fireEvent.click(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Try again" }));
+    const form = within(await screen.findByRole("form", { name: "New record" }));
+    expect(form.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
+    expect(form.getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken.");
+    expect(strip()).toBeNull();
+    expect(sent(invoke, create)).toHaveLength(2);
+  });
+
+  it("keeps a new record the Collection refused after its page closed where the person can copy it", async () => {
+    const invoke = refusedCreate();
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    createBob();
+    await screen.findByRole("group", { name: "Changes dohc did not confirm" });
+    // The row the failure left in Notices sends the change again after the page closed.
+    const [words, , retry, identity] = view.onError.mock.calls[0]!;
+    expect([words, typeof identity]).toEqual(["dohc could not confirm this change.", "string"]);
+    view.unmount();
+    await act(async () => retry());
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
+    await waitFor(() => expect(view.onError).toHaveBeenLastCalledWith("People refused the change. Open it to check its records.", expect.objectContaining({ code: "operation_refused" }), null));
+    render(<TransactionalCollectionPage {...view.props} />);
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
+    expect(list.getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken.");
+    expect(list.getByRole("button", { name: "Copy value" })).toBeTruthy();
+    fireEvent.click(list.getByRole("button", { name: "Clear value" }));
+    expect(strip()).toBeNull();
+  });
+
+  it("lets the row a failure left in Notices send the change again after its page closed, and names the Collection", async () => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    let fail = true;
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() })
+      : sent(invoke, edit).length === 1 ? answer.promise : fail ? Promise.reject(new Error("Lost reply")) : Promise.resolve({ result: receipt() }));
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    view.unmount();
+    await act(async () => answer.reject(new Error("Lost reply")));
+    expect(view.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm the change to People. Open it to check its records.", expect.objectContaining({ message: "Lost reply" }), expect.any(Function), expect.any(String));
+    fail = false;
+    await act(async () => view.onError.mock.calls[0]![2]());
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]).toEqual(sent(invoke, edit)[0]);
+    await waitFor(() => expect(view.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
+  });
+
+  it("sends null for a text value cleared in a form, as the table does", async () => {
+    const optional = dataset();
+    optional.tables[0]!.fields.find(entry => entry.fieldId === name)!.required = false;
+    const { invoke } = setup({ dataset: optional });
+    await screen.findByText("Alice");
+    const dialog = within(openDetails());
+    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
+    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
+    expect(sent(invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: null } });
+  });
+
+  it("lists a deletion that waits behind a change dohc could not confirm", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      if (request.operationId === edit) throw new Error("Lost reply");
+      return { result: { id: 1, version: 1 } };
+    });
+    setup({ invoke, confirmDelete: async () => true });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
+    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    const words = await screen.findByText("The deletion of record 1 is waiting for an earlier change to this record.");
+    expect(strip()!.contains(words)).toBe(true);
+    expect(sent(invoke, remove)).toHaveLength(0);
   });
 });

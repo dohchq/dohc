@@ -4,7 +4,7 @@ import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contrac
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 // The table alone: the package's index also loads the board and the calendar, which this page loads only for those views.
-import { TableView, type CollectionCellChange, type TableFieldMark, type TableHostCell } from "@dohc/collection-views/table";
+import { DISCARD_HINT, TableView, type CollectionCellChange, type TableAbandonedDraft, type TableFieldMark, type TableHostCell } from "@dohc/collection-views/table";
 import type { CollectionQuerySort, CollectionRecord, CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
 import type { CollectionTableView } from "./collectionTableViews";
 import { readCollectionReopenWait } from "../ipc/errorWords";
@@ -89,6 +89,7 @@ type FormField = { field: TransactionalField; value: AppBackendJson; changed: bo
 const VALUE_CHANGED = "This field changed, so this value can't be saved. Copy it if you need it, then clear it.";
 const CHANGE_GONE = "The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.";
 const SAVE_OFFLINE = "You can save this once the Collection is back online.";
+const EDIT_LEFT_OPEN = "This edit was still open, so dohc did not save it.";
 
 function undoFromReceipt(write: QueuedWrite, operation: DatasetOperation | undefined, raw: AppBackendJson): Undo | null {
   if (!operation || operation.kind !== "edit" || !operation.reversible || write.kind !== "edit" || write.undo || !write.record) return null;
@@ -127,7 +128,8 @@ function ValueInput({ field, value, disabled, describedBy, onChange }: { field: 
   return <input aria-label={field.name} {...marked} disabled={disabled} type={field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "url" ? "url" : "text"}
     step={field.type === "number" ? "any" : undefined} value={display(value)} className={inputClass} onChange={event => {
       const raw = event.target.value;
-      onChange(field.type === "number" ? raw === "" ? null : Number(raw) : raw === "" && field.type !== "text" ? null : raw);
+      // Nothing typed is null for every kind of field, as the table sends it, so empty values group and filter as one.
+      onChange(raw === "" ? null : field.type === "number" ? Number(raw) : raw);
     }} />;
 }
 
@@ -152,19 +154,34 @@ function unconfirmedWords(write: QueuedWrite): string {
   if (write.kind === "create") return "dohc could not confirm the new record.";
   return write.kind === "delete" ? `dohc could not confirm the deletion of record ${String(write.record?.id)}.` : `dohc could not confirm a change to record ${String(write.record?.id)}.`;
 }
+/** A change that waits, in the words its cell would show: "Waiting for…" becomes "… is waiting for…". */
+function waitingWords(write: QueuedWrite, reason: string): string {
+  const subject = write.kind === "create" ? "A new record" : write.kind === "delete" ? `The deletion of record ${String(write.record?.id)}` : `A change to record ${String(write.record?.id)}`;
+  return `${subject} is ${reason.charAt(0).toLowerCase()}${reason.slice(1)}.`;
+}
+/** A new record's values on one line, for its copy. */
+const recordText = (values: Readonly<Record<string, Typed>>) => Object.values(values).filter(typed => !isEmptyValue(typed.value)).map(typed => `${typed.under.name}: ${display(typed.value)}`).join(", ");
 /**
  * The changes that need the person and that no cell on screen shows: a
- * change dohc could not confirm, with Try again, and a value it did not
- * save, with a copy of it and the control that clears it.
+ * change dohc could not confirm, with Try again and Discard, a change that
+ * waits, and a value or a new record dohc did not save, with a copy of it
+ * and the control that clears it.
  */
-function UnshownChanges({ items, onRetry, onClear }: { items: readonly WriteAttention[]; onRetry(id: number): void; onClear(recordKey: string, fieldId: string): void }) {
+function UnshownChanges({ items, onRetry, onDiscard, onClear, onClearRecord }: { items: readonly WriteAttention[]; onRetry(id: number): void; onDiscard(id: number): void; onClear(recordKey: string, fieldId: string): void; onClearRecord(id: number): void }) {
   const ids = useId();
   return <div role="group" aria-label="Changes dohc did not confirm" className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3 text-[12px] text-muted">
     {items.map((item, index) => item.kind === "unconfirmed"
-      ? <div key={`change:${item.write.id}`} className="flex flex-wrap items-center gap-2"><span>{unconfirmedWords(item.write)}</span><SecondaryButton size="row" onClick={() => onRetry(item.write.id)}>Try again</SecondaryButton></div>
-      : <div key={`value:${item.recordKey}:${item.fieldId}`} className="flex flex-col gap-1">
+      ? <div key={`change:${item.write.id}`} className="flex flex-wrap items-center gap-2"><span>{unconfirmedWords(item.write)}</span>
+        <SecondaryButton size="row" onClick={() => onRetry(item.write.id)}>Try again</SecondaryButton><SecondaryButton size="row" title={DISCARD_HINT} onClick={() => onDiscard(item.write.id)}>Discard</SecondaryButton></div>
+      : item.kind === "waiting" ? <span key={`waiting:${item.write.id}`}>{waitingWords(item.write, item.reason)}</span>
+      : item.kind === "held" ? <div key={`value:${item.recordKey}:${item.fieldId}`} className="flex flex-col gap-1">
         <span>{item.fieldName} of record {String(item.recordId)}</span>
         <ChangedValue name={item.fieldName} value={item.value} disabled={false} describedBy={`${ids}-${index}`} onClear={() => onClear(item.recordKey, item.fieldId)} />
+        <FieldError id={`${ids}-${index}`}>{item.reason}</FieldError>
+      </div>
+      : <div key={`record:${item.id}`} className="flex flex-col gap-1">
+        <span>New record</span>
+        <ChangedValue name="New record" value={recordText(item.values)} disabled={false} describedBy={`${ids}-${index}`} onClear={() => onClearRecord(item.id)} />
         <FieldError id={`${ids}-${index}`}>{item.reason}</FieldError>
       </div>)}
   </div>;
@@ -266,9 +283,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // What is wrong with each field the person tried to save, by field id.
   const [invalid, setInvalid] = useState<Readonly<Record<string, string>>>({});
   const errorIds = useId(), focusInvalid = useRef(false);
-  // The changes this table made that its host has not confirmed. The queue is this table's own, by workspace,
-  // Collection and table, so an answer for another one reaches another queue and changes nothing here.
+  // The changes made to this table that its host has not confirmed. The queue is the table's one, by workspace,
+  // Collection and table: every page of the table shares it, and an answer for another table reaches another queue.
   const queue = useState(() => writeQueueFor(JSON.stringify([workspaceId, dataset.datasetId, tableId])))[0];
+  // This page's view of it, with the confirmed values this page's own records do not show yet.
+  const view = useState(() => queue.page())[0];
   useSyncExternalStore(queue.subscribe, queue.version);
   // The change the open form sent, while the form waits for its answer.
   const [awaiting, setAwaiting] = useState<number | null>(null), awaitingRef = useRef<number | null>(null);
@@ -332,7 +351,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setDetails(null); setQuery(next); setVisualRefresh(value => value + 1); return;
     }
     const abort = new AbortController(); readActive.current = abort;
-    const mine = ++sequence.current, shows = queue.readStarted();
+    const mine = ++sequence.current, shows = view.readStarted();
     locked.current = true; setBusy(true);
     try {
       const response = await invoke(request(read, pageInput(next), crypto.randomUUID()), abort.signal);
@@ -341,7 +360,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setPage(loaded); setQuery(next); setPrevious(history);
       setDetails(open => open && (loaded.rows.find(row => JSON.stringify(row.id) === JSON.stringify(open.id)) ?? null));
       settle();
-      queue.readShown(shows, loaded.rows);
+      view.readShown(shows, loaded.rows);
     } catch (cause) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
         setPage(null); setDetails(null);
@@ -360,12 +379,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // The queue reads the page's rules and handlers when it sends and when an answer comes, so each commit gives
   // it the current ones. It is given them before the page opens it, and before the rules change under it below.
   useLayoutEffect(() => {
-    queue.sync({ workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableName: table?.name ?? "this Collection",
-      fields: table?.fields ?? [], operations, offline, invoke, onError, onSettled: props.onSettled, onNotice, confirmed, dropped, unconfirmed, read: readForQueue });
+    view.sync({ workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableName: table?.name ?? "this Collection",
+      fields: table?.fields ?? [], primaryKeyFieldId: table?.primaryKeyFieldId, operations, offline, invoke, onError, onSettled: props.onSettled, onNotice,
+      confirmed, dropped, unconfirmed, read: readForQueue, describe: () => props.onRefresh?.() });
   });
-  // A page that closes leaves its queue. A request in flight ends without it, and what is unsent or unconfirmed
-  // is here when the page opens again.
-  useLayoutEffect(() => { queue.attach(); return () => queue.detach(); }, [queue]);
+  // A page that closes leaves the queue to go on without it: it sends what is unsent, and what it could not
+  // confirm is on its cells when a page of the table opens again.
+  useLayoutEffect(() => view.open(), [view]);
   const contractKey = JSON.stringify([dataset.revision, dataset.revisionSha256, dataset.operations, props.copy?.offline ?? false]);
   const priorContract = useRef(contractKey);
   // The fields the shown records, Undo and a board or calendar were read under.
@@ -487,7 +507,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (!read || !alive.current || locked.current) return;
     readActive.current?.abort();
     const abort = new AbortController(); readActive.current = abort;
-    const mine = ++sequence.current, next = currentQuery.current, shows = queue.readStarted();
+    const mine = ++sequence.current, next = currentQuery.current, shows = view.readStarted();
     try {
       const response = await invoke(request(read, pageInput(next), crypto.randomUUID()), abort.signal);
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
@@ -495,7 +515,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setPage(loaded);
       settle();
       showOpenRecord(loaded.rows);
-      queue.readShown(shows, loaded.rows);
+      view.readShown(shows, loaded.rows);
     } catch (cause) {
       // Otherwise nothing to say: the change happened elsewhere, and the page still shows its last read.
       if (failure === undefined || !alive.current || sequence.current !== mine || abort.signal.aborted) return;
@@ -588,8 +608,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (awaitingRef.current === write.id) closeEditor();
   }
   /** A change went unsaved. The form that sent it stays open with what was typed, and says why. */
-  function dropped(write: QueuedWrite, reason: string): boolean {
-    if (awaitingRef.current !== write.id) return false;
+  function dropped(write: QueuedWrite, reason: string, refused: boolean): boolean {
+    if (awaitingRef.current !== write.id) {
+      // A new record the Collection refused after its form closed opens the form again, with what was typed and why, while no other form is open.
+      if (!refused || write.kind !== "create" || editor !== null || !create || !canCreate) return false;
+      trigger.current = null; setDraft({ ...write.values }); setInvalid({}); setFormRefusal(reason); setEditor({ kind: "create", operation: create });
+      return true;
+    }
     awaitingRef.current = null; setAwaiting(null);
     const fieldId = write.kind === "edit" ? Object.keys(write.values)[0] : undefined;
     if (fieldId === undefined) setFormRefusal(reason);
@@ -707,7 +732,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const commitCell = useCallback((recordKey: string, fieldId: string, value: AppBackendJson | undefined): number => {
     const now = live.current, row = now?.rows.get(recordKey), field = now?.fields.find(entry => entry.fieldId === fieldId);
     if (!now || !row || !field) return queue.skip();
-    const shown = queue.statuses.get(recordKey, fieldId), refused = shown?.state === "refused";
+    const shown = view.statuses.get(recordKey, fieldId), refused = shown?.state === "refused";
     const current = shown && !refused ? shown.value as AppBackendJson : row.values[fieldId] ?? null;
     // The same value saves nothing, and takes back a value dohc did not save.
     if (value !== undefined && sameValue(value, current)) { if (refused) queue.dismiss(recordKey, fieldId); return queue.skip(); }
@@ -717,8 +742,24 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const problem = inputProblem(field, value);
     if (problem !== null) return queue.hold(row, field, value, problem);
     return queue.enqueue({ kind: "edit", record: row, operationId: operation.operationId, values: { [fieldId]: { value, under: field } }, label: "Saved the edit" });
-  }, [queue]);
+  }, [queue, view]);
   const changeCell = useCallback((change: CollectionCellChange) => commitCell(change.recordId, change.field, jsonValue(change.value)), [commitCell]);
+  // Each field's definition as the page last had it, so text typed under a field that is gone keeps its name.
+  const knownFields = useRef(new Map<string, TransactionalField>());
+  for (const field of table?.fields ?? []) knownFields.current.set(field.fieldId, field);
+  /**
+   * Text typed in a cell whose editor went with its record, its field, or the
+   * page, before it was saved. It stays on its cell, or in the page's list
+   * once the cell is gone, and is never sent until the person saves it.
+   */
+  const keepDraft = useCallback((draft: TableAbandonedDraft) => {
+    const field = knownFields.current.get(draft.field), row = live.current?.rows.get(draft.recordId);
+    if (!field) return;
+    const shown = view.statuses.get(draft.recordId, draft.field);
+    // Text the cell shows already is no change to keep.
+    if (row && draft.text === display(shown ? shown.value as AppBackendJson : row.values[draft.field])) return;
+    queue.hold({ id: JSON.parse(draft.recordId) as string | number }, field, draft.text, EDIT_LEFT_OPEN);
+  }, [queue, view]);
   const sortTable = useCallback((next: CollectionQuerySort[]) => {
     const now = live.current, by = next[0];
     if (!now || now.held) return;
@@ -750,7 +791,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     cell: record => {
       const now = live.current;
       if (!now) return null;
-      const status = queue.statuses.get(record.id, field.fieldId);
+      const status = view.statuses.get(record.id, field.fieldId);
       const value = status ? status.value as AppBackendJson : now.rows.get(record.id)?.values[field.fieldId];
       const readFile = now.resources.readFile;
       return <ResourceCell scope={now.scope} field={field} value={value} unconfirmed={status !== undefined} editable={now.editable.has(field.fieldId)} offline={now.offline} onError={now.onError}
@@ -759,7 +800,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     editor: canInput(field) ? (record, close) => {
       const now = live.current;
       if (!now) return null;
-      const status = queue.statuses.get(record.id, field.fieldId);
+      const status = view.statuses.get(record.id, field.fieldId);
       const initial = status ? status.value as AppBackendJson : now.rows.get(record.id)?.values[field.fieldId] ?? emptyValue(field);
       return <ResourceCellEditor scope={now.scope} field={field} initial={initial} upload={now.resources.uploadFile} resolve={now.resources.resolveRelation} onError={now.onError}
         onSave={value => { commitCell(record.id, field.fieldId, value); }} onClose={close} />;
@@ -780,9 +821,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // What needs the person and has no cell to say so: on a board or calendar, on another page of records, or in a
   // field the table no longer shows or changes.
   const inCell = (recordKey: string, fieldId: string) => !visual && page !== null && rows.has(recordKey) && fields.some(field => field.fieldId === fieldId);
-  const unshown = queue.attention().filter(item => item.kind === "unconfirmed"
-    ? item.write.id !== awaiting && !(item.write.record !== null && Object.keys(item.write.values).length > 0 && Object.keys(item.write.values).every(fieldId => inCell(item.write.record!.key, fieldId)))
-    : !(inCell(item.recordKey, item.fieldId) && editableIds.includes(item.fieldId)));
+  // A cell shows a change's own state only while no later change to the cell shows over it, so a cell that
+  // can't offer the change's Try again leaves it to the list.
+  const cellShows = (write: QueuedWrite, state: "unconfirmed" | "waiting") => write.record !== null &&
+    Object.keys(write.values).some(fieldId => inCell(write.record!.key, fieldId) && view.statuses.get(write.record!.key, fieldId)?.state === state);
+  const unshown = queue.attention().filter(item => item.kind === "unconfirmed" || item.kind === "waiting" ? item.write.id !== awaiting && !cellShows(item.write, item.kind)
+    : item.kind === "record" || !(inCell(item.recordKey, item.fieldId) && editableIds.includes(item.fieldId)));
   const problem = (entry: FormField) => entry.changed ? VALUE_CHANGED : invalid[entry.field.fieldId];
   const errorId = (entry: FormField) => problem(entry) === undefined ? undefined : `${errorIds}-${encodeURIComponent(entry.field.fieldId)}`;
   const fieldError = (entry: FormField) => problem(entry) === undefined ? null : <FieldError id={errorId(entry)!}>{problem(entry)}</FieldError>;
@@ -861,14 +905,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </div>
     {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
       : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
-    {unshown.length > 0 ? <UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} /> : null}
+    {unshown.length > 0 ? <UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} /> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? page ? <p role="status" className="m-0 text-[12px] text-muted">Loading records…</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
     : visual && shownView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
-      onReadInPlace={rows => { showOpenRecord(rows); const shows = visualRead.current; visualRead.current = Number.POSITIVE_INFINITY; queue.readShown(Number.isFinite(shows) ? shows : -1, rows); }}
+      onReadInPlace={rows => { showOpenRecord(rows); const shows = visualRead.current; visualRead.current = Number.POSITIVE_INFINITY; view.readShown(Number.isFinite(shows) ? shows : -1, rows); }}
       disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
-      read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, queue.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
+      read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
       canMove={fieldId=>editOperation(fieldId)!==undefined}
       onMove={(row,fieldId,value)=>{const operation=editOperation(fieldId),field=fields.find(field=>field.fieldId===fieldId);if(!operation||!field||disabled)return;
@@ -876,7 +920,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {failure && !busy && !visualBusy && (visual || !page) ? <CollectionUnavailable waiting={failure.wait !== null} words={failure.wait?.ended ? WAIT_ENDED : failure.words} onRetry={failure.retry} /> : null}
     {/* The table always shows its columns, so an empty Collection already says what a record holds. An offline copy pauses an open editor with what it holds. */}
     {!visual && page ? <div className="min-h-0 flex-1"><DataTable schema={schema} records={records} sort={sort} onSortChange={sortTable} canSortField={names.canSortField} fieldLabel={names.fieldLabel} recordName={nameRecord}
-      onCellChange={changeCell} editingDisabled={offline} canEditCell={canEditCell} cellStatuses={queue.statuses} acknowledgedWriteId={queue.acknowledged} subscribeToDiscardedWrites={queue.subscribeToDiscarded}
+      onCellChange={changeCell} onDraftAbandoned={keepDraft} editingDisabled={offline} canEditCell={canEditCell} cellStatuses={view.statuses} acknowledgedWriteId={view.acknowledged} subscribeToDiscardedWrites={queue.subscribeToDiscarded}
       hostCells={hostCells} fieldMarks={tableMarks} renderButton={renderButton} onOpenRecord={openRecord} onNewRecord={canCreate ? newRecord : undefined}
       emptyText={page.rows.length > 0 || (!query.search && canCreate) ? undefined : query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."} /></div> : null}
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"}{previous.length > 0 || page.nextCursor !== null ? " on this page" : ""}</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
