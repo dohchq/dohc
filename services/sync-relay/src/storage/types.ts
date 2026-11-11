@@ -954,6 +954,8 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  /** Whether `fetchLogPage` with `limit: count` would report `hasMore`, without reading the rows. */
+  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean;
   fetchLogPageDescending(input: {
     workspaceId: string;
     beforeRelaySeq: number | null;
