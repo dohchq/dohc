@@ -34,11 +34,11 @@ export function liveChangeAlreadyShown(action: LiveChangeAction, status: LiveDoc
  * to leave it to Stop reconciliation. "unrecorded" drops the change without
  * credit; it says nothing about whether the relay applied it.
  *
- * A change is credited only when its own response says this request made the
- * change, since the relay keeps no author: a Stop, ended access and account
- * deletion all retire a document, and a Resume and a share's enrollment both
- * make one ready. A response that says the document was already in that state,
- * or that does not say, leaves the change unrecorded. So a change is never
+ * A change is credited only when its own response says `changed: true`, that
+ * this request made the change, since the relay keeps no author: a Stop, ended
+ * access and account deletion all retire a document, and a Resume and a
+ * share's enrollment both make one ready. `changed: false`, or a response from
+ * a relay without the field, leaves the change unrecorded. So a change is never
  * applied here. A Stop this computer still owes waits for reconciliation to
  * send it again, and that response settles it. Every other change is left
  * unrecorded rather than pending, since nothing later would settle it. Skip
