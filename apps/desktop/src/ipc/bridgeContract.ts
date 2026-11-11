@@ -1498,6 +1498,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
+  // Shared notes whose edits wait on this computer for the server.
+  ownerPendingShare: z.array(SAFE_RELATIVE_PATH).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
