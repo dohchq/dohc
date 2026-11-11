@@ -3321,7 +3321,7 @@ fn ydoc_settle_attempt_on_store(
                 .filter(|job_id| *job_id != job.job_id)
                 .collect();
             if !earlier.is_empty() {
-                let incomplete = replay_materializations_in_order(
+                let stopped = replay_materializations_in_order(
                     store,
                     root_dir,
                     MaterializationReplayScope {
@@ -3337,22 +3337,29 @@ fn ydoc_settle_attempt_on_store(
                     faults,
                     &earlier,
                 )?;
-                if incomplete > 0 {
-                    // One still owed failed for a passing reason, such as a
-                    // locked file, so the caller retries; one that conflicted
-                    // never lands.
-                    let stopped = &earlier[earlier.len() - incomplete];
-                    if store
-                        .load_materialization_job(stopped)?
-                        .is_some_and(|job| job.status == JobStatus::Pending)
-                    {
-                        return Err(dohc_engine_sync::SyncError::RetryableState {
-                            reason: "settlement-materialization-pending",
+                if let Some(stopped) = stopped {
+                    // A conflicted write makes the document's file changed on
+                    // disk, as the head's own would. One that may pass, such
+                    // as on a locked file, is retried; any other needs someone
+                    // to act, so a retry loop can't help.
+                    let job = &earlier[earlier.len() - stopped.unlanded];
+                    let status = store.load_materialization_job(job)?.map(|job| job.status);
+                    return Err(match status {
+                        Some(JobStatus::Conflict) => {
+                            dohc_engine_domain::DomainError::ConflictStaleTarget.into()
                         }
-                        .into());
-                    }
-                    return Err(RuntimeError::ActiveVersionMaterializationIncomplete {
-                        failed_jobs: incomplete + 1,
+                        Some(JobStatus::Pending) if stopped.summary.failed_in_passing() => {
+                            dohc_engine_sync::SyncError::RetryableState {
+                                reason: "settlement-materialization-pending",
+                            }
+                            .into()
+                        }
+                        Some(JobStatus::Pending) if stopped.summary.blocked > 0 => {
+                            MaterializeError::SymlinkTarget.into()
+                        }
+                        _ => RuntimeError::ActiveVersionMaterializationIncomplete {
+                            failed_jobs: stopped.unlanded + 1,
+                        },
                     });
                 }
             }
@@ -4585,7 +4592,8 @@ fn materialize_ydoc_drain(
         now_ms,
         faults,
         &writes,
-    )?;
+    )?
+    .map_or(0, |stopped| stopped.unlanded);
     if !selected.is_empty() {
         let replay = replay_pending_materializations(
             store,
@@ -5650,7 +5658,7 @@ mod pending_write_order_tests {
     #[test]
     fn a_close_replays_writes_that_tie_in_time_in_moment_order() {
         let (scratch, mut store, writes) = two_writes_that_tie_in_time();
-        let incomplete = replay_materializations_in_order(
+        let stopped = replay_materializations_in_order(
             &mut store,
             scratch.path(),
             SCOPE,
@@ -5659,7 +5667,7 @@ mod pending_write_order_tests {
             &writes,
         )
         .expect("replay");
-        assert_eq!(incomplete, 0);
+        assert!(stopped.is_none());
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
             "second edit"

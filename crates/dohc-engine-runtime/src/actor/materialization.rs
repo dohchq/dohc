@@ -452,7 +452,17 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) failed: usize,
     pub(super) store_busy: usize,
     pub(super) selected_seen: usize,
+    /// Jobs a symlink or reparse point kept from their target.
+    pub(super) blocked: usize,
     pub(super) hard_errors: Vec<(String, String)>,
+}
+
+impl MaterializationReplaySummary {
+    /// Whether every failure may pass on its own, such as a locked file or a
+    /// busy store, so a retry can land the job without anyone acting.
+    pub(super) fn failed_in_passing(&self) -> bool {
+        self.blocked == 0 && self.hard_errors.is_empty()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -758,10 +768,18 @@ pub(super) fn replay_pending_materializations(
     )
 }
 
+/// Where an in-order replay stopped.
+pub(super) struct StoppedReplay {
+    /// How many writes did not land, counting from the one that stopped it.
+    pub(super) unlanded: usize,
+    /// What the replay of the write that stopped it saw.
+    pub(super) summary: MaterializationReplaySummary,
+}
+
 /// Replay `ordered` one job at a time, in that order, for writes where each
-/// expects the file to hold the one before it. Returns how many did not land.
-/// It stops at the first that does not, since every later one would find the
-/// file wrong too. A held placement stops it without counting, like a parked
+/// expects the file to hold the one before it. It stops at the first that
+/// does not land, since every later one would find the file wrong too, and
+/// returns where. A held placement stops it without counting, like a parked
 /// job in any replay. A job a newer write superseded counts as landed.
 pub(super) fn replay_materializations_in_order(
     store: &mut EngineStore,
@@ -770,7 +788,7 @@ pub(super) fn replay_materializations_in_order(
     now_ms: i64,
     faults: &dyn FaultInjector,
     ordered: &[String],
-) -> Result<usize, RuntimeError> {
+) -> Result<Option<StoppedReplay>, RuntimeError> {
     for (index, job_id) in ordered.iter().enumerate() {
         let replay = replay_materializations(
             store,
@@ -783,16 +801,19 @@ pub(super) fn replay_materializations_in_order(
             index == 0,
         )?;
         if replay.parked > 0 {
-            return Ok(0);
+            return Ok(None);
         }
         let landed = store
             .load_materialization_job(job_id)?
             .is_some_and(|job| matches!(job.status, JobStatus::Complete | JobStatus::Cancelled));
         if !landed {
-            return Ok(ordered.len() - index);
+            return Ok(Some(StoppedReplay {
+                unlanded: ordered.len() - index,
+                summary: replay,
+            }));
         }
     }
-    Ok(0)
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -849,6 +870,7 @@ fn replay_materializations(
             failed: 0,
             store_busy: 0,
             selected_seen: 0,
+            blocked: 0,
             hard_errors: Vec::new(),
         });
     }
@@ -913,6 +935,7 @@ fn replay_materializations(
             failed: 0,
             store_busy: 0,
             selected_seen: 0,
+            blocked: 0,
             hard_errors: Vec::new(),
         };
         let mut secret_key: Option<SecretDataKey> = None;
@@ -1273,7 +1296,10 @@ fn replay_materializations(
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                     summary.completed += 1;
                 }
-                Ok(JobOutcome::Blocked) => summary.failed += 1,
+                Ok(JobOutcome::Blocked) => {
+                    summary.failed += 1;
+                    summary.blocked += 1;
+                }
                 Ok(JobOutcome::Superseded) if superseded_after_projection_is_drained => {
                     summary.completed += 1;
                 }

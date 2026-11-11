@@ -862,10 +862,104 @@ async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
     supervisor.close(&db).expect("close actor");
 }
 
+/// When an older write fails for a reason that won't pass on its own, here a
+/// link in the file's place, the settle stops with that reason rather than
+/// asking the caller to retry forever. Once the file is back, a settle lands
+/// both writes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_whose_older_write_is_blocked_says_why() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = seed_parked_update(&scratch).await;
+    let file = scratch.path().join(PATH);
+    let claim = lineage_claim(&db, &key);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 200).expect("open actor").actor;
+    let first = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("first resync");
+    supervisor.close(&db).expect("close actor");
+
+    let peer = Ydoc::wire();
+    peer.apply(&first.initial_update).expect("peer state");
+    let end = u32::try_from(peer.plaintext_string().encode_utf16().count()).expect("length");
+    let again = peer.plaintext_insert(end, " again");
+    park(
+        &db,
+        &key,
+        ("peer", 2, 2),
+        Some(claim.as_deref().expect("lineage")),
+        &again,
+    );
+
+    let actor = supervisor.open(&db, 300).expect("reopen actor").actor;
+    let second = actor
+        .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+        .await
+        .expect("second resync");
+    assert_eq!(unfinished_writes(&db), 2);
+    let settle = |now| {
+        actor.ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.into(),
+            ContentKind::Plaintext,
+            claim.clone(),
+            second.head_blob_sha256.clone(),
+            "older-write-blocked".into(),
+            Arc::new(()),
+            now,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+    };
+    let outside = scratch.path().join("outside.md");
+    std::fs::write(&outside, "before").expect("outside file");
+    std::fs::remove_file(&file).expect("remove file");
+    std::os::unix::fs::symlink(&outside, &file).expect("link in the file's place");
+    let refused = settle(301)
+        .await
+        .expect_err("the older write is blocked, so the settle stops");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Materialize(
+                dohc_engine_files::MaterializeError::SymlinkTarget
+            )
+        ),
+        "a link won't go away on its own, so the settle says so: {refused:?}"
+    );
+    assert_eq!(unfinished_writes(&db), 2, "both writes stay owed");
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside file"),
+        "before",
+        "nothing is written through the link"
+    );
+
+    std::fs::remove_file(&file).expect("remove link");
+    std::fs::write(&file, "before").expect("file back");
+    settle(302)
+        .await
+        .expect("once the file is back, the settle writes it");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "before parked again"
+    );
+    assert_eq!(unfinished_writes(&db), 0);
+    supervisor.close(&db).expect("close actor");
+}
+
 /// Three resyncs owe three writes, and an outside edit leaves the file holding
 /// what the second would write. The first then conflicts and the second stays
 /// owed, but the head's write would find the file it expects. The settle must
-/// stop rather than write the head past the owed one.
+/// stop rather than write the head past the owed one, and report the file as
+/// changed on disk, as the head's own conflict would.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
     use dohc_engine_collab::{ContentKind, Ydoc};
@@ -931,9 +1025,11 @@ async fn a_settle_whose_older_write_conflicts_does_not_pass_it() {
     assert!(
         matches!(
             refused,
-            dohc_engine_runtime::RuntimeError::ActiveVersionMaterializationIncomplete { .. }
+            dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::ConflictStaleTarget
+            )
         ),
-        "a conflict never lands, so a retry can't help: {refused:?}"
+        "the outside edit makes the file changed on disk: {refused:?}"
     );
     assert_eq!(
         std::fs::read_to_string(&file).expect("file"),
