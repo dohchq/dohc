@@ -178,7 +178,9 @@ function harness(
     }),
   };
   const onError = vi.fn();
+  const onLiveEditsPaused = vi.fn();
   const ipc = createEngineYDocSessionIpc({
+    onLiveEditsPaused,
     localPersonId: () => person,
     sessionFor: () =>
       retired
@@ -205,6 +207,7 @@ function harness(
     ipc,
     capture,
     onError,
+    onLiveEditsPaused,
     session,
     capturedOpen: () => capturedOpen,
     setGeneration: (next: number) => {
@@ -255,6 +258,10 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, openPayload);
     const message = 'dohc could not save an edit to "notes/a.md". Copy it from recovery.';
     h.capturedOpen()?.onEditRefused?.("request-1", message);
+    expect(h.onLiveEditsPaused).not.toHaveBeenCalled();
+    // #2719: a refusal because the file's live editing is paused names it for the workspace notice.
+    h.capturedOpen()?.onEditRefused?.("request-2", message, true);
+    expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
       payload: { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
@@ -2343,6 +2350,19 @@ describe("engine Y.Doc IPC adapter", () => {
       );
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    // #2719: the editor says live editing is paused, so an agent must hear the same.
+    it("says live editing is paused when the file takes no more edits", async () => {
+      const session = editableSession();
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(
+        new DaemonRefusalError({ code: "INVALID_PARAMS", message: "owner-outbox-frozen", retry: "no" }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        'dohc could not save this edit to "notes/a.md". Live editing is paused for this file. Notices in dohc says why and how to resume.',
+      );
+      expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n");
     });
 
     it("settles consent without an append before retrying one capacity-refused edit", async () => {

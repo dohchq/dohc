@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
+  isOwnerOutboxFrozenRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
@@ -145,6 +146,8 @@ interface EngineYDocSessionIpcOptions {
     path: string,
   ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
+  /** dohc refused an edit to `path` because its queue for the server takes no more. */
+  onLiveEditsPaused?: (workspaceId: string, path: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
 }
@@ -488,6 +491,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     "resolveDocumentPath"
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
+  readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
   readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
@@ -511,6 +515,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#ownerDraftState = options.ownerDraftState;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
+    this.#onLiveEditsPaused = options.onLiveEditsPaused;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
@@ -745,7 +750,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             assertRecordWritable: () => {
               if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
             },
-            onEditRefused: (requestId, message) => {
+            onEditRefused: (requestId, message, paused) => {
+              if (paused) this.#onLiveEditsPaused?.(workspace.workspaceId, canonicalPath);
               publish(() => emit({
                 state: "error", seq: saveSeq.dirtySeq,
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
@@ -1087,7 +1093,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         .catch(() => undefined)
         .then(async () => {
           authority.assertCurrent();
-          return await this.#editResolved(workspace, path, input);
+          try {
+            return await this.#editResolved(workspace, path, input);
+          } catch (error) {
+            if (!isOwnerOutboxFrozenRefusal(error)) throw error;
+            this.#onLiveEditsPaused?.(workspace.workspaceId, path);
+            // The editor's words for the same refusal.
+            throw new Error(`dohc could not save this edit to "${path}". Live editing is paused for this file. Notices in dohc says why and how to resume.`, { cause: error });
+          }
         });
       this.#documentEdits.set(key, turn);
       try {

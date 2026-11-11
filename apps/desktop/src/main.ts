@@ -2764,6 +2764,7 @@ const activity = {
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+      ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
@@ -5236,6 +5237,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
+  onLiveEditsPaused: (workspaceId, path) => desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,
