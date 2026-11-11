@@ -27,12 +27,14 @@ const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces f
 // Why Chats has not shown the invitation. With chats off there is nothing to
 // read again, so `copy` stands alone, without Try again.
 export type HandoffChatsOutcome =
-  | { shareId: string; outcome: "absent" | "failed" }
+  | { shareId: string; outcome: "absent" | "failed" | "late" }
   | { shareId: string; outcome: "off"; copy: string };
-// What Chats found when it could not show the invitation.
+// What Chats found when it could not show the invitation. `late`: Chats did
+// not answer in time.
 const CHATS_OUTCOME_COPY = {
   absent: "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
   failed: "dohc could not read Chats to find this invitation. Check your connection.",
+  late: "dohc could not open this invitation in Chats yet.",
 } as const;
 
 type ReceivedShareState =

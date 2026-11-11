@@ -23,6 +23,7 @@ import { useReopenKey } from "./documentVersionKey";
 import { deferred, type Deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
+import { INVITATION_WAIT_MS } from "./workbench/invitationOutcome";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, dmSyncResult } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
@@ -2589,7 +2590,7 @@ describe("notices sent to you", () => {
       await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
       expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
       expect(onSwitchWorkspace).toHaveBeenCalledOnce();
-      expect(ends).toEqual(["opened"]);
+      await waitFor(() => expect(ends).toEqual(["opened"]));
     });
 
     // Every share read and message-request sync waits for the test. The
@@ -2696,6 +2697,18 @@ describe("notices sent to you", () => {
       await waitFor(() => expect(ends).toEqual(["opened"]));
     });
 
+    it("says Chats could not be read when its channel list can't be read, without waiting out the limit", async () => {
+      const { bridge, syncs } = heldBridge();
+      bridge.listChatChannels.mockRejectedValue(new Error("offline"));
+      const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+      await waitFor(() => expect(syncs.length).toBeGreaterThanOrEqual(1));
+      await answerEvery(syncs, dmSyncResult());
+      await waitFor(() => expect(syncs.length).toBeGreaterThanOrEqual(2));
+      await answerEvery(syncs, dmSyncResult());
+      expect(await screen.findByTestId("handoff-chats-failed")).toBeTruthy();
+      expect(ends).toEqual([]);
+    });
+
     it("says Chats could not be read when message requests can't be pulled, though the list is still there", async () => {
       const { bridge, shares, syncs } = heldBridge();
       const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
@@ -2732,7 +2745,7 @@ describe("notices sent to you", () => {
       expect(ends).toEqual([]);
     });
 
-    it("stops saying it isn't there once another account signs in", async () => {
+    it("stops saying it isn't there once another account signs in, until that account's lists answer", async () => {
       const { bridge, shares, syncs } = heldBridge();
       let session!: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void;
       bridge.onCloudSessionChanged.mockImplementation((listener: typeof session) => {
@@ -2745,11 +2758,62 @@ describe("notices sent to you", () => {
       await answerEvery(syncs, dmSyncResult());
       await answerEvery(shares, NO_INVITATION);
       await screen.findByTestId("handoff-chats-absent");
-      // The previous account's lists leave the screen; the new account's
-      // reads wait.
+      // The previous account's lists leave the screen, and what they said
+      // goes with them while the new account's reads wait.
+      const [read, synced] = [shares.length, syncs.length];
       act(() => session({ sessionKey: "other-account", phase: "ready" }));
-      expect(await screen.findByTestId("handoff-chats-failed")).toBeTruthy();
+      await opening();
+      expect(screen.queryByTestId("handoff-chats-absent")).toBeNull();
+      await waitFor(() => expect([shares.length > read, syncs.length > synced]).toEqual([true, true]));
+      await answerEvery(syncs, dmSyncResult());
+      await answerEvery(shares, NO_INVITATION);
+      expect(await screen.findByTestId("handoff-chats-absent")).toBeTruthy();
       expect(ends).toEqual([]);
+    });
+
+    it("says dohc could not open it yet once Chats takes too long, and a row that mounts later still ends it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { bridge, shares, syncs } = heldBridge();
+        const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+        await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+        await opening();
+        // No read answers. Polls keep queueing message syncs meanwhile.
+        await act(() => vi.advanceTimersByTimeAsync(INVITATION_WAIT_MS - 5_000));
+        expect(screen.queryByTestId("handoff-chats-late")).toBeNull();
+        await act(() => vi.advanceTimersByTimeAsync(5_000));
+        const late = await screen.findByTestId("handoff-chats-late");
+        expect(late.textContent).toContain("dohc could not open this invitation in Chats yet.");
+        expect(within(screen.getByTestId("share-handoff-surface")).getByRole("button", { name: "Try again" })).toBeTruthy();
+        expect(ends).toEqual([]);
+        // The reads answer at last, with the invitation.
+        await answerEvery(syncs, dmSyncResult());
+        await answerEvery(shares, INVITATION_LISTING);
+        await waitFor(() => expect(ends).toEqual(["opened"]));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("waits again after Try again, and says so again once that wait runs out", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { bridge, shares, syncs } = heldBridge();
+        const { ends } = renderHandoff(bridge, WORKSPACE, [WORKSPACE]);
+        await waitFor(() => expect(shares.length).toBeGreaterThanOrEqual(2));
+        await act(() => vi.advanceTimersByTimeAsync(INVITATION_WAIT_MS));
+        await screen.findByTestId("handoff-chats-late");
+        // The message syncs are still out, so this one queues behind them.
+        fireEvent.click(within(screen.getByTestId("share-handoff-surface")).getByRole("button", { name: "Try again" }));
+        await opening();
+        await act(() => vi.advanceTimersByTimeAsync(INVITATION_WAIT_MS - 5_000));
+        expect(screen.queryByTestId("handoff-chats-late")).toBeNull();
+        await act(() => vi.advanceTimersByTimeAsync(5_000));
+        expect(await screen.findByTestId("handoff-chats-late")).toBeTruthy();
+        expect(ends).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("never says it isn't there from a listing read before the reveal", async () => {

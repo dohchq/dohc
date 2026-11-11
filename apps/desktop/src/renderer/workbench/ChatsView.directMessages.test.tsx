@@ -474,6 +474,51 @@ describe("ChatsView direct messages", () => {
     });
   });
 
+  it("frees a request's buttons once the decline's own sync lands, while a sync queued behind it is still out", async () => {
+    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
+    const answer = (pending: typeof request[], declined: typeof request[]) =>
+      ({ available: true, dms: [], pending, declined });
+    bridgeMock.syncDms.mockResolvedValue(answer([request], []));
+    renderView();
+    const decline = await screen.findByTestId("chats-dm-request-decline");
+    const held: ((value: ReturnType<typeof answer>) => void)[] = [];
+    bridgeMock.syncDms.mockImplementation(() => new Promise((resolve) => held.push(resolve)));
+    bridgeMock.declineDm.mockResolvedValue(undefined);
+    fireEvent.click(decline);
+    await waitFor(() => expect(held).toHaveLength(1));
+    // Activity queues another pass behind the decline's sync.
+    act(() => emitWorkspaceActivity());
+    await act(async () => held[0]!(answer([], [request])));
+    await waitFor(() => expect(held).toHaveLength(2));
+    const again = await screen.findByTestId("chats-dm-request-again");
+    await waitFor(() => expect((again as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("keeps a request's buttons busy until the decline's own sync lands, when another sync was already out", async () => {
+    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
+    const answer = (pending: typeof request[], declined: typeof request[]) =>
+      ({ available: true, dms: [], pending, declined });
+    bridgeMock.syncDms.mockResolvedValue(answer([request], []));
+    renderView();
+    const decline = await screen.findByTestId("chats-dm-request-decline");
+    const held: ((value: ReturnType<typeof answer>) => void)[] = [];
+    bridgeMock.syncDms.mockImplementation(() => new Promise((resolve) => held.push(resolve)));
+    bridgeMock.declineDm.mockResolvedValue(undefined);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(held).toHaveLength(1));
+    // The decline's sync queues behind the one already out.
+    fireEvent.click(decline);
+    await waitFor(() => expect(bridgeMock.declineDm).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect((screen.getByTestId("chats-dm-request-decline") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => held[0]!(answer([request], [])));
+    await waitFor(() => expect(held).toHaveLength(2));
+    expect((screen.getByTestId("chats-dm-request-decline") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => held[1]!(answer([], [request])));
+    const again = await screen.findByTestId("chats-dm-request-again");
+    await waitFor(() => expect((again as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it("shows no DM surface at all for a solo user", async () => {
     // Even a stray dm-kind channel row never leaks into the channel list.
     bridgeMock.listChatChannels.mockResolvedValue({
