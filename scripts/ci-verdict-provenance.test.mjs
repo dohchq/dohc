@@ -531,7 +531,7 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
   assert.ok(prepare.steps.findIndex(step => step.with?.name === "compiler-tests-${{ github.run_attempt }}") < preparedUpload);
   const archive = prepare.steps.find(step => step.name === "Archive compiler confinement test binaries").run;
   assert.match(archive, /cargo nextest archive --locked --package dohc-compiler-owner --archive-file/u);
-  assert.match(prepare.steps.find(step => step.name === "Pack prepared artifacts").run, /packages\/app-backend-runtime\/dist/u);
+  assert.doesNotMatch(prepare.steps.find(step => step.name === "Pack prepared artifacts").run, /packages\/app-backend-runtime\/dist/u);
   for (const kind of ["compiler", "relay"]) {
     const id = "confinement-" + kind, job = jobs[id];
     assert.deepEqual(job.needs, ["changes", "javascript-prepare"]);
@@ -539,7 +539,7 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
     for (const [name, other] of Object.entries(jobs)) if (name !== "verification") assert.ok(![other.needs].flat().includes(id));
     const restore = job.steps.find(step => step.name === "Restore prepared artifacts").run;
     assert.match(restore, /assertPrepared\(\)/u);
-    assert.ok(!job.steps.some(step => step.run?.includes("app-backend-runtime build")));
+    assert.equal(job.steps.some(step => step.run?.includes("app-backend-runtime build")), kind === "relay");
   }
   const compiler = jobs["confinement-compiler"].steps.find(step => step.name === "Compiler confinement").run;
   assert.match(compiler, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --retries=0 --no-tests=fail/);

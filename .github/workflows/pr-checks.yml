@@ -272,7 +272,7 @@ jobs:
         run: >-
           tar -I "zstd -T0 -1" -cf /tmp/javascript-prepared.tar.zst .dohc-dev/verification/build.json target/debug/dohc-workspace-engine
           apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
-          apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist packages/app-backend-runtime/dist
+          apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -363,7 +363,7 @@ jobs:
           node-version-file: .node-version
           cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: javascript-prepared-${{ github.run_attempt }}
