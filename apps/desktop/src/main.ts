@@ -6928,6 +6928,20 @@ function registerIpcHandlers(): void {
       if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
       return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
     }),
+    // Who stopped or resumed each document, in this computer's engine. The window and agents share this one record.
+    liveChanges: (() => {
+      const withClient = <Result>(workspace: DesktopWorkspaceOperation["workspace"], work: (client: EngineClient, request: {id: number; workspace: string; deadlineMs: number}) => Promise<Result>) =>
+        requireEngineSessions().run(workspace, async session => {
+          const client = desktopEngine.daemon?.currentClient();
+          if (!(client instanceof EngineClient)) throw new Error("dohc could not record who changed live editing. Restart dohc and try again.");
+          return work(client, {id:0,workspace:session.workspace,deadlineMs:30_000});
+        });
+      return {
+        begin: (workspace, input) => withClient(workspace, (client, request) => client.ownerLiveChangeBegin(request, input)),
+        finish: (workspace, input) => withClient(workspace, (client, request) => client.ownerLiveChangeFinish(request, input)),
+        list: (workspace, objectIds) => withClient(workspace, (client, request) => client.ownerLiveChangeList(request, objectIds)),
+      };
+    })(),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
   ownerLiveStopAgainForCli = async (operation, kept) => {

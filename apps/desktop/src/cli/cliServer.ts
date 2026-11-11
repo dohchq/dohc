@@ -323,8 +323,8 @@ export interface CliKeptEditsPort {
 // the cursor is the list's own nextCursor. A Stop or Resume names its author.
 export interface CliLiveDocumentsPort {
   list(cursor?: string): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
-  stop(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
-  resume(path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
+  stop(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
+  resume(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
@@ -853,7 +853,7 @@ function retainedCopiesUnavailable() {
 // Who stopped or resumed live editing through this socket. Every call here
 // is an agent's, whatever it claims: the window is the person's door. The
 // agent is the one History records for this socket's edits.
-function liveChangeAuthor(context: CliWorkspaceContext, options: CliServerOptions): import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor {
+function liveChangeAuthor(context: CliWorkspaceContext, options: CliServerOptions): import("@dohc/workspace-contracts/change-author").ChangeAuthor {
   return { kind: "agent", agentId: editingAgentId(context), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) };
 }
 

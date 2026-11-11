@@ -64,7 +64,8 @@ import { isReadableChatChannelRow, pathShareLanes } from "../workspaces/relaySha
 import { buildShareCode } from "../workspaces/syncCode";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
-import type { WorkspaceSyncPauseAuthor as ChangeAuthor } from "@dohc/workspace-contracts/workspace-sync";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
+import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
@@ -138,8 +139,6 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   person?(): ChangeAuthor;
 }
 
-/** The relay's state of a document when a change begins, as far as this computer read it. */
-export type LiveChangeBefore = "ready" | "preparing" | "paused" | "retired" | "unavailable" | "absent";
 /**
  * The engine's record of who stopped or resumed each document. A change begins
  * before the server acts and is applied only when the server's own answer says
@@ -147,7 +146,7 @@ export type LiveChangeBefore = "ready" | "preparing" | "paused" | "retired" | "u
  * the action goes on regardless.
  */
 export interface OwnerLiveChangeRecord<Workspace> {
-  begin(workspace: Workspace, input: {objectId: string; path: string; action: "stopped" | "resumed"; author: ChangeAuthor; before: LiveChangeBefore}): Promise<{changeId: string} | null>;
+  begin(workspace: Workspace, input: {objectId: string; path: string; action: "stopped" | "resumed"; author: ChangeAuthor; before: LiveDocumentStatus}): Promise<{changeId: string} | null>;
   finish(workspace: Workspace, input: {objectId: string; changeId: string; outcome: "applied" | "unrecorded"}): Promise<boolean>;
   list(workspace: Workspace, objectIds: readonly string[]): Promise<readonly {objectId: string; pending?: {changeId: string; action: "stopped" | "resumed"}; last?: {action: "stopped" | "resumed"; atMs: number; author: ChangeAuthor}}[]>;
 }
@@ -229,7 +228,7 @@ export function createOwnerLiveDocumentActions<
     } catch {operation.assertCurrent(); return "unread" as const;}
   };
   const beginChange = async (operation: Operation, author: ChangeAuthor | undefined, change: {objectId: string; path: string; action: "stopped" | "resumed"},
-    before: LiveChangeBefore) => {
+    before: LiveDocumentStatus) => {
     if (!record || !author) return null;
     let begun: {changeId: string} | null = null;
     try {begun = await record.begin(operation.workspace, {...change, author, before});}
@@ -452,7 +451,7 @@ export function createOwnerLiveDocumentActions<
         if (row && last && (last.action === "stopped") === (row.status === "retired")) row.lastChange = {action: last.action, atMs: last.atMs, author: last.author.kind === "agent" ? last.author
           : {...last.author, self: person?.kind === "person" && person.personId === last.author.personId}};
         const pending = change.pending;
-        if (!pending || inFlight.has(pending.changeId) || (pending.action === "stopped" && owed.has(change.objectId))) continue;
+        if (!pending || inFlight.has(pending.changeId) || liveChangeOutcome(pending, {stopOwed: owed.has(change.objectId)}) === null) continue;
         await record!.finish(operation.workspace, {objectId: change.objectId, changeId: pending.changeId, outcome: "unrecorded"});
         operation.assertCurrent();
       }

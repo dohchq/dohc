@@ -24,6 +24,7 @@ import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccount
 
 import { OperationRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { ChangeAuthorStatus } from "@dohc/workspace-contracts/change-author";
 
 export const CLI_PROTOCOL_VERSION = 5;
 export const CLI_JSON_SCHEMA_VERSION = 3;
@@ -1711,7 +1712,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
       incident: keptEditsIncidentSchema.optional(),
       // Who stopped or resumed it into the state the row shows, as this computer recorded it. Absent means unknown.
       lastChange: z.object({ action: z.enum(["stopped", "resumed"]), atMs: z.number().int().nonnegative(),
-        author: WorkspaceSyncPauseStatus.shape.author }).strict().optional(),
+        author: ChangeAuthorStatus }).strict().optional(),
     }).strict()),
     nextCursor: z.string().min(1).nullable(),
   }).strict(),

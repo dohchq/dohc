@@ -134,8 +134,8 @@ interface DesktopCliServerDependencies<State> {
    */
   ownerLiveDocuments?: {
     list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
-    stop(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; objectId?: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<StopOwnerLiveDocumentResult>;
-    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor }): Promise<ResumeOwnerLiveDocumentResult>;
+    stop(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; objectId?: string; author: import("@dohc/workspace-contracts/change-author").ChangeAuthor }): Promise<StopOwnerLiveDocumentResult>;
+    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/change-author").ChangeAuthor }): Promise<ResumeOwnerLiveDocumentResult>;
   };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
@@ -707,9 +707,9 @@ export function createDesktopCliServer<State>(
             ...(ownerLiveDocuments ? {
               liveDocuments: {
                 list: (cursor?: string) => withOwnerLiveRecovery(operation => ownerLiveDocuments.list(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
-                stop: (path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor, objectId?: string) => withOwnerLiveRecovery(operation =>
+                stop: (path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string) => withOwnerLiveRecovery(operation =>
                   ownerLiveDocuments.stop(operation, { path, author, ...(objectId === undefined ? {} : { objectId }) })),
-                resume: (path: string, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor) => withOwnerLiveRecovery(operation => ownerLiveDocuments.resume(operation, { path, author })),
+                resume: (path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor) => withOwnerLiveRecovery(operation => ownerLiveDocuments.resume(operation, { path, author })),
               },
             } : {}),
           }),
