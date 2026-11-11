@@ -407,7 +407,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
               for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
               const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
-              for (const path of paused) if (!documents.some(document => document.binding.currentPath === path) || refusedPaths(workspaceId).has(path)) paused.delete(path);
+              for (const path of paused) if (!documents.some(document => document.binding.currentPath === path)) paused.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
               frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
@@ -440,9 +440,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const blocked = result === "frozen" && !refusedPaths(workspaceId).has(path);
               if (result === "retry" || blocked) failures.add(path); else failures.delete(path);
               if (blocked) frozen.add(path); else if (result !== "retry") frozen.delete(path);
-              if (result === "acknowledged" || result === "empty") paused.delete(path);
+              // A pass delivers one waiting edit, so only an empty queue takes edits again.
+              // A refused queue, which this pass may have found, has its own notice.
+              for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) paused.delete(pausedPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
-              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
+              setOwnerDeliveryStatus(workspaceId, failures.size || paused.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
                 frozen.size && !ownerMustAct ? "document-unavailable" : paused.size && !reason ? "unsent-edits-limit" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
