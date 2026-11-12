@@ -184,6 +184,17 @@ Include your own address.
 With a list, the server also accepts an address that has a pending invite.
 A pending invite exists when someone shares work with an email address that has no verified account on the server.
 Revoking that share removes the invite.
+
+A workspace invite link also admits a new account while sign-up is closed.
+The person opens the link, selects **Create an account**, and the sign-up page sends the link with the request.
+To stop invite links from creating accounts, set this in `.env.self-host`:
+
+```dotenv
+DOHC_INVITE_LINK_SIGN_UP=off
+```
+
+People who already have an account can still join through the link.
+The relay refuses to start if the value is anything other than `on` or `off`.
 The server ignores case and surrounding spaces when it compares addresses.
 
 With a list, the sign-up page asks for no name or password.

@@ -52,7 +52,7 @@ it("omits browser invitations from revoked, dependent, damaged, and public grant
     grant: {shareId: "share", grantId: "grant", principalKind: "user", principalUserId: "friend", principalEmail: null, access: "edit",
       generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
   };
-  const {grantedShareSummary} = createShareSummaries({findChannelCreateKind: () => null}, () => ({subjectName: null}), undefined, SHARE_WEB_ORIGIN);
+  const {grantedShareSummary} = createShareSummaries({findChannelCreateKind: () => null, workspaceRoleOf: () => null}, () => ({subjectName: null}), undefined, SHARE_WEB_ORIGIN);
   const excluded: SyncRelayShareWithGrantRow[] = [
     {...row, grant: {...row.grant, status: "revoked", revokedAtMs: 2}},
     {...row, grant: {...row.grant, parentGrantId: "parent"}},
@@ -70,7 +70,7 @@ it.each(["chat", "group"] as const)("issues a browser invitation for a %s at eit
       grant: {shareId: "share", grantId: "grant:exact/with?#characters", principalKind: "user", principalUserId: "friend",
         principalEmail: null, access, generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
     };
-    const {grantedShareSummary} = createShareSummaries({findChannelCreateKind: () => "channel"}, () => ({subjectName: "Team"}), undefined, SHARE_WEB_ORIGIN);
+    const {grantedShareSummary} = createShareSummaries({findChannelCreateKind: () => "channel", workspaceRoleOf: () => null}, () => ({subjectName: "Team"}), undefined, SHARE_WEB_ORIGIN);
     expect(await grantedShareSummary({...row, automationsGeneration: null})).toMatchObject({
       browserInvitationUrl: `${SHARE_WEB_ORIGIN}/s/chat/${encodeURIComponent(row.grant.grantId)}`,
     });

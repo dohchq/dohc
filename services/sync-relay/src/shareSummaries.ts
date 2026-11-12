@@ -35,7 +35,7 @@ function readableAccess(selector: StoredAnyShareSelector, access: string): boole
 }
 
 export function createShareSummaries(
-  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf">,
   labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
@@ -122,6 +122,17 @@ export function createShareSummaries(
     };
   };
 
+  // A received membership says which role the recipient holds. The level
+  // alone cannot tell an admin from a member at Edit.
+  const workspaceRoleOfRow = (row: SyncRelayShareWithGrantRow, selector: unknown) => {
+    if (!selector || typeof selector !== "object" || (selector as { kind?: unknown }).kind !== "workspace") return {};
+    const userId = row.grant.principalUserId;
+    const role = userId ? storage.workspaceRoleOf(row.share.workspaceId, userId)?.role : undefined;
+    return role === "admin" || role === "member"
+      ? { selector: { kind: "workspace", role } }
+      : { selector: null, damaged: true as const, selectorKind: "workspace" };
+  };
+
   const receivedShareSummary = (
     row: SyncRelayShareWithGrantRow,
     granterEmail: string | null,
@@ -131,8 +142,10 @@ export function createShareSummaries(
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see. Only the detail route adds a recipient source handle.
+    const base = shareSummaryBase(row);
     return {
-      ...shareSummaryBase(row),
+      ...base,
+      ...workspaceRoleOfRow(row, base.selector),
       granterUserId: row.share.granterUserId,
       granterEmail,
       sharerName,
