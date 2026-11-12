@@ -252,6 +252,15 @@ export type PageEditor = {
   setIdentity: (identity: { title: string; icon: string }) => void;
 };
 
+/**
+ * The page's title, its record's buttons and its properties, above its text.
+ * A record's body in the record panel draws none of them: the panel draws
+ * the record's name, its buttons and its fields.
+ */
+function TopMatter(props: { hidden?: boolean; children: React.ReactNode }) {
+  return props.hidden ? null : <div className="group/topmatter">{props.children}</div>;
+}
+
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
   useEffect(() => props.onRendered(), [props.onRendered]);
   return null;
@@ -349,6 +358,10 @@ export function MarkdownView(props: {
   // Called each time an editable editor mounts, and with null once the
   // document opens with none.
   onEditorReady?: (editor: PageEditor | null) => void;
+  // The view is a record's body in the record panel, which draws the
+  // record's name, buttons and fields itself. The view draws no title, no
+  // buttons row and no properties, and is not timed as a file opening.
+  recordBody?: boolean;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
@@ -961,13 +974,13 @@ export function MarkdownView(props: {
   // read view reports after its lazy chunk parses the visible window; small
   // files report from the editor after its own lazy chunk resolves.
   const onMarkdownRendered = useCallback(() => {
-    if (markdownOpenMarkedRef.current) return;
+    if (markdownOpenMarkedRef.current || props.recordBody) return;
     markdownOpenMarkedRef.current = true;
     rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
     // Last-wins: readers poll this epoch to know the measure above belongs to
     // the open they triggered (never a stale value from the previous file).
     rendererMarks.mark("markdown-opened");
-  }, [props.fileOpenStartMark, props.path]);
+  }, [props.fileOpenStartMark, props.path, props.recordBody]);
   const renderedDocument = useMemo(
     () => (
       <LazyMarkdownReadView
@@ -2304,7 +2317,7 @@ export function MarkdownView(props: {
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" + on empty docs). */}
-          <div className="group/topmatter">
+          <TopMatter hidden={props.recordBody}>
             <PageIdentity
               ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
@@ -2316,7 +2329,7 @@ export function MarkdownView(props: {
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
               <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
             </Suspense>
-          </div>
+          </TopMatter>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
           >
@@ -2482,7 +2495,7 @@ export function MarkdownView(props: {
           data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
-          <div className="group/topmatter">
+          <TopMatter hidden={props.recordBody}>
             <PageIdentity
               body={draft}
               onChange={onPropertiesDraft}
@@ -2495,7 +2508,7 @@ export function MarkdownView(props: {
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
               <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
             </Suspense>
-          </div>
+          </TopMatter>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
           >
@@ -2555,7 +2568,7 @@ export function MarkdownView(props: {
             readScroll.current = { key: props.documentKey, top: event.currentTarget.scrollTop };
           }}
         >
-          <div className="group/topmatter">
+          <TopMatter hidden={props.recordBody}>
             {/* Title, icon and properties autosave through the same disk write
                 as the body, so the opening refusal covers them too. */}
             <PageIdentity
@@ -2581,7 +2594,7 @@ export function MarkdownView(props: {
                 onShowSource={toggleSourceView}
               />
             </Suspense>
-          </div>
+          </TopMatter>
           {/* The editor's own rules draw the body, so it replaces it in place. */}
           <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">
             {renderedDocument}

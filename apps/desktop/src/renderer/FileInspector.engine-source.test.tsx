@@ -3881,4 +3881,28 @@ describe("engine markdown source view", () => {
       vi.useRealTimers();
     }
   });
+
+  it("draws a record's body in the record panel without the title, the buttons row and the properties, and a file tab with all three", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const listRecordButtons = vi.fn(async () => ({
+      record: { id: "rec-1", path: "a.md", conflicted: false, values: [] }, collectionPath: "", fields: [],
+    }));
+    vi.stubGlobal("dohcDesktop", Object.assign(bridgeMock, { listRecordButtons }));
+    const reports = { onButtonError: () => undefined, onButtonNotice: () => undefined, onOpenRecordHistory: () => undefined };
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" {...reports} recordBody />);
+    // The body is the file's live document, with the document's own controls.
+    const editor = await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(editor.textContent).toContain("Base paragraph."));
+    expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy();
+    // The panel draws the record's name, buttons and fields, so the body draws none and asks main for no record.
+    expect(screen.queryByTestId("page-identity")).toBeNull();
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
+    expect(screen.queryByTestId("record-buttons")).toBeNull();
+    expect(listRecordButtons).not.toHaveBeenCalled();
+
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" {...reports} />);
+    expect((await screen.findByTestId("page-title") as HTMLTextAreaElement).value).toBe("Plan");
+    expect(await screen.findByTestId("properties-panel")).toBeTruthy();
+    expect(await screen.findByTestId("record-buttons")).toBeTruthy();
+  });
 });

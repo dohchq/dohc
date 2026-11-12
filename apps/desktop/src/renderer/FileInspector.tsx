@@ -336,6 +336,9 @@ type FileInspectorProps = {
   // A new page's file: its editor takes the keystrokes the page held, and
   // null says none will.
   onEditorReady?: (editor: PageEditor | null) => void;
+  // The file is a record's body in the record panel, which draws the
+  // record's name, buttons and fields: a document draws none of the three.
+  recordBody?: boolean;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -938,6 +941,7 @@ export const FileInspector = memo(function FileInspector(
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}
             onEditorReady={props.onEditorReady}
+            recordBody={props.recordBody}
           />
         </div>
       );

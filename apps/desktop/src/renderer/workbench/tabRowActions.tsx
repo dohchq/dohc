@@ -19,6 +19,14 @@ export function useTabRowActionsSlot(): HTMLElement | null | undefined {
   return useContext(TabRowActionsSlot);
 }
 
+// A view drawn inside another tab's page, such as a record's body in its
+// Collection's record panel, keeps its actions with it: they draw in a row of
+// their own, as outside an editor group, and not in the row of a tab that is
+// not the view's.
+export function OwnActionsRow(props: { children: ReactNode }) {
+  return <TabRowActionsSlot.Provider value={undefined}>{props.children}</TabRowActionsSlot.Provider>;
+}
+
 // One editor group: its tab row, given the element the actions land in, then
 // the view under it. Each group has its own slot, so a split shows each
 // group's document actions in that group's row.
