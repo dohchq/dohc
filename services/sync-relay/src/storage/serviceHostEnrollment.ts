@@ -853,6 +853,16 @@ export function forgetIdleServiceHostUploads(storage: StorageContext, workspaceI
 }
 
 /**
+ * Whether the document has an enrollment. A personal agent's session needs
+ * one, as its open leaves, since absence enables a document only for hosts
+ * configured without enrollments.
+ */
+export function serviceHostDocumentEnrolled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
+  return storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
+    .get(document.workspaceId, document.objectId) !== undefined;
+}
+
+/**
  * Absence preserves explicitly configured hosts. A retained enrollment fences
  * its document once its owner pauses or stops it, its workspace changes, or no
  * Edit grant of its owner covers its enrolled path. Only `owner`, the

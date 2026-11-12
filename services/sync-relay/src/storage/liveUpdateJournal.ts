@@ -879,7 +879,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     const expectedAuthority = parseServerDerivedLiveUpdateAuthority(baselineRecord(outer.expectedAuthority,
       ["principalKind", "principalId", "grantId", "grantGeneration"]));
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
-    if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+    if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link" && actorKind !== "personal") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
     if (trustedAutomation && actorKind !== "owner") return {result: {kind: "refused", reason: "authority-refused"}, admitted: null};
     if (trustedAutomationPress && (!trustedAutomation || actorKind !== "owner")) return {result: {kind: "refused", reason: "authority-refused"}, admitted: null};
@@ -915,6 +915,9 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (current.binding.restoreFenceGeneration !== metadata.binding.restoreFenceGeneration) return refused({ kind: "refused", reason: "restore-fenced" });
         if (!isDeepStrictEqual(current.binding, metadata.binding)) return refused({ kind: "refused", reason: "stale-binding" });
         if (!isDeepStrictEqual(current.authority, expectedAuthority)) return refused({ kind: "refused", reason: "authority-refused" });
+        // A personal agent's snapshot comes from its authority, so its update's context is ignored and never stored.
+        const personal = current.authority.principalKind === "personal" ? current.authority : undefined;
+        const authorContext = personal ? undefined : metadata.authorContext;
         if (!allowsServiceActivationCandidate(storage, request, host, current.binding, metadata.updateDigest, metadata.deliveryId, activation)) {
           return refused({kind: "refused", reason: "authority-refused"});
         }
@@ -927,7 +930,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           if (previous.receipt.updateDigest !== metadata.updateDigest || !isDeepStrictEqual(previous.binding, current.binding) ||
             !isDeepStrictEqual(previous.authority, current.authority) ||
             (trustedAutomation ? !isDeepStrictEqual(row.admitted.metadata.authorSnapshot, [{kind: "automation", ...trustedAutomation}]) : row.admitted.metadata.authorSnapshot?.some(author => author.kind === "automation")) ||
-            replayRaw.author_context_json !== (metadata.authorContext === undefined ? null : JSON.stringify(metadata.authorContext))) return refused({ kind: "refused", reason: "delivery-conflict" });
+            replayRaw.author_context_json !== (authorContext === undefined ? null : JSON.stringify(authorContext))) return refused({ kind: "refused", reason: "delivery-conflict" });
           liveJournalCoverageWithin(storage, document, [...row.admitted.metadata.firstSeen, ...journalRanges(JSON.parse(String(replayRaw.seed_first_seen_json)))]);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
@@ -961,12 +964,10 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, coverage), allFirstSeen)) {
           return refused({kind:"refused",reason:"provenance-refused"});
         }
-        // A personal agent's snapshot comes from its authority, so its update's context is ignored.
-        const personal = current.authority.principalKind === "personal" ? current.authority : undefined;
-        if (!trustedAutomation && !personal && claimsPersonalAgent(metadata.authorContext)) return refused({kind: "refused", reason: "provenance-refused"});
+        if (!trustedAutomation && claimsPersonalAgent(authorContext)) return refused({kind: "refused", reason: "provenance-refused"});
         let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}]
           : personal ? personalLiveAuthorSnapshot(storage, personal)
-          : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
+          : deriveLiveAuthorSnapshot(storage, current.authority, authorContext, trustedAccount);
         journalIntegrity(isDeepStrictEqual(seedSource,liveJournalSeedSource(storage,document)));
         const seedFirstSeen = allFirstSeen.filter(range => range.clientId === seedId);
         const firstSeen = allFirstSeen.filter(range => range.clientId !== seedId);
@@ -1001,7 +1002,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         const checkpointBytes = due ? validation.evidence.stateUpdate! : null;
         const checkpointDigest = due ? validation.evidence.stateUpdateSha256 : null;
         const admitted = appendValidatedLiveJournal(storage, {document,namespace,host,current,metadata,updateBytes,receivedAtMs,
-          firstSeen,firstSeenDeletes,authorSnapshot,seedFirstSeen,authorContext:metadata.authorContext,
+          firstSeen,firstSeenDeletes,authorSnapshot,seedFirstSeen,authorContext,
           ...(due ? {checkpointCoverage:window.coverage} : {}),checkpointBytes,checkpointDigest,priorMetadata: read.cut.suffix.at(-1)?.metadata ?? read.cut.checkpoint.metadata,
           onFirstWrite() {firstWriteAttempted = true;}});
         assertWorkspaceQuota(storage,document.workspaceId,144);
@@ -1015,6 +1016,8 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         }
         // An agent's accepted edit is its connection's action; a check, wake, or replay is not.
         if ("agentConnectionId" in request.actor) recordAgentConnectionActionInTransaction(storage, request.actor.agentConnectionId, receivedAtMs);
+        if (request.actor.kind === "personal") storage.db.prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
+          WHERE agent_id = ?`).run(receivedAtMs, request.actor.agentId);
         return {reply: {result: {kind: "accepted" as const, receipt: {...admitted.metadata.accepted.receipt}, replayed: false}, admitted}};
       });
     } catch (error) {

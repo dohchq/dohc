@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryConfig } from "pg";
 
 // An account's credential fence lives in Postgres beside Better Auth's tables
 // (migration 0005). Its epoch increases in the transaction that changes or
@@ -8,6 +8,8 @@ import type { Pool, PoolClient } from "pg";
 export const CREDENTIAL_FENCE_CHANNEL = "dohc_credential_fence";
 /** How long a dropped `LISTEN` connection waits before it connects again. */
 export const CREDENTIAL_FENCE_RETRY_MS = 1_000;
+/** How long a fence read waits for Postgres before it fails as unavailable. */
+export const CREDENTIAL_FENCE_READ_TIMEOUT_MS = 5_000;
 
 export interface CredentialFenceChange {
   userId: string;
@@ -62,7 +64,10 @@ function parseChange(payload: string): CredentialFenceChange | null {
 export function createPostgresCredentialFence(pool: Pool): CredentialFence {
   return {
     async readEpoch(userId) {
-      const result = await pool.query<{ epoch: string }>("select epoch from dohc_credential_fences where user_id = $1", [userId]);
+      // pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
+      const query: QueryConfig & { query_timeout: number } = {
+        text: "select epoch from dohc_credential_fences where user_id = $1", values: [userId], query_timeout: CREDENTIAL_FENCE_READ_TIMEOUT_MS };
+      const result = await pool.query<{ epoch: string }>(query);
       return epochOf(result.rows[0]?.epoch);
     },
 

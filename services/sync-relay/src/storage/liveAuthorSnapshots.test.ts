@@ -12,6 +12,9 @@ import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
 import {limitLiveDeclaredAgents} from "./liveAuthorWindow.js";
 import {seedLinkAgent} from "../liveTickets.test-helper.js";
 import {AGENT_ACCESS_TOKEN_TTL_MS} from "./agentConnections.js";
+import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
+import {agentAccessCheck} from "../linkAuthority.js";
+import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
@@ -61,6 +64,74 @@ it("records a connected agent's last action when its live edit commits, never wh
     expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
     expect(accepted.admitted!.metadata.accepted.authority).toMatchObject({principalKind: "link", principalId: agent.principalId});
     expect(lastAction()).toEqual({last_action_at_ms: edit.receivedAtMs});
+  } finally {f.close();}
+});
+
+const personalHost = {mode: "service", hostId: "service", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection"} as const;
+const helperId = `p-${"h".repeat(26)}`;
+/**
+ * The owner's personal agent "Helper", signed in and reaching the workspace
+ * at Edit as its sign-in commits it, on a self-hosted live host that enrolled
+ * the document. Returns the agent's live actor.
+ */
+function personalEditor(f: Fixture) {
+  const check = agentAccessCheck("a".repeat(43), "https://share.example.test/mcp/agent/w/workspace", new Uint8Array(32).fill(7))!;
+  f.storage.claimWorkspaceIdentity({workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.write(db => {
+    db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+      created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes) VALUES ('workspace',?,?,'owner',NULL,'epoch','stream',1,1,1,1,64)`)
+      .run(f.input.evidence.document.objectId, f.input.evidence.currentPath);
+    db.prepare("INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms) VALUES (?,'owner','Helper','olive','active',1,0)")
+      .run(helperId);
+    db.prepare(`INSERT INTO sync_relay_personal_agent_connections(connection_id,agent_id,owner_user_id,client_id,resource_hash,agent_epoch,fence_epoch,connected_at_ms)
+      VALUES ('helper-connection',?,'owner','client',?,1,0,0)`).run(helperId, check.resourceHash);
+    db.prepare("INSERT INTO sync_relay_personal_agent_tokens(token_hash,connection_id,kind,issued_at_ms,expires_at_ms) VALUES (?,'helper-connection','access',0,?)")
+      .run(check.accessTokenHash, 4_000_000_000_000);
+    db.prepare("INSERT INTO sync_relay_personal_agent_reach(agent_id,workspace_id,level,start_seq) VALUES (?,'workspace','edit',0)").run(helperId);
+  });
+  return {kind: "personal" as const, workspaceId: "workspace", agentId: helperId, connectionId: "helper-connection",
+    accessTokenHash: check.accessTokenHash, resourceHash: check.resourceHash, fenceEpoch: 0};
+}
+
+// Proves: the journal admits a personal agent's live edit only on behalf of
+// the workspace's owner. Another account's agent is provenance-refused, and a
+// context the agent declares changes neither its snapshot nor its replay.
+it("admits a personal agent's live edit on behalf of its owner, and never by what it declares", () => {
+  const f = registered({deployment: true, host: personalHost});
+  try {
+    const actor = personalEditor(f);
+    const helper = [{kind: "agent", agentId: helperId, agentName: "Helper", onBehalfOf: "owner", depth: 0}];
+    const declaring = (input: Input, authorContext: import("@dohc/live-session-contract").LiveAuthorContext): Input =>
+      ({...input, metadata: {...input.metadata, authorContext}});
+    const human = {kind: "account" as const, accountId: "reader"};
+    const otherAgent = {kind: "signed-out" as const, agent: {agentId: "other-agent", agentName: "Other", onBehalfOf: "reader", depth: 1}};
+    const anotherPersonal = {kind: "account" as const, accountId: "owner", agent: {agentId: `p-${"o".repeat(26)}`, depth: 0}};
+    const lastAction = () => f.raw.prepare("SELECT last_action_at_ms FROM sync_relay_personal_agents WHERE agent_id=?").get(helperId);
+    const bytes = f.update("title", "Helper");
+    // The edit by an agent whose record names another account, which its connection still authorizes here.
+    f.write(db => { db.prepare("UPDATE sync_relay_personal_agents SET owner_user_id='other-owner' WHERE agent_id=?").run(helperId); });
+    expect(f.storage.commitLiveUpdateJournal(f.capture(bytes, "helper-first", actor)).result).toEqual({kind: "refused", reason: "provenance-refused"});
+    expect(lastAction()).toEqual({last_action_at_ms: null});
+    f.write(db => { db.prepare("UPDATE sync_relay_personal_agents SET owner_user_id='owner' WHERE agent_id=?").run(helperId); });
+    const first = f.capture(bytes, "helper-first", actor);
+    expect(first.expectedAuthority).toEqual({principalKind: "personal", principalId: helperId, grantId: null, grantGeneration: null});
+    const accepted = f.storage.commitLiveUpdateJournal(first);
+    expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
+    expect(accepted.admitted!.metadata.accepted.authority).toEqual(first.expectedAuthority);
+    expect(accepted.admitted!.metadata.authorSnapshot).toEqual(helper);
+    expect(lastAction()).toEqual({last_action_at_ms: first.receivedAtMs});
+    // A replay that declares someone else is still the same delivery.
+    expect(f.storage.commitLiveUpdateJournal(declaring(first, human)).result).toMatchObject({kind: "accepted", replayed: true});
+    for (const [index, context] of [human, otherAgent, anotherPersonal].entries()) {
+      const declared = declaring(f.capture(f.update("title", `Declared ${index}`), `helper-declared-${index}`, actor), context);
+      const admitted = f.storage.commitLiveUpdateJournal(declared);
+      expect(admitted.result).toMatchObject({kind: "accepted", replayed: false});
+      expect(admitted.admitted!.metadata.authorSnapshot).toEqual(helper);
+    }
+    expect(f.raw.prepare("SELECT delivery_id, author_context_json, author_snapshot_json FROM sync_relay_live_update_journal WHERE delivery_id LIKE 'helper-%' ORDER BY journal_cursor").all()
+      .map(row => ({...row, author_snapshot_json: JSON.parse(String(row.author_snapshot_json))})))
+      .toEqual(["helper-first", "helper-declared-0", "helper-declared-1", "helper-declared-2"].map(delivery_id =>
+        ({delivery_id, author_context_json: null, author_snapshot_json: helper})));
   } finally {f.close();}
 });
 
