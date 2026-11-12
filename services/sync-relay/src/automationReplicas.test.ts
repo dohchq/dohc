@@ -317,7 +317,8 @@ describe("the automation replicas", () => {
                 await pullGate.open;
               }
               return { result: { pageToken: "fetched" } };
-            case "files.resolve": return { result: { versionId: "main",
+            // The file adapter's requester checks that the answer names its request.
+            case "files.resolve": return { id: (request as Sent & { id: number }).id, result: { versionId: "main",
               results: (request.params.targets as Array<{ objectId?: string }>).map((target) => {
                 const path = target.objectId === undefined ? undefined : filePaths.get(target.objectId);
                 return path === undefined ? { status: "absent" } : { status: "found", objectId: target.objectId, path };
