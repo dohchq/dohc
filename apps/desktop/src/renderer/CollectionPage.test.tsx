@@ -3271,6 +3271,72 @@ describe("a new record in the table", () => {
     fireEvent.change(editorInput(), { target: { value: title } });
     fireEvent.keyDown(editorInput(), { key: leave });
   }
+  /** Types a title in the row that is open and saves it with Enter, with no wait. */
+  function typeNext(title: string) {
+    fireEvent.change(editorInput(), { target: { value: title } });
+    fireEvent.keyDown(editorInput(), { key: "Enter" });
+  }
+  /** The row on screen holds nothing typed, and has the cursor in its first field. No row shows a save. */
+  function expectFreshRow() {
+    expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
+    expect(newRow()!.textContent).toBe("");
+    expect(document.activeElement).toBe(editorInput());
+    expect(document.querySelector("[data-new-record-status]")).toBeNull();
+  }
+  /** The field writes this workspace did not take, which the list of unsaved changes keeps: each with its record's file. */
+  const keptWrites = () => collectionWriteFailures().map((failure) => [failure.change.recordId, failure.change.recordPath, failure.change.field, failure.change.value]);
+
+  it.each([
+    ["in the order typed", [0, 1, 2]],
+    ["out of order", [2, 0, 1]],
+  ] as const)("takes three records typed with no pause, and writes each one's values to its own file when the creations answer %s", async (_order, order) => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onError = vi.fn();
+    renderPage(bridge, onNewRecord, undefined, { onError });
+    await startRow("One", "Enter");
+    typeNext("Two");
+    typeNext("Three");
+    // Each row left the table as it was saved, and the next key was typed in the row after it. Three creations are out.
+    expectFreshRow();
+    expect(onNewRecord.mock.calls.map((call) => call[2])).toMatchObject([{ title: "One", open: false }, { title: "Two", open: false }, { title: "Three", open: false }]);
+    // This workspace takes no field write, so each typed value is kept by the file it was for.
+    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+    const names = ["One", "Two", "Three"];
+    for (const index of order) act(() => onNewRecord.mock.calls[index]![1]!({ path: `tasks/${names[index]}.md`, recordId: `rec-${names[index]}` }));
+    // Each creation's values went to its own record: none lost, none twice, none to another's file.
+    expect(keptWrites()).toEqual(order.map((index) => [`rec-${names[index]}`, `tasks/${names[index]}.md`, "title", names[index]]));
+    expect(onNewRecord).toHaveBeenCalledTimes(3);
+    expect(onError).not.toHaveBeenCalled();
+    expectFreshRow();
+  });
+
+  it("makes the other two when one of three records is not made, and reports that one in a notice with what was typed", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onError = vi.fn();
+    renderPage(bridge, onNewRecord, undefined, { onError });
+    await startRow("One", "Enter");
+    typeNext("Two");
+    typeNext("Three");
+    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/One.md", recordId: "rec-One" }));
+    let taken = false;
+    act(() => {
+      taken = onNewRecord.mock.calls[1]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
+    });
+    act(() => onNewRecord.mock.calls[2]![1]!({ path: "tasks/Three.md", recordId: "rec-Three" }));
+    // The page keeps what the failed row held, so the shell reports nothing more of it.
+    expect(taken).toBe(true);
+    expect(onError).toHaveBeenCalledOnce();
+    const [message, error] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Two");
+    expect((error as TextNotSavedError).typed).toBe("title: Two");
+    // The other two were made, each with its own value, and no row came back for the one that failed.
+    expect(keptWrites()).toEqual([["rec-One", "tasks/One.md", "title", "One"], ["rec-Three", "tasks/Three.md", "title", "Three"]]);
+    expect(onNewRecord).toHaveBeenCalledTimes(3);
+    expectFreshRow();
+  });
 
   it("starts a row in place, then creates the file and writes each typed value when the row is saved", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
@@ -3295,7 +3361,8 @@ describe("a new record in the table", () => {
     expect(path).toBe("tasks");
     // The file takes the record's name, and opens in no tab.
     expect(options).toMatchObject({ title: "Milk", open: false });
-    expect(newRow()!.querySelector("[data-new-record-status='pending']")).not.toBeNull();
+    // The row left the table with its save, and Tab started no other.
+    expect(newRow()).toBeNull();
 
     act(() => created!({ path: "tasks/Milk.md", recordId: "rec-new" }));
     await waitFor(() => expect(doc.getMap("frontmatter").get("title")).toBe("Milk"));
@@ -3308,21 +3375,19 @@ describe("a new record in the table", () => {
     // The first write settles, and the next typed value follows it through the same queue.
     settle();
     await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
-    // The file is made and a field write is still out: the row shows as saving, and nothing makes a second file.
+    // The file is made and a field write is still out: no row holds the record, and nothing makes a second file.
     await Promise.resolve();
-    expect(newRow()!.querySelector("[data-new-record-status='pending']")).not.toBeNull();
+    expect(newRow()).toBeNull();
     fireEvent.keyDown(grid(), { key: "Enter" });
     fireEvent.pointerDown(document.body);
     expect(onNewRecord).toHaveBeenCalledOnce();
-    // The last write settles, and only then is the row saved.
     settle();
-    await waitFor(() => expect(newRow()).toBeNull());
     expect(onNewRecord).toHaveBeenCalledOnce();
     expect(onOpenRecord).not.toHaveBeenCalled();
     expect(screen.queryByTestId("collection-record-panel")).toBeNull();
   });
 
-  it("counts a field write kept in the list of unsaved changes as settled, and makes no second file for it", async () => {
+  it("keeps a field write the workspace does not take in the list of unsaved changes, and makes no second file for it", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     renderPage(bridge, onNewRecord);
@@ -3330,8 +3395,8 @@ describe("a new record in the table", () => {
     // The file is made, and then this workspace takes no field write: each typed value is kept with its Try again and its copy.
     setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Milk.md", recordId: "rec-new" }));
-    // The row is saved: Enter sent it, so the next row starts, empty.
-    await waitFor(() => expect(newRow()?.textContent).toBe(""));
+    // Enter saved the row and started the next, which is empty.
+    expectFreshRow();
     expect(collectionWriteFailures().map((failure) => [failure.change.recordPath, failure.change.field, failure.change.value])).toEqual([["tasks/Milk.md", "title", "Milk"]]);
     expect(onNewRecord).toHaveBeenCalledOnce();
   });
@@ -3377,68 +3442,67 @@ describe("a new record in the table", () => {
     expect(onNewRecord.mock.calls[0]![2]).not.toHaveProperty("title");
   });
 
-  it("keeps the row and says why when the record is not made, and makes it once on Try again", async () => {
+  it("reports a record that is not made in a notice with what was typed, and makes it once from the notice's Try again", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     const onError = vi.fn();
     renderPage(bridge, onNewRecord, undefined, { onError });
     await startRow("Milk", "Enter");
-    let shown = false;
+    let taken = false;
     act(() => {
-      shown = onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
+      taken = onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
     });
 
-    // The row shows it, so the shell reports nothing.
-    expect(shown).toBe(true);
-    expect(onError).not.toHaveBeenCalled();
-    const note = within(grid()).getByRole("note");
-    expect(note.textContent).toContain("The sync relay did not accept this record.");
-    expect(newRow()?.textContent).toContain("Milk");
-    fireEvent.click(within(note).getByRole("button", { name: "Try again" }));
+    // The page keeps what the row held, so the shell reports nothing more. No row comes back for it.
+    expect(taken).toBe(true);
+    expect(within(grid()).queryByRole("note")).toBeNull();
+    expectFreshRow();
+    expect(onError).toHaveBeenCalledOnce();
+    const [message, error, retry] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk");
+    expect(error).toBeInstanceOf(TextNotSavedError);
+    expect((error as TextNotSavedError).typed).toBe("title: Milk");
+    // The notice's Try again makes the record with what was typed, once.
+    act(() => (retry as () => void)());
     expect(onNewRecord).toHaveBeenCalledTimes(2);
     expect(onNewRecord.mock.calls[1]![2]).toMatchObject({ title: "Milk", open: false });
-    // The second try is in flight: the row offers no Try again to send it twice.
-    expect(within(grid()).queryByRole("note")).toBeNull();
   });
 
-  it("finishes a creation that stopped part way from the row's Try again", async () => {
+  it("keeps what was typed with the shell's resume when a creation stops part way, and writes the typed values when the resume finishes", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
-    renderPage(bridge, onNewRecord);
+    const onError = vi.fn();
+    renderPage(bridge, onNewRecord, undefined, { onError });
     await startRow("Milk", "Enter");
     const resume = vi.fn();
-    const page = { render: null as ReturnType<typeof renderPage> | null };
-    const partWay = { reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true };
-    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!(partWay));
-    // The file exists, so the row takes no typing: only its Try again, which finishes the same creation, and Discard.
-    fireEvent.click(within(newRow()!).getAllByRole("gridcell")[1]!);
-    expect(document.querySelector("[data-cell-editor]")).toBeNull();
-    fireEvent.click(within(within(grid()).getByRole("note")).getByRole("button", { name: "Try again" }));
-    expect(resume).toHaveBeenCalledOnce();
-    // The resume is out until it answers: no second press, no Enter, and no press away starts another.
-    expect(within(grid()).queryByRole("note")).toBeNull();
-    expect(newRow()!.querySelector("[data-new-record-status='pending']")).not.toBeNull();
-    fireEvent.keyDown(grid(), { key: "Enter" });
-    fireEvent.pointerDown(document.body);
-    expect(resume).toHaveBeenCalledOnce();
-    // It stops part way again, and Try again is back.
-    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!(partWay));
-    expect(within(within(grid()).getByRole("note")).getByRole("button", { name: "Try again" })).toBeTruthy();
-    // The same creation goes on: no second file is asked for.
+    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true }));
+    // The file exists, so nothing is typed for it again: no row came back, and the one notice has what was typed
+    // and the shell's own resume, which finishes the same creation.
+    expectFreshRow();
+    expect(onError).toHaveBeenCalledOnce();
+    const [message, error, retry] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc did not create a record in Tasks. dohc created the record file but could not finish the record. You typed: title: Milk");
+    expect(error).toBeInstanceOf(TextNotSavedError);
+    expect(retry).toBe(resume);
+    expect(resume).not.toHaveBeenCalled();
+    // The resume finishes: the shell answers the same creation, which writes what was typed to the record's file.
+    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Milk.md", recordId: "rec-new" }));
+    expect(keptWrites()).toEqual([["rec-new", "tasks/Milk.md", "title", "Milk"]]);
+    // The same creation went on: no second file was asked for.
     expect(onNewRecord).toHaveBeenCalledOnce();
-    void page;
   });
 
-  it("starts no resume when the table closes over a creation that stopped part way, and keeps what was typed with the resume", async () => {
+  it("starts no resume when the page closes before a creation stops part way, and keeps what was typed with the resume", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     const onError = vi.fn();
     const view = renderPage(bridge, onNewRecord, undefined, { onError });
     await startRow("Milk", "Enter");
     const resume = vi.fn();
-    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true }));
     view.unmount();
     await Promise.resolve();
+    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true }));
     expect(resume).not.toHaveBeenCalled();
     expect(onNewRecord).toHaveBeenCalledOnce();
     // A notice has the typed values, and its Try again is the same resume.
@@ -3535,36 +3599,61 @@ describe("a new record in the table", () => {
     expect(onNotice).not.toHaveBeenCalled();
   });
 
-  it("says the record was created when no row on screen shows it", async () => {
+  it("says once that records were created when no row on screen shows them, after the read that follows the last of a burst", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    // The view's page of records holds Plan alone, whatever is created.
     bridge.queryCollectionRecords.mockResolvedValue({
       collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
       records: [record("rec-1", "Plan")],
       groups: null,
       nextCursor: { sortValues: [], recordPath: "tasks/Plan.md", recordId: "rec-1" },
     });
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-new");
-    docMock.current = engineDocState({ available: true, doc });
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     const onNotice = vi.fn();
     vi.stubGlobal("dohcDesktop", bridge);
-    const view = render(pageWithHost(onNewRecord, undefined, { onNotice }));
+    render(pageWithHost(onNewRecord, undefined, { onNotice }));
     await screen.findByText("Plan");
-    await startRow("Zebra", "Enter");
-    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Zebra.md", recordId: "rec-new" }));
-    await waitFor(() => expect(doc.getMap("frontmatter").get("title")).toBe("Zebra"));
-    // Nothing is said while the record's field write is out.
+    await startRow("Yak", "Enter");
+    typeNext("Zebra");
+    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+    const queries = bridge.queryCollectionRecords.mock.calls.length;
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Yak.md", recordId: "rec-yak" }));
+    // One creation of the burst is still out: the view reads nothing yet, and nothing is said.
+    await Promise.resolve();
+    expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries);
     expect(onNotice).not.toHaveBeenCalled();
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
-    view.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
-    view.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
+    act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created 2 records. They are not among the records on screen."));
+    expect(onNotice).toHaveBeenCalledOnce();
+    expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(queries);
+    // Enter saved each row, so the next one is open with the cursor in its first field.
+    expectFreshRow();
+  });
+
+  it("says nothing of a created record that a row on screen shows, and says one record where one is out of view", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost(onNewRecord, undefined, { onNotice }));
+    await screen.findByText("Plan");
+    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+    await startRow("Milk", "Enter");
+    // The view's next read holds the new record, in a row on screen.
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [record("rec-1", "Plan"), record("rec-milk", "Milk")],
+      groups: null,
+      nextCursor: null,
+    });
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Milk.md", recordId: "rec-milk" }));
+    await screen.findByText("Milk");
+    expect(onNotice).not.toHaveBeenCalled();
+    // The next record is not among the records that read returns.
+    typeNext("Zebra");
+    act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is not among the records on screen."));
-    // Enter saved the row, so the next one starts with the cursor in its first field.
-    expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
-    expect(document.activeElement).toBe(editorInput());
-    expect(editorInput().value).toBe("");
+    expect(onNotice).toHaveBeenCalledOnce();
   });
 
   it("offers no new row to someone who cannot change the Collection", async () => {

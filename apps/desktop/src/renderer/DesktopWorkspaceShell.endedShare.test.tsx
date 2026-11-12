@@ -126,9 +126,11 @@ async function saveNewRow(name: string) {
   fireEvent.change(input, { target: { value: name } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
-/** Waits for the new row to say why it was not saved. */
-async function newRowSays(text: string) {
-  await waitFor(() => expect(document.querySelector("[data-new-record-status]")?.textContent).toContain(text));
+/** Waits for a notice to say why the new row's record was not made, with what was typed. No row says it. */
+async function noticeSays(text: string) {
+  await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(text));
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk");
+  expect(document.querySelector("[data-new-record-status]")).toBeNull();
 }
 const PART_WAY = "dohc created the record file but could not finish the record.";
 
@@ -186,13 +188,12 @@ describe("ended Edit Collection shares", () => {
     const send = directWriteInput.current!.sendShareChanges;
     if (action === "record creation") {
       await saveNewRow("Milk");
-      // The row says the creation stopped part way, so no notice does.
-      await newRowSays(PART_WAY);
-      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      // A notice says the creation stopped part way, and keeps what was typed.
+      await noticeSays(PART_WAY);
     }
     view.rerender(shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }));
-    // The row goes with the right to add records, and starts no request as it goes. A notice keeps what was typed,
-    // and its Try again, which finishes the same creation, meets the shell's refusal.
+    // The right to add records goes, and nothing starts a request as it goes. The notice's Try again, which
+    // finishes the same creation, meets the shell's refusal.
     if (action === "record creation") {
       await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(PART_WAY));
       expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
@@ -671,10 +672,8 @@ describe("ended Edit Collection shares", () => {
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValue(pending.promise);
     await saveNewRow("Milk");
-    // The row keeps what was typed and says why, in place of a notice.
-    await newRowSays("already exists");
-    expect(document.querySelector("[data-new-record]")?.textContent).toContain("Milk");
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    // A notice keeps what was typed and says why.
+    await noticeSays("already exists");
     expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce();
   });
 
@@ -700,7 +699,7 @@ describe("ended Edit Collection shares", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(`Your access to this share ${access}.`));
   });
 
-  it("keeps a recipient's new row, with why, when the relay refuses the record, and opens no file tab", async () => {
+  it("keeps what a recipient typed in a new row, with why, when the relay refuses the record, and opens no file tab", async () => {
     const bridge = collectionBridge();
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
     // The record's file is kept on this computer as a draft the relay refused.
@@ -709,18 +708,18 @@ describe("ended Edit Collection shares", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
-    await newRowSays("The owner's server did not accept this record.");
+    await noticeSays("The owner's server did not accept this record.");
 
-    // The file takes the record's name. The row keeps what was typed, and nothing else reports the refusal.
+    // The file takes the record's name. One notice keeps what was typed, and no row holds it.
     expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({ collectionPath: "tasks", name: "Milk" });
-    expect(document.querySelector("[data-new-record]")?.textContent).toContain("Milk");
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(document.querySelector("[data-new-record]")?.textContent).toBe("");
     expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
 
-    // Try again makes the record once more, and still opens no tab.
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-new-record-status]")!).getByRole("button", { name: "Try again" }));
+    // The notice's Try again makes the record once more, and still opens no tab.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(document.querySelector("[data-new-record-status='refused']")).toBeNull());
+    expect(bridge.createCollectionRecord.mock.calls[1]![0]).toMatchObject({ collectionPath: "tasks" });
     expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
   });
 
@@ -733,8 +732,8 @@ describe("ended Edit Collection shares", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
-    await newRowSays(PART_WAY);
-    // The share ends, so the row goes, and starts no request as it goes. A notice keeps what was typed.
+    await noticeSays(PART_WAY);
+    // The share ends, and nothing starts a request as it does. The notice keeps what was typed.
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk"));
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
@@ -760,7 +759,7 @@ describe("ended Edit Collection shares", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
-    await newRowSays(PART_WAY);
+    await noticeSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
@@ -783,7 +782,7 @@ describe("ended Edit Collection shares", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
-    await newRowSays(PART_WAY);
+    await noticeSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "needs-reopen" });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());

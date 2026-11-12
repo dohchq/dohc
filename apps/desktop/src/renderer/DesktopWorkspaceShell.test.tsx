@@ -466,17 +466,41 @@ describe("collection folders", () => {
       return { path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
     });
     await typeRow("Milk", "Enter");
-    // The record exists, so its title is written, or kept with its Try again, and the row does not say it could not be created.
+    // The record exists, so its title is written, or kept with its Try again, and nothing says it could not be created.
     await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Could not refresh workspace files."));
-    expect(document.querySelector("[data-new-record-status='refused']")).toBeNull();
+    expect(document.querySelector("[data-new-record-status]")).toBeNull();
     expect(screen.queryByText(/could not create this record/)).toBeNull();
     // Nothing offers a second file for it.
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
     resetCollectionFieldWritesForTests();
   });
 
-  it("keeps a creation that stopped part way as that record's when its resume fails: the row takes no typing and makes no second file", async () => {
+  it("gives two new rows named alike and saved back to back a file each, and writes each row's title to its own file", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    const answers = [deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>(), deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>()];
+    bridge.createCollectionRecord.mockImplementationOnce(() => answers[0]!.promise).mockImplementationOnce(() => answers[1]!.promise);
+    const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
+    await typeRow("Acme", "Enter");
+    // The next key is typed in the next row, with no wait for the first creation.
+    const editor = document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+    fireEvent.change(editor, { target: { value: "acme" } });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    // Both creations are out. The first holds its file's name until it ends, so the second took the next one.
+    expect(bridge.createCollectionRecord.mock.calls.map(([payload]) => payload.name)).toEqual(["Acme", "acme 2"]);
+    // They answer out of order.
+    await act(async () => answers[1]!.resolve({ path: "tasks/acme 2.md", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb" }));
+    await act(async () => answers[0]!.resolve({ path: "tasks/Acme.md", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" }));
+    // Each title is with the field writes of its own file.
+    await waitFor(() => expect([...retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)].sort()).toEqual(["tasks/Acme.md", "tasks/acme 2.md"]));
+    expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/could not create this record/)).toBeNull();
+    resetCollectionFieldWritesForTests();
+  });
+
+  it("keeps a creation that stopped part way as that record's when its resume fails: the notice keeps the same resume, and nothing makes a second file", async () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
@@ -487,27 +511,26 @@ describe("collection folders", () => {
       .mockRejectedValueOnce(new Error("The shared file session changed. Open the Collection again."));
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     await typeRow("Milk", "Enter");
-    const note = () => document.querySelector<HTMLElement>("[data-new-record-status]:not([data-new-record-status='pending'])");
-    await waitFor(() => expect(note()?.textContent).toContain("dohc created the record file but could not finish the record."));
-    // The resume itself fails. The record still exists in part, so the row is still that record's.
-    fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
+    const notice = () => screen.getByTestId("workspace-shell-error");
+    await waitFor(() => expect(notice().textContent).toContain("dohc created the record file but could not finish the record."));
+    // No row holds the record. The notice has what was typed, and its Try again is the resume of that record.
+    expect(notice().textContent).toContain("You typed: title: Milk");
+    expect(document.querySelector("[data-new-record-status]")).toBeNull();
+    // The resume itself fails. The record still exists in part, so the failure is still that record's.
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(note()?.textContent).toContain("already exists"));
+    await waitFor(() => expect(notice().textContent).toContain("already exists"));
     // The words still say the record's file exists, so nobody takes the record for one that was never made.
-    expect(note()!.textContent).toContain("dohc created the record file but could not finish the record.");
-    expect(note()!.textContent).not.toContain("could not create this record");
-    expect(note()!.getAttribute("data-new-record-status")).toBe("unconfirmed");
-    expect(within(note()!).getByRole("button", { name: "Discard" })).toBeTruthy();
-    // It takes no typing, and Enter starts no creation beside the unfinished one.
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-new-record]")!).getAllByRole("gridcell")[1]!);
-    expect(document.querySelector("[data-cell-editor]")).toBeNull();
-    fireEvent.keyDown(screen.getByRole("grid"), { key: "Enter" });
+    expect(notice().textContent).toContain("dohc created the record file but could not finish the record.");
+    expect(notice().textContent).not.toContain("could not create this record");
+    expect(notice().textContent).toContain("You typed: title: Milk");
+    // The row on screen is the next one, with nothing typed: Enter in it starts no creation beside the unfinished one.
+    fireEvent.keyDown(document.querySelector<HTMLInputElement>("[data-cell-editor] input")!, { key: "Enter" });
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
     // Its one retry is the same resume, for the same record, however often that fails.
-    fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
-    await waitFor(() => expect(note()?.textContent).toContain("The shared file session changed."));
-    expect(note()!.getAttribute("data-new-record-status")).toBe("unconfirmed");
+    await waitFor(() => expect(notice().textContent).toContain("The shared file session changed."));
     expect(bridge.createCollectionRecord.mock.calls.slice(1).map(([payload]) => [payload.name, payload.recordId])).toEqual([["Milk", recordId], ["Milk", recordId]]);
     resetCollectionFieldWritesForTests();
   });

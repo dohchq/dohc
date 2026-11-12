@@ -153,7 +153,8 @@ export interface NewRecordOptions {
   open?: boolean;
   /**
    * Receives why the record was not made, and what finishes a creation that
-   * stopped part way. True when the page shows it, so the shell reports nothing.
+   * stopped part way. True when the page reports it with what was typed, so
+   * the shell reports nothing more.
    */
   onFailure?(failure: {
     reason: string;
@@ -572,8 +573,21 @@ export function CollectionPage({
       pageOpen.current = false;
     };
   }, []);
-  // What starts the table's new row, while a table shows.
-  const startNewRow = useRef<(() => void) | null>(null);
+  // The table's side of its new row, while a table shows.
+  const tableSide = useRef<Parameters<NonNullable<TableNewRecord["bind"]>>[0] | null>(null);
+  // The creations the table's new rows handed over that have not ended, and the records they made that no notice
+  // has counted. Once the last creation ends the view reads its records, and `rowsDue` waits for that read.
+  const rowsOut = useRef(0);
+  const rowsMade = useRef<string[]>([]);
+  const rowsDue = useRef(false);
+  // The records new rows made that no row on screen shows get one notice, so a burst of rows gets one.
+  useEffect(() => {
+    if (!rowsDue.current || state.status !== "ready" || rowsOut.current > 0) return;
+    rowsDue.current = false;
+    const side = tableSide.current;
+    const unseen = rowsMade.current.splice(0).filter((recordId) => side !== null && !side.shows(recordId)).length;
+    if (unseen > 0) onNotice(unseen === 1 ? "Created a record. It is not among the records on screen." : `Created ${unseen} records. They are not among the records on screen.`);
+  }, [state.status, state.records]);
   // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
   const [justMade, setJustMade] = useState<string | null>(null);
   const openMade = useRef<(recordId: string) => void>(() => undefined);
@@ -601,20 +615,22 @@ export function CollectionPage({
   );
   // In a table the button starts the new row. Beside a board or a calendar it makes a record with no value filled in.
   const newRecord = useCallback(
-    () => (startNewRow.current ? startNewRow.current() : makeRecord()),
+    () => (tableSide.current ? tableSide.current.start() : makeRecord()),
     [makeRecord],
   );
   // The lineage this page opened under. The shell opens a new page when the workspace changes versions or restores
   // earlier work, so a row typed here belongs to this one, whatever the workspace's lineage is by the time it is saved.
   const pageLineage = useState(() => currentCollectionWriteLineage(workspaceId))[0];
-  const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, onNotice, collectionName: collectionPath });
-  rowHost.current = { onNewRecord, enqueueCellChange, onError, onNotice, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
+  const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, collectionName: collectionPath });
+  rowHost.current = { onNewRecord, enqueueCellChange, onError, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
   /**
    * The table's new row. Saving it creates the record's file, named from
    * the row's title or name, then writes each typed value as an edit of a
-   * cell does. Once the file is made the row never creates again, and it is
-   * saved when every one of those writes has settled. One object for the
-   * page's life, so the table builds nothing again.
+   * cell does. The row is gone as soon as it is saved, so what becomes of
+   * the creation shows elsewhere: a notice keeps what was typed for a record
+   * that was not made, and the list of unsaved changes keeps a value whose
+   * write failed. One object for the page's life, so the table builds
+   * nothing again.
    */
   const tableNewRecord = useMemo((): TableNewRecord => {
     const text = (value: CollectionValue) => (Array.isArray(value) ? value.join(", ") : String(value));
@@ -631,69 +647,61 @@ export function CollectionPage({
         // The kept row holds everything typed: its values, and text an editor held that its field cannot take, under that field.
       } else retainUnsavedCollectionRecord(workspaceId, collectionPath, left ? { ...values, [left.field]: left.text } : values, `dohc did not create this record. ${reason}`);
     };
-    const save: TableNewRecord["save"] = (values, report) => {
+    const save: TableNewRecord["save"] = (values) => {
       const now = rowHost.current;
       const entries = Object.entries(values).map(([field, value]) => ({ field, value }));
       const named = labelField(entries);
       const typed = entries.map((entry) => `${entry.field}: ${text(entry.value)}`).join(", ");
       // What a field write checks, checked before the file is made: a file made where its values would be refused
-      // is a named record with empty fields. The row keeps its values, or a report takes all of them once.
+      // is a named record with empty fields. Nothing is made, and all the row held is kept once.
       const refusal = mayNotWrite.current()
         ?? (collectionWritesPaused(workspaceId) ? "Editing was paused while dohc changed files in this workspace." : null)
         ?? (pageLineage !== currentCollectionWriteLineage(workspaceId) ? "This workspace changed versions or restored earlier work." : null);
       if (refusal !== null) {
-        if (!report({ state: "refused", reason: refusal }) && typed !== "") keep(values, typed, refusal, null);
+        if (typed !== "") keep(values, typed, refusal, null);
         return;
       }
+      // The creation is out until the file is made or the creation fails. A resume that ends later is the same one.
+      let out = true;
+      rowsOut.current++;
+      const ended = (recordId?: string) => {
+        if (recordId !== undefined) rowsMade.current.push(recordId);
+        if (out) rowsOut.current--;
+        out = false;
+        if (rowsOut.current > 0 || !pageOpen.current) return;
+        // The view reads its records, and the table then says which of the records the rows made no row on screen shows.
+        rowsDue.current = true;
+        void store.refresh();
+      };
       now.onNewRecord(collectionPath, (record) => {
-        // The file is made. The row never creates again: what remains is its field writes, which go on whether or
-        // not the page is still open.
-        report({ state: "made" });
-        let out = entries.length;
-        const saved = () => {
-          // Each write landed, or is kept in the list of unsaved changes with its value, its Try again and its copy.
-          // The view reads its records next, and the table then says whether a row on screen shows the record.
-          if (report({ state: "saved", recordId: record.recordId }) && pageOpen.current) void store.refresh();
-        };
-        if (out === 0) return saved();
-        for (const { field, value } of entries) {
-          let settled = false;
-          now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value }, undefined, () => {
-            if (settled) return;
-            settled = true;
-            if (--out === 0) saved();
-          });
-        }
+        // The file is made. Each typed value is written as an edit of a cell is, whether or not the page is still
+        // open. A write that fails is in the list of unsaved changes, with its value and its Try again.
+        for (const { field, value } of entries) now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
+        ended(record.recordId);
       }, {
         ...(named === null ? {} : { title: text(values[named] ?? null) }),
         open: false,
         onFailure: (failure) => {
-          // A file that exists and is not finished leaves the row in doubt: its Try again finishes the same
-          // creation, and Discard or closing the table hands what was typed to a report. A creation that did
-          // not run is refused, and the row takes typing again.
-          const status = failure.partial
-            ? { state: "unconfirmed" as const, reason: failure.reason, ...(failure.retry ? { retry: failure.retry } : {}),
-                discard: () => keep(values, typed, failure.reason, null), released: () => keep(values, typed, failure.reason, failure.retry) }
-            : { state: "refused" as const, reason: failure.reason };
-          if (pageOpen.current && report(status)) return true;
+          ended();
           // A record with nothing typed in it has nothing to keep, so the shell reports it as it does any creation.
           if (typed === "") return false;
-          // The row went with its table, so what it held is kept, with what makes the record again where nothing was made.
-          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => save(values, () => false)));
+          // No row is left to say why, so what it held is kept with the failure. A file that exists and is not
+          // finished keeps the shell's own resume, which writes these values when it finishes. Where nothing
+          // was made, Try again makes the record again.
+          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => void save(values)));
           return true;
         },
       });
     };
     return {
-      bind: (start) => {
-        startNewRow.current = start;
+      bind: (side) => {
+        tableSide.current = side;
         return () => {
-          if (startNewRow.current === start) startNewRow.current = null;
+          if (tableSide.current === side) tableSide.current = null;
         };
       },
       save,
       // What the row held and did not save goes to a notice, whose details hold all of it. Nothing is created.
-      onOutOfView: () => rowHost.current.onNotice("Created a record. It is not among the records on screen."),
       onUnsaved: (row) => {
         const typed = [...Object.entries(row.values).map(([field, value]) => `${field}: ${text(value)}`), ...(row.text ? [`${row.text.field}: ${row.text.text}`] : [])].join(", ");
         const field = Object.keys(row.values)[0] ?? "";

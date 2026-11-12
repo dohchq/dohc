@@ -4557,7 +4557,7 @@ export function DesktopWorkspaceShell(props: {
        */
       const execute = async (recordId?: string): Promise<void> => {
         const resume = recordId === undefined ? null : () => void execute(recordId);
-        // The page that asked shows a failure in place, where it still can. Otherwise the shell reports it. A
+        // The page that asked reports a failure with what was typed for the record. Otherwise the shell reports it. A
         // shell the window no longer shows can run no retry.
         const shownInPage = (reason: string, retry: (() => void) | null = resume, partial = recordId !== undefined) =>
           options.onFailure?.({ reason, retry: moved() ? null : retry, partial, ...(recordId === undefined ? {} : { recordId }) }) ?? false;
