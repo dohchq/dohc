@@ -715,10 +715,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           );
         } catch (error) {
           reportError(error);
-          // A quiet run is finished either way; an unread reply loses only
-          // its notice.
-          if (intent.exitCode === 0 && live.quiet) quietEnd = true;
-          else if (intent.exitCode === 0) {
+          // Whether a quiet run posted decides its notice, and only this
+          // live run knows it was quiet, so it keeps its slot and reads again.
+          if (intent.exitCode === 0 && live.quiet) {
+            scheduleRecoveryScan(live.workspace);
+            return false;
+          }
+          if (intent.exitCode === 0) {
             pendingNoReplyChecks.set(
               runKey(live.workspace.workspaceId, live.claim.run.runId),
               { workspace: live.workspace, run: live.claim.run },

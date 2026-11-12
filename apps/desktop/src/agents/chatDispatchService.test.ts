@@ -4585,10 +4585,13 @@ describe("chatDispatchService", () => {
     const { threadId, runId, process } = await startAutomationRun(fixture);
 
     expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
-    if (readFails) fixture.rejectNextRunMessageLookup!(new Error("daemon restarted during listRunMessages"));
+    // A failed read is tried again before the run's end is saved.
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    if (readFails) fixture.rejectNextRunMessageLookup!(lookupError);
     process.emitExit(0);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+    if (readFails) expect(fixture.errors).toContain(lookupError);
 
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
     expect(fixture.notices).toEqual([]);
@@ -4628,9 +4631,15 @@ describe("chatDispatchService", () => {
     const replied = await startAutomationRun(replying);
     expect(replying.service.endRunQuietly(WORKSPACE_ID, replied.runId, replied.threadId)).toBeNull();
     const reply = await linkAgentReply(replying, replied.threadId, replied.runId);
+    // The first read after it ends fails; the next one finds the reply.
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    replying.rejectNextRunMessageLookup!(lookupError);
     replied.process.emitExit(0);
     await replying.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(replying.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+    expect(replying.errors).toContain(lookupError);
     expect(replying.notices).toEqual([expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]);
+    expect(await replying.dispatch.getRunRecord(replied.runId)).toMatchObject({ exitCode: 0, failureHandled: false });
   });
 
   it("refuses to end quietly a person's run, another thread's, or one that isn't running", async () => {
