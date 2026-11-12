@@ -639,7 +639,7 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   const checkout = jobs.changes.steps.find(step => step.uses?.startsWith("actions/checkout@"));
   const filter = jobs.changes.steps.find(step => step.id === "filter");
   assert.equal(checkout.with.ref, "${{ github.sha }}");
-  assert.equal(checkout.with["fetch-depth"], 0);
+  assert.equal(checkout.with["fetch-depth"], 2);
   assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
   const base = jobs.changes.steps.find(step => step.id === "merge-base");
   assert.equal(base.if, "github.event_name == 'pull_request'");

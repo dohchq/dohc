@@ -61,7 +61,7 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Resolve the tested merge base

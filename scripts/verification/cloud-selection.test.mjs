@@ -71,7 +71,10 @@ test("PR selection uses the merge first parent when the recorded base is outside
 });
 
 test("PR selection rejects a checkout without a merge commit", t => {
-  const { source } = mergeFixture(t);
+  const { root, source } = mergeFixture(t);
+  const missingParents = join(root, "missing-parents");
+  git(root, "clone", "--no-local", "--depth=1", "--single-branch", "--branch=proof", source, missingParents);
+  assert.throws(() => cloudChangedFiles({ GITHUB_EVENT_NAME: "pull_request" }, missingParents), /Pull request selection requires HEAD to be a merge commit with both parents available/u);
   git(source, "checkout", "main");
   assert.throws(() => cloudChangedFiles({ GITHUB_EVENT_NAME: "pull_request" }, source), /Pull request selection requires HEAD to be a merge commit/u);
 });
