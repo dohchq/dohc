@@ -10,6 +10,7 @@ import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
@@ -2004,6 +2005,7 @@ describe("CLI socket server", () => {
         ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }],
         ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }],
         ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }],
+        ["dataset", { request: { action: "cancelInvoke", workspaceId: WORKSPACE_ID, invocationId: "00000000-0000-4000-8000-000000000003" } }],
         ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } }],
       ];
       for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
@@ -2128,6 +2130,83 @@ describe("CLI socket server", () => {
       expect(await send("stopSync", { cwd: link, actor: "human" })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" });
       expect(reached).toHaveBeenCalledTimes(1);
     });
+
+    // Every other name for a share's folder ends at the refusal, or names no
+    // workspace at all.
+    describe("named another way", () => {
+      const NO_WORKSPACE = "dohc: not inside a dohc workspace";
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const answer = (response: CliTransportResponse) => (response.ok ? "ran" : response.error);
+      const answers = async (cwd: string) => [
+        answer(await send("stopSync", { cwd, actor: "human" })),
+        answer(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" })),
+      ];
+      // cmd's short spelling of a path: each name that has a short alias, by that alias.
+      const windowsShortPath = (path: string) => spawnSync("cmd.exe", ["/d", "/s", "/c", `"for %I in ("${path}") do @echo %~sI"`],
+        { encoding: "utf8", windowsVerbatimArguments: true }).stdout.trim();
+
+      beforeEach(() => {
+        reached.mockClear();
+        context.stopSync = reached;
+      });
+      afterEach(() => {
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      });
+
+      it("refuses in other capitals where the disk folds them, and names no workspace where it doesn't", async () => {
+        for (const cwd of [join(workspaceRoot, "SHARED-WITH-ME", "received", "notes"), join(workspaceRoot, "Shared-With-Me")]) {
+          const folds = await stat(cwd).then(() => true, () => false);
+          expect(await answers(cwd), cwd).toEqual(folds ? [OWNER, CHAT] : [NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      // These read the folder's real name, as Windows reports it, at both the
+      // workspace lookup and the rule.
+      it("refuses by Windows short names, for the workspace's folder and for shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const shortRoot = windowsShortPath(workspaceRoot);
+        const shortShared = windowsShortPath(join(workspaceRoot, "shared-with-me"));
+        // A volume that keeps no short names gives each path back unchanged.
+        if (shortRoot === workspaceRoot || shortShared === join(workspaceRoot, "shared-with-me")) ctx.skip();
+        for (const cwd of [join(shortRoot, "shared-with-me", "received", "notes"), join(workspaceRoot, basename(shortShared), "received", "notes"),
+          windowsShortPath(inShare)]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses through a folder's directory stream", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me:$I30:$INDEX_ALLOCATION`, `${workspaceRoot}\\shared-with-me::$INDEX_ALLOCATION`,
+          `${inShare}::$INDEX_ALLOCATION`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses by the device, volume and object names Windows resolves to the same folder", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const volume = execFileSync("mountvol", [inShare.slice(0, 2), "/L"], { encoding: "utf8" }).trim();
+        for (const cwd of [`\\\\?\\${inShare}`, `\\\\.\\${inShare}`, `${volume}${inShare.slice(3)}`, `\\\\?\\GLOBALROOT\\??\\${inShare}`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("names no workspace for a trailing dot or space, or a file stream, on shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me \\received`,
+          `${workspaceRoot}\\shared-with-me...`, `\\\\?\\${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me::$DATA`]) {
+          expect(await answers(cwd), cwd).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      it("names no workspace for a network path to the same disk", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const cwd = `\\\\localhost\\${inShare.slice(0, 1)}$\\${inShare.slice(3)}`;
+        // The disk's administrative share can be closed to this account.
+        if (!(await stat(cwd).then(() => true, () => false))) ctx.skip();
+        expect(await answers(cwd)).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+      });
+    });
   });
 
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
@@ -2148,8 +2227,11 @@ describe("CLI socket server", () => {
       ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }, "App responses require the owning workspace."],
       ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }, "Collections require the owning workspace."],
       ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } }, "Collections require the owning workspace."],
       ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } },
         "App publication requires the owning workspace."],
+      ["appPublication", { request: { action: "createLink", workspaceId: WORKSPACE_ID, appRoot: "app", access: "view",
+        operationId: "00000000-0000-4000-8000-000000000101", agentLabel: "Builder" } }, "App publication requires the owning workspace."],
     ];
     const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
       ["groupCreate", { name: "needs-ice" }],

@@ -580,6 +580,7 @@ export async function resolveCliWorkspace(
   cwd: string,
   workspaces: readonly CliRegistryWorkspace[],
 ): Promise<CliRegistryWorkspace | null> {
+  // Needs the native realpath: the folder's real name, as the system reports it.
   const absoluteCwd = await realpath(resolve(cwd)).catch(() => null);
   if (absoluteCwd === null) return null;
   const roots = (
@@ -2159,6 +2160,7 @@ async function receivedShareRefusal(request: CliRequest, options: CliServerOptio
   if (resolved === "anywhere") return undefined;
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) return undefined;
+  // Needs the native realpath: the folder's real name, as the system reports it.
   const root = await realpath(workspace.rootPath);
   const folder = await pathUnderRoot(root, await realpath(request.args.cwd));
   if (folder === null || !isSharedWithMePath(relative(root, folder).split(sep).join("/"))) return undefined;
