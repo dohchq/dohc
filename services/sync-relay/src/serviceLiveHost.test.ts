@@ -7876,9 +7876,10 @@ it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes,
 
 // A pass visits eight awake notes, so twenty-four take three passes. With every pause at the idle interval, a note
 // was visited once in three of them.
-// Proves: an idle host visits every awake note within its idle interval. An edit queued for the note the host
-// visited last, which no notice, nudge or wake announces, is drained within that interval.
-it("drains an edit no signal announced within the idle interval on an idle host of twenty-four notes", async () => {
+// Proves: while the same notes stay awake, an idle host visits each within its idle interval. An edit queued for
+// the note the host visited last, which no notice, nudge or wake announces, meets its visit within that interval.
+// The activation here is a stand-in that marks the visit; the one-note tests drain through the real delivery.
+it("visits a note with an edit no signal announced within the idle interval on an idle host of twenty-four notes", async () => {
   const paced = pacedPasses(), h = await readyHostedHost(["workspace"], {notes: 24, intervals: {pollIntervalMs: paced.poll, idlePollIntervalMs: paced.ceiling}});
   const host = await startServiceLiveHost({...h.f, ...paced.timers});
   cleanup.push(() => host.close());

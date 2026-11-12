@@ -47,8 +47,9 @@ export function selfHostLiveProfile() {
         // An idle host runs a pass at least this often, and each pass checks every hosted document's authority:
         // a Pause, a Stop or a revocation another process wrote to the relay database, which no signal
         // announces, waits no longer than this for that pass. While the same documents stay awake, an idle host
-        // also visits each of them at least this often. When more wake during a long pause, a document waits
-        // for its visit at most this much longer than on a host that never slows down.
+        // also visits each of them at least this often, apart from the passes' own time. When more wake during
+        // a long pause, a document can wait that pause and then one rotation of the awake documents at
+        // pollIntervalMs: under four seconds with the 64 documents a host may hold.
         idlePollIntervalMs: 2_000},
       // Copying and migrating an earlier store for its owner's recovery copy
       // may take this long, the longest the engine answers a request.
