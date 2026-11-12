@@ -6363,7 +6363,9 @@ export function createWorkspaceEngineCapture(
           }),
           settleNow: opts => publicSession.settleNow(opts),
           // A later record open must follow this writer's lease release.
-          close: opts => enqueueResult("close record session", () => publicSession.close(opts)),
+          close: opts => stopped
+            ? publicSession.close(opts)
+            : enqueueResult("close record session", () => publicSession.close(opts)),
         } satisfies RecordEditSession;
         return publicSession;
       }

@@ -769,6 +769,27 @@ it("opens the next record writer after the previous writer releases its session"
   expect(methodCount(YDOC_METHOD.close)).toBe(2);
 });
 
+it("closes a settled record writer after capture stops without failing the edit", async () => {
+  enforceRecordOwner = true;
+  const context = recordContext();
+  await expect(setCollectionRecordFields({ ...context, async openRecord(path) {
+    const session = await context.openRecord(path);
+    return {
+      ...session,
+      async settleNow(options: Parameters<typeof session.settleNow>[0]) {
+        const result = await session.settleNow(options);
+        await capture.stop();
+        return result;
+      },
+    };
+  } }, {
+    recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: recordAutomation,
+  })).resolves.toMatchObject({ replaced: { "Finished on": null } });
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(1);
+  expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
+});
+
 it("settles an open record before a person's delete and credits the person in History", async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
   await openedLocalState({ workspaceId: "record-delete", rootPath: root });
