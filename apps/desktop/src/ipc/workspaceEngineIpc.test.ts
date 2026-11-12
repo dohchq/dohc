@@ -475,6 +475,16 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("readonly");
     expect(h.adapter.reconcileCapture).toHaveBeenCalledTimes(2);
   });
+  it("keeps the secret key notice when Try again runs before dohc has finished checking the workspace", async () => {
+    const h = await harness();
+    // A restarted engine has no reason yet: the status alone reads as healthy.
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: false, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: true, degraded: true, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+  });
   it("admits live delivery retries only through the current writable renderer workspace", async () => {
     const h = await harness();
     await h.invoke(CHANNELS.retryOwnerLiveDelivery);
