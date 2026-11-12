@@ -389,7 +389,7 @@ export function renderMembers(result: CliResultByVerb["members"]): string {
     ...(view.inviteLink === null ? [] : [view.inviteLink.enabled && view.inviteLink.url ? `Invite link: ${view.inviteLink.url}` : "Invite link: off"]),
     "",
     ...active.map(row),
-    ...(invited.length ? ["", "Invites", ...invited.map(row)] : []),
+    ...(invited.length ? ["", "Invites (dohc sends no email; each joins when they sign in with that address)", ...invited.map(row)] : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
   ].join("\n");
 }

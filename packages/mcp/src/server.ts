@@ -220,7 +220,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   }, async ({request}) => text(await publishApp(ctx,request)));
 
   register("dohc_members", {
-    description: "Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email; remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.",
+    description: "Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: they join when they sign in to dohc with that address, so pass on the invite link yourself); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.",
     inputSchema: {request: OwnerMembersRequest},
   }, async ({request}) => text(await members(ctx, request)));
 
