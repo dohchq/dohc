@@ -941,6 +941,8 @@ export function makeBridge(
         changedFileCount: 0,
       }),
     ),
+    // On Main nothing is marked.
+    listNotVersionedFiles: vi.fn(async (): Promise<{ paths: string[] | null }> => ({ paths: null })),
     // Typed to the contract as well: a workspace with only Main is this
     // default, not the shape every test is allowed to report.
     listWorkspaceVersions: vi.fn(

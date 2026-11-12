@@ -3,7 +3,7 @@ import {initializeWorkReferenceSchema} from "./workReferenceSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
 import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
 import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
-import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
+import {initializeHostedSettlementSchema, SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
@@ -454,6 +454,44 @@ CREATE TABLE sync_relay_session_host_control (
 function normalizedSchemaSql(value: string): string {
   // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
   return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
+}
+
+// SQLite cannot change a CHECK in place. Each of `tables`, a parent before
+// its children, is copied aside, dropped and created again under its own name
+// from `sqlFor`, which receives its current SQL. Children drop first, so no
+// drop cascades. Indexes, triggers and AUTOINCREMENT positions return after
+// the rows, so no trigger runs on the copy. A table outside `tables` that
+// references one of them would lose its rows, so it refuses.
+function rebuildTables(db: SqliteDb, tables: readonly string[], sqlFor: (table: string, sql: string) => string): void {
+  const marks = tables.map(() => "?").join(",");
+  const outside = db.prepare(`SELECT s.name FROM sqlite_schema s JOIN pragma_foreign_key_list(s.name) f
+    WHERE s.type = 'table' AND f."table" IN (${marks}) AND s.name NOT IN (${marks})`).all(...tables, ...tables);
+  if (outside.length) throw new Error("a rebuilt table has an unexpected dependent");
+  const created = tables.map(table => {
+    const row = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table);
+    if (typeof row?.sql !== "string") throw new Error("a rebuilt table is missing");
+    return sqlFor(table, row.sql);
+  });
+  const columns = tables.map(table =>
+    db.prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid").all(table).map(row => String(row.name)).join(", "));
+  const dependents = db.prepare(`SELECT sql FROM sqlite_schema
+    WHERE type IN ('index', 'trigger') AND sql IS NOT NULL AND tbl_name IN (${marks}) ORDER BY rowid`).all(...tables).map(row => String(row.sql));
+  const sequences = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get()
+    ? db.prepare(`SELECT name, seq FROM sqlite_sequence WHERE name IN (${marks})`).all(...tables) : [];
+  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
+  for (const table of [...tables].reverse()) db.exec(`DROP TABLE main.${table}`);
+  for (const sql of created) db.exec(sql);
+  for (const [index, table] of tables.entries()) {
+    db.exec(`INSERT INTO main.${table} (${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`);
+  }
+  for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
+  for (const sql of dependents) db.exec(sql);
+  // The copy back can write a position even for an empty table, so each
+  // table's position returns exactly as it was, or stays absent.
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get()) {
+    db.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${marks})`).run(...tables);
+  }
+  for (const {name, seq} of sequences) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(name, seq);
 }
 
 function assertSessionHostControlSchema(db: SqliteDb): void {
@@ -912,7 +950,8 @@ function assertLiveJournalSchema(db: SqliteDb): void {
     same(rows.length, 1);
     same(row?.type, name.startsWith("idx_") ? "index" : "table");
     same(row?.tbl_name, name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE);
-    same(typeof row?.sql === "string" ? (name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db) ? originalLiveJournalSql(row.sql) : normalizedSchemaSql(row.sql)) : null, normalizedSchemaSql(sql));
+    same(typeof row?.sql === "string" ? (name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db) ? originalLiveJournalSql(row.sql) : normalizedSchemaSql(row.sql)) : null,
+      name === LIVE_JOURNAL_TABLE && liveJournalPersonalMarked(db) ? personalJournalSql(sql) : normalizedSchemaSql(sql));
   }
   for (const [table, expected] of Object.entries(LIVE_JOURNAL_SHAPE)) {
     if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
@@ -930,6 +969,39 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);
   db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_MARKER,Date.now());
+}
+
+const LIVE_JOURNAL_PERSONAL_MIGRATION = "live-update-journal-personal-v1";
+// A personal agent's update names the agent and holds no grant.
+const LIVE_JOURNAL_PERSONAL_CHANGES = [
+  ["CHECK (principal_kind IN ('owner', 'named', 'link'))", "CHECK (principal_kind IN ('owner', 'personal', 'named', 'link'))"],
+  ["(principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL)",
+    "(principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL) OR " +
+    "(principal_kind = 'personal' AND substr(principal_id, 1, 2) = 'p-' AND grant_id IS NULL AND grant_generation IS NULL)"],
+] as const;
+function liveJournalPersonalMarked(db: SqliteDb): boolean {
+  return !!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_PERSONAL_MIGRATION);
+}
+/** The journal SQL `sql` with personal authority allowed, normalized. */
+function personalJournalSql(sql: string): string {
+  let result = normalizedSchemaSql(sql);
+  for (const [from, to] of LIVE_JOURNAL_PERSONAL_CHANGES) {
+    const at = result.indexOf(from);
+    if (at < 0 || result.includes(from, at + 1)) throw new Error("live update journal schema is missing or damaged");
+    result = result.slice(0, at) + to + result.slice(at + from.length);
+  }
+  return result;
+}
+// Runs after every journal dependent exists. The rebuild keeps the columns
+// that later migrations added, the struct provenance and settlement cuts that
+// reference each row, the restore foreign key, and the journal's next cursor.
+function initializeLiveJournalPersonalAuthority(db: SqliteDb): void {
+  if (!liveJournalPersonalMarked(db)) {
+    rebuildTables(db, [LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE, SETTLEMENT_CUTS],
+      (table, sql) => table === LIVE_JOURNAL_TABLE ? personalJournalSql(sql) : sql);
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_PERSONAL_MIGRATION, Date.now());
+  }
+  assertLiveJournalSchema(db);
 }
 
 const LIVE_JOURNAL_WORKSPACE_INDEX = "idx_sync_relay_live_update_journal_workspace";
@@ -1494,6 +1566,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         );
       END;
     `);
+    initializeLiveJournalPersonalAuthority(db);
 }
 
 export const DEVICE_HOST_CREDENTIAL_TABLE = "sync_relay_device_host_credential";
@@ -1528,7 +1601,8 @@ function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
 
 export const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
 
-const LIVE_TICKET_MIGRATION = "live-session-tickets-v2";
+const LIVE_TICKET_MIGRATION = "live-session-tickets-v3";
+const LIVE_TICKET_V2_MIGRATION = "live-session-tickets-v2";
 const LIVE_TICKET_V1_MIGRATION = "live-session-tickets-v1";
 
 const LIVE_TICKET_SCHEMA = {
@@ -1558,13 +1632,15 @@ CREATE TABLE sync_relay_live_session_tickets (
   ),
   restore_fence_generation INTEGER NOT NULL
     CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
-  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('named', 'link')),
+  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('personal', 'named', 'link')),
   principal_id TEXT NOT NULL
     CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
-  grant_id TEXT NOT NULL
-    CHECK (length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512),
-  grant_generation INTEGER NOT NULL
-    CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+  grant_id TEXT CHECK (
+    grant_id IS NULL OR length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512
+  ),
+  grant_generation INTEGER CHECK (
+    grant_generation IS NULL OR grant_generation BETWEEN 1 AND 9007199254740991
+  ),
   host_epoch INTEGER NOT NULL
     CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
   minted_at_ms INTEGER NOT NULL
@@ -1585,9 +1661,17 @@ CREATE TABLE sync_relay_live_session_tickets (
   agent_connection_id TEXT CHECK (
     agent_connection_id IS NULL OR length(CAST(agent_connection_id AS BLOB)) BETWEEN 1 AND 512
   ),
+  personal_connection_id TEXT CHECK (
+    personal_connection_id IS NULL OR length(CAST(personal_connection_id AS BLOB)) BETWEEN 1 AND 512
+  ),
   CHECK (
-    (principal_kind = 'named' AND link_session_id IS NULL AND agent_connection_id IS NULL) OR
-    (principal_kind = 'link' AND (link_session_id IS NULL) <> (agent_connection_id IS NULL))
+    (principal_kind = 'personal' AND substr(principal_id, 1, 2) = 'p-'
+      AND grant_id IS NULL AND grant_generation IS NULL
+      AND link_session_id IS NULL AND agent_connection_id IS NULL AND personal_connection_id IS NOT NULL) OR
+    (principal_kind = 'named' AND grant_id IS NOT NULL AND grant_generation IS NOT NULL
+      AND link_session_id IS NULL AND agent_connection_id IS NULL AND personal_connection_id IS NULL) OR
+    (principal_kind = 'link' AND grant_id IS NOT NULL AND grant_generation IS NOT NULL
+      AND (link_session_id IS NULL) <> (agent_connection_id IS NULL) AND personal_connection_id IS NULL)
   ),
   PRIMARY KEY (ticket_id),
   FOREIGN KEY (workspace_id)
@@ -1615,7 +1699,11 @@ export const LIVE_TICKET_COLUMNS = [
   "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
   "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
   "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id", "agent_connection_id",
+  "personal_connection_id",
 ] as const;
+export const LIVE_TICKET_NULLABLE_COLUMNS = new Set<string>([
+  "grant_id", "grant_generation", "redeemed_at_ms", "link_session_id", "agent_connection_id", "personal_connection_id",
+]);
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
   "restore_fence_generation", "grant_generation", "host_epoch", "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
@@ -1635,7 +1723,7 @@ function assertLiveTicketSchema(db: SqliteDb): void {
   same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
   LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
-    (name === "redeemed_at_ms" || name === "link_session_id" || name === "agent_connection_id") ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+    LIVE_TICKET_NULLABLE_COLUMNS.has(name) ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
   same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
   [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);
@@ -1656,16 +1744,25 @@ function assertLiveTicketSchema(db: SqliteDb): void {
 }
 
 function initializeLiveTicketSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_MIGRATION) !== undefined;
-  if (marked) { assertLiveTicketSchema(db); return; }
+  const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(migration) !== undefined;
+  const unmark = (migration: string) => db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(migration);
+  if (isMarked(LIVE_TICKET_MIGRATION)) { assertLiveTicketSchema(db); return; }
   // A v1 table cannot name an agent's connection. Its tickets expire within 30 seconds, so it is replaced, not copied.
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_V1_MIGRATION) !== undefined) {
+  if (isMarked(LIVE_TICKET_V1_MIGRATION)) {
     db.exec(`DROP TABLE IF EXISTS ${LIVE_TICKET_TABLE}`);
-    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(LIVE_TICKET_V1_MIGRATION);
+    unmark(LIVE_TICKET_V1_MIGRATION);
   }
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
-  if (existing.length) throw new Error("unmarked live-ticket schema already exists");
-  for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
+  if (isMarked(LIVE_TICKET_V2_MIGRATION)) {
+    // A v2 table cannot hold a personal agent's ticket. Its rows return with no personal connection.
+    const columns = db.prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid").all(LIVE_TICKET_TABLE).map(row => String(row.name));
+    if (columns.join(",") !== LIVE_TICKET_COLUMNS.slice(0, -1).join(",")) throw new Error("live-ticket schema is missing or damaged");
+    rebuildTables(db, [LIVE_TICKET_TABLE], () => LIVE_TICKET_SCHEMA[LIVE_TICKET_TABLE]);
+    unmark(LIVE_TICKET_V2_MIGRATION);
+  } else {
+    const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
+    if (existing.length) throw new Error("unmarked live-ticket schema already exists");
+    for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
+  }
   assertLiveTicketSchema(db);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(LIVE_TICKET_MIGRATION, Date.now());
 }

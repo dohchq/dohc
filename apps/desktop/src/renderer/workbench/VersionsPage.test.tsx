@@ -847,7 +847,7 @@ describe("VersionsPage", () => {
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     await user.click(within(empty).getByTestId("versions-page-new"));
     expect(screen.getByTestId("version-new-same").textContent)
-      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
+      .toBe("Chats are the same in every version. Files over 5\u00a0MB (text over 10\u00a0MB) aren't copied, so changing one here changes it in Main too.");
   });
 
   it("opens the New version dialog from the header, starting from the version you're in, and Escape gives focus back", async () => {

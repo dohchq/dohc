@@ -492,18 +492,25 @@ const DAY_DIVIDER_TOP = 10;
 // edge, so the copy steps aside while the next day's divider passes under it.
 const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
 
+// A conversation keeps one column in the middle of a wide pane: the text's
+// 720px, its face and the insets. Rows, day lines, the working row and the
+// composer share it, so a row's actions and the composer stay beside the words.
+export const STREAM_COLUMN = "mx-auto w-full max-w-[808px]";
+
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
 // A narrow row has no room beside its name, so its hover bar rises above it.
+// A row's fill hangs outside its text: the margin and padding add up to the
+// divider's inset, so faces and day lines keep one left edge.
 export const DENSITY = {
   stream: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-5", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-5",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
   },
   thread: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-4", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-4",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-3",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
   },
 } as const;
 
@@ -587,6 +594,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   density?: ChatDensity;
   // The pane's background, which the pinned day covers messages with.
   surface?: "bg" | "panel";
+  // Keeps the rows in the middle column of a wide pane. The host puts its
+  // composer in the same column.
+  column?: boolean;
 }) {
   const density = props.density ?? "stream";
   const anchor = props.anchor ?? "end";
@@ -805,7 +815,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
         data-open={open ? "true" : undefined}
-        className={`relative flex flex-col ${
+        className={`relative flex flex-col ${props.column ? STREAM_COLUMN : ""} ${
           props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
@@ -838,7 +848,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         ) : null}
         <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div
-          className={`group relative grid ${sizes.row} ${continues ? "pt-px" : "pt-1.5"} pb-1 ${
+          // A new author's row stands 4px off the run before it, outside its fill.
+          className={`group relative grid rounded-md ${sizes.row} ${continues ? "py-0.5" : "mt-1 py-1"} ${
             open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover keyboard:focus-within:bg-hover"
           }`}
         >
@@ -933,17 +944,20 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   // The list draws a row again only when this changes, so a rename shows on rows already drawn.
   const listExtraData = useMemo(() => ({ props, personalNames }), [props, personalNames]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
-    return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""}`}>
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
     </div>;
   }
   if (props.loading || props.messages.length === 0) {
-    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 ${anchor === "end" ? "justify-end" : ""}`}>
-      {props.loading ? (
-        <SkeletonRows label="Loading..." className="pt-1" />
-      ) : (
-        <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
-      )}
+    // Loading rows and the empty line start where the messages will.
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""} ${anchor === "end" ? "justify-end" : ""}`}>
+      <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
+        {props.loading ? (
+          <SkeletonRows label="Loading..." className="pt-1" />
+        ) : (
+          <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
+        )}
+      </div>
     </div>;
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">
@@ -954,7 +968,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
         style={{ right: scrollbarWidth }}
       >
-        <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        <div className={props.column ? STREAM_COLUMN : undefined}>
+          <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        </div>
       </div>
     ) : null}
     <LegendList
@@ -975,7 +991,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     onLayout={event => setViewportHeight(event.nativeEvent.layout.height)}
     recycleItems={false}
     alwaysRender={pinned}
-    className="min-h-0 flex-1 overflow-y-auto"
+    // The column keeps its place when a scrollbar appears.
+    className={`min-h-0 flex-1 overflow-y-auto ${props.column ? "[scrollbar-gutter:stable]" : ""}`}
     // A narrow row's hover bar rises above it, so the first row needs the room.
     style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
     role="list"

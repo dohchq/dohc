@@ -511,9 +511,9 @@ export function createDesktopCliServer<State>(
       }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
-      deletePath: async (path, origin, requestId) => {
+      deletePath: async (path, origin, requestId, confirmNotVersioned) => {
         const result = await withPathChange(requestId, (operation, options) =>
-          prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options));
+          prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options, confirmNotVersioned));
         return result;
       },
       // Document reads and edits go through the desktop's live document

@@ -2,6 +2,7 @@ import { AtSign } from "lucide-react";
 import { useRef, useState } from "react";
 import type { DmRecord, DmRequestRow } from "../../ipc/bridgeContract";
 import { Overlay } from "../Overlay";
+import { ShareRowMark, type ShareRowReport } from "./shareRowMark";
 
 export type DmWorkspaceOption = { workspaceId: string; label: string };
 
@@ -205,6 +206,7 @@ export function DmRequestListItem(props: {
   state: "pending" | "declined";
   // The row a notice's Open revealed.
   marked?: boolean;
+  report: ShareRowReport;
   busy: boolean;
   onAccept?: () => void;
   onDecline?: () => void;
@@ -217,6 +219,7 @@ export function DmRequestListItem(props: {
       aria-current={props.marked ? "true" : undefined}
       className={`border-b border-line${props.marked ? " bg-selected" : ""}`}
     >
+      <ShareRowMark shareId={props.request.shareId} report={props.report} />
       <div className="flex items-center gap-1.5 px-3 py-2">
         <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
         <span className="min-w-0 flex-1">

@@ -28,6 +28,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "heldNoteChange"
   | "listRetainedCopies"
   | "deleteRetainedCopies"
+  | "notVersioned"
 >;
 
 // A version as the versions menu and the CLI show it.
@@ -54,6 +55,8 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
   authorNames(workspaceId: string, event: Event): EngineMomentAuthorNames;
   onRefusalsChanged?(): void;
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
+  // Every file on the workspace's disk, by workspace-relative path.
+  listDiskFiles(workspaceId: string): Promise<string[]>;
   notifyRenderer(target: { workspaceId: string }): void;
   activity: { queueCloudSync(workspaceId: string): void };
 }): OperationHandlers<typeof workspaceVersionOperations, Event> {
@@ -87,6 +90,11 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
         versions: snapshot.versions.map(workspaceVersionForIpc),
         activeVersionId: snapshot.activeVersionId,
       };
+    },
+
+    async listNotVersionedFiles(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return { paths: await capture.notVersioned(() => dependencies.listDiskFiles(input.workspaceId)) };
     },
 
     async createWorkspaceVersion(input) {

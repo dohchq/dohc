@@ -274,6 +274,7 @@ fn settle(
             Ok(result) => {
                 tx.execute_batch("RELEASE owner_settlement_replay")
                     .map_err(SyncError::persist)?;
+                crate::settlement_publication::name_drained_moment_in_tx(tx, envelope)?;
                 let facts_json = result
                     .record_facts
                     .as_ref()

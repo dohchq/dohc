@@ -200,7 +200,8 @@
       "dataset.schema.change.prepare",
       "dataset.migration.approve",
       "dataset.migration.discard",
-      "dataset.operation.invoke"
+      "dataset.operation.invoke",
+      "dataset.operation.cancel"
     ],
     "appPublication": [
       "app.link.create",
@@ -400,6 +401,7 @@
     "file duplicate": "file.duplicate",
     "chat links": "chat.read",
     "notices list": "notice.list",
-    "document held-change": "document.held.change"
+    "document held-change": "document.held.change",
+    "dataset cancelInvoke": "dataset.operation.cancel"
   }
 }

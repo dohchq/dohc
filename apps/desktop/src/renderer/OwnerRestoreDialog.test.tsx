@@ -372,6 +372,17 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
   expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
 });
+it("names a personal agent's change by the agent's name, not its ID", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture(), agentId = `p-${"a".repeat(26)}`;
+  const authority = {principalKind: "personal" as const, principalId: agentId, grantId: null, grantGeneration: null};
+  const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => index === 0 ? {...event, metadata: {...event.metadata,
+    accepted: {...event.metadata.accepted, authority}, authorSnapshot: [{kind: "agent", agentId, agentName: "Scout", onBehalfOf: "owner", depth: 0}]}} : event)};
+  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const badge = screen.getAllByTestId("owner-restore-change-agent-badge").find(entry => entry.parentElement!.nextElementSibling!.textContent === "Scout")!;
+  expect(badge.closest("li")!.textContent!.split("Change details")[0]).not.toContain(agentId);
+});
 
 it("allows declining content replacement after access stops", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();

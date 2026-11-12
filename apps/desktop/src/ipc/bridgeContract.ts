@@ -926,10 +926,13 @@ export type CreateWorkspaceFolderPayload = z.infer<
 export const DuplicateWorkspaceFilePayload = z.object({workspaceId: WORKSPACE_ID, relativePath: PATH_STRING}).strict();
 export const DuplicateWorkspaceFileResult = CreateWorkspaceFileResult.extend({...OperationRecovery.shape, materialized: z.boolean()});
 
+// confirmNotVersioned: the person agreed to change, in a version, files that
+// version does not track, so the change happens in Main too.
 export const MoveWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   fromPath: PATH_STRING,
   toPath: PATH_STRING,
+  confirmNotVersioned: z.literal(true).optional(),
 });
 export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 
@@ -937,6 +940,7 @@ export const DeleteWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
   emptyFolderOnly: z.boolean().optional(),
+  confirmNotVersioned: z.literal(true).optional(),
 });
 export type DeleteWorkspacePathPayload = z.infer<
   typeof DeleteWorkspacePathPayload
@@ -3409,6 +3413,13 @@ export const HeldNoteChangeResult = z.object({
 }).strict();
 export type HeldNoteChangeResult = z.infer<typeof HeldNoteChangeResult>;
 
+// The workspace's files the active version does not track, which have one
+// copy for every version. null on Main.
+export const ListNotVersionedFilesResult = z.object({
+  paths: z.array(PATH_STRING).nullable(),
+}).strict();
+export type ListNotVersionedFilesResult = z.infer<typeof ListNotVersionedFilesResult>;
+
 export const workspaceVersionOperations = {
   heldNoteChange: {
     capabilityId: "document.held.change", channel: "desktop:held-note-change",
@@ -3418,6 +3429,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.list",
     channel: "desktop:list-workspace-versions",
     payload: WorkspaceIdPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
+  },
+  listNotVersionedFiles: {
+    capabilityId: "version.unversioned.list",
+    channel: "desktop:list-not-versioned-files",
+    payload: WorkspaceIdPayload, result: ListNotVersionedFilesResult, ...versionGuard,
   },
   createWorkspaceVersion: {
     capabilityId: "version.create",

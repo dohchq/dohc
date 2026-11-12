@@ -2158,26 +2158,32 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
 }
 
 /// Only the relay writes a personal agent's work. An owner device's audit
-/// record that names one in its author snapshot or checkpoint coverage, with
-/// every digest recomputed, is refused, so History never shows a personal
-/// agent editing a document. History the relay committed before it refused
-/// personal agents can name one, so the same metadata still decodes as a
-/// committed event.
+/// record that names one in its author snapshot or checkpoint coverage, or
+/// claims one's personal authority, with every digest recomputed, is refused,
+/// so History never shows a personal agent editing a document. History the
+/// relay committed before it refused personal agents can name one, so the same
+/// metadata still decodes as a committed event.
 #[test]
 fn an_audit_record_naming_a_personal_agent_is_refused() {
     let ordinary = format!("q-{}", "b".repeat(26));
     let personal = format!("p-{}", "b".repeat(26));
-    assert!(!audit_record_refused(None, None));
-    assert!(!audit_record_refused(None, Some(&ordinary)));
-    assert!(audit_record_refused(Some(&personal), None));
-    assert!(audit_record_refused(None, Some(&personal)));
+    assert!(!audit_record_refused(None, None, None));
+    assert!(!audit_record_refused(None, Some(&ordinary), None));
+    assert!(audit_record_refused(Some(&personal), None, None));
+    assert!(audit_record_refused(None, Some(&personal), None));
+    assert!(audit_record_refused(None, None, Some(&personal)));
 }
 
 /// Publishes an owner's audit record that declares an agent, then forges it
-/// with the record's digests recomputed: `snapshot` renames the agent and
-/// `coverage` adds a checkpoint author. Says whether a peer refuses the forged
-/// record, whose metadata still decodes as committed history.
-fn audit_record_refused(snapshot: Option<&str>, coverage: Option<&str>) -> bool {
+/// with the record's digests recomputed: `snapshot` renames the agent,
+/// `coverage` adds a checkpoint author and `personal` claims that agent's
+/// personal authority. Says whether a peer refuses the forged record, whose
+/// metadata still decodes as committed history.
+fn audit_record_refused(
+    snapshot: Option<&str>,
+    coverage: Option<&str>,
+    personal: Option<&str>,
+) -> bool {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
         LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
@@ -2277,12 +2283,18 @@ fn audit_record_refused(snapshot: Option<&str>, coverage: Option<&str>) -> bool 
             deletion_ranges: Vec::new(),
         }]
     });
+    if let Some(agent_id) = personal {
+        metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Personal {
+            principal_id: agent_id.into(),
+        };
+    }
     let after = serde_json::to_string(&metadata).unwrap();
     let rewritten = evidence(previous, &metadata);
     let committed = serde_json::to_value(&metadata).unwrap();
     AdmittedLiveUpdate::from_committed_metadata(committed, f.bytes.clone()).unwrap();
     assert_eq!(text.matches(before.as_str()).count(), 1);
     assert_eq!(text.matches(original.as_str()).count(), 1);
+    assert_eq!(text.matches("\"principalKind\"").count(), 1);
     let forged = text
         .replacen(&before, &after, 1)
         .replacen(&original, &rewritten, 1);

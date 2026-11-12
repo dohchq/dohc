@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, type PathLike } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { protectedWriteCopies } from "./protectedWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -3589,7 +3589,22 @@ describe("workspaceEngineCapture batch capture", () => {
 });
 
 describe("workspaceEngineCapture relay sync materialization", () => {
+  // A test that times out keeps running, and its page would write into the
+  // tests after it. Stop it here, not in onTestFinished, which runs after the
+  // setup file's afterEach has removed the test's folder.
+  let endTest: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await endTest?.();
+    endTest = undefined;
+  }, 120_000);
+
   it.each([300, 0])("materializes one 500-op page without copies, writes=%s", async writeCount => {
+    let finished = false;
+    let engine: ReturnType<typeof capture> | undefined;
+    endTest = async () => {
+      finished = true;
+      await engine?.stop();
+    };
     const root = await createTestScratch("relay-500-recorded-");
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
     const loopback = new VersionedLoopbackEngine();
@@ -3597,6 +3612,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     const changes: RelayMaterializedPath[] = [];
     for (let index = 0; index < 500; index++) {
+      if (finished) return;
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path: `${index}.md`, text: "recorded before pull" });
       await write(root, `${index}.md`, "recorded before pull");
     }
@@ -3611,28 +3627,26 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     const gets = vi.spyOn(store, "getMoment");
     const resolves = vi.spyOn(store, "resolveFiles");
     const notice = vi.fn();
-    const engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: notice });
-    try {
-      const started = performance.now();
-      await engine.runRelaySync(page => page(changes));
-      const elapsedMs = performance.now() - started;
-      expect(lists).toHaveBeenCalledTimes(500 + Math.ceil((500 - writeCount) / 100));
-      expect(lists.mock.calls.filter(([input]) => input.objectId === undefined)).toHaveLength(Math.ceil((500 - writeCount) / 100));
-      expect(gets).not.toHaveBeenCalled();
-      expect(resolves).toHaveBeenCalledTimes(Math.ceil(writeCount / 128));
-      for (const [input] of resolves.mock.calls) {
-        expect(input.versionId).toBe("main");
-        expect(input.targets.length).toBeLessThanOrEqual(128);
-        expect(Buffer.byteLength(JSON.stringify(input.targets))).toBeLessThanOrEqual(48 * 1024);
-      }
-      expect((await readdir(root)).filter(name => name.includes("(kept copy"))).toEqual([]);
-      expect(notice).not.toHaveBeenCalled();
-      for (let index = 0; index < 500; index++) {
-        if (index < writeCount) expect(await readFile(join(root, `${index}.md`), "utf8")).toBe("incoming");
-        else expect(existsSync(join(root, `${index}.md`))).toBe(false);
-      }
-      process.stdout.write(`500-op page writes=${writeCount}: ${elapsedMs.toFixed(2)} ms; listMoments=${lists.mock.calls.length}; getMoment=${gets.mock.calls.length}; resolveFiles=${resolves.mock.calls.length}\n`);
-    } finally { await engine.stop(); }
+    engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: notice });
+    const started = performance.now();
+    await engine.runRelaySync(page => page(changes));
+    const elapsedMs = performance.now() - started;
+    expect(lists).toHaveBeenCalledTimes(500 + Math.ceil((500 - writeCount) / 100));
+    expect(lists.mock.calls.filter(([input]) => input.objectId === undefined)).toHaveLength(Math.ceil((500 - writeCount) / 100));
+    expect(gets).not.toHaveBeenCalled();
+    expect(resolves).toHaveBeenCalledTimes(Math.ceil(writeCount / 128));
+    for (const [input] of resolves.mock.calls) {
+      expect(input.versionId).toBe("main");
+      expect(input.targets.length).toBeLessThanOrEqual(128);
+      expect(Buffer.byteLength(JSON.stringify(input.targets))).toBeLessThanOrEqual(48 * 1024);
+    }
+    expect((await readdir(root)).filter(name => name.includes("(kept copy"))).toEqual([]);
+    expect(notice).not.toHaveBeenCalled();
+    for (let index = 0; index < 500; index++) {
+      if (index < writeCount) expect(await readFile(join(root, `${index}.md`), "utf8")).toBe("incoming");
+      else expect(existsSync(join(root, `${index}.md`))).toBe(false);
+    }
+    process.stdout.write(`500-op page writes=${writeCount}: ${elapsedMs.toFixed(2)} ms; listMoments=${lists.mock.calls.length}; getMoment=${gets.mock.calls.length}; resolveFiles=${resolves.mock.calls.length}\n`);
   });
 
   it("batches head resolution by UTF-8 bytes as well as target count", async () => {
@@ -5126,17 +5140,23 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     await write(root, "notes.md", "old");
     const fs = await actualFs();
     const events: string[] = [];
+    // The mocks see every caller in this process, including a timed-out
+    // test's writes that are still running, so only this folder counts.
+    const ours = (path: unknown) => {
+      const inside = relative(root, String(path));
+      return !inside.startsWith("..") && !isAbsolute(inside);
+    };
     vi.mocked(open).mockImplementation(async (...args) => {
       const handle = await fs.open(...args);
       const sync = handle.sync.bind(handle);
       handle.sync = async () => {
-        events.push(`sync ${basename(String(args[0]))}`);
+        if (ours(args[0])) events.push(`sync ${basename(String(args[0]))}`);
         await sync();
       };
       return handle;
     });
     vi.mocked(rename).mockImplementation(async (from, to) => {
-      events.push(`rename ${basename(String(from))} to ${basename(String(to))}`);
+      if (ours(from)) events.push(`rename ${basename(String(from))} to ${basename(String(to))}`);
       await fs.rename(from, to);
     });
     try {

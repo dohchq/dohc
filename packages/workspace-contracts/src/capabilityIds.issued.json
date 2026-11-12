@@ -288,5 +288,7 @@
   "chat.unread.list",
   "file.protected.restore",
   "file.protected.discard",
+  "dataset.operation.cancel",
+  "version.unversioned.list",
   "capture.secret.retry"
 ]

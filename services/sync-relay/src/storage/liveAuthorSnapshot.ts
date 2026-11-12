@@ -45,9 +45,11 @@ export function claimsPersonalAgent(recordingContext: LiveAuthorContext | undefi
 /**
  * Only an explicit recording context matching the authenticated principal
  * earns a snapshot. Callers refuse a context that `claimsPersonalAgent` first.
+ * A personal agent's snapshot comes from its authority, never from a context.
  */
 export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: ServerDerivedLiveUpdateAuthority,
   recordingContext: LiveAuthorContext | undefined, trustedAccount?: TrustedLiveAccount): LiveAuthorSnapshot {
+  if (authority.principalKind === "personal") throw new TypeError("A personal agent's snapshot comes from its authority.");
   if (recordingContext === undefined) return [];
   if (claimsPersonalAgent(recordingContext)) throw new TypeError("A recording context cannot declare a personal agent.");
   const context = parseLiveAuthorContext(recordingContext);

@@ -1,22 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { createShareHandoffIpcHandlers } from "./shareHandoffIpc";
+import { createShareHandoffIpcHandlers, sendShareHandoffStatus } from "./shareHandoffIpc";
 import { shareHandoffOperations } from "./shareOperations";
 import { registerOperations } from "./operationTable";
 import type { ShareHandoffStatus } from "./bridgeContract";
 
 function harness() {
-  const handlers = new Map<string, (event: { trusted: boolean }, payload: unknown) => Promise<unknown>>();
+  type Event = { trusted: boolean; window?: string };
+  const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   const coordinator = {
     status: vi.fn<() => ShareHandoffStatus>(() => ({ status: "waiting-for-acceptance", statusId: "current", email: "member@example.test" })),
     accept: vi.fn(), retry: vi.fn(), dismiss: vi.fn(),
   };
   registerOperations({
     handle: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
-    assertTrustedSender: (event: { trusted: boolean }) => { if (!event.trusted) throw new Error("untrusted"); },
+    assertTrustedSender: (event: Event) => { if (!event.trusted) throw new Error("untrusted"); },
     withActiveWorkspace: vi.fn(async () => { throw new Error("Unexpected workspace operation."); }),
-  }, shareHandoffOperations, createShareHandoffIpcHandlers({ shareHandoffRedemption: coordinator }));
-  const invoke = (channel: string, trusted: boolean, payload?: unknown) => handlers.get(channel)!({ trusted }, payload);
+  }, shareHandoffOperations, createShareHandoffIpcHandlers({
+    shareHandoffRedemption: coordinator,
+    takesHandoff: (event: Event) => event.window === "landing",
+  }));
+  const invoke = (channel: string, trusted: boolean, payload?: unknown, window = "landing") => handlers.get(channel)!({ trusted, window }, payload);
   return { handlers, coordinator, invoke };
 }
 
@@ -53,5 +57,19 @@ describe("registered share handoff handlers", () => {
       await expect(h.invoke(channel, true, { statusId: "" })).rejects.toThrow(ZodError);
     }
     for (const method of Object.values(h.coordinator)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it("shows a handoff only in the window the link landed in", async () => {
+    const h = harness();
+    expect(await h.invoke(shareHandoffOperations.getShareHandoffStatus.channel, true, undefined, "other")).toEqual({ status: "idle" });
+    const sent: Array<[string, ShareHandoffStatus]> = [];
+    const done: ShareHandoffStatus = { status: "done", statusId: "current", shareId: "share-1" };
+    sendShareHandoffStatus({
+      windows: ["first", "landing", "manager"],
+      takesHandoff: (window) => window === "landing",
+      status: done,
+      send: (window, status) => sent.push([window, status]),
+    });
+    expect(sent).toEqual([["first", { status: "idle" }], ["landing", done], ["manager", { status: "idle" }]]);
   });
 });

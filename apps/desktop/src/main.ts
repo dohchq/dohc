@@ -118,7 +118,7 @@ import {
 } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
-import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
+import { createShareHandoffIpcHandlers, sendShareHandoffStatus } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { removeEarlierMarkedCopies, removeMarkedCopies, systemMarkedCopies } from "./workspaces/markedCopies";
@@ -216,7 +216,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { createLocalChangeAuthor, isReservedPath } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
@@ -1280,12 +1280,20 @@ function noticeStore(): NoticeStore {
 }
 app.on("browser-window-focus", () => void noticeStore().sync());
 
+// A link lands in liveWorkspaceWindow (showOrCreateMainWindow), so that window takes its handoff.
+function takesShareHandoff(window: BrowserWindow | null): boolean {
+  return window !== null && window === liveWorkspaceWindow();
+}
+
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   const publicStatus = ShareHandoffStatus.parse(status);
   if (!app.isReady()) return;
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
-  }
+  sendShareHandoffStatus<BrowserWindow>({
+    windows: BrowserWindow.getAllWindows(),
+    takesHandoff: takesShareHandoff,
+    status: publicStatus,
+    send: (win, windowStatus) => win.webContents.send(CHANNELS.shareHandoffStatus, windowStatus),
+  });
 }
 
 const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
@@ -1304,6 +1312,11 @@ const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
         cloudLogin().invalidateSessionIf(expected),
     }),
   publishStatus: publishShareHandoffStatus,
+});
+// When the window that took a handoff closes, the next workspace window takes
+// it, so each window hears again whether it shows the handoff.
+app.on("browser-window-created", (_event, window) => {
+  window.once("closed", () => setImmediate(() => publishShareHandoffStatus(shareHandoffRedemption.status())));
 });
 
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
@@ -6861,6 +6874,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, shareHandoffOperations, createShareHandoffIpcHandlers({
     shareHandoffRedemption,
+    takesHandoff: (event: IpcMainInvokeEvent) => takesShareHandoff(BrowserWindow.fromWebContents(event.sender)),
   }));
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
@@ -7662,6 +7676,9 @@ function registerIpcHandlers(): void {
         capture: activity.engineCaptureFor(operation.workspace.workspaceId, operation.workspace.rootPath),
         requestId: randomUUID(), trashItem: path => shell.trashItem(path), markChanged, admit,
         markDeleted: path => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(operation.workspace.attachmentId, path),
+        // Undo of an import this session made, unchanged since: removing it
+        // leaves every version as it was before the import.
+        confirmNotVersioned: true,
       },
     ),
   });
@@ -7756,6 +7773,9 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, activity,
+    // Share mounts and dohc's own files are no file of the person's.
+    listDiskFiles: async workspaceId => (await listFiles(requireWorkspace(workspaceId).rootPath)).files
+      .map(file => file.path).filter(path => !isReservedPath(path)),
     // A version change can change which notes wait for the server.
     notifyRenderer: target => { notifyRenderer(target); ownerPendingShare.refresh(target.workspaceId); },
     localPerson,
