@@ -69,7 +69,7 @@ async function failReplacement() {
   harness.emit("settling", 0);
   const setItem = refuseDraftStorage();
   harness.emitLineageReplacement("winner");
-  const retry = await screen.findByTestId("markdown-save-state-retry");
+  const retry = await screen.findByTestId("markdown-save-state-action");
   expect(harness.acknowledgedGenerations).toEqual([]);
   return { setItem, retry };
 }
@@ -110,9 +110,9 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   expect(screen.queryByTestId("connection-notices")).toBeNull();
 
   setItem.mockRestore();
-  await user.click(screen.getByTestId("markdown-save-state-retry"));
+  await user.click(screen.getByTestId("markdown-save-state-action"));
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  await waitFor(() => expect(screen.queryByTestId("markdown-save-state-retry")).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
   expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([PATH]);
   // Storage kept the edits, so the document's row no longer asks for a copy to keep them.
@@ -141,9 +141,9 @@ it("offers Try again on the frozen editor when it failed while another workspace
   view.rerender(surface("ws-1"));
   expect(screen.queryByTestId("connection-notices")).toBeNull();
   setItem.mockRestore();
-  await user.click(screen.getByTestId("markdown-save-state-retry"));
+  await user.click(screen.getByTestId("markdown-save-state-action"));
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  await waitFor(() => expect(screen.queryByTestId("markdown-save-state-retry")).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
   await act(async () => { view.unmount(); });
 });

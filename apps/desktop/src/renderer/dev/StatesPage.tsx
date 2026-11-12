@@ -49,7 +49,7 @@ import {
   SetAsideEditRow,
   ViewActions,
 } from "../fileInspectorUi";
-import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "../readOnlyReasons";
+import { CONNECTION_LOST_REASON, LIVE_EDITING_PAUSED_REASON, REPLACEMENT_FAILED_REASON } from "../readOnlyReasons";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -4034,7 +4034,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
             <div className="flex justify-end px-3 py-1.5">
               <StateMark testId={`states-read-only-replacement-${theme}`} state="read-only" shown="read-only-unavailable"
-                title={REPLACEMENT_FAILED_REASON} onRetry={noop} />
+                title={REPLACEMENT_FAILED_REASON} action={{ label: "Try again", run: noop }} />
             </div>
             <MarkdownSourceStrip words={REPLACEMENT_FAILED_REASON} getText={() => null} />
           </div>
@@ -4046,6 +4046,15 @@ function Pane(props: { theme: "light" | "dark" }) {
                 title={CONNECTION_LOST_REASON} />
             </div>
             <MarkdownSourceStrip words={CONNECTION_LOST_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="the server refused its live edits: the chip with Open Live documents, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-live-paused-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={LIVE_EDITING_PAUSED_REASON} action={{ label: "Open Live documents", run: noop }} />
+            </div>
+            <MarkdownSourceStrip words={LIVE_EDITING_PAUSED_REASON} getText={() => null} />
           </div>
         </Specimen>
         <Specimen label="an edit refused for good: its set-aside row">

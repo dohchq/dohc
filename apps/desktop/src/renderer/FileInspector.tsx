@@ -310,6 +310,7 @@ type FileInspectorProps = {
   readOnly?: boolean;
   // Live editing is paused for this note: the server refused its edits, or too many wait.
   liveEditingPaused?: "refused" | "full";
+  onOpenLiveDocuments?: (path: string) => void;
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
   accessEnded?: boolean;
@@ -910,6 +911,7 @@ export const FileInspector = memo(function FileInspector(
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
             liveEditingPaused={props.liveEditingPaused}
+            onOpenLiveDocuments={props.onOpenLiveDocuments}
             reopenKey={props.engineVersionKey}
             switchReadPending={switchReadPending.current}
             switchUnresyncedRef={switchUnresyncedRef}

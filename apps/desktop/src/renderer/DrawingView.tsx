@@ -305,7 +305,7 @@ export function DrawingView({
             // A failed history replacement freezes the drawing read-only; its
             // save error says why, as the Markdown chip does.
             title={engine.saveError && (engine.retryReplacement || (typeof drawingChipState !== "string" && drawingChipState.kind === "error")) ? engine.saveError : undefined}
-            onRetry={engine.retryReplacement ?? undefined}
+            action={engine.retryReplacement ? { label: "Try again", run: engine.retryReplacement } : undefined}
           />
         }
       />

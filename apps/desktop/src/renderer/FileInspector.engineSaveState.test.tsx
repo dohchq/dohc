@@ -94,6 +94,21 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(chip.getAttribute("title")).toBe(LIVE_EDITING_PAUSED_REASON);
   });
 
+  it("offers Open Live documents beside a refused note's chip, for that note", async () => {
+    const onOpenLiveDocuments = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" liveEditingPaused="refused" onOpenLiveDocuments={onOpenLiveDocuments} />);
+    const open = await screen.findByTestId("markdown-save-state-action");
+    expect(open.textContent).toBe("Open Live documents");
+    act(() => open.click());
+    expect(onOpenLiveDocuments).toHaveBeenCalledExactlyOnceWith("a.md");
+  });
+
+  it("offers no step while a note's waiting edits reach the server, since that ends by itself", async () => {
+    render(<FileInspector workspaceId="ws-1" path="a.md" liveEditingPaused="full" onOpenLiveDocuments={vi.fn()} />);
+    expect((await screen.findByTestId("markdown-save-state")).getAttribute("data-state")).toBe("read-only");
+    expect(screen.queryByTestId("markdown-save-state-action")).toBeNull();
+  });
+
   it("keeps the existing unexplained error tooltip", async () => {
     engineDocStore.set({ saveState: { kind: "error", reason: "generic reason", issueId: null } });
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
