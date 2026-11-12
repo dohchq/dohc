@@ -36,3 +36,8 @@ export {
   type CalendarRecordEvent,
   type CalendarViewProps,
 } from "./calendar/CalendarView";
+export {
+  CellStatusNote,
+  RecordProperties,
+  type RecordPropertiesProps,
+} from "./record/RecordProperties";

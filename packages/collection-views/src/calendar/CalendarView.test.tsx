@@ -185,6 +185,16 @@ describe("CalendarView", () => {
     expect(onNavigate.mock.calls[0]?.[0].toDateString()).toBe(new Date(2026, 10, 3).toDateString());
   });
 
+  it("marks the entry of the record the host shows open, and no other", () => {
+    const records = makeRecords();
+    const { container } = render(
+      <CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} openRecordId={records[0]!.id} />,
+    );
+    const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) => entry.classList.contains("ring-ink"));
+    expect(marked).toHaveLength(1);
+    expect(marked[0]!.textContent).toBe("Book flights");
+  });
+
   it("emits the event's record when the event is selected", () => {
     const onOpenRecord = vi.fn();
     render(

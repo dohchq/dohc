@@ -44,6 +44,8 @@ export interface CalendarViewProps {
   onCellChange?: (change: CollectionCellChange) => void;
   /** Receives the event's record when the event is clicked, not dragged. */
   onOpenRecord?: (record: CollectionRecord) => void;
+  /** The record the host shows open, as in a panel beside the calendar. Its entry is marked. */
+  openRecordId?: string | null;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   /** The date whose month opens first. Defaults to today. */
@@ -115,6 +117,7 @@ export function CalendarView({
   visibleFields,
   onCellChange,
   onOpenRecord,
+  openRecordId,
   personLabel,
   defaultDate,
   date,
@@ -210,6 +213,8 @@ export function CalendarView({
           onSelectEvent={
             onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
           }
+          // The open record's entry wears a line around it, clear of the entry's own fill.
+          eventPropGetter={(event) => (event.record.id === openRecordId ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" } : {})}
         />
       </div>
     </div>

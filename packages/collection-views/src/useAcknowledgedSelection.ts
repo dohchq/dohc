@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 
 export type PendingSelection = {
@@ -36,6 +36,29 @@ export function withoutDiscarded(pending: PendingSelection[], writeId: number): 
   };
   kept.splice(index, 1);
   return kept;
+}
+
+/**
+ * Each multi-select cell's saved picks that the index does not show yet, by
+ * a key for the cell. They outlive the picker, so a second edit starts from
+ * the first.
+ */
+export function useCarriedSelections(
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void,
+): (key: string) => CarriedSelection {
+  const cells = useRef(new Map<string, CarriedSelection>());
+  useEffect(
+    () =>
+      subscribeToDiscardedWrites?.((writeId) => {
+        for (const carried of cells.current.values()) carried.pending = withoutDiscarded(carried.pending, writeId);
+      }),
+    [subscribeToDiscardedWrites],
+  );
+  return (key) => {
+    let carried = cells.current.get(key);
+    if (!carried) cells.current.set(key, (carried = { pending: [] }));
+    return carried;
+  };
 }
 
 /** `observed` after each pending change in turn: the selection now, and every value on the way to it. */

@@ -48,6 +48,14 @@ export interface FieldCellProps {
    * a click on the text opens it, and a click beside it still edits.
    */
   onOpenLink?: (url: string) => void;
+  /**
+   * The cell's own control is a Tab stop, as in a record's properties, and
+   * the control that edits it is the open target of the row that holds it.
+   * In the table the grid is the one stop, and its keys reach every cell.
+   */
+  tabStop?: boolean;
+  /** What an empty value says, as in a record's properties. Absent, it shows nothing. */
+  emptyText?: string;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -380,7 +388,13 @@ export function FieldCell({
   onChange,
   editable = false,
   onOpenLink,
+  tabStop = false,
+  emptyText,
 }: FieldCellProps) {
+  // In the table the grid is the Tab stop, and its keys act on the selected cell.
+  const stop = tabStop ? undefined : -1;
+  // A Tab stop that edits stretches over its row, which shows its focus.
+  const target = tabStop ? " dohc-row-open-target" : "";
   const reason =
     indexed !== undefined && indexed.validation.status === "flagged"
       ? indexed.validation.reason.code
@@ -402,8 +416,7 @@ export function FieldCell({
       <input
         type="checkbox"
         aria-label={label}
-        // The grid is the Tab stop. Enter on the selected cell toggles the box.
-        tabIndex={-1}
+        tabIndex={stop}
         checked={checked}
         disabled={onChange === undefined}
         onChange={() => onChange?.(!checked)}
@@ -418,8 +431,16 @@ export function FieldCell({
       <span className="flex w-full min-w-0 items-center text-[13px]">
         <span
           role="link"
-          // The grid is the Tab stop.
-          tabIndex={-1}
+          tabIndex={tabStop ? 0 : -1}
+          // The link stays above the stretched edit control beside it.
+          data-row-above={tabStop ? "" : undefined}
+          onKeyDown={
+            tabStop
+              ? (event) => {
+                  if (event.key === "Enter") onOpenLink(value);
+                }
+              : undefined
+          }
           className="cursor-pointer truncate underline decoration-line underline-offset-[3px] transition-colors duration-75 hover:decoration-ink"
           onClick={(event) => {
             // The click opens the link. It neither selects nor edits the cell.
@@ -430,25 +451,27 @@ export function FieldCell({
           {value}
         </span>
         {editable ? (
-          <button type="button" tabIndex={-1} aria-label={`Edit ${label}`} className="min-h-5 min-w-6 flex-1 self-stretch" />
+          <button type="button" tabIndex={stop} aria-label={`Edit ${label}`} className={`min-h-5 min-w-6 flex-1 self-stretch${target}`} />
         ) : null}
       </span>
     );
   }
 
-  const shown = reason === null
-    ? <FieldValue field={field} indexed={indexed} personLabel={personLabel} />
-    : <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>;
+  const empty = value === null || value === "" || (Array.isArray(value) && value.length === 0);
+  const shown = reason !== null
+    ? <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>
+    : empty && emptyText !== undefined
+      ? <span className="truncate text-[13px] text-subtle">{emptyText}</span>
+      : <FieldValue field={field} indexed={indexed} personLabel={personLabel} />;
   if (!editable) return wrapFlagged(reason, shown);
   return wrapFlagged(
     reason,
     <button
       type="button"
-      // The grid is the Tab stop. Enter on the selected cell opens the editor.
-      tabIndex={-1}
+      tabIndex={stop}
       // min-h keeps an empty cell's button a target: with no text its
       // content box collapses to zero height.
-      className="flex min-h-5 w-full min-w-0 items-center text-left text-[13px]"
+      className={`flex min-h-5 w-full min-w-0 items-center text-left text-[13px]${target}`}
     >
       {shown}
     </button>,

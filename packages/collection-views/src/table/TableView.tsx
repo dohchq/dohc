@@ -27,7 +27,7 @@ import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
 import { Tooltip, useTooltip } from "../tooltip";
-import { replayedSelection, withoutDiscarded, type CarriedSelection } from "../useAcknowledgedSelection";
+import { replayedSelection, useCarriedSelections } from "../useAcknowledgedSelection";
 import { FieldTypeIcon } from "../values";
 import { asText, CellEditor, FieldCell } from "./cells";
 import { composing, pickerWidth, type CellMove, type TablePerson } from "./pickers";
@@ -97,7 +97,11 @@ export interface TableCellStatuses {
 
 /** A cell the host draws, for a kind of value the table does not know, such as a file. */
 export interface TableHostCell {
-  cell(record: CollectionRecord): ReactNode;
+  /**
+   * `tabStop`: the cell's own control is a Tab stop, as in a record's
+   * properties. In the table the grid is the stop.
+   */
+  cell(record: CollectionRecord, tabStop?: boolean): ReactNode;
   /**
    * The cell's editor, drawn in the table's overlay. `close` ends the edit.
    * An editor that holds a value it has not saved marks a control
@@ -172,6 +176,8 @@ export interface TableViewProps {
   onOpenLink?: (url: string) => void;
   /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
+  /** The record the host shows open, as in a panel beside the table. Its row is marked. */
+  openRecordId?: string | null;
   /**
    * Runs the relation picker's queries against a relation field's related
    * collection. Absent means relation cells stay read-only.
@@ -226,7 +232,7 @@ const columnLeft = (index: number) => (index === 0 ? 0 : TITLE_COLUMN_WIDTH + (i
 // executor the cell stays read-only. Checkboxes commit through onChange and
 // never open an editor. Buttons store no value. A host-drawn cell opens only
 // the host's own editor.
-function opensEditor(
+export function opensEditor(
   field: FieldDefinition,
   relationExecutor: CollectionQueryExecutor | undefined,
   host: TableHostCell | undefined,
@@ -243,12 +249,12 @@ function opensEditor(
  * The fields whose edit a typed character starts: it replaces a text,
  * number, url, or typed person value, and starts the search in a picker.
  */
-const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person", "select", "multi-select"]);
+export const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person", "select", "multi-select"]);
 /** The room a picker keeps between it and the table's right edge. */
 const PICKER_EDGE = 8;
 /** A host's editor holds a search or a file input, so it gets a popover's room. */
-const HOST_EDITOR_WIDTH = 320;
-const NO_STATUSES: TableCellStatuses = { subscribe: () => () => undefined, get: () => undefined };
+export const HOST_EDITOR_WIDTH = 320;
+export const NO_STATUSES: TableCellStatuses = { subscribe: () => () => undefined, get: () => undefined };
 const MARK_ICON = { size: 12, strokeWidth: 1.9, "aria-hidden": true } as const;
 /** A 16px control inside a cell's line. */
 const MARK_BUTTON = "grid size-4 shrink-0 place-items-center rounded text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
@@ -290,7 +296,7 @@ function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: nu
  * or was refused shows an icon, with its words on hover and for a screen
  * reader. The selected cell shows the same words under it.
  */
-function StatusMark({ status }: { status: TableCellStatus }) {
+export function StatusMark({ status }: { status: TableCellStatus }) {
   if (status.state === "pending") {
     return (
       <span data-cell-status="pending" className="ml-1 inline-flex shrink-0 items-center">
@@ -344,7 +350,7 @@ function StatusMark({ status }: { status: TableCellStatus }) {
 }
 
 /** A status's value in place of the stored one. */
-function shownValue(
+export function shownValue(
   field: string,
   indexed: CollectionIndexedValue | undefined,
   status: TableCellStatus | undefined,
@@ -510,6 +516,7 @@ export function TableView({
   people,
   onOpenLink,
   onOpenRecord,
+  openRecordId,
   relationExecutor,
   personLabel,
   fieldLabel,
@@ -631,24 +638,8 @@ export function TableView({
   const editsAt = (record: CollectionRecord, field: FieldDefinition) =>
     onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
 
-  // Each multi-select cell's saved picks that the index does not show yet.
-  // They outlive the picker, so a second edit starts from the first.
-  const carriedSelections = useRef(new Map<string, CarriedSelection>());
-  const carriedSelection = (cell: TableCell) => {
-    const key = JSON.stringify([cell.recordId, cell.field]);
-    let carried = carriedSelections.current.get(key);
-    if (!carried) carriedSelections.current.set(key, (carried = { pending: [] }));
-    return carried;
-  };
-  useEffect(
-    () =>
-      subscribeToDiscardedWrites?.((writeId) => {
-        for (const carried of carriedSelections.current.values()) {
-          carried.pending = withoutDiscarded(carried.pending, writeId);
-        }
-      }),
-    [subscribeToDiscardedWrites],
-  );
+  const carriedSelections = useCarriedSelections(subscribeToDiscardedWrites);
+  const carriedSelection = (cell: TableCell) => carriedSelections(JSON.stringify([cell.recordId, cell.field]));
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFieldSetElement>(null);
@@ -934,7 +925,8 @@ export function TableView({
                   key={row.id}
                   role="row"
                   data-index={item.index}
-                  className="group absolute left-0 top-0 flex"
+                  aria-current={row.id === openRecordId ? "true" : undefined}
+                  className="group absolute left-0 top-0 flex aria-[current=true]:bg-selected"
                   style={{ height: ROW_HEIGHT, transform: `translateY(${item.start - HEADER_HEIGHT}px)` }}
                 >
                   {onOpenRecord ? (

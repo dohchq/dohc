@@ -348,6 +348,14 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
   });
 
+  it("marks the row of the record the host shows open, and no other", () => {
+    const { view, grid } = setup({ openRecordId: "rec-b" });
+    const current = () => [...grid.querySelectorAll('[role="row"][aria-current="true"]')].map((row) => row.getAttribute("data-index"));
+    expect(current()).toEqual(["1"]);
+    view.rerender(<TableView schema={schema} records={records()} openRecordId={null} />);
+    expect(current()).toEqual([]);
+  });
+
   it("says what the host gives for a table with no records, beside its New record row", () => {
     render(<TableView schema={schema} records={[]} onNewRecord={vi.fn()} emptyText="No records match. Try a shorter search." />);
     expect(screen.getByText("No records match. Try a shorter search.")).toBeDefined();

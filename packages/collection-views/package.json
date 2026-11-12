@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./table": "./src/table/TableView.tsx",
+    "./record": "./src/record/RecordProperties.tsx",
     "./tooltip": "./src/tooltip.tsx",
     "./record-label": "./src/recordLabel.ts",
     "./values": "./src/values.tsx",

@@ -529,6 +529,15 @@ describe("BoardView", () => {
     expect(onCellChange).not.toHaveBeenCalled();
   });
 
+  it("marks the card of the record the host shows open, and no other", () => {
+    const groups = makeGroups();
+    const open = groups.flatMap((group) => group.records)[0]!;
+    render(<BoardView schema={makeSchema()} groups={groups} groupBy="status" openRecordId={open.id} />);
+    const current = screen.getAllByRole("listitem").filter((card) => card.getAttribute("aria-current") === "true");
+    expect(current).toHaveLength(1);
+    expect(current[0]!.getAttribute("aria-label")).toBe("Write the spec");
+  });
+
   it("opens the record from the card's focusable Open button", () => {
     const onOpenRecord = vi.fn();
     render(
