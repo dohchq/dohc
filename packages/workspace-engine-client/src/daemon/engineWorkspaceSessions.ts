@@ -268,6 +268,25 @@ export class EngineWorkspaceShuttingDownError extends Error {
   }
 }
 
+// The workspace folder did not answer the checks made before the daemon opens
+// the workspace, as a network drive that stopped responding does. The
+// message names the workspace id, never the folder: these messages reach
+// copy details and agents.
+export class EngineWorkspaceFolderTimeoutError extends Error {
+  readonly workspaceId: string;
+  readonly deadlineMs: number;
+
+  constructor(workspaceId: string, deadlineMs: number) {
+    super(
+      `Rust engine stopped waiting for the folder of workspace ${workspaceId}: ` +
+        `it did not answer within ${deadlineMs}ms. Retry the operation once the folder responds.`,
+    );
+    this.name = "EngineWorkspaceFolderTimeoutError";
+    this.workspaceId = workspaceId;
+    this.deadlineMs = deadlineMs;
+  }
+}
+
 // The refusals a document open must not answer with the writable plain editor.
 // Each means the same thing to the surface — the engine did not open this
 // document, and the writable plain editor is not safe. The engine may still
