@@ -97,8 +97,9 @@ export interface WriteQueuePage {
   readStarted(): number;
   /**
    * What the Collection confirmed for a record and a read that started at `token` would show: its changed
-   * values, and its version when a receipt gave one. A page takes them for a record it shows that the read
-   * left out, before `readShown` ends their time on the cells.
+   * values, and the version the last of their receipts gave, when it gave one. That is the version the
+   * values were confirmed at, never one a later read of the record found. A page takes them for a record
+   * it shows that the read left out, before `readShown` ends their time on the cells.
    */
   confirmed(token: number, recordKey: string): { values: Record<string, AppBackendJson>; version?: number };
   /** The page shows the records a read returned. */
@@ -142,7 +143,8 @@ function reminderWords(tableName: string, items: readonly WriteAttention[]): str
 /** `uncertain`: the change was sent and the host did not answer that it ran nothing, so it may have saved. */
 type Held = { id: number; recordId: string | number; fieldName: string; value: AppBackendJson; reason: string; uncertain?: true };
 type Deletion = { id: number; recordKey: string; recordId: string | number; name: string; reason: string };
-type Settled = { id: number; seq: number; status: TableCellStatus };
+/** A confirmed value. `version`: what its receipt gave for the record, which no later read replaces. */
+type Settled = { id: number; seq: number; version: number | null; status: TableCellStatus };
 type Shown = { signature: string; status: TableCellStatus };
 /** The one request in flight: a change, or a read of one record for its version. */
 type Flight = { abort: AbortController; revisionSha256: string; write?: QueuedWrite };
@@ -300,9 +302,13 @@ export class WriteQueue {
       readStarted: () => page.host?.offline ? -1 : this.seq,
       confirmed: (token, recordKey) => {
         const values: Record<string, AppBackendJson> = {};
-        for (const [fieldId, settled] of page.settled.get(recordKey) ?? []) if (settled.seq <= token) values[fieldId] = settled.status.value as AppBackendJson;
-        const known = this.versions.get(recordKey);
-        return known && known.seq <= token ? { values, version: known.version } : { values };
+        let last: Settled | undefined;
+        for (const [fieldId, settled] of page.settled.get(recordKey) ?? []) {
+          if (settled.seq > token) continue;
+          values[fieldId] = settled.status.value as AppBackendJson;
+          if (!last || settled.seq > last.seq) last = settled;
+        }
+        return last && last.version !== null ? { values, version: last.version } : { values };
       },
       readShown: (token, rows) => {
         page.readAsked = false;
@@ -646,7 +652,7 @@ export class WriteQueue {
       else if (write.kind === "edit") this.forget(write.record.key);
       else this.versions.delete(write.record.key);
       for (const page of this.pages) for (const [fieldId, typed] of Object.entries(write.values)) {
-        put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, status: { state: "pending", value: typed.value as CollectionValue } });
+        put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, version, status: { state: "pending", value: typed.value as CollectionValue } });
       }
     }
     // An open page shows its table's change. With none open, a notice in the workspace's open shell says the change saved, and in which Collection.

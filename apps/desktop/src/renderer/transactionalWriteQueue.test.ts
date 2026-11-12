@@ -184,6 +184,16 @@ describe("a confirmed value a page's records do not show yet", () => {
     expect(page.confirmed(started, "2").values).toEqual({});
   });
 
+  it("is given with the version its receipt gave, not one another page's later read of the record found", async () => {
+    const rules = host(), { queue, page } = open(rules), other = open(host());
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    rules.calls[0]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // The other page reads the record after someone else changed it, which this page has not shown.
+    other.page.readShown(other.page.readStarted(), [row(2, 6)]);
+    expect(page.confirmed(page.readStarted(), "2")).toEqual({ values: { name: "Beatrice" }, version: 5 });
+  });
+
   it("stays through a read of its record that started before the change was confirmed", async () => {
     const rules = host(), { queue, page } = open(rules);
     const before = page.readStarted();
