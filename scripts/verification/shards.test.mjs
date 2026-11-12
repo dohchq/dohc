@@ -201,14 +201,10 @@ test("Rust receipts require every policy row and exactly the full passing test i
   }
 });
 
-test("reader proofs fit beside the lightest measured partition", () => {
-  // Run 43146936367 execution times, excluding setup and transfer.
-  const ordinary = [100.565, 100.646, 101.444, 90.850, 106.928, 97.463, 86.707, 81.165,
-    147.591, 83.168, 129.489, 130.209, 135.764, 82.801, 114.591, 99.180];
-  const reader = 49.474;
-  assert.equal(ordinary.length, RUST_SHARDS);
-  assert.equal(RUST_READER_SHARD, ordinary.indexOf(Math.min(...ordinary)));
-  assert.ok(ordinary[RUST_READER_SHARD] + reader <= Math.max(...ordinary), "reader proofs must fit within the longest ordinary partition");
+test("reader proofs retain their index pending twenty-partition measurements", () => {
+  // The sixteen-partition measurements cannot predict twenty hash partitions.
+  assert.equal(RUST_READER_SHARD, 7);
+  assert.ok(RUST_READER_SHARD >= 0 && RUST_READER_SHARD < RUST_SHARDS);
 });
 
 test("Rust inventory retains selected ordinary tests and counts only actual passes", () => {

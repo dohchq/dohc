@@ -118,11 +118,13 @@ Workers do not wait for confinement. Aggregates and final verification require b
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
 Workers have two execution slots during preparation and three afterward. Desktop and accounts browser proofs reserve two slots; other groups reserve one.
-The Rust gate builds one test archive, runs its complete inventory across 16 shards, and checks policy separately.
-Ordinary Rust tests use nextest's `hash:N/16` partitions. Shard 7 also runs the reader proofs, with nextest partition `hash:8/16`.
+The Rust gate builds one test archive, runs its complete inventory across 20 shards, and checks policy separately.
+Ordinary Rust tests use nextest's `hash:N/20` partitions. Shard 7 also runs the reader proofs, with nextest partition `hash:8/20`.
+Reader placement stays at index 7 pending measurements from a 20-partition run; the former 16-partition timings do not predict this partitioning.
 The completed verdict requires those proofs exactly once on that shard.
 Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
 The graph permits at most 25 concurrent jobs: 20 JavaScript workers, preparation, Rust build, Rust policy, and both confinement jobs.
+The Rust phase also permits 25: 20 partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
 The organisation's Team plan permits 60 concurrent standard-runner jobs. Two combined runs fit; three can queue.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.

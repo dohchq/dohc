@@ -630,6 +630,10 @@ jobs:
           - 13
           - 14
           - 15
+          - 16
+          - 17
+          - 18
+          - 19
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'

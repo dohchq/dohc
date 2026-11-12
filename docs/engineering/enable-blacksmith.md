@@ -80,9 +80,10 @@ An over-budget run with more than 30 s of gate-job runner wait warns that timing
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
-The workflow runs 20 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
+The workflow runs 20 JavaScript workers and 20 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
 The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
 Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
+The Rust phase also permits at most 25 jobs: its partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
