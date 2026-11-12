@@ -592,7 +592,7 @@ test("job names match the workflow graph and timeout backstops", () => {
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const {jobs} = load(workflow);
   assert.equal(JS_SHARDS, 16);
-  assert.equal(RUST_SHARDS, 12);
+  assert.equal(RUST_SHARDS, 16);
   for (const [name, count, finalJob, scope, command] of [
     ["javascript-workers", JS_SHARDS, "javascript", "js-worker", "node scripts/verification/cloud.mjs worker 0"],
     ["rust-tests", RUST_SHARDS, "rust", "rust-tests", "node scripts/verification/cloud-rust.mjs tests 0"],

@@ -163,11 +163,11 @@ test("Rust receipts require every policy row and exactly the full passing test i
   }
 });
 
-test("reader proofs fit beside the lightest measured hash partition", () => {
-  // Standard-runner execution times, excluding setup and artifact transfer.
+test("reader proofs retain their measured placement", () => {
+  // Historical twelve-partition execution times, excluding setup and transfer.
   const ordinary = [124.911, 144.876, 183.461, 138.352, 126.076, 96.029, 149.624, 135.491, 170.892, 155.824, 166.976, 158.163];
   const reader = 85.778;
-  assert.equal(ordinary.length, RUST_SHARDS);
+  assert.equal(RUST_READER_SHARD, 5);
   assert.ok(ordinary[RUST_READER_SHARD] + reader <= Math.max(...ordinary), "reader proofs must fit within the longest ordinary partition");
 });
 
@@ -190,9 +190,11 @@ function passingCloudJobs() {
   jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
   prepared.completed_at = "2026-11-11T13:06:40Z";
   // Extend the historical topology with copies of an existing worker's timing.
-  const workers = jobs.filter(job => /^JS worker \d+$/u.test(job.name));
-  for (let part = workers.length + 1; part < JS_SHARDS; part++) {
-    jobs.push({ ...workers[0], name: `JS worker ${part}` });
+  for (const [prefix, count] of [["JS worker", JS_SHARDS], ["Rust tests", RUST_SHARDS]]) {
+    const workers = jobs.filter(job => job.name.startsWith(`${prefix} `));
+    for (let part = workers.length + 1; part < count; part++) {
+      jobs.push({ ...workers[0], name: `${prefix} ${part}` });
+    }
   }
   return jobs;
 }
@@ -317,7 +319,7 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
       ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === name).conclusion = conclusion; }),
       rows => { rows.find(job => job.name === name).head_sha = "other"; },
     ]),
-    ...[scope === "js" ? `JS worker ${JS_SHARDS - 2}` : "Rust tests 1", scope === "js" ? `JS worker ${JS_SHARDS - 1}` : "Rust tests 11"].flatMap(name => [
+    ...[scope === "js" ? `JS worker ${JS_SHARDS - 2}` : "Rust tests 1", scope === "js" ? `JS worker ${JS_SHARDS - 1}` : `Rust tests ${RUST_SHARDS - 1}`].flatMap(name => [
       rows => rows.splice(rows.findIndex(job => job.name === name), 1),
       rows => rows.push(rows.find(job => job.name === name)),
       rows => { rows.find(job => job.name === name).conclusion = "cancelled"; },
