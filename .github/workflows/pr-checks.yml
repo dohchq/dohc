@@ -22,7 +22,7 @@ on:
       runner_provider:
         description: Runner provider for this manual measurement
         type: choice
-        options: [github, blacksmith]
+        options: [github, blacksmith, blacksmith-builds]
         default: github
       runner_size:
         description: Blacksmith vCPUs, ignored on GitHub's runners
@@ -227,7 +227,13 @@ jobs:
     name: shared preparation
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: >-
+      ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds')) ||
+      vars.BLACKSMITH_BUILD_VCPUS == '4' || vars.BLACKSMITH_BUILD_VCPUS == '8') &&
+      format('["blacksmith-{0}vcpu-ubuntu-2404"]',
+      (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds'))) &&
+      (inputs.runner_size == '8' && '8' || '4') || vars.BLACKSMITH_BUILD_VCPUS) || '["ubuntu-24.04"]') }}
     timeout-minutes: 20
     env:
       DOHC_CONFINEMENT_SUITES: exclude
@@ -540,7 +546,13 @@ jobs:
     name: Rust build once
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: >-
+      ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds')) ||
+      vars.BLACKSMITH_BUILD_VCPUS == '4' || vars.BLACKSMITH_BUILD_VCPUS == '8') &&
+      format('["blacksmith-{0}vcpu-ubuntu-2404"]',
+      (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds'))) &&
+      (inputs.runner_size == '8' && '8' || '4') || vars.BLACKSMITH_BUILD_VCPUS) || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
     env:
       NEXTEST_PROFILE: without-confinement

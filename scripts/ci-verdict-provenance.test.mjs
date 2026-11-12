@@ -430,10 +430,10 @@ function workflowExpression(expression, { github, vars = {}, inputs = {}, needs 
   );
 }
 
-function workflowContext({ enabled = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4", provider = "github" } = {}) {
+function workflowContext({ enabled = "", buildSize = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4", provider = "github" } = {}) {
   return {
     github: {event_name: event, repository: "dohchq/dohc", event: {pull_request: {draft, head: {repo: {full_name: fork ? "contributor/dohc" : "dohchq/dohc"}}}}},
-    vars: {BLACKSMITH_ENABLED: enabled}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size, runner_provider: provider} : {},
+    vars: {BLACKSMITH_ENABLED: enabled, BLACKSMITH_BUILD_VCPUS: buildSize}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size, runner_provider: provider} : {},
   };
 }
 
@@ -462,7 +462,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
 test("manual Blacksmith selection leaves automatic and default runs unchanged", () => {
   const document = load(workflow);
   assert.equal(document.on.workflow_dispatch.inputs.runner_provider.default, "github");
-  assert.deepEqual(document.on.workflow_dispatch.inputs.runner_provider.options, ["github", "blacksmith"]);
+  assert.deepEqual(document.on.workflow_dispatch.inputs.runner_provider.options, ["github", "blacksmith", "blacksmith-builds"]);
   for (const enabled of ["", "false"]) for (const size of ["4", "8", "32", ""]) {
     const manual = workflowContext({enabled, size, event: "workflow_dispatch", provider: "blacksmith"});
     const automatic = {...workflowContext({enabled}), inputs: {runner_provider: "blacksmith", runner_size: size}};
@@ -476,6 +476,30 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
       assert.deepEqual(workflowExpression(job["runs-on"], manual), [`blacksmith-${cpus}vcpu-ubuntu-2404`], name);
       assert.deepEqual(workflowExpression(job["runs-on"], automatic), ["ubuntu-24.04"], name);
       assert.deepEqual(workflowExpression(job["runs-on"], unknown), ["ubuntu-24.04"], name);
+    }
+  }
+});
+
+test("build-only runner selection affects only preparation and the Rust archive in every mode", () => {
+  const {jobs} = load(workflow);
+  for (const enabled of ["", "false", "true"]) for (const buildSize of ["", "4", "8", "0", "16", "true"]) {
+    for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "unknown"]) {
+      for (const size of ["4", "8", "32", ""]) {
+        const context = workflowContext({enabled, buildSize, event, provider, size});
+        const all = enabled === "true" || (event === "workflow_dispatch" && provider === "blacksmith");
+        const manualBuilds = event === "workflow_dispatch" && provider === "blacksmith-builds";
+        const selectedSize = event === "workflow_dispatch" && size === "8" ? "8" : "4";
+        for (const [name, job] of Object.entries(jobs)) {
+          let expected = "ubuntu-24.04";
+          if (!name.startsWith("confinement-")) {
+            if (all) expected = `blacksmith-${["changes", "verification"].includes(name) ? "2" : selectedSize}vcpu-ubuntu-2404`;
+            else if (["javascript-prepare", "rust-archive"].includes(name) && (manualBuilds || ["4", "8"].includes(buildSize))) {
+              expected = `blacksmith-${manualBuilds ? size === "8" ? "8" : "4" : buildSize}vcpu-ubuntu-2404`;
+            }
+          }
+          assert.deepEqual(workflowExpression(job["runs-on"], context), [expected], JSON.stringify({name, enabled, buildSize, event, provider, size}));
+        }
+      }
     }
   }
 });
@@ -526,7 +550,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
 
 test("confinement jobs reuse identified artifacts without occupying worker runners", () => {
   const {jobs} = load(workflow), prepare = jobs["javascript-prepare"];
-  assert.equal(prepare["runs-on"], jobs["javascript-workers"]["runs-on"]);
+  assert.equal(prepare["runs-on"], jobs["rust-archive"]["runs-on"]);
   const preparedUpload = prepare.steps.findIndex(step => step.with?.name === "javascript-prepared-${{ github.run_attempt }}");
   assert.ok(prepare.steps.findIndex(step => step.uses?.startsWith("taiki-e/install-action@")) > preparedUpload);
   assert.ok(prepare.steps.findIndex(step => step.name === "Archive compiler confinement test binaries") > preparedUpload);

@@ -7,9 +7,13 @@ Track the remaining public-contributor setup in [issue #1193](https://github.com
 ## Keep Blacksmith off
 
 The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
-An absent variable or `false` runs PR checks and default manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
+With both runner variables unset, PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
-Shared preparation uses the workers' runner pool. Confinement always uses GitHub's `ubuntu-24.04` image.
+Confinement always uses GitHub's `ubuntu-24.04` image.
+
+Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only shared preparation and Rust build to that Blacksmith size.
+An absent, empty, or other value leaves those jobs on GitHub. Manual `runner_provider=blacksmith-builds` selects only those jobs using `runner_size`.
+The full-gate switch and manual `blacksmith` selection keep their existing runner sizes; manual build-only selection overrides the build variable's size.
 
 Inspect the switch:
 
@@ -65,9 +69,9 @@ gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runne
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.
-The `runner_provider` input accepts `github` (default) or `blacksmith` for a manual opt-in.
+The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacksmith-builds` for a manual opt-in.
 The default does not override `BLACKSMITH_ENABLED=true`.
-The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
+The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
 Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
