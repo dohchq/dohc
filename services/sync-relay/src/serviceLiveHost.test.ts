@@ -6320,6 +6320,34 @@ it("pushes a live document's settled edit on the next pass while another documen
   expect(unreadyPulls(), "The workspace must keep pulling every pass while the other document backs off.").toBeGreaterThanOrEqual(pulled + 2);
 });
 
+// Proves: while another document backs off, a push refused for pending owner
+// admission does not cost the workspace its pull, so held lists still page.
+it("keeps pulling a workspace whose push waits for owner admission while another document backs off", async () => {
+  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.pushed.promise;
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
+    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
+    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(o.other.path, new Error("Capture failed."));
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
+  const edit = o.acceptEdit("waits-for-admission");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.settle(o.document);
+  o.replies.push = {ownerAdmissionPending: [{workspaceId: "workspace", originId: "origin", originSeq: 3, versionId: "main", objectId: o.sibling.objectId, path: o.sibling.path}]};
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Hosted publication is waiting for owner admission.")));
+  const unreadyPulls = () => o.host.hostedPulls(o.workspace.workspaceId).reasons.unready ?? 0, pulled = unreadyPulls();
+  await o.nextPass(); await o.nextPass(); await o.nextPass();
+  expect(unreadyPulls(), "A refused push must not cost the workspace its pull.").toBeGreaterThanOrEqual(pulled + 2);
+  expect(o.host.retains(o.other)).toBe(true);
+});
+
 // A review of the fix above: one check served both "may this target capture
 // now" and "does it hold its workspace back", and its second half would let a
 // target that still holds an owner for another document capture on every pass.

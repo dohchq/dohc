@@ -1590,12 +1590,11 @@ export async function startServiceLiveHost(options: {
             const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
             if(current && reason)await pull(current,passSignal,reason);
           });
-          else if(activation!.workspacePushes(workspaceId))await step(async()=>{
-            await attached.hosted.push(passSignal);
-            const current=checked(workspaceId);
-            if(current && !catchUp.has(workspaceId))await pull(current,passSignal,"unready");
-          });
-          else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal,"unready"));
+          else{
+            // A refused push does not cost the pull, so held lists still page while the push keeps failing.
+            if(activation!.workspacePushes(workspaceId))await step(()=>attached.hosted.push(passSignal));
+            if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal,"unready"));
+          }
         }
         // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
         // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
