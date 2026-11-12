@@ -11,6 +11,12 @@ export const CONNECTION_LOST_REASON = "dohc lost its connection to this document
 // An edit dohc refused for good, once its set-aside row is dismissed. Tabs share
 // one session, so only closing every tab ends it.
 export const NOT_SAVED_REASON = "dohc could not save this document. Close every tab showing it, then reopen it to edit.";
+// The server refused the document's edits and holds them. Live documents
+// lists it in every such state, with Try again, Stop and Save recovery copy;
+// a Notices row can be dismissed.
+export const LIVE_EDITING_PAUSED_REASON = "Live editing is paused for this document. Open Live documents to continue.";
+// Too many of its edits wait to reach the server. This ends by itself.
+export const LIVE_EDITS_WAITING_REASON = "Live editing is paused until this document's waiting edits reach the server.";
 
 // Why this session became read-only, beside any row it set aside, since no row
 // says why. None when access ended, which has its own reason.
@@ -34,6 +40,8 @@ export function readOnlyReasons(causes: {
   transition: string | undefined;
   // Refused for good, with its set-aside row dismissed.
   notSaved: boolean;
+  // Live editing is paused: the server refused its edits, or too many wait.
+  livePaused: "refused" | "full" | undefined;
 }): string[] {
   if (causes.gone) return [];
   const reasons = [
@@ -42,6 +50,7 @@ export function readOnlyReasons(causes: {
     causes.shared && !causes.accessEnded ? SAVE_STATE["read-only"].title : undefined,
     causes.transition,
     causes.notSaved ? NOT_SAVED_REASON : undefined,
+    causes.livePaused === "refused" ? LIVE_EDITING_PAUSED_REASON : causes.livePaused === "full" ? LIVE_EDITS_WAITING_REASON : undefined,
   ];
   return reasons.filter((reason): reason is string => reason !== undefined);
 }

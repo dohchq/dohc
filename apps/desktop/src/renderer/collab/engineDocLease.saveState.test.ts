@@ -788,6 +788,24 @@ it("leaves a replacement that follows a refused edit to the refusal's own notice
   expect(notices.reports()).toEqual([]);
 });
 
+// Main's pause reaches the editor after the refusal does, so the person can
+// still type into the replacement. The engine refuses that edit too, and it
+// must land in its own draft rather than vanish.
+it("keeps typing that lands before the pause reaches the editor in a draft", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await flushLocalBatch();
+  harness.emitEditRefusal("dohc could not save an edit.", 1);
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  act(() => editDocument());
+  await flushLocalBatch();
+  harness.emitEditRefusal("dohc could not save an edit.", 2);
+  harness.emitLineageReplacement("winner", [], 3);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2, 3]));
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text).sort()).toEqual(["seed!", "winner!"]));
+});
+
 // Turning sync on claims the open document's lineage, so main hands the
 // renderer a replacement while the person is still typing. The sandboxed
 // renderer has no `process`, and a handoff that reached it stayed frozen.

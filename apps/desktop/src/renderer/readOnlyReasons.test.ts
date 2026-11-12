@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CONNECTION_LOST_REASON, NOT_SAVED_REASON, readOnlyReasons, transitionReason } from "./readOnlyReasons";
 
-const NONE = { gone: false, accessEnded: false, shared: false, transition: undefined, notSaved: false };
+const NONE = { gone: false, accessEnded: false, shared: false, transition: undefined, notSaved: false, livePaused: undefined };
 const TURN = { readOnlyWhileEditing: true, readOnlyCause: "reconnecting" } as const;
 
 describe("readOnlyReasons", () => {
@@ -25,9 +25,18 @@ describe("readOnlyReasons", () => {
     ]);
   });
 
+  it("says live editing is paused, and where to continue", () => {
+    expect(readOnlyReasons({ ...NONE, livePaused: "refused" })).toEqual([
+      "Live editing is paused for this document. Open Live documents to continue.",
+    ]);
+    expect(readOnlyReasons({ ...NONE, livePaused: "full" })).toEqual([
+      "Live editing is paused until this document's waiting edits reach the server.",
+    ]);
+  });
+
   it("gives no sentence once the file is gone, whatever else applies", () => {
     expect(
-      readOnlyReasons({ gone: true, accessEnded: true, shared: true, transition: CONNECTION_LOST_REASON, notSaved: true }),
+      readOnlyReasons({ gone: true, accessEnded: true, shared: true, transition: CONNECTION_LOST_REASON, notSaved: true, livePaused: "refused" }),
     ).toEqual([]);
   });
 

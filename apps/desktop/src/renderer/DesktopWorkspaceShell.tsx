@@ -195,6 +195,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { advanceReopenKey, observeLiveSessions, useReopenKey, watchLiveSessions } from "./documentVersionKey";
+import { queueHoldsNote } from "./liveQueueState";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveDocumentStopRunning, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, isLiveStopWaiting, LIVE_STOP_WAITING, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -2225,6 +2226,20 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     pendingShareMarks.set(pendingShare ?? [], openTabs.map((tab) => tab.path));
   }, [pendingShareMarks, pendingShare, openTabs]);
+  // Notes whose live editing is paused: their queue is full, or the server
+  // refused it and still holds it. Edits to them can't reach the server, so
+  // their editors stay read-only rather than set each keystroke aside. Main
+  // lists them until Try again delivers, the queue drains or a Stop releases
+  // the note. A row kept after a restore, or in an earlier copy of the
+  // workspace, holds no current queue; Live documents labels rows by the same
+  // rule. Rebuilt only when a status read changes the lists, so a render looks
+  // a path up once.
+  const livePausedPaths = syncStatus?.ownerLivePausedPaths;
+  const liveQuarantines = syncStatus?.ownerLiveQuarantines;
+  const liveEditingPaused = useMemo(() => new Map<string, "refused" | "full">([
+    ...(livePausedPaths ?? []).map((path) => [path, "full"] as const),
+    ...(liveQuarantines ?? []).filter(queueHoldsNote).map((row) => [row.path, "refused"] as const),
+  ]), [livePausedPaths, liveQuarantines]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -7312,6 +7327,8 @@ export function DesktopWorkspaceShell(props: {
                   (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)
                 }
+                // The lists name this workspace's own notes, never a received share's.
+                liveEditingPaused={shareView || isMountedSharePath(tabPath) ? undefined : liveEditingPaused.get(tabPath)}
                 receivedShare={!!shareView || isMountedSharePath(tabPath)}
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
