@@ -3,7 +3,8 @@
 // assert its outcome: accepted, how long it took, and that it never held the event loop long enough to stall typing.
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { afterEach, expect, it } from "vitest";
-import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
+import { validateOrdinaryActivation, type OrdinaryActivationValidator } from "./storage/ordinaryActivationValidation.js";
+import { checkpointPolicySha256 } from "./storage/ordinaryActivationCheckpoint.js";
 import { ACTIVATION, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -11,6 +12,10 @@ afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await cl
 // The bars from the agreed #3763 plan.
 const ACTIVATION_MS = 1_000, EVENT_LOOP_STALL_MS = 100;
 const typedRelayNote = (keystrokes: number) => seedTypedRelayNote(keystrokes, close => {cleanup.push(close);});
+/** The relay's validation in this process, naming its policy as the relay's validation pool does. */
+const validate: OrdinaryActivationValidator = Object.assign(
+  async (work: Parameters<OrdinaryActivationValidator>[0]) => validateOrdinaryActivation(work, ACTIVATION.validation),
+  {policySha256: checkpointPolicySha256(ACTIVATION.validation)});
 
 /** The relay's work for this note that runs off the request path, before anyone shares it. Main has none. */
 async function foldAhead(_note: TypedRelayNote) {}
@@ -22,8 +27,7 @@ async function activate(note: TypedRelayNote) {
   const start = performance.now();
   try {
     const outcome = await store.prepare({capture: note.capture, host: note.host, registeredAtMs: 3, guard() {},
-      validate: async work => validateOrdinaryActivation(work, ACTIVATION.validation),
-      bounds: {maxCaptureBytes: ACTIVATION.maxCaptureBytes, maxEntriesPerDrain: ACTIVATION.maxEntriesPerDrain,
+      validate, bounds: {maxCaptureBytes: ACTIVATION.maxCaptureBytes, maxHistoryEntries: ACTIVATION.maxActivationHistoryEntries,
         maxBytesPerDrain: ACTIVATION.maxBytesPerDrain}}).then(value => value, (error: unknown) => error);
     return {outcome, elapsedMs: performance.now() - start, stallMs: stalls.max / 1e6};
   } finally {stalls.disable();}

@@ -5,7 +5,8 @@ import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationValidation.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork, OrdinaryFoldResult, OrdinaryFoldWork } from "./storage/ordinaryActivationValidation.js";
+import { checkpointPolicySha256 } from "./storage/ordinaryActivationCheckpoint.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
 import { liveRestoreValidator, type LiveRestoreReply, type LiveRestoreValidator, type LiveRestoreWork } from "./liveRestoreValidation.js";
@@ -37,7 +38,7 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
-  | { kind: "activation"; input: OrdinaryActivationWork }
+  | { kind: "activation"; input: OrdinaryActivationWork | OrdinaryFoldWork }
   | { kind: "restore"; input: LiveRestoreWork }
 );
 type CapacityRetry = {
@@ -265,12 +266,13 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
    */
   function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    return Object.assign((input: OrdinaryActivationWork, signal?: AbortSignal) =>
-      submit<OrdinaryActivationValidation>(
+    return Object.assign((input: OrdinaryActivationWork | OrdinaryFoldWork, signal?: AbortSignal) =>
+      submit<OrdinaryActivationValidation | OrdinaryFoldResult>(
         { kind: "activation", policy: ownedPolicy, input },
         { kind: "capacity-refused" },
         signal,
-      ), { hasCapacity: () => hasCapacity(true), waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true) });
+      ), { hasCapacity: () => hasCapacity(true), waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true),
+        policySha256: checkpointPolicySha256(ownedPolicy) });
   }
   /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
   function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {

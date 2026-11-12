@@ -4310,9 +4310,13 @@ for (const c of [
   const capture = o.engine.capture;
   const source = {...capture.source, committedCursor: Number(o.raw.prepare("SELECT MAX(relay_seq) AS cursor FROM sync_relay_log WHERE workspace_id=?")
     .get("workspace")!.cursor)};
-  const read = () => readOrdinaryActivationHistory(o.f.storage as StorageContext, {source, document: o.document,
-    baselineBytes: capture.baselineBytes, fullState: capture.fullState,
-    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000}});
+  const read = () => {
+    const found = readOrdinaryActivationHistory(o.f.storage as StorageContext, {source, document: o.document,
+      baselineBytes: capture.baselineBytes, fullState: capture.fullState, checkpoint: null,
+      bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000}});
+    if (found.kind !== "history") throw new Error(`Expected a history read, not ${found.kind}.`);
+    return found.history;
+  };
   if (c.changedText) {
     expect(read, "The returned document must refuse a move that changed its text.")
       .toThrow("Ordinary activation history replaced the live document.");
@@ -4496,8 +4500,10 @@ for (const c of [
     .get("workspace")!.cursor)};
   const bounds = {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000};
   const check = () => {
-    const input = {source, document: o.document, baselineBytes: capture.baselineBytes, fullState: capture.fullState, bounds};
-    const history = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);
+    const input = {source, document: o.document, baselineBytes: capture.baselineBytes, fullState: capture.fullState, bounds, checkpoint: null};
+    const found = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);
+    if (found.kind !== "history") throw new Error(`Expected a history read, not ${found.kind}.`);
+    const history = found.history;
     const validation = validateOrdinaryActivation({document: o.document, currentPath: source.currentPath,
       baselineBytes: capture.baselineBytes, cut: {source, fullState: capture.fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, restorePolicy);
     if (validation.kind !== "accepted") throw new Error(validation.message);

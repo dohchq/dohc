@@ -26,6 +26,12 @@ export interface OrdinaryActivationHistory {
   /** The state a proved settlement source settled, which must project the source. */
   readonly settled:{readonly state:Uint8Array;readonly stateSha256:string}|null;
   readonly charged:number;
+  /**
+   * The lineage's checkpoint the history continues from, or null when it starts at the base. `updates[0]` is then the
+   * checkpoint's state, `rows[0]` stands for the rows it folded, and its file moments keep the projections they followed.
+   */
+  readonly checkpoint:{readonly throughRelaySeq:number;readonly stateSha256:string;readonly projection:Projection;
+    readonly moments:readonly (Projection&{readonly relaySeq:number})[]}|null;
 }
 /** A capture's validation. One the relay already retains checks only its baseline. */
 export interface OrdinaryActivationWork {
@@ -41,9 +47,11 @@ export type OrdinaryActivationValidation={kind:"accepted";baseline:OrdinaryActiv
 /**
  * `hasCapacity` says whether a validation slot is free now, so a pass captures nothing while the pool is busy.
  * `waitForCapacity` settles once one may be free, which another operation can still take first.
+ * `policySha256` names the policy it validates and folds with; activation continues only checkpoints folded under it,
+ * and without it reads every capture's history from the base.
  */
-export type OrdinaryActivationValidator=((work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>)&
-  {readonly hasCapacity?:()=>boolean;readonly waitForCapacity?:(signal?:AbortSignal)=>Promise<void>};
+export type OrdinaryActivationValidator=((work:OrdinaryActivationWork|OrdinaryFoldWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation|OrdinaryFoldResult>)&
+  {readonly hasCapacity?:()=>boolean;readonly waitForCapacity?:(signal?:AbortSignal)=>Promise<void>;readonly policySha256?:string};
 /**
  * One page of a lineage's ordinary history to fold into its checkpoint: the state the page starts from and the Y.Doc
  * rows after it, in relay order. `keepFrom` is the first history prefix whose projection the page keeps; 0 is `start`.
@@ -78,7 +86,7 @@ export function validateOrdinaryActivation(work:OrdinaryActivationWork|OrdinaryF
 }
 function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNullable<OrdinaryActivationWork["cut"]>,baseline:OrdinaryActivationBaseline,
   validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>,validateHistory:ReturnType<typeof createLiveMarkdownHistoryValidator>):OrdinaryActivationProof{
-  const {document,baselineBytes}=work,{source,fullState,history:{updates,from,wanted,settled},maxBytesPerDrain}=cut;
+  const {document}=work,{source,fullState,history:{updates,from,wanted,settled},maxBytesPerDrain}=cut;
   let charged=cut.history.charged;
   const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   const projects=(evidence:Projection)=>evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
@@ -92,11 +100,12 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
   }
   // One pass validates the history and, from the source's prefix on, checks that every prefix keeps its projection,
   // so a change and its reversal can't stand behind an earlier source. The baseline alone was validated as a registration.
-  charge(baselineBytes.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
+  charge(updates[0]!.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
+  // The first prefix is the base, or the checkpoint the relay's own validation folded and projected.
   const start=from===null?updates.length:Math.max(from,1);
   const keep=new Set(wanted),lower=Math.min(start,...wanted),projections:(Projection&{index:number})[]=[];
-  let projected=from!==0||projects(baseline),next=lower;
-  const result=validateHistory({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:updates.slice(1,Math.max(updates.length-1,1)),
+  let projected=from!==0||projects(cut.history.checkpoint?cut.history.checkpoint.projection:baseline),next=lower;
+  const result=validateHistory({document,currentPath:source.currentPath,checkpoint:updates[0]!,suffix:updates.slice(1,Math.max(updates.length-1,1)),
     candidate:updates.length===1?new Uint8Array([0,0]):updates[updates.length-1]!},
   {from:lower,visit:(evidence,index)=>{
     projected&&=index===next++&&(index<start||projects(evidence));

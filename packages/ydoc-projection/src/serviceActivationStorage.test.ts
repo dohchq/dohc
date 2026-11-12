@@ -374,8 +374,10 @@ function losingDevice(f:ReturnType<typeof fixture>){
 }
 // The ordinary-cut check a fresh capture runs, without retaining an activation.
 async function verify(f:ReturnType<typeof fixture>,readBounds=bounds){
-  const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds:readBounds}
-  const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+  const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds:readBounds,checkpoint:null}
+  const read=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+  if(read.kind!=='history')throw new Error(`Expected a history read, not ${read.kind}.`)
+  const history=read.history
   const validation=await validateActivation({document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
     cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain:readBounds.maxBytesPerDrain}})
   if(validation.kind!=='accepted')throw new Error(validation.kind==='refused'?validation.message:JSON.stringify(validation))
@@ -598,7 +600,10 @@ it('charges the walk back over a long losing-lineage interval to an artifact ori
     f.raw.exec('COMMIT')
     staleArtifact(f,'other-device',0)
     const context=f.storage as StorageContext,prepare=vi.spyOn(context.db,'prepare')
-    await expect(verify(f)).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')
+    // The walk's own charge shows within the read bound.
+    await expect(verify(f)).rejects.toThrow('Ordinary activation metadata exceeds its configured byte budget.')
+    const payloads=Number(f.raw.prepare('SELECT sum(octet_length(payload_json)) AS bytes FROM sync_relay_log WHERE relay_seq>=2').get()!.bytes)
+    await expect(verify(f,{...bounds,maxBytesPerDrain:payloads+f.capture.baselineBytes.length})).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')
     await expect(verify(f,{...bounds,maxBytesPerDrain:4_000_000})).rejects.toThrow(divergent)
     const walk=prepare.mock.calls.map(call=>call[0]).find(sql=>sql.includes('idx_sync_relay_log_document_page')&&sql.includes('ORDER BY relay_seq DESC'))!
     prepare.mockRestore()
@@ -1339,8 +1344,10 @@ it('blocks a capture whose history check runs out of its work budget, as one pas
 })
 it('answers over-budget when a history check runs past its byte budget',async()=>{
   const f=fixture();try{
-    const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds}
-    const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds,checkpoint:null}
+    const read=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    if(read.kind!=='history')throw new Error(`Expected a history read, not ${read.kind}.`)
+    const history=read.history
     const work={document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
       cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain:bounds.maxBytesPerDrain}}
     expect(validateOrdinaryActivation(work,policy).kind).toBe('accepted')
@@ -1803,7 +1810,7 @@ it('refuses a capture as stale when the retained activation it read is gone by t
     read.mockClear()
     const documents=f.raw.prepare('SELECT * FROM sync_relay_live_documents').all(),control=f.storage.getLiveHostControl()
     const validate:OrdinaryActivationValidator=async work=>{
-      expect(work.cut).toBeUndefined()
+      expect(work).not.toHaveProperty('cut')
       f.raw.exec('DELETE FROM sync_relay_service_activations')
       return validateActivation(work)
     }

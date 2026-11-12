@@ -12,6 +12,7 @@ import {NATIVE_MOMENT_FIELDS} from "./serviceActivationPublication";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import {stableJsonStringify} from "../canonicalJson";
 import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
+import {readOrdinaryCheckpoint,type OrdinaryCheckpointScope} from "./ordinaryActivationCheckpoint";
 import {requireWithinBudget,type OrdinaryActivationBaseline,type OrdinaryActivationHistory,type OrdinaryActivationProof,type Projection} from "./ordinaryActivationValidation";
 
 export class ServiceActivationStaleCut extends Error {
@@ -39,13 +40,23 @@ function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
 }
 /** The history prefix a write at this relay position follows. */
 const prefixAt=(rows:OrdinaryActivationHistory["rows"],relaySeq:number)=>rows.filter(row=>row.relay_seq<relaySeq).length-1;
-type HistoryInput={source:NativeOwnerActivationSource;document:LiveDocumentKey;baselineBytes:Uint8Array;fullState:Uint8Array;bounds:OrdinaryActivationBounds};
+/**
+ * `checkpoint` names the lineage's checkpoint to continue from; null reads from the base. With a checkpoint the read
+ * may answer `fold`: more rows follow it than one read takes, so the checkpoint must fold a page first. It answers
+ * `base` when only a read from the base can decide this capture, because the checkpoint no longer holds what it needs.
+ */
+type HistoryInput={source:NativeOwnerActivationSource;document:LiveDocumentKey;baselineBytes:Uint8Array;fullState:Uint8Array;bounds:OrdinaryActivationBounds;
+  checkpoint:OrdinaryCheckpointScope|null};
+export type OrdinaryActivationRead={kind:"history";history:OrdinaryActivationHistory}|{kind:"fold"}|{kind:"base"};
 /** Reads and checks the history a capture must rebuild and its source's proof, charging both to the drain budget. Validation runs on what it returns. */
-export function readOrdinaryActivationHistory(storage:StorageContext,input:HistoryInput):OrdinaryActivationHistory{
+export function readOrdinaryActivationHistory(storage:StorageContext,input:HistoryInput):OrdinaryActivationRead{
   const {source,document,baselineBytes,fullState,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
+  const checkpoint=input.checkpoint&&readOrdinaryCheckpoint(storage,input.checkpoint);
+  // A checkpoint stands for its rows, so the read starts after it; the base row is still checked on its own below.
+  const lower=checkpoint?checkpoint.throughRelaySeq+1:source.baseRelaySeq,start=checkpoint?checkpoint.state:baselineBytes;
   const entryLimit=Math.min(bounds.maxHistoryEntries,MAX_OLD_SUFFIX_ENTRIES+2);
   // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
@@ -53,15 +64,30 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
       AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
       AND NOT (${OTHER_LINEAGE_UPDATE})
     ORDER BY relay_seq LIMIT ?`;
-  const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
+  const params=[document.workspaceId,lower,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
+  // octet_length() takes each size from the row's header; no payload is read before the read is known to fit.
+  const readable=bounds.maxBytesPerDrain-start.length;
+  let read=0;
+  for(const row of storage.db.prepare(`SELECT octet_length(payload_json) AS payload_bytes FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page
+    WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=? AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
+    ORDER BY relay_seq`).iterate(document.workspaceId,lower,source.committedCursor,document.mainVersionId,document.objectId)){
+    requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");
+    read+=Number(row.payload_bytes);
+    if(read>readable){
+      if(input.checkpoint)return {kind:"fold"};
+      requireWithinBudget(false,"Ordinary activation metadata exceeds its configured byte budget.");
+    }
+  }
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
-    (SELECT length(CAST(payload_json AS BLOB))+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
-  requireValue(size&&integer(size.entries)&&size.entries>0,"Ordinary activation base history is unavailable.");
-  requireWithinBudget(size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
+    (SELECT octet_length(payload_json)+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
+  requireValue(size&&integer(size.entries)&&(checkpoint||size.entries>0),"Ordinary activation base history is unavailable.");
   requireValue(integer(size.bytes),"Ordinary activation metadata is damaged.");
+  // Past what one read takes, a lineage that may fold continues its checkpoint first, so its history is never refused for its length.
+  if(input.checkpoint&&(size.entries>entryLimit||size.bytes>bounds.maxBytesPerDrain-start.length))return {kind:"fold"};
+  requireWithinBudget(size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
   requireWithinBudget(size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");
-  const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,relay_admission,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
-  let charged=baselineBytes.length;
+  const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,relay_admission,octet_length(payload_json) AS payload_bytes ${selected}`).all(...params);
+  let charged=start.length;
   const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
   // Prove each move backward from the current path, without skipping a step.
@@ -106,18 +132,51 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     charge(Number(blob.byte_length));
     return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,ordinary:row.relay_admission===null,payload,byteLength:Number(blob.byte_length)}];
   }).reverse();
-  requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
-  const first=rows[0]!;
-  requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
-    first.payload.isBaseState===true&&first.payload.updateBlobSha256===document.lineageClaimId,"Native activation base coordinate differs from ordinary history.");
+  if(checkpoint){
+    // The walk proved each move back to the path the checkpoint left; the fold proved the moves before it.
+    if(provedPath!==checkpoint.currentPath)return {kind:"base"};
+    for(const kept of [...checkpoint.moments].reverse()){
+      if(kept.operation==="rename")latestMove??=kept.relaySeq;
+      else if(latestWrite===null&&kept.write?.objectMoment&&objectRow.get(document.workspaceId,document.objectId,kept.relaySeq,document.mainVersionId)){
+        latestWrite=kept.relaySeq;latestWriteBlobSha256=kept.write.blobSha256;latestWriteByteLength=kept.write.byteLength;
+      }
+    }
+    // The checkpoint keeps its latest file moments; past those, only a read from the base knows the latest move and write.
+    if(checkpoint.momentsFromSeq>source.baseRelaySeq&&(latestMove===null||latestWrite===null))return {kind:"base"};
+    // The base row itself, sized before it is read.
+    const baseSize=storage.db.prepare("SELECT octet_length(payload_json) AS payload_bytes FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,source.baseRelaySeq);
+    requireValue(baseSize&&integer(baseSize.payload_bytes),"Ordinary activation base history is unavailable.");
+    requireWithinBudget(Number(baseSize.payload_bytes)<=bounds.maxBytesPerDrain-charged,"Ordinary activation metadata exceeds its configured byte budget.");
+    const baseRow=storage.db.prepare("SELECT origin_id,origin_seq,op_kind,relay_admission,payload_json,settlement_admission_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?")
+      .get(document.workspaceId,source.baseRelaySeq);
+    requireValue(baseRow&&typeof baseRow.payload_json==="string","Ordinary activation base history is unavailable.");
+    charge(Number(baseSize.payload_bytes)+Buffer.byteLength(JSON.stringify([source.baseRelaySeq,baseRow.origin_id,baseRow.origin_seq,baseRow.op_kind])));
+    const payload=JSON.parse(baseRow.payload_json) as Record<string,unknown>;
+    const admission=typeof baseRow.settlement_admission_json==="string"?JSON.parse(baseRow.settlement_admission_json) as {status?:unknown}|null:null;
+    requireValue(baseRow.op_kind==="ydoc.update"&&admission?.status!=="refused"&&payload.versionId===document.mainVersionId&&payload.objectId===document.objectId,
+      "Ordinary activation base history is unavailable.");
+    requireValue(payload.path===source.currentPath&&payload.contentKind==="richdoc"&&payload.lineageClaimId===document.lineageClaimId,
+      "Ordinary activation history differs from the captured lineage.");
+    requireValue(baseRow.origin_id===source.baseOriginId&&baseRow.origin_seq===source.baseOriginSeq&&payload.isBaseState===true&&
+      payload.updateBlobSha256===document.lineageClaimId,"Native activation base coordinate differs from ordinary history.");
+  }else{
+    requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
+    const first=rows[0]!;
+    requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
+      first.payload.isBaseState===true&&first.payload.updateBlobSha256===document.lineageClaimId,"Native activation base coordinate differs from ordinary history.");
+  }
   for(const row of rows)requireValue(!row.payload.isBaseState||row.payload.updateBlobSha256===document.lineageClaimId,"Ordinary activation has a different baseline.");
-  const updates=rows.map(row=>{
+  const updates=[...(checkpoint?[checkpoint.state]:[]),...rows.map(row=>{
     const bytes=storage.getBlob(document.workspaceId,String(row.payload.updateBlobSha256));
     requireValue(bytes&&bytes.length===row.byteLength&&hash(bytes)===row.payload.updateBlobSha256,"Ordinary activation bytes differ from their digest.");
     return new Uint8Array(bytes);
-  });
-  requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
-  const history=rows.map(({relay_seq,origin_id,origin_seq,ordinary})=>({relay_seq,origin_id,origin_seq,ordinary}));
+  })];
+  if(!checkpoint)requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
+  // With a checkpoint, the first row stands for every row it folded, at the coordinates of the last one.
+  const folded=checkpoint?.tail.at(-1);
+  const history=[...(checkpoint&&folded?[{relay_seq:checkpoint.throughRelaySeq,origin_id:folded.originId,origin_seq:folded.originSeq,ordinary:folded.ordinary}]:[]),
+    ...rows.map(({relay_seq,origin_id,origin_seq,ordinary})=>({relay_seq,origin_id,origin_seq,ordinary}))];
+  const offset=history.length-rows.length;
   const found=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   const moment=found?{...found}:null;
@@ -127,12 +186,31 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   if(!(moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes)){
     // A receiver-generated source names an ordinarily admitted Y.Doc row; a departed row counts as history, never as a source.
     // Otherwise the source is a settlement moment the relay proved, after the history before it.
-    const index=rows.findIndex(row=>source.sourceMomentId===`moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`);
+    const names=(row:{origin_id:unknown;origin_seq:unknown})=>source.sourceMomentId===
+      `moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`;
+    const index=rows.findIndex(names);
     if(index>=0)requireValue(rows[index]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
     let anchor:number;
-    if(index>=0)anchor=rows[index]!.relay_seq;
-    else{const proved=provedSettlementSource(storage,{source,document,charge});anchor=proved.relaySeq;settled={state:proved.state,stateSha256:proved.stateSha256};}
-    from=index>=0?index:history.filter(row=>row.relay_seq<anchor).length-1;
+    if(index>=0){anchor=rows[index]!.relay_seq;from=index+offset;}
+    else{
+      // A source the checkpoint folded is one of its last rows, and every row after it kept the source's projection.
+      const tail=checkpoint?.tail??[],at=tail.findIndex(row=>names({origin_id:row.originId,origin_seq:row.originSeq}));
+      if(at>=0){
+        requireValue(tail[at]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
+        for(const row of tail.slice(at)){
+          if(!row.projection)return {kind:"base"};
+          requireValue(row.projection.projectedMarkdownSha256===source.sourceDigest&&row.projection.projectedMarkdownByteLength===source.sourceByteLength,
+            "Native activation source moment does not project the captured source.");
+        }
+        anchor=tail[at]!.relaySeq;from=0;
+      }else{
+        if(checkpoint&&!storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND moment_id=?`).get(document.workspaceId,source.sourceMomentId))return {kind:"base"};
+        const proved=provedSettlementSource(storage,{source,document,charge});
+        if(checkpoint&&proved.relaySeq<=checkpoint.throughRelaySeq)return {kind:"base"};
+        anchor=proved.relaySeq;settled={state:proved.state,stateSha256:proved.stateSha256};
+        from=history.filter(row=>row.relay_seq<anchor).length-1;
+      }
+    }
     // A returned document keeps the text it had before moving.
     if(moment&&Number(moment.relay_seq)===latestMove&&latestWrite===null){
       const prior=priorObjectRow.get(document.workspaceId,document.objectId,document.mainVersionId,source.baseRelaySeq);
@@ -141,6 +219,8 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     if(moment&&Number(moment.relay_seq)===latestMove&&latestWrite!==null)requireValue(latestWriteBlobSha256===moment.blob_sha256&&latestWriteByteLength===moment.byte_length,"Ordinary activation found a later ordinary file moment with a divergent projection.");
     const latest=moment&&Number(moment.relay_seq)===latestMove?latestWrite:moment?Number(moment.relay_seq):null;
     if(latest!==null&&latest>anchor&&!echoes)artifact=latest;
+    // The artifact proof compares the writes behind it with the projections they followed, which the checkpoint keeps only for its latest moments.
+    if(artifact!==null&&checkpoint&&checkpoint.momentsFromSeq>source.baseRelaySeq)return {kind:"base"};
   }
   if(latestMove!==null&&moment){
     const current=currentFileRow.get(document.workspaceId,document.mainVersionId,source.currentPath);
@@ -149,7 +229,9 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   // Behind a later artifact, validation keeps the projection each of this document's writes followed, to tell folded echoes.
   const wanted=artifact===null?[]:[...new Set(metadata.filter(row=>row.op_kind==="moment.append"&&Number(row.relay_seq)<artifact)
     .map(row=>prefixAt(history,Number(row.relay_seq))).filter(index=>index>=1&&index<updates.length-1))].sort((a,b)=>a-b);
-  return {rows:history,updates,moment,from,artifact,wanted,settled,charged};
+  return {kind:"history",history:{rows:history,updates,moment,from,artifact,wanted,settled,charged,checkpoint:checkpoint?{throughRelaySeq:checkpoint.throughRelaySeq,
+    stateSha256:checkpoint.stateSha256,projection:checkpoint.projection,
+    moments:checkpoint.moments.map(({relaySeq,projectedMarkdownSha256,projectedMarkdownByteLength})=>({relaySeq,projectedMarkdownSha256,projectedMarkdownByteLength}))}:null}};
 }
 /**
  * Accepts a capture whose validation passed on `history`, in the transaction that registers it. A write
@@ -159,18 +241,27 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
 export function verifyOrdinaryActivationCut(storage:StorageContext,input:HistoryInput&{baseline:OrdinaryActivationBaseline;history:OrdinaryActivationHistory;proof?:OrdinaryActivationProof}):VerifiedOrdinaryActivationCut{
   const {source,document,baseline,history,proof,bounds}=input;
   // Validation accepted the history it read, so refusing the history read again means it changed since.
-  let current:OrdinaryActivationHistory;
+  let current:OrdinaryActivationRead;
   try{current=readOrdinaryActivationHistory(storage,input);}
   catch(error){if(error instanceof Error&&error.constructor===Error&&!("code" in error))throw new ServiceActivationStaleCut();throw error;}
-  if(!isDeepStrictEqual(current,history))throw new ServiceActivationStaleCut();
+  // A read that now needs a fold, or the base, saw another history or another checkpoint.
+  if(current.kind!=="history"||!isDeepStrictEqual(current.history,history))throw new ServiceActivationStaleCut();
   if(history.artifact!==null){
     requireValue(proof,"Ordinary activation found a later ordinary file moment with a divergent projection.");
     let charged=proof.charged;
     const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
     const kept=new Map(proof.projections.map(({index,...projection})=>[index,projection]));
     const last=history.updates.length-1,sourceProjection={projectedMarkdownSha256:source.sourceDigest,projectedMarkdownByteLength:source.sourceByteLength};
-    // Validation proved the complete history projects the source.
-    const projectionAt=(relaySeq:number)=>{const index=prefixAt(history.rows,relaySeq);return index===0?baseline:index===last?sourceProjection:kept.get(index);};
+    // Validation proved the complete history projects the source. A write the checkpoint folded keeps the projection it followed.
+    const folded=history.checkpoint;
+    const projectionAt=(relaySeq:number):Projection|undefined=>{
+      if(folded&&relaySeq<=folded.throughRelaySeq){
+        const write=folded.moments.find(moment=>moment.relaySeq===relaySeq);
+        return write&&{projectedMarkdownSha256:write.projectedMarkdownSha256,projectedMarkdownByteLength:write.projectedMarkdownByteLength};
+      }
+      const index=prefixAt(history.rows,relaySeq);
+      return index===0?(folded?folded.projection:baseline):index===last?sourceProjection:kept.get(index);
+    };
     requireValue(sameLineageArtifact(storage,{source,document,charge,projectionAt,proved:new Map()},history.artifact),
       "Ordinary activation found a later ordinary file moment with a divergent projection.");
   }
@@ -263,7 +354,7 @@ function artifactStands(storage:StorageContext,proof:ArtifactProof,relaySeq:numb
     write.versionId!==document.mainVersionId||write.objectId!==document.objectId||write.operation!=="write"||write.path!==source.currentPath||
     write.payloadAfterPath!==source.currentPath||write.payloadAfterContentKind!=="text"||(write.beforeObjectId!=null&&write.beforeObjectId!==document.objectId))return false;
   // Back from the artifact over this document's rows, each charged to the proof budget. Within one origin, relay order is origin order.
-  const before=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes
+  const before=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,octet_length(payload_json) AS payload_bytes
     FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page
     WHERE workspace_id=? AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=? AND relay_seq>=? AND relay_seq<?
     ORDER BY relay_seq DESC`);
@@ -283,7 +374,7 @@ function artifactStands(storage:StorageContext,proof:ArtifactProof,relaySeq:numb
   // another write of this document before the artifact (2), unless it folds as an echo of the lineage's projection at that point
   // or is itself a stale artifact of this lineage; or another object at the bound path, or one whose before-image names this
   // document, even if it left again. A write restoring earlier bytes is no echo.
-  const scan=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes,
+  const scan=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,octet_length(payload_json) AS payload_bytes,
       json_extract(payload_json,'$.payloadAfterBlobSha256') AS after_sha256,json_extract(payload_json,'$.payloadAfterByteLength') AS after_byte_length,
       CASE WHEN op_kind=? THEN origin_id=? AND relay_seq<? AND json_extract(payload_json,'$.opKind')='ydoc.update'
         WHEN COALESCE(json_extract(settlement_admission_json,'$.status'),'')='refused' OR json_extract(payload_json,'$.versionId') IS NOT ? THEN 0

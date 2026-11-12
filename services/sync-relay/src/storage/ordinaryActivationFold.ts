@@ -13,6 +13,8 @@ import type {OrdinaryFoldResult,OrdinaryFoldWork} from "./ordinaryActivationVali
  * ever covers rows activation would have accepted.
  */
 export interface OrdinaryFoldBounds {readonly pageRows:number;readonly pageBytes:number}
+/** The rows one fold page takes. A page of typed keystrokes validates well within 250 ms. */
+export const ORDINARY_FOLD_PAGE_ROWS=1_024;
 type PageMoment=Omit<OrdinaryCheckpointMoment,"projectedMarkdownSha256"|"projectedMarkdownByteLength">;
 type PageRow=Omit<OrdinaryCheckpointRow,"projection">;
 export type OrdinaryFoldPage={
