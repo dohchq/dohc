@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { asRecord } from "@dohc/workspace-core";
-import { CHATS_METHOD, ChatsLiveAdapter, type EngineTransport, type JsonValue, type Request, type Response } from "@dohc/workspace-engine-client";
+import { CHATS_METHOD, ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { readChat } from "@dohc/workspace-operations/chats";
 import {
   OPERATION_ID_MAX_LENGTH, phoneWriteIds, replayUnfinishedWrites, runPhoneWrite, type PhoneWrite, type PhoneWriteAnswer,
@@ -12,6 +10,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { notFound } from "./errors";
 import { OPERATION_KEEP_SETTLED_MS } from "./storage/operationRecords";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
+import { PhoneWriteEngine, seedPhoneChats, type PhoneWriteRow } from "./testing/phoneWriteEngine";
 
 // The phone's chat writes on a copy whose engine is an in-memory stand-in for
 // its chats and files. The stand-in writes a receipt for each keyed stage, as
@@ -25,137 +24,6 @@ afterEach(async () => {
 const WORKSPACE = "trip";
 const OWNER = "ana";
 const ORIGIN = "server-copy";
-const WRITES = new Set<string>([CHATS_METHOD.threadStart, CHATS_METHOD.messageSend, CHATS_METHOD.decisionResolve, CHATS_METHOD.reactionSet]);
-
-type Row = { originSeq: number; kind: string; payload: { [field: string]: JsonValue }; pushed: boolean };
-type Receipt = { threadId: string; outcome: "written" | "lost"; winnerMessageId?: string; rows: Row[] };
-
-class TestEngine implements EngineTransport {
-  readonly chats = new ChatsLoopbackEngine();
-  readonly files = new VersionedLoopbackEngine();
-  readonly failing = new Map<string, Error>();
-  /** Errors a method answers with after its write committed, as an engine whose answer failed after the commit. */
-  readonly failAfter = new Map<string, Error>();
-  /** Each chat write that reached the engine, in order. */
-  readonly writes: Request[] = [];
-  /** The method of each request asked of the engine, including one it then failed. */
-  readonly asked: string[] = [];
-  readonly receipts = new Map<string, Receipt>();
-  /** Runs as each chat write reaches the engine, before it changes anything. */
-  beforeWrite: () => void = () => undefined;
-  private readonly held = new Map<string, { reached(): void; open: Promise<void> }>();
-  private originSeq = 0;
-  onEvent() { return () => undefined; }
-  close() {}
-
-  /** Holds the next request for `method` until the test releases it. `reached` resolves once it waits. */
-  hold(method: string): { reached: Promise<void>; release(): void } {
-    let reached!: () => void, release!: () => void;
-    const waiting = new Promise<void>((resolve) => { reached = resolve; });
-    this.held.set(method, { reached, open: new Promise<void>((resolve) => { release = resolve; }) });
-    return { reached: waiting, release: () => release() };
-  }
-
-  async sendRequest(request: Request): Promise<Response> {
-    this.asked.push(request.method);
-    const held = this.held.get(request.method);
-    if (held !== undefined) {
-      this.held.delete(request.method);
-      held.reached();
-      await held.open;
-    }
-    const failure = this.failing.get(request.method);
-    if (failure) throw failure;
-    if (request.method === "sync.ordinary.publicationState") {
-      const stageKeys = asRecord(request.params)?.stageKeys as string[];
-      return { id: request.id, result: { stages: stageKeys.map((stageKey) => this.stateOf(stageKey)) } };
-    }
-    if (!request.method.startsWith("chats.")) return await this.files.sendRequest(request);
-    const write = WRITES.has(request.method);
-    if (write) {
-      this.writes.push(request);
-      this.beforeWrite();
-    }
-    let response: Response;
-    try {
-      response = await this.chats.sendRequest(request);
-    } catch (error) {
-      // The engine's own refusal: the request didn't happen, and won't if asked again.
-      throw new EngineRequestError(request.id, { code: "INVALID_PARAMS", message: error instanceof Error ? error.message : "refused", retry: "no" },
-        request.method);
-    }
-    if (write && asRecord(request.params)?.stageReceipt === true && typeof request.idempotencyKey === "string") {
-      await this.receive(request, request.idempotencyKey);
-    }
-    const after = this.failAfter.get(request.method);
-    if (after) throw after;
-    return response;
-  }
-
-  /** Pushes each row the receipts list that the relay hasn't had yet. */
-  push(relay: (row: Row) => void): void {
-    for (const receipt of this.receipts.values()) {
-      for (const row of receipt.rows.filter((each) => !each.pushed)) {
-        relay(row);
-        row.pushed = true;
-      }
-    }
-  }
-
-  private stateOf(stageKey: string): JsonValue {
-    const receipt = this.receipts.get(stageKey);
-    if (receipt === undefined) return { stageKey, state: "absent" };
-    return {
-      stageKey, state: "present", outcome: receipt.outcome, threadId: receipt.threadId,
-      ...(receipt.winnerMessageId === undefined ? {} : { winnerMessageId: receipt.winnerMessageId }),
-      coordinates: receipt.rows.map((row) => ({ originId: ORIGIN, originSeq: row.originSeq, state: row.pushed ? "pushed" : "pending" })),
-    };
-  }
-
-  // What the engine journals for a stage, read back from the stand-in.
-  private async receive(request: Request, key: string): Promise<void> {
-    if (this.receipts.has(key)) return;
-    const params = asRecord(request.params) ?? {};
-    const read = new ChatsLiveAdapter(this.chats, String(request.workspace), { workspaceId: WORKSPACE });
-    const row = (kind: string, payload: { [field: string]: JsonValue }): Row => ({ originSeq: ++this.originSeq, kind, payload, pushed: false });
-    if (request.method === CHATS_METHOD.decisionResolve) {
-      const threadId = String(params.threadId);
-      const decision = (await read.listThreadDecisions(WORKSPACE, threadId)).find((each) => each.messageId === params.messageId);
-      const winner = decision?.resolvedByMessageId ?? "";
-      const chosen = decision?.chosenOption;
-      this.receipts.set(key, winner === params.resolvedByMessageId
-        ? { threadId, outcome: "written", rows: [row("chat.decision.set", {
-          threadId, messageId: String(params.messageId), state: "resolved", resolvedByMessageId: winner,
-          ...(decision?.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
-          ...(chosen === undefined ? {} : { chosenOption: chosen }), atMs: 2,
-        })] }
-        : { threadId, outcome: "lost", winnerMessageId: winner, rows: [] });
-      return;
-    }
-    if (request.method === CHATS_METHOD.reactionSet) {
-      const threadId = String(params.threadId);
-      this.receipts.set(key, { threadId, outcome: "written", rows: [row("chat.reaction.set", {
-        threadId, messageId: String(params.messageId), emoji: String(params.emoji), authorId: String(asRecord(params.author)?.authorId),
-        authorKind: "human", authorDisplayName: String(asRecord(params.author)?.displayName), state: String(params.state), atMs: 3,
-      })] });
-      return;
-    }
-    const message = await read.getMessage({ workspaceId: WORKSPACE, messageId: String(params.messageId) });
-    const rows = [row("chat.message.append", {
-      messageId: message.id, threadId: message.threadId, authorKind: message.author.kind, authorDisplayName: message.author.displayName,
-      authorUserId: message.authorUserId ?? null, body: message.body, createdAtMs: message.createdAtMs,
-      ...(message.parentMessageId === undefined ? {} : { parentMessageId: message.parentMessageId }),
-    })];
-    // The open question, with its choices as the engine stores them.
-    const options = (await read.listThreadDecisions(WORKSPACE, message.threadId)).find((each) => each.messageId === message.id)?.options ?? [];
-    if (params.needsDecision === true || options.length > 0) {
-      rows.push(row("chat.decision.set", {
-        threadId: message.threadId, messageId: message.id, state: "open", ...(options.length > 0 ? { options: [...options] } : {}), atMs: 1,
-      }));
-    }
-    this.receipts.set(key, { threadId: message.threadId, outcome: "written", rows });
-  }
-}
 
 async function fixture() {
   const storage = await testStorage();
@@ -163,12 +31,12 @@ async function fixture() {
   storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch", streamIdentity: "stream" });
   storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 1, reasons: ["account"] });
   const raw = inspectDatabase(storagePath(storage));
-  const engine = new TestEngine();
+  const engine = new PhoneWriteEngine(WORKSPACE, ORIGIN);
   // The copy has files, so its active version exists, which placing a chat's file needs.
   engine.files.seedTextFile({ workspace: WORKSPACE, path: "README.md", text: "# Trip\n", objectId: "object-readme" });
   // What the relay does with what the copy pushes.
   let relay: "accept" | "refuse" | "hold" = "accept";
-  const pushed = (row: Row) => {
+  const pushed = (row: PhoneWriteRow) => {
     if (relay === "accept") {
       raw.prepare("INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES (?, ?, ?, ?, ?, 1)")
         .run(WORKSPACE, ORIGIN, row.originSeq, row.kind, JSON.stringify(row.payload));
@@ -225,19 +93,7 @@ async function fixture() {
 }
 
 const human = { kind: "human" as const, displayName: "Ana" };
-
-/** A Group with a post, an agent's poll in it, and a thread on a secret file with a question of the owner's. */
-async function seed(chats: ChatsLiveAdapter) {
-  const planning = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning", type: "both" });
-  await chats.startChannelThread({ workspaceId: WORKSPACE, channelId: planning.channelId, threadId: "thread-stay", messageId: "message-stay",
-    lane: "posts", author: human, authorUserId: OWNER, authorActorKey: null, body: "Where do we stay?" });
-  await chats.sendMessage({ workspaceId: WORKSPACE, threadId: "thread-stay", messageId: "message-poll", author: { kind: "agent", displayName: "Nova" },
-    authorOwnerDisplayName: "Ana", authorActorKey: null, body: "Alfama or Baixa?", options: ["Alfama", "Baixa"] });
-  const onSecret = await chats.createThread({ workspaceId: WORKSPACE, title: "Keys", linkedFile: { objectId: "object-env", pathHint: ".env" } });
-  await chats.sendMessage({ workspaceId: WORKSPACE, threadId: onSecret.id, messageId: "message-secret", author: human, authorUserId: OWNER,
-    authorActorKey: null, body: "Which key?", needsDecision: true });
-  return { planning, onSecret };
-}
+const seed = (chats: ChatsLiveAdapter) => seedPhoneChats(chats, WORKSPACE, OWNER);
 
 const reply = (operationId: string, threadId: string, more: { parentMessageId?: string; resolves?: { messageId: string; chosenOption?: string } } = {}):
   PhoneWrite => ({ operation: "reply", args: { operationId, threadId, body: "Alfama", ...more } });

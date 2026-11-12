@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { cutText } from "@dohc/workspace-contracts/names";
@@ -10,6 +11,7 @@ import {
   type ChatMessageContent, type ChatWriteHost,
 } from "@dohc/workspace-operations/chat-writes";
 import { failure, OperationError } from "@dohc/workspace-operations/chats";
+import { currentAccountFeedCursor } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
@@ -18,6 +20,7 @@ import {
   COULD_NOT_SEND, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
   type ExpectedRecord, type PublicationAnswer, type PublicationStage, type RefusalReason,
 } from "./operationPublication";
+import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { OperationRecord } from "./storage/operationRecords";
 
@@ -28,7 +31,8 @@ import type { OperationRecord } from "./storage/operationRecords";
 // with its canonical command, is written before the engine's first stage, and
 // every stage carries its derived key and asks the engine for a receipt. A
 // stage that a crash or a lost answer left unwritten replays from that stored
-// command, when the copy opens or the phone retries. No route calls this yet.
+// command, when the copy opens or the phone retries. The account operations
+// route calls `runAccountWrite`.
 
 /** The bounds of a phone write's operation ID, in UTF-16 code units, which storage's bound in characters admits. */
 export const OPERATION_ID_MIN_LENGTH = 1;
@@ -41,13 +45,27 @@ export function isOperationId(value: unknown): value is string {
 type MessageArgs = { body: string; needsDecision?: boolean; options?: string[] };
 
 /** A phone write, as its strict request schema admits it. */
-export type PhoneWrite =
-  | { operation: "post"; args: MessageArgs & { operationId: string; groupId: string; title?: string } }
-  | { operation: "send"; args: MessageArgs & { operationId: string; streamId: string } }
-  | { operation: "reply"; args: MessageArgs & {
-    operationId: string; threadId: string; parentMessageId?: string; resolves?: { messageId: string; chosenOption?: string };
-  } }
-  | { operation: "react"; args: { operationId: string; messageId: string; emoji: string; state: "added" | "removed" } };
+export type PhoneWrite = { [Operation in PhoneWriteOperation]: {
+  operation: Operation;
+  args: ReturnType<(typeof phoneWriteArgsSchemas)[Operation]["parse"]>;
+} }[PhoneWriteOperation];
+
+/** Whether `name` is a phone write's operation. */
+export function isPhoneWriteOperation(name: string): name is PhoneWriteOperation {
+  return Object.hasOwn(phoneWriteArgsSchemas, name);
+}
+
+/**
+ * The phone write `operation` names, with its arguments checked against its
+ * strict schema. An unknown name rejects with not-found, and arguments
+ * outside the schema with a bad request.
+ */
+export function parsePhoneWrite(operation: string, args: unknown): PhoneWrite {
+  if (!isPhoneWriteOperation(operation)) throw notFound();
+  const parsed = phoneWriteArgsSchemas[operation].safeParse(args);
+  if (!parsed.success) throw badRequest(`the arguments do not fit ${operation}`);
+  return { operation, args: parsed.data } as PhoneWrite;
+}
 
 /** Who writes, from the session. */
 export interface PhoneWriter {
@@ -749,6 +767,11 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
     await input.authorize();
     return answer;
   };
+  // Access is checked before the error is read: a bad request says something of the target.
+  const failedBeforeRecord = async (error: unknown) => {
+    await input.authorize();
+    return refusalBeforeRecord(error, signal);
+  };
   const messageIdOf = (record: OperationRecord) => {
     const stored = storedWrite(record.command);
     return stored === null || stored.write.kind === "react" ? undefined : stored.write.messageId;
@@ -768,7 +791,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
     } catch (error) {
       if (error instanceof RelayError || signal?.aborted) throw error;
       // Nothing is written yet, so the write wasn't sent; a recorded one's publication answers.
-      if (found.kind === "absent") return await answered(refusalBeforeRecord(error, signal));
+      if (found.kind === "absent") return await failedBeforeRecord(error);
       synced = false;
     }
     await input.authorize();
@@ -794,7 +817,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
         const author = authorOf(writer, workspaceId);
         stored = { stages: publicationStages(command, author, ids.key), write: command, author };
       } catch (error) {
-        return await answered(refusalBeforeRecord(error, signal));
+        return await failedBeforeRecord(error);
       }
       const session: Session = { stored, record: null, committed: false };
       // The row, written before the engine's first stage, under the identity the copy was made for.
@@ -813,7 +836,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       try {
         await runCommand(serverWriteHost(context, targets, session, claim), stored);
       } catch (error) {
-        if (session.record === null) return await answered(refusalBeforeRecord(error, signal));
+        if (session.record === null) return await failedBeforeRecord(error);
         if (error instanceof RelayError || signal?.aborted) throw error;
         // Once the row is made, what the relay holds answers, whatever this attempt saw.
       }
@@ -828,6 +851,36 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       nowMs, ...(input.pause ? { pause: input.pause } : {}),
     });
     return await answered(phoneAnswer(published, messageIdOf(record)));
+  });
+}
+
+/**
+ * Runs one phone write in a visit to the account's copy of `workspaceId`,
+ * and answers it with the change feed's cursor when it ran. A settled write
+ * answers without a sync, so the copy may not have pulled up to that cursor,
+ * and it is not a read's starting point. The caller authenticates the account, checks that it owns the
+ * workspace and that the workspace shows on the phone, and parses the write.
+ * `authorize` runs once the copy is open, then at each of the write's own
+ * checks. The write runs its own sync, so a settled one answers without it.
+ */
+export async function runAccountWrite(
+  server: { storage: SyncRelayStorage; copies: ServerCopies },
+  input: {
+    workspaceId: string;
+    writer: PhoneWriter;
+    write: PhoneWrite;
+    visitor: Extract<CopyVisitor, { reason: "account" }>;
+    authorize(): Promise<void>;
+  },
+): Promise<{ result: PhoneWriteAnswer; cursor: string }> {
+  const { storage } = server;
+  return await server.copies.withServerCopy(input.writer.accountId, input.workspaceId, input.visitor, async (copy) => {
+    await input.authorize();
+    const cursor = currentAccountFeedCursor(storage, input.workspaceId);
+    const result = await runPhoneWrite({
+      storage, copy, writer: input.writer, write: input.write, authorize: () => input.authorize(), signal: input.visitor.signal,
+    });
+    return { result, cursor };
   });
 }
 

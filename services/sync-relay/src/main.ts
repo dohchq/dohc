@@ -450,6 +450,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,
+  relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? {automationServer} : {}),
 });
 let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;

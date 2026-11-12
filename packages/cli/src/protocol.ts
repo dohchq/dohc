@@ -9,6 +9,7 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-work";
+import { MAX_CHAT_MESSAGE_BODY_BYTES } from "@dohc/workspace-contracts/chat-message-body";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
@@ -277,6 +278,43 @@ export const serverOperationArgsSchemas = {
   documentRead: documentReadArgsSchema.omit(callerArgs).strict(),
 };
 export type ServerOperation = keyof typeof serverOperationArgsSchemas;
+
+// The chat writes a phone sends through a server's copy, each field written
+// out. The server takes who writes, and every ID a write makes, from the
+// session. A target ID is an engine ID. A body is at most 64 KiB once its
+// line endings are normalized, and a CRLF halves, so its raw form is at most
+// twice that.
+const phoneOperationIdSchema = z.string().min(1).max(128);
+const phoneTargetIdSchema = z.string().min(1).max(256);
+const phoneChoiceSchema = z.string().min(1).max(200);
+const phoneMessageFields = {
+  body: z.string().min(1).max(2 * MAX_CHAT_MESSAGE_BODY_BYTES),
+  needsDecision: z.boolean().optional(),
+  options: z.array(phoneChoiceSchema).max(12).optional(),
+};
+export const phoneWriteArgsSchemas = {
+  post: z.object({
+    operationId: phoneOperationIdSchema,
+    groupId: phoneTargetIdSchema,
+    title: z.string().min(1).max(200).optional(),
+    ...phoneMessageFields,
+  }).strict(),
+  send: z.object({ operationId: phoneOperationIdSchema, streamId: phoneTargetIdSchema, ...phoneMessageFields }).strict(),
+  reply: z.object({
+    operationId: phoneOperationIdSchema,
+    threadId: phoneTargetIdSchema,
+    parentMessageId: phoneTargetIdSchema.optional(),
+    resolves: z.object({ messageId: phoneTargetIdSchema, chosenOption: phoneChoiceSchema.optional() }).strict().optional(),
+    ...phoneMessageFields,
+  }).strict(),
+  react: z.object({
+    operationId: phoneOperationIdSchema,
+    messageId: phoneTargetIdSchema,
+    emoji: z.string().min(1).max(32),
+    state: z.enum(["added", "removed"]),
+  }).strict(),
+};
+export type PhoneWriteOperation = keyof typeof phoneWriteArgsSchemas;
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
