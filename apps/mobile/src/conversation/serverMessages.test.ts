@@ -4,7 +4,8 @@ import { conversationItems, serverMessage } from "./serverMessages";
 
 const at = new Date(2026, 10, 5, 12, 0).getTime();
 const entry = (id: string, authorKind: ChatMessage["authorKind"], authorName: string, minutes: number): ChatMessage =>
-  ({ id, threadId: "thread-1", authorKind, authorName, body: id, createdAtMs: at + minutes * 60_000 });
+  ({ id, threadId: "thread-1", authorKind, authorName, body: id, createdAtMs: at + minutes * 60_000, parentMessageId: null, attachments: [],
+    needsDecision: false, decisionState: null, options: [], chosenOption: null, resolvedByMessageId: null, reactions: [] });
 const continued = (...entries: ChatMessage[]) => conversationItems(entries.map(item => serverMessage(item, null, ["#000000"])), at)
   .flatMap(item => item.type === "message" ? [item.continued] : []);
 

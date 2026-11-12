@@ -358,22 +358,25 @@ function advance(storage: SyncRelayStorage, record: OperationRecord, nowMs: numb
 /**
  * Runs one engine stage of a recorded write. An error doesn't say the stage
  * didn't commit: an internal failure can follow a commit. Only the engine's
- * refusal of the stage's content, with no receipt for the stage and no
- * earlier stage of the write committed, proves nothing of it can publish, so
- * the write is refused now. Otherwise its publication judges it.
+ * refusal of the stage's content, with no receipt for the stage, proves the
+ * stage never wrote. With no earlier stage of the write committed, nothing
+ * of it can publish, so the write is refused now. An answer's decision stage
+ * after its reply committed is marked instead: nothing writes it again, and
+ * publication refuses the write once the reply is published. Any other
+ * outcome is left to publication.
  */
 async function runStage<T>(context: WriteContext, record: OperationRecord, progress: { committed: boolean }, key: string,
-  run: () => Promise<T>): Promise<T> {
+  run: () => Promise<T>, decision?: { threadId: string }): Promise<T> {
   try {
     const result = await run();
     progress.committed = true;
     return result;
   } catch (error) {
-    if (!progress.committed && refusedByEngine(error) && await receiptAbsent(context, key)) {
-      context.storage.advanceAccountOperation({
-        accountId: record.accountId, operationId: record.operationId, stage: "refused",
-        result: { threadId: null, reason: COULD_NOT_SEND }, nowMs: context.nowMs(),
-      });
+    const change = !progress.committed ? { stage: "refused" as const, result: { threadId: null, reason: COULD_NOT_SEND } }
+      : decision !== undefined ? { result: { threadId: decision.threadId, refusedStage: key } }
+      : null;
+    if (change !== null && refusedByEngine(error) && await receiptAbsent(context, key)) {
+      context.storage.advanceAccountOperation({ accountId: record.accountId, operationId: record.operationId, nowMs: context.nowMs(), ...change });
     }
     throw error;
   }
@@ -441,7 +444,8 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
     await context.authorize();
     stillCurrent(context);
     const row = (session.record ??= record());
-    return await runStage(context, row, session, stageKey(stored, role), run);
+    return await runStage(context, row, session, stageKey(stored, role), run,
+      role === "decision" ? { threadId: write.threadId } : undefined);
   }
   const progress = (change: { stage?: "reply-written" | "answer-written"; threadId?: string }) => {
     if (session.record !== null) advance(storage, session.record, nowMs(), change);
@@ -611,12 +615,14 @@ async function replayStages(context: WriteContext, record: OperationRecord, stor
   const keys = stored.stages.map((stage) => stage.key);
   const receipts = await receiptReader(copy, copy.workspace, context.signal)(keys);
   const present = new Set(receipts.stages.filter((stage) => stage.state === "present").map((stage) => stage.stageKey));
-  if (keys.every((key) => present.has(key))) return;
+  const progress = { committed: present.size > 0 };
+  // A decision the engine refused is never asked again; publication settles its write.
+  const refused = asRecord(record.result)?.refusedStage;
+  const absent = (role: Role) => !present.has(stageKey(stored, role)) && stageKey(stored, role) !== refused;
+  if (!stored.stages.some((stage) => absent(stage.role))) return;
   const adapter = new ChatsLiveAdapter(copy.client, copy.workspace, { workspaceId });
   const targets = visibleTargets(storage, copy);
-  const progress = { committed: present.size > 0 };
   const { write } = stored;
-  const absent = (role: Role) => !present.has(stageKey(stored, role));
   // The thread is checked, then access, then the stage started, with nothing awaited between the last two.
   const stage = async <T>(role: Role, run: () => Promise<T>): Promise<T> => {
     if (write.kind !== "start") await targets.thread(write.threadId);

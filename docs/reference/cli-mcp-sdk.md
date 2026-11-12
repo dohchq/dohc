@@ -648,7 +648,7 @@ Read one dohc Chat thread, or one group's stream. With `threadId`: its messages 
 - `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
 - `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests?, authorReported?, work? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, reactions?, agentRequests?, authorReported?, work? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 

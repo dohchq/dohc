@@ -83,7 +83,11 @@ export type ExpectedRecord = {
   optional?: boolean;
 };
 
-/** What a settled write keeps as its result. */
+/**
+ * What a settled write keeps as its result. Before it settles, the row may
+ * hold its thread, and `refusedStage`: the key of a stage the engine refused
+ * before writing, which publication refuses the write by.
+ */
 export type OperationResult = { threadId: string | null; reason?: RefusalReason; winnerMessageId?: string };
 
 export type Verdict =
@@ -146,7 +150,9 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
  * row for a coordinate the copy never saw pushed too, since a push whose
  * answer was lost may still have reached the relay. A lost decision answers
  * "already answered", and a message whose own records were accepted is
- * published whatever the rest does.
+ * published whatever the rest does. A stage the row marks as refused by the
+ * engine, still without a receipt, refuses the write once the rest is
+ * resolved, so a published reply settles with its refused decision.
  */
 export function judgeOperation(
   storage: Pick<SyncRelayStorage, "fetchAccountOperationLogRow">,
@@ -155,10 +161,16 @@ export function judgeOperation(
   settling: RefusalReason | null,
 ): Verdict {
   const stages = commandStages(record.command);
+  // A stage the engine refused before it wrote, with no receipt then, which nothing asks of it again.
+  const refusedStage = asRecord(record.result)?.refusedStage;
   let threadId: string | null = null, unresolved = stages === null, refused = false, messagePublished = false;
   let lost: { winnerMessageId?: string } | null = null;
   for (const stage of stages ?? []) {
     const receipt = receipts.get(stage.key);
+    if (receipt?.state === "absent" && stage.key === refusedStage) {
+      refused = true;
+      continue;
+    }
     if (receipt === undefined || receipt.state === "absent") {
       unresolved = true;
       continue;
@@ -357,7 +369,8 @@ export async function inspectOperations(
  * One bounded attempt for unfinished writes on an open copy: one sync step,
  * queued behind any sync already running, then their receipts and the
  * relay's rows, read whether or not the step succeeded. `signal` ends the
- * attempt wherever it waits; the copy's own passes carry the sync on.
+ * attempt wherever it waits; the copy's own passes carry the sync on. A
+ * caller's `authorize` runs once the step ends, before anything is read.
  */
 export async function publishOnce(
   storage: PublicationStorage,
@@ -365,6 +378,7 @@ export async function publishOnce(
   records: readonly OperationRecord[],
   nowMs: () => number,
   signal?: AbortSignal,
+  authorize?: () => Promise<void>,
 ): Promise<Array<OperationRecord | null> | null> {
   let syncError: unknown;
   try {
@@ -374,6 +388,7 @@ export async function publishOnce(
     if (copy.signal.aborted) return null;
     syncError = error;
   }
+  await authorize?.();
   const inspected = await inspectOperations(storage, copy.workspaceId, receiptReader(copy, copy.workspace, signal), records, nowMs, syncError);
   signal?.throwIfAborted();
   return inspected;
@@ -390,18 +405,20 @@ const answerOf = (record: OperationRecord | null): PublicationAnswer => ({
  * so the lane is free between them, until the relay accepted or refused
  * every record the receipts list, or `deadlineMs` passes. The deadline ends
  * this request's attempt wherever it waits, in the lane, in an engine
- * request, or in a receipt read. Then `authorize` checks the caller again,
- * and the answer comes from the record: saved, refused, or pending, which
- * the copy's passes carry on. `signal` is the caller's: its abort rejects
- * instead. A sync that succeeds, or has more to do, is never taken as
- * acceptance. Never call it from a sync callback: it waits for the lane.
+ * request, or in a receipt read. `authorize` checks the caller again after
+ * each step and each wait between attempts, and once more before the answer,
+ * which comes from the record: saved, refused, or pending, which the copy's
+ * passes carry on. A caller who lost access gets its rejection, never a
+ * result. `signal` is the caller's: its abort rejects instead. A sync that
+ * succeeds, or has more to do, is never taken as acceptance. Never call it
+ * from a sync callback: it waits for the lane.
  */
 export async function publishOperation(input: {
   storage: PublicationStorage;
   copy: PublicationCopy;
   record: OperationRecord;
   signal?: AbortSignal;
-  /** Checks the caller's credential, ownership, and "Show on phone" again, right before the answer. */
+  /** Checks the caller's credential, ownership, and "Show on phone" again: after each wait, and right before the answer. */
   authorize?(): Promise<void>;
   deadlineMs?: number;
   nowMs?(): number;
@@ -411,6 +428,7 @@ export async function publishOperation(input: {
   const { storage, copy, signal } = input;
   const nowMs = input.nowMs ?? Date.now;
   const pause = input.pause ?? ((ms: number, abort?: AbortSignal) => sleep(ms, undefined, abort === undefined ? {} : { signal: abort }));
+  const authorize = input.authorize?.bind(input);
   // A write made on an earlier incarnation settles when that incarnation's folder goes.
   if (input.record.workspaceId !== copy.workspaceId || input.record.incarnation !== copy.incarnation) return answerOf(input.record);
   const { accountId, operationId } = input.record;
@@ -423,10 +441,11 @@ export async function publishOperation(input: {
   const attempt = signal === undefined ? expired.signal : AbortSignal.any([expired.signal, signal]);
   try {
     for (let wait = FIRST_POLL_MS; record !== null && record.stage !== "saved" && record.stage !== "refused"; wait = Math.min(wait * 2, MAX_POLL_MS)) {
-      const after = await publishOnce(storage, copy, [record], nowMs, attempt);
+      const after = await publishOnce(storage, copy, [record], nowMs, attempt, authorize);
       if (after !== null) record = after[0] ?? null;
       if (record === null || record.stage === "saved" || record.stage === "refused" || nowMs() + wait >= deadline) break;
       await pause(wait, attempt);
+      await authorize?.();
     }
   } catch (error) {
     // Only the deadline ends the attempt with an answer; the caller's abort, or a failure, rejects.
@@ -435,7 +454,7 @@ export async function publishOperation(input: {
   } finally {
     clearTimeout(timer);
   }
-  await input.authorize?.();
+  await authorize?.();
   return answerOf(record);
 }
 

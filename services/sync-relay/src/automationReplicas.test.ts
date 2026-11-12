@@ -2871,6 +2871,7 @@ describe("the automation replicas", () => {
       const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
       expect(sends()).toBe(0);
+      expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
       engine.receipts(new Map());
 
       // A visit's sync fails before it pulls, while the relay may have moved the page to a secret path.
@@ -2882,10 +2883,12 @@ describe("the automation replicas", () => {
       expect(sends(), `moved: ${moved}; the copy is behind the relay, so nothing replays`).toBe(0);
 
       // A full sync catches it up again and asks for the pass that replays, into a thread still visible.
+      const before = errors.length;
       engine.failPush(false);
       await replica.sync();
       await restarted.pass();
       expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+      expect(errors.slice(before), `moved: ${moved}; the final pass`).toEqual([]);
     }
   });
 
@@ -2909,7 +2912,9 @@ describe("the automation replicas", () => {
       await first.running.close();
       // The restarted copy catches up, but its receipts can't be read, so the replay stays owed.
       engine.receipts(new Error("the engine is busy"));
-      const restarted = await stepped(storage, wanted, { root: first.root, onError: () => undefined });
+      const errors: unknown[] = [];
+      const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
+      expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
       engine.receipts(new Map());
 
@@ -2921,10 +2926,12 @@ describe("the automation replicas", () => {
       await restarted.pass();
       expect(sends(), `moved: ${moved}; nothing replays before the sync pulls`).toBe(0);
 
+      const before = errors.length;
       gate.release();
       await syncing;
       await restarted.pass();
       expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+      expect(errors.slice(before), `moved: ${moved}; the final pass`).toEqual([]);
     }
   });
 
@@ -2948,7 +2955,9 @@ describe("the automation replicas", () => {
       await first.running.close();
       // The restarted copy catches up, but its receipts can't be read, so the replay stays owed.
       engine.receipts(new Error("the engine is busy"));
-      const restarted = await stepped(storage, wanted, { root: first.root, onError: () => undefined });
+      const errors: unknown[] = [];
+      const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
+      expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
 
       // The next pass's replay starts while the copy is current, and waits on its receipt read.
@@ -2972,10 +2981,12 @@ describe("the automation replicas", () => {
       expect(sends(), `moved: ${moved}; the replay stopped`).toBe(0);
 
       // Still owed: a pass after the sync replays, into a thread still visible.
+      const before = errors.length;
       gate.release();
       await syncing;
       await restarted.pass();
       expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+      expect(errors.slice(before), `moved: ${moved}; the final pass`).toEqual([]);
     }
   });
 

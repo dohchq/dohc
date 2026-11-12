@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cliResultSchemas } from "@dohc/cli/protocol";
 import {
   FILES_GROUP,
   listFileChats,
@@ -234,6 +235,41 @@ describe("chat", () => {
     store.messages.set("thread-orphan", []);
     expect(await readChat(host, { threadId: "thread-orphan" }))
       .toEqual({ ok: false, reason: "chat thread not found: thread-orphan" });
+  });
+
+  it("gives each message its reactions from one read of the thread, and a stream's from its items, which show leaves out", async () => {
+    const { store } = tripStore();
+    const sam = { authorId: "user-sam", kind: "human" as const, displayName: "Sam" };
+    const nova = { authorId: "agent-nova", kind: "agent" as const, displayName: "Nova" };
+    const thread = store.addThread({ id: "thread-chat", channelId: "channel-trip", lane: "chat" });
+    const first = store.addMessage({ id: "message-1", threadId: thread.id });
+    store.addMessage({ id: "message-2", threadId: thread.id });
+    const thumbs = store.addReaction(first, "👍", sam);
+    const party = store.addReaction(first, "🎉", nova);
+    const reactions = [
+      { emoji: "👍", authorId: "user-sam", authorKind: "human", authorDisplayName: "Sam", atMs: thumbs.atMs },
+      { emoji: "🎉", authorId: "agent-nova", authorKind: "agent", authorDisplayName: "Nova", atMs: party.atMs },
+    ];
+    const host = memoryHost(store, { writable: false });
+
+    const read = await readChat(host, { threadId: thread.id });
+    if (!read.ok || !("thread" in read)) throw new Error("expected a thread");
+    expect(read.messages[0]?.reactions).toEqual(reactions);
+    expect(read.messages[1], "a message with none has no field").not.toHaveProperty("reactions");
+    expect(store.log.filter((method) => method === "listReactions"), "one read for the thread").toHaveLength(1);
+    expect(cliResultSchemas.chat.safeParse(read).success).toBe(true);
+
+    store.log.length = 0;
+    const stream = await readChat(host, { group: "trip" });
+    if (!stream.ok || !("stream" in stream)) throw new Error("expected a stream");
+    expect(stream.stream.items.map((item) => item.message.reactions)).toEqual([reactions, undefined]);
+    expect(store.log, "a stream carries its own").not.toContain("listReactions");
+    expect(cliResultSchemas.chat.safeParse(stream).success).toBe(true);
+
+    const shown = await showChat(host, { target: "trip", peek: true });
+    if (!("stream" in shown)) throw new Error("expected a stream");
+    expect(shown.stream.items[0]).not.toHaveProperty("reactions");
+    expect(shown.stream.items[0]?.message).not.toHaveProperty("reactions");
   });
 
   it("words a failed group read with the group it named", async () => {

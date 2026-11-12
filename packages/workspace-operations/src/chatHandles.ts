@@ -3,6 +3,7 @@ import { formatMessageHandle } from "@dohc/cli/thread-markdown";
 import type {
   ChatChannelSummary,
   ChatMessage,
+  ChatReaction,
   ChatStreamItem,
   ChatThread,
 } from "@dohc/workspace-contracts/engine";
@@ -71,9 +72,23 @@ export function rawChatThread(thread: ChatThread) {
   };
 }
 
+// A message's active reactions, each by its author. A message with none has no field.
+function rawReactions(reactions: readonly ChatReaction[]) {
+  return reactions.length === 0 ? {} : {
+    reactions: reactions.map((reaction) => ({
+      emoji: reaction.emoji,
+      authorId: reaction.author.authorId,
+      authorKind: reaction.author.kind,
+      authorDisplayName: reaction.author.displayName,
+      atMs: reaction.atMs,
+    })),
+  };
+}
+
 export function rawChatMessage(
   message: ChatMessage,
   decision: ChatStreamItem["decision"],
+  reactions: readonly ChatReaction[],
 ) {
   return {
     id: message.id,
@@ -95,6 +110,7 @@ export function rawChatMessage(
       ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
+    ...rawReactions(reactions),
     ...agentRequestsFor(message),
     ...reportedFor(message),
     ...(message.work ? { work: { ...message.work } } : {}),

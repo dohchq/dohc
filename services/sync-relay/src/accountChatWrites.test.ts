@@ -3,9 +3,11 @@ import { asRecord } from "@dohc/workspace-core";
 import { CHATS_METHOD, ChatsLiveAdapter, type EngineTransport, type JsonValue, type Request, type Response } from "@dohc/workspace-engine-client";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { readChat } from "@dohc/workspace-operations/chats";
 import {
   OPERATION_ID_MAX_LENGTH, phoneWriteIds, replayUnfinishedWrites, runPhoneWrite, type PhoneWrite, type PhoneWriteAnswer,
 } from "./accountChatWrites";
+import { serverChats } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { notFound } from "./errors";
 import { OPERATION_KEEP_SETTLED_MS } from "./storage/operationRecords";
@@ -36,14 +38,32 @@ class TestEngine implements EngineTransport {
   readonly failAfter = new Map<string, Error>();
   /** Each chat write that reached the engine, in order. */
   readonly writes: Request[] = [];
+  /** The method of each request asked of the engine, including one it then failed. */
+  readonly asked: string[] = [];
   readonly receipts = new Map<string, Receipt>();
   /** Runs as each chat write reaches the engine, before it changes anything. */
   beforeWrite: () => void = () => undefined;
+  private readonly held = new Map<string, { reached(): void; open: Promise<void> }>();
   private originSeq = 0;
   onEvent() { return () => undefined; }
   close() {}
 
+  /** Holds the next request for `method` until the test releases it. `reached` resolves once it waits. */
+  hold(method: string): { reached: Promise<void>; release(): void } {
+    let reached!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    this.held.set(method, { reached, open: new Promise<void>((resolve) => { release = resolve; }) });
+    return { reached: waiting, release: () => release() };
+  }
+
   async sendRequest(request: Request): Promise<Response> {
+    this.asked.push(request.method);
+    const held = this.held.get(request.method);
+    if (held !== undefined) {
+      this.held.delete(request.method);
+      held.reached();
+      await held.open;
+    }
     const failure = this.failing.get(request.method);
     if (failure) throw failure;
     if (request.method === "sync.ordinary.publicationState") {
@@ -529,5 +549,196 @@ describe("a phone's chat write through the server's copy", () => {
     await expect(f.run(reply("op-gone", "thread-stay"))).rejects.toMatchObject({ code: "not_found" });
     expect(f.rows()).toBe(0);
     expect(f.engine.writes).toEqual([]);
+  });
+
+  it("makes no row and no change when access ends while a target read waits", async () => {
+    const cases: Array<[label: string, method: string, write: PhoneWrite]> = [
+      ["a reply's thread", CHATS_METHOD.threadsList, reply("op-thread", "thread-stay")],
+      ["a reply's thread, placed by its file", "files.resolve", reply("op-file", "thread-stay")],
+      ["a reacted message", CHATS_METHOD.messageGet, react("op-message", "message-stay")],
+    ];
+    for (const [label, method, write] of cases) {
+      const f = await fixture();
+      await seed(f.chats);
+      const held = f.engine.hold(method);
+      const writing = f.run(write);
+      await held.reached;
+      f.authorize.mockImplementation(async () => { throw notFound(); });
+      held.release();
+      await expect(writing, label).rejects.toMatchObject({ code: "not_found" });
+      expect(f.rows(), label).toBe(0);
+      expect(f.engine.writes, label).toEqual([]);
+    }
+  });
+
+  it("starts no decision once access ends after an answer's reply, on the first attempt and on a retry's replay", async () => {
+    const answer = reply("op-answer", "thread-stay", { resolves: { messageId: "message-poll", chosenOption: "Alfama" } });
+    const resolves = (f: Awaited<ReturnType<typeof fixture>>) => f.engine.asked.filter((method) => method === CHATS_METHOD.decisionResolve).length;
+
+    // The first attempt: access ends while the reply is written, the last wait before the decision.
+    const first = await fixture();
+    await seed(first.chats);
+    const sending = first.engine.hold(CHATS_METHOD.messageSend);
+    const answering = first.run(answer);
+    await sending.reached;
+    first.authorize.mockImplementation(async () => { throw notFound(); });
+    sending.release();
+    await expect(answering).rejects.toMatchObject({ code: "not_found" });
+    expect(first.engine.writes.map((request) => request.method), "the reply exists").toEqual([CHATS_METHOD.messageSend]);
+    expect(resolves(first)).toBe(0);
+
+    // A retry: the reply saved and the decision's answer was lost; access ends while replay reads the question.
+    const retry = await fixture();
+    await seed(retry.chats);
+    retry.engine.failing.set(CHATS_METHOD.decisionResolve, new Error("the engine went away"));
+    expect(await retry.run(answer)).toMatchObject({ ok: true, state: "pending" });
+    retry.engine.failing.clear();
+    const reading = retry.engine.hold(CHATS_METHOD.messageGet);
+    const retrying = retry.run(answer);
+    await reading.reached;
+    retry.authorize.mockImplementation(async () => { throw notFound(); });
+    reading.release();
+    await expect(retrying).rejects.toMatchObject({ code: "not_found" });
+    expect(resolves(retry), "only the first attempt's").toBe(1);
+  });
+
+  it("replays nothing once access ends while a replay's target read waits, from a retry or in the background", async () => {
+    const replies = (f: Awaited<ReturnType<typeof fixture>>) => f.engine.asked.filter((method) => method === CHATS_METHOD.messageSend).length;
+    // A reply whose send's answer was lost, so its stage never committed as far as anything knows.
+    const unsent = async () => {
+      const f = await fixture();
+      await seed(f.chats);
+      f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
+      expect(await f.run(reply("op-replay", "thread-stay"))).toMatchObject({ ok: true, state: "pending" });
+      f.engine.failing.clear();
+      return f;
+    };
+
+    const retried = await unsent();
+    const held = retried.engine.hold(CHATS_METHOD.threadsList);
+    const retrying = retried.run(reply("op-replay", "thread-stay"));
+    await held.reached;
+    retried.authorize.mockImplementation(async () => { throw notFound(); });
+    held.release();
+    await expect(retrying).rejects.toMatchObject({ code: "not_found" });
+    expect(replies(retried), "only the lost send").toBe(1);
+
+    const background = await unsent();
+    const errors: unknown[] = [];
+    const replay = () => replayUnfinishedWrites({ storage: background.storage, copy: background.copy, nowMs: () => 0,
+      onError: (error) => errors.push(error), records: background.storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE, incarnation: 1 }) });
+    const reading = background.engine.hold(CHATS_METHOD.threadsList);
+    const replaying = replay();
+    await reading.reached;
+    background.storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: WORKSPACE, showOnPhone: false });
+    reading.release();
+    await replaying;
+    expect(replies(background), "only the lost send").toBe(1);
+    background.storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: WORKSPACE, showOnPhone: true });
+    expect(await replay()).toBe(true);
+    expect(replies(background), "replayed once access is back").toBe(2);
+    expect(errors).toEqual([]);
+  });
+
+  it("reads a visible thread's reactions and decisions through the reads' filter, and never a hidden thread's", async () => {
+    const f = await fixture();
+    const { onSecret } = await seed(f.chats);
+    expect(await f.run(react("op-react", "message-stay"))).toMatchObject({ ok: true, state: "saved" });
+    const read = await readChat(serverChats(f.storage, f.copy, WORKSPACE), { threadId: "thread-stay" });
+    if (!read.ok || !("thread" in read)) throw new Error("expected a thread");
+    expect(read.messages.find((message) => message.id === "message-stay")?.reactions)
+      .toEqual([expect.objectContaining({ emoji: "👍", authorId: OWNER, authorKind: "human", authorDisplayName: "Ana" })]);
+    expect(read.messages.find((message) => message.id === "message-poll"))
+      .toMatchObject({ needsDecision: true, decisionState: "open", options: ["Alfama", "Baixa"] });
+
+    await f.chats.setReaction({ workspaceId: WORKSPACE, threadId: onSecret.id, messageId: "message-secret", emoji: "🔑",
+      author: { authorId: OWNER, kind: "human", displayName: "Ana" }, state: "added" });
+    f.engine.asked.length = 0;
+    const hidden = serverChats(f.storage, f.copy, WORKSPACE).store;
+    await expect(hidden.listReactions({ workspaceId: WORKSPACE, threadId: onSecret.id })).rejects.toThrow(`chat thread not found: ${onSecret.id}`);
+    await expect(hidden.listThreadDecisions(WORKSPACE, onSecret.id)).rejects.toThrow(`chat thread not found: ${onSecret.id}`);
+    expect(f.engine.asked).not.toContain(CHATS_METHOD.reactionsList);
+    expect(f.engine.asked).not.toContain(CHATS_METHOD.decisionsListForThread);
+  });
+});
+
+describe("an answer whose decision the engine refused", () => {
+  const answer = reply("op-answer", "thread-stay", { resolves: { messageId: "message-poll", chosenOption: "Alfama" } });
+  const ids = phoneWriteIds(OWNER, WORKSPACE, "op-answer");
+  const refusal = () => new EngineRequestError(1, { code: "INVALID_PARAMS", message: "decision-not-found", retry: "no" }, CHATS_METHOD.decisionResolve);
+  const refused = { ok: false, refusal: "refused", reason: "Couldn't send", threadId: "thread-stay" };
+  const resolves = (f: Awaited<ReturnType<typeof fixture>>) => f.engine.asked.filter((method) => method === CHATS_METHOD.decisionResolve).length;
+
+  it("stays pending until its reply is published, then settles refused, and never asks for that decision again", async () => {
+    const f = await fixture();
+    await seed(f.chats);
+    const errors: unknown[] = [];
+    const replay = () => replayUnfinishedWrites({ storage: f.storage, copy: f.copy, nowMs: () => 0, onError: (error) => errors.push(error),
+      records: f.storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE, incarnation: 1 }) });
+    f.engine.failing.set(CHATS_METHOD.decisionResolve, refusal());
+    f.relay("hold");
+    expect(await f.run(answer), "the reply isn't published yet")
+      .toEqual({ ok: true, state: "pending", threadId: "thread-stay", messageId: ids.messageId("reply") });
+    expect(f.operation("op-answer")).toMatchObject({ stage: "publishing", message_state: "pending" });
+    // Another write on the same copy, unpublished too.
+    expect(await f.run(reply("op-other", "thread-stay"))).toMatchObject({ ok: true, state: "pending" });
+    expect(resolves(f)).toBe(1);
+
+    // A restart, then a retry, while the engine would take the decision now: neither asks for it.
+    f.engine.failing.clear();
+    expect(await replay()).toBe(true);
+    expect(resolves(f)).toBe(1);
+    f.relay("accept");
+    expect(await f.run(answer), "settled once its reply is published").toEqual(refused);
+    expect(f.operation("op-answer")).toMatchObject({ stage: "refused", message_state: "published" });
+    expect(await f.run(answer)).toEqual(refused);
+    await replay();
+    expect(resolves(f)).toBe(1);
+    expect(errors).toEqual([]);
+
+    // The other write is still unfinished, and saves.
+    expect(f.storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE }).map((row) => row.operationId)).toEqual(["op-other"]);
+    expect(await f.run(reply("op-other", "thread-stay"))).toMatchObject({ ok: true, state: "saved" });
+  });
+
+  it("settles refused when a retry's replayed decision is refused after the reply published", async () => {
+    const f = await fixture();
+    await seed(f.chats);
+    f.engine.failing.set(CHATS_METHOD.decisionResolve, new Error("the engine went away"));
+    expect(await f.run(answer)).toMatchObject({ ok: true, state: "pending" });
+    expect(f.operation("op-answer")).toMatchObject({ message_state: "published" });
+    f.engine.failing.set(CHATS_METHOD.decisionResolve, refusal());
+    expect(await f.run(answer)).toEqual(refused);
+    expect(f.operation("op-answer")).toMatchObject({ stage: "refused", message_state: "published" });
+    f.engine.failing.clear();
+    expect(await f.run(answer)).toEqual(refused);
+    expect(resolves(f), "the lost one and the refused one").toBe(2);
+  });
+
+  it("saves from its receipt when the decision committed though the engine then refused", async () => {
+    const f = await fixture();
+    await seed(f.chats);
+    f.engine.failAfter.set(CHATS_METHOD.decisionResolve, refusal());
+    expect(await f.run(answer)).toEqual({ ok: true, state: "saved", threadId: "thread-stay", messageId: ids.messageId("reply") });
+    expect(resolves(f)).toBe(1);
+  });
+
+  it("stays pending, and asks again on a retry, after an internal error or a refusal whose receipt can't be read", async () => {
+    const cases: Array<[label: string, failures: Array<[method: string, error: Error]>]> = [
+      ["an internal error", [[CHATS_METHOD.decisionResolve,
+        new EngineRequestError(1, { code: "INTERNAL", message: "persist-failed", retry: "no" }, CHATS_METHOD.decisionResolve)]]],
+      ["an unreadable receipt", [[CHATS_METHOD.decisionResolve, refusal()], ["sync.ordinary.publicationState", new Error("the engine is busy")]]],
+    ];
+    for (const [label, failures] of cases) {
+      const f = await fixture();
+      await seed(f.chats);
+      for (const [method, error] of failures) f.engine.failing.set(method, error);
+      expect(await f.run(answer), label).toMatchObject({ ok: true, state: "pending" });
+      expect(f.operation("op-answer"), label).toMatchObject({ stage: "publishing" });
+      expect(JSON.parse(String(f.operation("op-answer")?.result_json)), label).not.toHaveProperty("refusedStage");
+      f.engine.failing.clear();
+      expect(await f.run(answer), label).toMatchObject({ ok: true, state: "saved" });
+      expect(resolves(f), label).toBe(2);
+    }
   });
 });
