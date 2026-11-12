@@ -578,6 +578,11 @@ export async function startServiceLiveHost(options: {
       attached.confirmed = number;
       attached.last = result.hasMore ? "more" : "done";
       if (!result.hasMore) {attached.seen = state; attached.overlapped = attached.check; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
+      // A recovery probe that brought nothing found the relay as the host knew it, so its pass can still be idle:
+      // the three requests of each of its pages count with the ones an idle pass sends.
+      if (reason === "probe" && !result.hasMore && result.pages.every(page => page.committed && page.fetched === 0 && page.applied === 0 &&
+        page.refused === 0 && page.skipped === 0 && page.conflictsOpened === 0 && page.changedPaths.length === 0 && page.held.length === 0 &&
+        page.newlyHeld.listed.length === 0 && page.departed.listed.length === 0)) idleRequests += 3 * result.pages.length;
       // A departure is confirmed only by a pull whose departed list reaches it, so while one has not, the next pull
       // moves the list on toward it. Its workspace drains only at a pull that reads that list from its start and
       // finds nothing departed, so a list that ended empty partway through is read once more from its start. Both

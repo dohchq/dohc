@@ -7861,9 +7861,9 @@ it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes,
     expect(host.hostedPulls("workspace").reasons.probe).toBeGreaterThanOrEqual(2);
     if (idlePollIntervalMs === 250) expect(passes).toBe(240);
     else {
-      // No pause is longer than the idle interval, and the passes after each probe start again from the poll interval.
+      // No pause is longer than the idle interval, and a probe that brings nothing leaves the pause as it is.
       expect(passes).toBeGreaterThanOrEqual(30);
-      expect(passes).toBeLessThanOrEqual(40);
+      expect(passes).toBeLessThanOrEqual(32);
     }
   });
 
@@ -7899,6 +7899,24 @@ it("runs the pass a relay write asks for one poll interval after the last pass, 
   await vi.waitFor(() => h.caughtUp("workspace"));
   expect(paced.clock.nowMs()).toBe(idle + paced.poll);
   expect(passes).toBe(1);
+});
+
+// Proves: a recovery probe that finds nothing new leaves an idle host's pause at its idle interval. One that brings
+// a row no notice announced puts it back to the poll interval, so the pass that follows the pull comes as soon as before.
+it("keeps an idle host's pause through a recovery probe that brings nothing, and not through one that brings a row", async () => {
+  const paced = pacedPasses(), h = await readyHostedHost(["workspace"], {intervals: {pollIntervalMs: paced.poll, idlePollIntervalMs: paced.ceiling}});
+  const host = await startServiceLiveHost({...h.f, ...paced.timers});
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  const probes = () => host.hostedPulls("workspace").reasons.probe ?? 0;
+  await paced.until(h.f, () => probes() === 1);
+  expect(probes()).toBe(1);
+  expect(paced.resting()).toBe(paced.ceiling);
+  h.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','device',0,'workspace.init','{}',1)").run();
+  await paced.until(h.f, () => probes() === 2);
+  expect(probes()).toBe(2);
+  h.caughtUp("workspace");
+  expect(paced.resting()).toBe(paced.poll);
 });
 
 // A real hosted note, delivered and settled by the real activation, on a host that reached its idle interval.
@@ -7938,7 +7956,7 @@ it.each([250, 2_000])("runs one hosted, ready note for a minute at an idle inter
   if (ceiling === 250) expect(passes).toBe(240);
   else {
     expect(passes).toBeGreaterThanOrEqual(30);
-    expect(passes).toBeLessThanOrEqual(40);
+    expect(passes).toBeLessThanOrEqual(32);
   }
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
