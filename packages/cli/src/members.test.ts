@@ -58,7 +58,7 @@ describe("dohc members", () => {
       "owner · Owner · Ice · ice@test",
       "m-ana · Admin · Ana · ana@test",
       "",
-      "Invites",
+      "Invites (dohc sends no email; each joins when they sign in with that address)",
       "m-bo · Invited · bo@test",
       "",
       "Removed (dohc members let-back-in <id>)",

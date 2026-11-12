@@ -453,7 +453,7 @@ export function renderMembers(result: CliResultByVerb["members"]): string {
         ]),
     "",
     ...active.map(row),
-    ...(invited.length ? ["", "Invites", ...invited.map(row)] : []),
+    ...(invited.length ? ["", "Invites (dohc sends no email; each joins when they sign in with that address)", ...invited.map(row)] : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
   ].join("\n");
 }
