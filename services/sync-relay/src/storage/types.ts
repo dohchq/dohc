@@ -751,6 +751,8 @@ export interface SyncRelayStorage {
   advanceAccountOperation(input: import("./operationRecords").AdvanceOperationInput): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
   listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }): import("./operationRecords").OperationRecord[];
   listUnfinishedOperationCopies(): Array<{ workspaceId: string; incarnation: number }>;
+  /** Each workspace with phone writes still to finish, with the earliest end of their active time. */
+  unfinishedOperationActiveEnds(): Array<{ workspaceId: string; activeUntilMs: number }>;
   /** The relay's row at a phone write's coordinate, only within the log rows the write's own epoch and stream could make. */
   fetchAccountOperationLogRow(input: Parameters<typeof import("./operationRecords").operationLogRow>[1]): SyncRelayLogRow | null;
   /** The copies whose phone writes may still publish, those with a write not yet stalled first, then oldest write first. */

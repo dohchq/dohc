@@ -168,13 +168,13 @@ const MAX_POLL_OPTION_LENGTH = 200;
 
 // Rust's str::trim: Unicode White_Space only. String.prototype.trim differs,
 // stripping U+FEFF and keeping U+0085, so a choice the engine stores could fail here.
-function engineTrim(value: string): string {
+export function engineTrim(value: string): string {
   return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 }
 
 // The engine's rules for a message, checked before any row so a refused
 // message writes nothing. The engine trims each choice as it stores it.
-function checkedContent(input: MessageInput): ChatMessageContent {
+export function checkedContent(input: MessageInput): ChatMessageContent {
   const body = normalizeChatMessageBody(input.body);
   const options = input.options ?? [];
   if (options.length > MAX_POLL_OPTIONS) throw new Error("A poll has at most twelve choices.");

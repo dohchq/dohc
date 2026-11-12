@@ -186,7 +186,7 @@ type Place = (objectIds: readonly string[]) => Promise<ReadonlyMap<string, Place
  * unavailable, as on the desktop. A thread on a secret file reads as missing,
  * and an attachment to one is left out.
  */
-function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): ChatsHost {
+export function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): ChatsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   const chats = replicaChatStore(replica);
   const known = new Map<string, Placement>();

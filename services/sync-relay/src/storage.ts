@@ -958,6 +958,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return operationRecordStorage.listUnfinishedOperationCopies(this);
   }
 
+  unfinishedOperationActiveEnds() {
+    return operationRecordStorage.unfinishedOperationActiveEnds(this);
+  }
+
   fetchAccountOperationLogRow(input: Parameters<typeof operationRecordStorage.operationLogRow>[1]) {
     return operationRecordStorage.operationLogRow(this, input);
   }
