@@ -2023,6 +2023,7 @@ describe("CLI socket server", () => {
         ["groupCreate", { name: "needs-ice" }],
         ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
         ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+        ["nothingToReport", { thread: "thread-1" }],
         ["react", { actor: "human", message: "message-1", emoji: "👍" }],
         ["chatRetry", { thread: "thread-1" }],
         ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],

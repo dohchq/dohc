@@ -2143,7 +2143,7 @@ const RECEIVED_SHARE_RULES: { [Verb in CliVerb]: ReceivedShareRule | ((request: 
   appPublication: request => "appRoot" in request.args.request ? "anywhere" : "owner",
   stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", keptCopies: "owner", saveKeptCopy: "owner",
   retainedCopies: "owner", deleteRetainedCopies: "owner", ownerAppResponses: "owner",
-  groupCreate: "chat", post: "chat", reply: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
+  groupCreate: "chat", post: "chat", reply: "chat", nothingToReport: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
   link: "chat",
   show: request => request.args.peek ? "anywhere" : "chat",
   liveKeptEdits: keptEditsInOwner, saveRecoveryCopy: keptEditsInOwner, retryKeptEdits: keptEditsInOwner, stopAgain: keptEditsInOwner,
