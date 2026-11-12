@@ -74,9 +74,12 @@ The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacks
 The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
-Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
+Cloud timing targets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
+Uncontended runs above target warn and pass through ceilings of 400 s and 700 s, respectively; runs above those ceilings fail.
 Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
-An over-budget run with more than 30 s of gate-job runner wait warns that timing is unmeasured; uncontended overruns fail.
+A run above target with a counted runner wait above 30 s warns that timing is unmeasured and does not fail for time.
+A receipt transfer above 30 s excuses only its own seconds; the run still fails if it is above the ceiling without the transfer.
+Final verification alone emits timing warning annotations and step summary lines.
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 

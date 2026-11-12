@@ -535,7 +535,7 @@ jobs:
           pattern: verification-js-*-${{ github.run_attempt }}
           merge-multiple: true
           path: .agent-artifacts/verification/downloaded
-      - name: Require complete proof and the five-minute group budget
+      - name: Require complete proof and the JavaScript timing ceiling
         if: always()
         run: node scripts/verification/cloud-aggregate.mjs js
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -773,7 +773,7 @@ jobs:
           pattern: verification-rust-*-${{ github.run_attempt }}
           merge-multiple: true
           path: .agent-artifacts/verification/downloaded
-      - name: Require complete proof and the ten-minute group budget
+      - name: Require complete proof and the Rust timing ceiling
         if: always()
         run: node scripts/verification/cloud-aggregate.mjs rust
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

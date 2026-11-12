@@ -1,0 +1,34 @@
+{
+  "runId": 43214474036,
+  "attempt": 1,
+  "selectionStartedAt": "2026-11-12T12:03:37Z",
+  "reportingJob": {
+    "name": "typecheck + tests",
+    "head_sha": "e6a06b0866167b639e3e0fdd3158f5fe104f3ad1",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-11-12T12:03:47Z",
+    "started_at": "2026-11-12T12:03:49Z",
+    "completed_at": "2026-11-12T12:11:07Z",
+    "steps": [
+      {
+        "name": "Wait for the complete JavaScript group",
+        "number": 11,
+        "started_at": "2026-11-12T12:07:15Z",
+        "completed_at": "2026-11-12T12:08:00Z"
+      },
+      {
+        "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "number": 12,
+        "started_at": "2026-11-12T12:08:00Z",
+        "completed_at": "2026-11-12T12:11:01Z"
+      },
+      {
+        "name": "Require complete proof and the five-minute group budget",
+        "number": 13,
+        "started_at": "2026-11-12T12:11:01Z",
+        "completed_at": "2026-11-12T12:11:03Z"
+      }
+    ]
+  }
+}
