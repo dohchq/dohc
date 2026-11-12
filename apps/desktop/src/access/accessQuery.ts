@@ -103,7 +103,8 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
   }
   for (const row of rows) {
     const selector = row.selector;
-    if (!selector || row.status !== "active") continue;
+    // A membership covers another workspace, never a path or chat of this one.
+    if (!selector || row.status !== "active" || selector.kind === "workspace") continue;
     if (selector.kind === "chat" || selector.kind === "group")
       add(chats, selector.channelWireId, row);
     if (selector.kind === "chat" || (selector.kind === "group" && row.fileScope !== "served"))
@@ -132,6 +133,7 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
           if (
             selector &&
             selector.kind !== "chat" &&
+            selector.kind !== "workspace" &&
             visibleSharePath(selector, input.path) !== null
           )
             found.set(key(row), row);

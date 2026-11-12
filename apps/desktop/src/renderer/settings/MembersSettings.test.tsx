@@ -145,7 +145,7 @@ describe("Members page", () => {
   });
 
   it("loads a paused workspace, which keeps its place on the server", () => {
-    expect(membersGate(cloud({ status: status({ workspaceSynced: false, workspaceSyncConnected: false, syncPause: { atMs: 1, author: { kind: "person", self: true } } }) })).kind).toBe("ready");
+    expect(membersGate(cloud({ status: status({ workspaceSynced: false, workspaceSyncConnected: false, syncPause: { atMs: 1, author: { kind: "person", personId: "p-owner", self: true } } }) })).kind).toBe("ready");
   });
 
   it("waits on the server connection, and reads it again from a failed read", async () => {
