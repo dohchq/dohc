@@ -163,11 +163,14 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
 export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, outputDirectory = ".agent-artifacts/verification/aggregate", ...options } = {}) {
   const deadline = now() + 20 * 60_000, api = cloudApi({ ...options, pause, now, deadline });
   const expected = gateJobNames(scope).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
+  let required = [];
   try {
     for (;;) {
-      const required = (await (readJobs ? readJobs() : api.jobs())).filter(job => expected.includes(job.name));
-      if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
-      if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
+      if (now() < deadline) {
+        required = (await (readJobs ? readJobs() : api.jobs())).filter(job => expected.includes(job.name));
+        if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
+        if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
+      }
       if (now() >= deadline) throw new Error(`The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${required.some(job => QUEUED_STATUSES.includes(job.status)) ? "still queued for a runner" : required.some(job => job.status === "in_progress") ? "still running" : "missing"}.`);
       if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) {
         mkdirSync(outputDirectory, { recursive: true });

@@ -33,11 +33,11 @@ export async function waitForPreparation(scope, { env = process.env, request = f
         const matching = artifacts.filter(artifact => artifact.name === name && !artifact.expired);
         if (matching.length > 1) throw new Error(`Duplicate preparation artifact ${name}.`);
         if (matching.length === 1 && now() < deadline) {
-          const artifact = matching[0], transferStartedAt = now();
-          let downloadDeadline = Math.min(deadline, now() + 30_000), attempts = 0;
+          const artifact = matching[0];
+          let downloadDeadline = Math.min(deadline, now() + 30_000), attempts = 0, transferStartedAt;
           if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
-          let saw404 = false;
-          const unavailable = cause => new Error(saw404
+          let sawUnavailable = false;
+          const unavailable = cause => new Error(sawUnavailable
             ? `Preparation artifact ${name} was listed but never became downloadable within its 30-second retry cap.`
             : `Preparation artifact ${name} download timed out waiting for a response within its 30-second retry cap.`, { cause });
           for (;;) {
@@ -45,19 +45,20 @@ export async function waitForPreparation(scope, { env = process.env, request = f
             let response;
             try { response = await api.download(artifact.id, downloadDeadline - now(), deadline - now()); }
             catch (error) { if (now() >= downloadDeadline) throw unavailable(error); throw error; }
-            if (response.status !== 404) {
+            if (![404, 429].includes(response.status) && (response.status < 500 || response.status >= 600)) {
               if (!response.ok || !response.body) {
                 await response.body?.cancel();
                 throw new Error(`Cannot download the prepared artifact: HTTP ${response.status}.`);
               }
               if (download) {
+                transferStartedAt ??= now();
                 attempts++;
                 try { return { artifact, value: await download(response) }; }
                 catch (cause) {
                   const seconds = (now() - transferStartedAt) / 1000;
                   if (attempts < 2 && now() < deadline && (["AbortError", "TimeoutError", "TypeError"].includes(cause.name) || cause.code === "ERR_STREAM_PREMATURE_CLOSE")) {
                     console.log(`Retrying preparation artifact ${name} body transfer after ${seconds}s: ${cause.message}`);
-                    downloadDeadline = Math.min(deadline, now() + 30_000); saw404 = false;
+                    downloadDeadline = Math.min(deadline, now() + 30_000); sawUnavailable = false;
                     continue;
                   }
                   throw new Error(`Preparation artifact ${name} (${artifact.id}) body transfer failed after ${seconds}s (${attempts} attempt${attempts === 1 ? "" : "s"}).`, { cause });
@@ -68,7 +69,7 @@ export async function waitForPreparation(scope, { env = process.env, request = f
               name = names.shift();
               break;
             }
-            saw404 = true;
+            sawUnavailable = true;
             await response.body?.cancel();
             if (now() >= downloadDeadline) throw unavailable();
             await pause(Math.min(2_000, downloadDeadline - now()));

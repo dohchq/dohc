@@ -33,21 +33,24 @@ export function cloudApi({ env = process.env, request = fetch, pause = delay, no
           }
           counted++;
           if (response.ok) {
-            const data = await response.json();
-            if (conditional && previous && JSON.stringify(data) === JSON.stringify(previous.data)) this.pollMs = 10_000;
-            if (conditional) cache.set(path, { etag: last?.get("etag"), data });
-            return data;
+            try {
+              const data = await response.json();
+              if (conditional && previous && JSON.stringify(data) === JSON.stringify(previous.data)) this.pollMs = 10_000;
+              if (conditional) cache.set(path, { etag: last?.get("etag"), data });
+              return data;
+            } catch (error) { cause = error; }
+          } else {
+            cause = new Error(`HTTP ${response.status}`);
+            await response.body?.cancel().catch(() => {});
+            if (response.status !== 429 && (response.status < 500 || response.status >= 600)) throw failed();
           }
-          cause = new Error(`HTTP ${response.status}`);
-          await response.body?.cancel().catch(() => {});
-          if (response.status !== 429 && (response.status < 500 || response.status >= 600)) throw failed();
         }
         if (attempts === 3 || now() >= deadline) throw failed();
         await pause(Math.min(1_000, deadline - now()));
       }
       throw failed();
     },
-    async download(id, headersTimeoutMs, remainingMs = 60_000) {
+    async download(id, headersTimeoutMs, remainingMs) {
       const headersDeadline = new AbortController();
       const timer = setTimeout(() => headersDeadline.abort(new Error("Artifact download readiness timed out.")), headersTimeoutMs);
       let response;
