@@ -23,6 +23,7 @@ import {authorizeServiceHostReplication} from "../../sync-relay/src/serviceHostC
 import {createServiceHostReplication} from "../../sync-relay/src/serviceHostReplication.js";
 import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHostEnrollmentRoutes.js";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
+import {RECLAIM_RETENTION_MS} from "../../sync-relay/src/liveHostingLimits.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
@@ -1439,6 +1440,46 @@ it("keeps a document retired without a Stop parked until an owner open reaches t
   expect(attempts()).toBe(before + 1);
   expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
   const markdown = "---\nbeforeActivation: ordinary-owner\nwhileRetired: ordinary-owner\n---\n\nHello\n";
+  expect((await proof.hostState()).markdown).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  return {attemptsBeforeOpen: before, reports: proof.reports};
+}), 120000);
+
+// Reclaim, as the host's sweep runs it once the retention period has passed.
+// After the share goes, only the owner's open keeps the document. With no live
+// connection and no edit for that period, the sweep retires its activation and
+// the document parks, keeping its store. An edit the owner makes afterwards
+// reaches the relay but no session host. Their next open enrolls it again, and
+// a successor holds the edit.
+it("reclaims a document only its owner's open keeps once idle past retention, and their next open starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim", async proof => {
+  const saved = proof.activation()!;
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 200, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "ready", changed: false}});
+  expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+  // Within retention the sweep keeps it.
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now())).toEqual([]);
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false, ownerDemand: true});
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now() + RECLAIM_RETENTION_MS + 1).map(row => row.path)).toEqual(["docs/a.md"]);
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+      .toMatchObject({enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null, hostDrainedAtMs: expect.any(Number)});
+    expect(proof.activations()).toEqual([expect.objectContaining({activation_id: saved.activationId, retired: 1})]);
+  }, {timeout: 30000});
+  // The owner keeps editing on their device, where no session host admits the edit.
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileReclaimed", "ordinary-owner"));
+  const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
+  // The desktop's owner open enrolls it again, as the owner's demand.
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true});
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  // One capture, in the store it parked in, starts a successor holding the edit.
+  expect(attempts()).toBe(before + 1);
+  expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileReclaimed: ordinary-owner\n---\n\nHello\n";
   expect((await proof.hostState()).markdown).toBe(markdown);
   // The settlement commits before the engine writes the file.
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
