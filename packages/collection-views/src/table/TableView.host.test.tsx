@@ -356,6 +356,37 @@ describe("what the host allows and has not confirmed", () => {
     expect(current()).toEqual([]);
   });
 
+  it("keeps the Escape that cancels an edit, and leaves Escape to a host that shows a record open before it clears the selection", () => {
+    const escapes = vi.fn();
+    const table = (openRecordId: string | null) => (
+      <div onKeyDown={(event) => { if (event.key === "Escape") escapes(); }}>
+        <TableView schema={schema} records={records()} onCellChange={() => 1} openRecordId={openRecordId} />
+      </div>
+    );
+    const view = render(table("rec-a"));
+    const grid = screen.getByRole("grid");
+    const title = () => grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!;
+    const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
+    // Escape in the editor cancels the edit, and is not the host's.
+    fireEvent.click(title());
+    fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(escapes).not.toHaveBeenCalled();
+    // So is Escape on the grid while an editor is open.
+    fireEvent.click(title());
+    fireEvent.keyDown(grid, { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(escapes).not.toHaveBeenCalled();
+    // With a record open, the next Escape is the host's, and the selection stays.
+    fireEvent.keyDown(grid, { key: "Escape" });
+    expect(escapes).toHaveBeenCalledOnce();
+    expect(title().getAttribute("aria-selected")).toBe("true");
+    // With none open, Escape clears the selection.
+    view.rerender(table(null));
+    fireEvent.keyDown(grid, { key: "Escape" });
+    expect(title().getAttribute("aria-selected")).toBeNull();
+  });
+
   it("says what the host gives for a table with no records, beside its New record row", () => {
     render(<TableView schema={schema} records={[]} onNewRecord={vi.fn()} emptyText="No records match. Try a shorter search." />);
     expect(screen.getByText("No records match. Try a shorter search.")).toBeDefined();

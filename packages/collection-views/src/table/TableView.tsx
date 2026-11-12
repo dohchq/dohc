@@ -176,7 +176,11 @@ export interface TableViewProps {
   onOpenLink?: (url: string) => void;
   /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
-  /** The record the host shows open, as in a panel beside the table. Its row is marked. */
+  /**
+   * The record the host shows open, as in a panel beside the table. Its row
+   * is marked. While one is open, Escape on a selected cell is left to the
+   * host, which closes the record before the table clears its selection.
+   */
   openRecordId?: string | null;
   /**
    * Runs the relation picker's queries against a relation field's related
@@ -746,8 +750,9 @@ export function TableView({
     const opens = (event.ctrlKey || event.metaKey) && key === "Enter";
     if (event.altKey || ((event.ctrlKey || event.metaKey) && !opens)) return;
     if (editorRef.current) {
-      // An editor left open without focus takes the first Escape.
+      // An editor left open without focus takes the first Escape, which is then not the host's.
       if (key === "Escape" && !editingDisabled) {
+        event.stopPropagation();
         cancelled.current = true;
         setEditing(null);
       }
@@ -780,7 +785,11 @@ export function TableView({
       event.preventDefault();
       return select(...to);
     }
-    if (key === "Escape") return setSelected(null);
+    if (key === "Escape") {
+      // While the host shows a record open, Escape closes that record first. The next one clears the selection.
+      if (openRecordId !== null && openRecordId !== undefined) return;
+      return setSelected(null);
+    }
     const arrow = ARROWS[key];
     if (arrow) {
       event.preventDefault();
@@ -990,6 +999,10 @@ export function TableView({
                 disabled={editingDisabled}
                 onBlurCapture={(event) => {
                   if (editingDisabled) event.stopPropagation();
+                }}
+                // One Escape closes one surface: the editor took this one, so it is not the host's.
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") event.stopPropagation();
                 }}
                 className={
                   editingPickerWidth === null

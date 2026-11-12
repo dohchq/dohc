@@ -303,6 +303,24 @@ describe("a record's properties", () => {
     expect(view.changes).toEqual([]);
   });
 
+  it("starts another record's tags from that record's own value, not from picks saved on the record before it", () => {
+    // The host numbers its saves, and its index shows none of them yet.
+    const view = renderProperties();
+    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "beta" }));
+    fireEvent.pointerDown(document.body);
+    expect(view.changes).toEqual([expect.objectContaining({ recordId: "rec-a", field: "tags", value: ["alpha", "beta"] })]);
+    // Another record takes the first one's place, with no remount.
+    view.rerender({ record: record("rec-b", "Task b") });
+    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "gamma" }));
+    fireEvent.pointerDown(document.body);
+    expect(view.changes[1]).toMatchObject({ recordId: "rec-b", field: "tags", value: ["alpha", "gamma"] });
+    // The first record still starts its next edit from what it saved.
+    view.rerender({ record: record() });
+    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "gamma" }));
+    fireEvent.pointerDown(document.body);
+    expect(view.changes[2]).toMatchObject({ recordId: "rec-a", field: "tags", value: ["alpha", "beta", "gamma"] });
+  });
+
   it("draws a button field through renderButton", () => {
     const fields = makeSchema([{ name: "title", type: "text" }, { name: "stamp", type: "button" }]);
     render(<RecordProperties schema={fields} record={makeRecord("rec-a", [indexedValue("title", "Task a")])} onCellChange={() => 0}

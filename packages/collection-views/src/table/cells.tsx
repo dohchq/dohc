@@ -54,6 +54,12 @@ export interface FieldCellProps {
    * In the table the grid is the one stop, and its keys reach every cell.
    */
   tabStop?: boolean;
+  /**
+   * Every kind of value starts at the left, as in a record's properties,
+   * where each sits beside its field's name. In the table a number ends at
+   * its column's right edge.
+   */
+  alignStart?: boolean;
   /** What an empty value says, as in a record's properties. Absent, it shows nothing. */
   emptyText?: string;
 }
@@ -389,6 +395,7 @@ export function FieldCell({
   editable = false,
   onOpenLink,
   tabStop = false,
+  alignStart = false,
   emptyText,
 }: FieldCellProps) {
   // In the table the grid is the Tab stop, and its keys act on the selected cell.
@@ -462,7 +469,7 @@ export function FieldCell({
     ? <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>
     : empty && emptyText !== undefined
       ? <span className="truncate text-[13px] text-subtle">{emptyText}</span>
-      : <FieldValue field={field} indexed={indexed} personLabel={personLabel} />;
+      : <FieldValue field={field} indexed={indexed} personLabel={personLabel} alignStart={alignStart} />;
   if (!editable) return wrapFlagged(reason, shown);
   return wrapFlagged(
     reason,
@@ -486,10 +493,13 @@ export function FieldValue({
   field,
   indexed,
   personLabel,
+  alignStart = false,
 }: {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: (userId: string) => string | null;
+  /** A number starts at the left, as every other value does. Absent, it ends at the right, as in a table's column. */
+  alignStart?: boolean;
 }) {
   const value = indexed?.value ?? null;
   if (value === null) return null;
@@ -515,7 +525,7 @@ export function FieldValue({
       return <span className="truncate text-[13px]">{shortDate(date)}</span>;
     }
     case "number":
-      return <span className="ml-auto truncate text-[13px] tabular-nums">{asText(value)}</span>;
+      return <span className={`${alignStart ? "" : "ml-auto "}truncate text-[13px] tabular-nums`}>{asText(value)}</span>;
     case "relation":
     case "url":
       return (

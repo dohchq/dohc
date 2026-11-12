@@ -177,6 +177,7 @@ function PropertyRow(props: RowProps) {
         editable={editable}
         onOpenLink={props.onOpenLink}
         tabStop
+        alignStart
         emptyText={EMPTY}
       />
     );
@@ -343,7 +344,8 @@ export function RecordProperties(props: RecordPropertiesProps) {
           host={hostCells?.get(field.name)}
           mark={fieldMarks?.get(field.name)}
           editing={editing?.field === field.name ? editing : null}
-          carried={field.type === "multi-select" ? carried(field.name) : undefined}
+          // By record and field, as the table keeps them, so another record in the same place starts from its own picks.
+          carried={field.type === "multi-select" ? carried(JSON.stringify([record.id, field.name])) : undefined}
           onStartEdit={(typed) => startEdit(field.name, typed)}
           onCloseEdit={closeEdit}
           onFocusValue={() => focusValue(field.name)}
