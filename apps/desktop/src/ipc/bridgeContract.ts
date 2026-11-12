@@ -1472,6 +1472,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  // Why protected files such as `.env` wait on the workspace secret key, as
+  // the engine's code, such as `key-missing`. Omitted while the key works.
+  secretKeyUnavailable: z.string().min(1).optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
   // A protected file's change a sync replaced, kept on this computer, as
@@ -1639,6 +1642,16 @@ export const captureRecoveryOperations = {
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The restart starts only in the sending window's active, writable workspace, and is awaited outside its workspace operation." },
+  },
+  // Rescans, so a protected file waiting on the secret key is captured again.
+  // Rejects while the key is still unavailable.
+  retrySecretKey: {
+    capabilityId: "capture.secret.retry",
+    channel: "desktop:retry-secret-key",
+    payload: WorkspaceIdPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The rescan runs only in the sending window's active, writable workspace." },
   },
 } satisfies OperationTable;
 

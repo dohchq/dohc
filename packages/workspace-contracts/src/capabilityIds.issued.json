@@ -291,5 +291,6 @@
   "dataset.operation.cancel",
   "version.unversioned.list",
   "work.reference.describe",
-  "work.reference.make"
+  "work.reference.make",
+  "capture.secret.retry"
 ]

@@ -10,7 +10,7 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
-import { CollectionMoveUnfinishedError, ipcWireError } from "../../ipc/errorWords";
+import { CollectionMoveUnfinishedError, ipcWireError, VOLUME_SHARES_NEW_FILES_WORDS } from "../../ipc/errorWords";
 import { sharedViewRefusal, sharedViewRefusalWords } from "../../testing/sharedViewRefusal.fixture";
 import { createOwnedProjectionRepairer } from "../../workspaces/ownedProjectionRepair";
 
@@ -968,6 +968,28 @@ it("reports unavailable recovery without replacing unrelated Notices and clears 
   expect(result.current.shellErrors[0].message).toBe("Unrelated failure");
 });
 
+
+it.each([
+  ["key-missing", "The workspace secret key file is missing. Restore .dohc/engine/secret.key from a backup, then choose Try again."],
+  ["key-corrupt", "The workspace secret key file is damaged. Restore .dohc/engine/secret.key from a backup, then choose Try again."],
+  ["volume-shares-new-files", VOLUME_SHARES_NEW_FILES_WORDS],
+  ["decrypt-failed", "dohc could not read the workspace secret key file."],
+] as const)("says why protected files wait on the secret key (%s), keeps the row until the key works, and retries", (reason, message) => {
+  const retry = vi.fn();
+  const { result } = renderHook(() => useShellError("secret-key"));
+  act(() => result.current.reportSecretKeyUnavailable(reason, retry));
+  const row = result.current.shellErrors[0]!;
+  expect(row).toMatchObject({ kind: "secret-key-unavailable", title: "History could not save protected files", message, noDismiss: true, seen: false });
+  expect(row.details).toEqual([["File", ".dohc/engine/secret.key"], ["Reason", reason]]);
+  act(() => result.current.reportSecretKeyUnavailable(reason, retry));
+  expect(result.current.shellErrors).toHaveLength(1);
+  expect(result.current.shellErrors[0]!.id).toBe(row.id);
+  act(() => result.current.retryShellError(row.id));
+  expect(retry).toHaveBeenCalledOnce();
+  act(() => result.current.reportSecretKeyUnavailable(reason, retry));
+  act(() => result.current.reportSecretKeyUnavailable(null, retry));
+  expect(result.current.shellErrors).toEqual([]);
+});
 
 it("retries unavailable recovery through the supplied action", () => {
   const retry = vi.fn();

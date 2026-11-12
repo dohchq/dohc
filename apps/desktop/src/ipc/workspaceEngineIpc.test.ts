@@ -302,7 +302,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, historyOperations.listVersionLastChanges.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  captureRecoveryOperations.retryHistoryCapture.channel, captureRecoveryOperations.retrySecretKey.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -462,6 +462,28 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");
+  });
+  it("retries the secret key only for the writable workspace this renderer shows, and fails while the key is still unavailable", async () => {
+    const h = await harness();
+    await h.invoke(captureRecoveryOperations.retrySecretKey.channel);
+    expect(h.adapter.reconcileCapture).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel, { workspaceId: "other" })).rejects.toThrow();
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, secretKeyUnavailable: "key-missing", deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still cannot use the workspace secret key");
+    h.writable.mockImplementation(() => { throw new Error("readonly"); });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("readonly");
+    expect(h.adapter.reconcileCapture).toHaveBeenCalledTimes(2);
+  });
+  it("keeps the secret key notice when Try again runs before dohc has finished checking the workspace", async () => {
+    const h = await harness();
+    // A restarted engine has no reason yet: the status alone reads as healthy.
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: false, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: true, degraded: true, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
   });
   it("admits live delivery retries only through the current writable renderer workspace", async () => {
     const h = await harness();

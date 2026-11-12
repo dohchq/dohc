@@ -947,6 +947,7 @@ export function DesktopWorkspaceShell(props: {
     showRetainedCopies,
     showSavedTabsNotice,
     reportRecoveryUnavailable,
+    reportSecretKeyUnavailable,
     showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,
@@ -6408,6 +6409,26 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  const secretKeyUnavailable = syncStatus?.secretKeyUnavailable ?? null;
+  const secretKeyUnavailableRef = useRef(secretKeyUnavailable);
+  secretKeyUnavailableRef.current = secretKeyUnavailable;
+  // Try again removes the row, so a retry that fails files it again.
+  const retrySecretKey = useCallback(() => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor) return;
+    void bridge().retrySecretKey({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportSecretKeyUnavailable(null, retrySecretKey);
+    }, () => {
+      // A healthy status that arrived first already cleared the row.
+      const reason = secretKeyUnavailableRef.current;
+      if (workspaceIdRef.current !== askedFor || reason === null) return;
+      reportSecretKeyUnavailable(reason, retrySecretKey);
+    });
+  }, [workspaceId, reportSecretKeyUnavailable]);
+  useEffect(() => {
+    reportSecretKeyUnavailable(secretKeyUnavailable, retrySecretKey);
+  }, [secretKeyUnavailable, reportSecretKeyUnavailable, retrySecretKey]);
   // History stopped recording. Try again keeps its row, busy, until the
   // restart answers: one that runs again clears the row, and a failure shows
   // it again with its toast.

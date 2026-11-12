@@ -954,6 +954,9 @@ export interface WorkspaceEngineCaptureOptions {
   // moment. Sticky: the drive does not change while the workspace is open.
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
+  // Why protected files such as `.env` wait on the workspace secret key, such
+  // as `key-missing`, or null while the key works.
+  onSecretKeyUnavailable?: (reason: string | null) => void;
   onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   // Protected text a sync replaced, kept on this computer: [path, id, keptAtMs].
   onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
@@ -4731,6 +4734,7 @@ export function createWorkspaceEngineCapture(
           await reportProtectedCopies();
           options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
+          options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }

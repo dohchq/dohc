@@ -58,6 +58,8 @@ interface WatchedWorkspace {
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
   recoveryUnavailable: boolean;
+  // Why protected files wait on the workspace secret key, or null.
+  secretKeyUnavailable: string | null;
   // Null until this capture first reads the list.
   outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
   outsideWriteCopyReadError: string | null | undefined;
@@ -175,6 +177,7 @@ export interface WorkspaceCaptureHooks {
   ) => void;
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
+  onSecretKeyUnavailable?: (reason: string | null) => void;
   onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
@@ -333,6 +336,7 @@ export function createWorkspaceActivity(
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
+      ...(w?.secretKeyUnavailable ? { secretKeyUnavailable: w.secretKeyUnavailable } : {}),
       ...(w && w.outsideWriteCopies !== null ? {
         outsideWriteCopies: w.outsideWriteCopies.map(([original, copy, id]): [string, string, string] => [original, copy, id]),
       } : {}),
@@ -439,6 +443,7 @@ export function createWorkspaceActivity(
         atomicPlacementUnavailable: false,
         onNetworkShare: false,
         recoveryUnavailable: false,
+        secretKeyUnavailable: null,
         outsideWriteCopies: null,
         outsideWriteCopyReadError: undefined,
         protectedCopies: null,
@@ -470,6 +475,11 @@ export function createWorkspaceActivity(
               onRecoveryUnavailable: (unavailable) => {
                 if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
                 entry.recoveryUnavailable = unavailable;
+                notify({ workspaceId: workspace.workspaceId });
+              },
+              onSecretKeyUnavailable: (reason) => {
+                if (state.entry !== entry || entry.secretKeyUnavailable === reason) return;
+                entry.secretKeyUnavailable = reason;
                 notify({ workspaceId: workspace.workspaceId });
               },
               onOutsideWriteCopies: (paths, readError) => {

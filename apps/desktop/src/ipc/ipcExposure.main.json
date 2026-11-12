@@ -293,6 +293,7 @@
     "desktop:retry-owner-live-delivery",
     "desktop:retry-owner-live-quarantine",
     "desktop:retry-owner-live-share",
+    "desktop:retry-secret-key",
     "desktop:retry-server-account-disconnect",
     "desktop:retry-share-handoff",
     "desktop:retry-stopped-run",
