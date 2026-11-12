@@ -25,7 +25,7 @@ export function LinkDocumentEditor({discriminator, path, available, onClose}: {
       current.current = value; setSession(value); void value.reconnect();
     }).catch((error: unknown) => {if (!controller.signal.aborted && request.current === controller) setError(
       error instanceof Error && Object.values(LINK_REFUSALS).some(value => value.error === error.message)
-        ? error.message : "dohc could not open this file for editing. Retry or ask the owner for access.");})
+        ? error.message : "dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.");})
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
   useEffect(() => {

@@ -44,6 +44,14 @@ it("shows the grant-scoped refusal with its next step", async () => {
   await settle(() => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true);
   expect(container.textContent).toContain("Retry");
 });
+it("asks a link holder to retry, not to ask for access, when the file could not open for another reason", async () => {
+  vi.mocked(openLinkDocument).mockRejectedValue(new TypeError("Failed to fetch"));
+  await render(true);
+  await settle(() => container.querySelector(".download-card p") !== null);
+  expect(container.querySelector(".download-card p")!.textContent)
+    .toBe("dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.");
+  expect(container.textContent).toContain("Retry");
+});
 it("retains a quarantined draft after access loss, including updates rejected before they entered the queue", async () => {
   const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
   await render(true, onClose); await settle(() => container.querySelector('[role="textbox"]') !== null);
