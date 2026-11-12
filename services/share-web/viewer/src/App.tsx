@@ -996,6 +996,10 @@ function useNarrow(): boolean {
 }
 
 type Surface = "comments" | "agent" | "about" | "apps" | "more";
+/** Where each surface lives in the page. Opening one moves focus there, and closing returns it to the button. */
+const SURFACE_ID: Record<Surface, string> = {
+  comments: "link-discussion", agent: "link-agent", about: "link-about", apps: "link-apps", more: "link-more",
+};
 
 function OpenInDohc(props: { session: string }) {
   const [handoffState, setHandoffState] = useState<HandoffState>("idle");
@@ -1197,6 +1201,7 @@ export function App() {
       if (event.key === "Escape") closeSurface();
     };
     window.addEventListener("keydown", closeOnEscape);
+    document.getElementById(SURFACE_ID[surface])?.focus();
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [surface, closeSurface]);
   const readyStateRef = useRef<ReadyState | null>(null);
@@ -1688,7 +1693,7 @@ export function App() {
             </div>
           </div>
           {ready && !editing ? (
-            <div className="side-panel" id="link-discussion" hidden={surface !== "comments"}>
+            <div className="side-panel" id="link-discussion" tabIndex={-1} hidden={surface !== "comments"}>
               <button className="icon-button panel-close" type="button" aria-label={`Close ${discussion.toLowerCase()}`} title="Close" onClick={closeSurface}>
                 <Icon name="x" />
               </button>
@@ -1709,16 +1714,16 @@ export function App() {
         {ready && !editing ? (
           <>
             {surface !== null ? <div className={surface === "comments" ? "backdrop narrow-only" : "backdrop"} onClick={closeSurface} /> : null}
-            <div className="popover" id="link-agent" hidden={surface !== "agent"}>
+            <div className="popover" id="link-agent" tabIndex={-1} hidden={surface !== "agent"}>
               <LinkAgent secret={agentLink.current.secret} />
             </div>
-            <div className="popover" id="link-about" hidden={surface !== "about"}>
+            <div className="popover" id="link-about" tabIndex={-1} hidden={surface !== "about"}>
               <LinkAbout meta={ready.meta} fileCount={files.length} updated={updated} />
             </div>
-            <div className={appsLead ? "popover apps-lead" : "popover"} id="link-apps" hidden={surface !== "apps" && !appsLead}>
+            <div className={appsLead ? "popover apps-lead" : "popover"} id="link-apps" tabIndex={-1} hidden={surface !== "apps" && !appsLead}>
               <PublishedApps session={ready.session} onState={setApps} />
             </div>
-            <div className="popover link-more" id="link-more" hidden={surface !== "more"}>
+            <div className="popover link-more" id="link-more" tabIndex={-1} hidden={surface !== "more"}>
               <button className="menu-item" type="button" onClick={() => setSurface("about")}>
                 <Icon name="info" />
                 About this link

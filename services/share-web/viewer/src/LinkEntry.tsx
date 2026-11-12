@@ -20,6 +20,8 @@ export function LinkAbout({ meta, fileCount, updated, children }: {
 }) {
   const { paths, versionId } = meta.effectiveSelector;
   const files = fileCount === 0 ? "No files yet" : fileCount === 1 ? "1 file" : `${fileCount} files`;
+  // The paths say where the files sit, unless the link is named for its one path.
+  const where = paths.length === 0 || (paths.length === 1 && paths[0] === meta.subjectName) ? "" : ` in ${paths.join(", ")}`;
   return (
     <section className="link-about" aria-labelledby="link-entry-title">
       <h2 id="link-entry-title">About this link</h2>
@@ -35,7 +37,7 @@ export function LinkAbout({ meta, fileCount, updated, children }: {
           <Icon name={fileCount === 1 ? "file-text" : "folder"} />
           <div>
             <p>{meta.subjectName ?? "Shared files"}</p>
-            <p className="link-fact-detail">{paths.length > 0 ? `${files} in ${paths.join(", ")}` : files}</p>
+            <p className="link-fact-detail">{files}{where}</p>
           </div>
         </li>
         <li>

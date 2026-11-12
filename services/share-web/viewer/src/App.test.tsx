@@ -4,6 +4,7 @@ import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspa
 vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
+import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -460,6 +461,104 @@ describe("App", () => {
     await settle(() => container.textContent.includes("This link isn't available."));
     expect(container.querySelector("#link-agent-title")).toBeNull();
     expect(container.textContent).not.toContain("/mcp/s/");
+  });
+
+  it("keeps the page readable when live editing can't start, with a way to try again and a way back", async () => {
+    const meta: ViewMeta = {...DEFAULT_META, access: "edit", effectiveSelector: {access: "edit", versionId: null, paths: ["docs"]}};
+    const files: SharedFile[] = [{path: "doc.md", blobSha256: "a".repeat(64), contentKind: "text"}];
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    let opens = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const route = requestPath(input);
+      if (route === "/api/view/meta") return jsonResponse(meta);
+      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+      if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+      if (route === "/api/live/link-document") {
+        opens += 1;
+        return jsonResponse(linkRefusalBody("link_live_unavailable"), LINK_REFUSALS.link_live_unavailable.status);
+      }
+      return fallback(input, init);
+    }));
+    await renderApp();
+    await settle(() => container.querySelector("article.markdown") !== null);
+
+    await act(async () => buttonNamed("Edit file")!.click());
+    await settle(() => container.querySelector(".edit-notice") !== null);
+
+    expect(container.querySelector(".edit-notice")?.textContent)
+      .toContain("dohc could not start editing this page.You can still read and comment here.");
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
+    expect(buttonNamed("Open in dohc")).toBeDefined();
+
+    await act(async () => buttonNamed("Try again")!.click());
+    await settle(() => opens === 2 && container.querySelector(".edit-notice") !== null);
+
+    await act(async () => buttonNamed("Done")!.click());
+    expect(buttonNamed("Edit file")).toBeDefined();
+    expect(container.querySelector(".edit-notice")).toBeNull();
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
+  });
+
+  it("keeps comments closed until asked for, with their count on the button", async () => {
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      if (requestPath(input) === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [{ messageId: "m1", createdAtMs: 1, deleted: false, body: "Shared comment", author: { kind: "named", displayName: "Sam" } }],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      return fallback(input, init);
+    }));
+    await renderApp();
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Comments"]')!;
+    const panel = container.querySelector<HTMLElement>("#link-discussion")!;
+    await settle(() => toggle.textContent === "1");
+    expect(panel.hidden).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => toggle.click());
+    expect(panel.hidden).toBe(false);
+    expect(panel.textContent).toContain("Shared comment");
+    expect(document.activeElement).toBe(panel);
+
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(panel.hidden).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("shows a link to one file as that file's name, and a link to several as a list", async () => {
+    const files: SharedFile[] = [
+      { path: "docs/a.md", blobSha256: "a".repeat(64), contentKind: "text" },
+      { path: "docs/b.md", blobSha256: "b".repeat(64), contentKind: "text" },
+    ];
+    let shared = files.slice(0, 1);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage(shared, 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage(shared);
+      if (path.startsWith("/api/view/blob/")) return new Response("Text");
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    await renderApp();
+    expect(container.querySelector("header nav")?.textContent).toBe("a.md");
+    expect(container.querySelector("button.folder")).toBeNull();
+    expect(container.querySelector('button[aria-label="Files"]')).toBeNull();
+    expect(container.querySelector("h1")?.textContent).toBe("a");
+
+    act(() => root?.unmount());
+    shared = files;
+    await renderApp();
+    expect(container.querySelector("header nav")).toBeNull();
+    expect(container.querySelector("button.folder")?.textContent).toBe("docs");
+    expect(renderedFilePaths()).toEqual(["a.md", "b.md"]);
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Files"]')!;
+    await act(async () => toggle.click());
+    expect(container.querySelector<HTMLElement>("#shared-files")?.hidden).toBe(true);
   });
 
   it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
@@ -1061,11 +1160,13 @@ describe("App", () => {
       blobSha256: "f".repeat(64),
       contentKind: "text",
     };
+    // A link to one file shows no tree, so the folder needs a second file.
+    const files: SharedFile[] = [file, { ...file, path: "docs/second.md" }];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return currentPage([file], 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/current") return currentPage(files, 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage(files);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response("# Shared file");
       }

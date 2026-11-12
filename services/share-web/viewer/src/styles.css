@@ -167,7 +167,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .icon-button.on { background: var(--viewer-selected); color: var(--viewer-ink); }
 .icon-button.agent { color: var(--viewer-agent); }
 
-.link-page > nav { width: 248px; flex: none; overflow-y: auto; border-right: 1px solid var(--viewer-line); padding: 8px 4px; background: var(--viewer-panel); }
+.link-page > nav { width: 248px; flex: none; overflow-y: auto; border-right: 1px solid var(--viewer-line); padding: 10px 4px 8px; background: var(--viewer-panel); }
 .link-page .tree ul { padding-left: 20px; }
 .link-page .folder, .link-page .file { display: flex; height: 28px; align-items: center; gap: 8px; padding: 0 8px; color: var(--viewer-muted); font-size: 13px; font-weight: 400; }
 .link-page .folder span, .link-page .file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -207,13 +207,14 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .link-page :is(.markdown, .ProseMirror) li { margin: 4px 0; }
 .link-page :is(.markdown, .ProseMirror) li > p { margin: 0; }
 .link-page :is(.markdown, .ProseMirror) blockquote { margin: 16px 0; border-left: 2px solid var(--viewer-line); padding-left: 16px; color: var(--viewer-muted); }
-.link-page :is(.markdown, .ProseMirror) table { margin: 4px 0 16px; border-collapse: collapse; font-size: .94em; }
+.link-page :is(.markdown, .ProseMirror) table { width: 100%; margin: 4px 0 16px; border-collapse: collapse; font-size: .94em; }
 .link-page .markdown :is(th, td) { border-bottom: 1px solid var(--viewer-line); padding: 8px 16px 8px 0; text-align: left; }
+.link-page .markdown th { color: var(--viewer-subtle); font-size: 12px; font-weight: 500; }
 .link-page :is(.markdown, .ProseMirror) hr { margin: 24px 0; border: 0; border-top: 1px solid var(--viewer-line); }
 .link-page :is(.markdown, .ProseMirror) :not(pre) > code { border-radius: 4px; padding: 1px 4px; background: var(--viewer-panel-2); }
 .link-page :is(.markdown, .ProseMirror) pre { border: 0; background: var(--viewer-panel-2); font-size: 14px; }
 .link-page .properties { margin: 0 0 16px; font-size: 12px; }
-.link-page .properties summary { display: inline-block; margin-left: -4px; border-radius: 6px; padding: 2px 8px 2px 4px; color: var(--viewer-subtle); cursor: pointer; }
+.link-page .properties summary { width: fit-content; margin-left: -4px; border-radius: 6px; padding: 2px 8px 2px 4px; color: var(--viewer-subtle); cursor: pointer; }
 .link-page .properties summary:hover { background: var(--viewer-hover); color: var(--viewer-muted); }
 .link-page .properties pre { margin: 8px 0 0; padding: 12px; font-size: 12px; }
 .link-page .source-text { margin: 0; overflow: auto; border-radius: 8px; padding: 16px; background: var(--viewer-panel-2); font-size: 13px; line-height: 1.5; }
@@ -233,6 +234,9 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .link-page .comments-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; border: 0; padding: 14px 16px 16px; background: none; }
 .link-page .comments-panel h2 { margin: 0 32px 4px 0; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; }
 .link-page .comments-helper { margin: 0 0 16px; }
+/* A Group link shows its channel here, which brings its own scroller and composer. */
+.link-page .comments-panel.link-channel { position: static; max-height: none; overflow: hidden; padding: 0; }
+.link-page .link-channel > h2 { margin: 0; padding: 14px 48px 8px 16px; }
 .link-page .comment-list { margin-bottom: 16px; }
 .link-page .comment-row { border: 0; padding: 0; }
 .link-page .unverified { font-family: inherit; font-size: 12px; letter-spacing: 0; text-transform: none; }
@@ -251,9 +255,11 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .popover { position: absolute; top: 48px; right: 12px; z-index: 30; width: 360px; max-width: calc(100% - 24px); max-height: calc(100% - 60px); overflow-y: auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 16px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); }
 .popover.link-more { width: 232px; border-radius: 8px; padding: 4px; }
 .popover.apps-lead { top: 96px; right: auto; left: 50%; width: min(440px, calc(100% - 32px)); transform: translateX(-50%); box-shadow: none; }
-.menu-item, .link-more .handoff-open { display: flex; width: 100%; height: 32px; align-items: center; justify-content: flex-start; gap: 8px; border: 0; border-radius: 6px; padding: 0 8px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 400; }
+.menu-item, .link-page .link-more .handoff-open { display: flex; width: 100%; height: 32px; align-items: center; justify-content: flex-start; gap: 8px; border: 0; border-radius: 6px; padding: 0 8px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 400; }
 .menu-item:hover, .link-page .link-more .handoff-open:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
 .link-more .handoff-panel { max-width: none; padding: 8px; }
+/* A surface takes focus as it opens, so Tab starts inside it. Its controls show their own focus. */
+.popover:focus, .side-panel:focus { outline: none; }
 .backdrop { position: fixed; inset: 0; z-index: 20; }
 .backdrop.narrow-only { display: none; }
 .popover section[aria-label="Shared apps"] h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
