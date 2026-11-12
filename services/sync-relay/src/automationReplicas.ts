@@ -417,8 +417,8 @@ export async function startAutomationReplicas(options: {
       // Only a replay that finished is done; one that failed stays owed for a later pass. Just before each stage, the
       // copy must be as current as now: no sync started since, none running, and nothing new at the relay.
       const generation = syncGeneration;
-      const current = () => generation === syncGeneration && running === 0 && logHead(row.workspaceId) <= replica.pulledHead;
-      replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs, current,
+      const stillCurrent = () => generation === syncGeneration && running === 0 && logHead(row.workspaceId) <= replica.pulledHead;
+      replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs, current: stillCurrent,
         records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
         onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
       return replayed ? "replayed" : "owed";
