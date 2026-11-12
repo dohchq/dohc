@@ -99,7 +99,7 @@ export async function runPublicAutomaticView(options: Options) {
     transport.relayUrl = options.relayUrl;
     const {hostId, instanceId} = h.host().coordinate;
     // Enrollment puts the document in the service host's scope and gives the host its credential.
-    const enrolled = h.storage.enrollServiceHostDocument({workspaceId, path, shareId: link.shareId, ownerUserId: h.ownerUserId,
+    const enrolled = h.storage.ensureOwnedLiveDocument({intent: "share", workspaceId, path, shareId: link.shareId, ownerUserId: h.ownerUserId,
       nowMs: Date.now(), guard: h.storage.captureStanding()});
     await options.replaceHost({version: 1, ...options.native, engineExecutable: options.executable, hostId, instanceId,
       workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, hostedReplication: {

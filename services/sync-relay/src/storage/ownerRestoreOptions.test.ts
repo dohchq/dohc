@@ -62,7 +62,7 @@ function enrollService(f: Awaited<ReturnType<typeof fixture>>) {
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId,binding.currentPath,"b".repeat(64));
-  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
 }
 
 it("returns the accepted head in retirement and repeated retirement", async () => {
@@ -97,7 +97,7 @@ it("compares retirement against the current lineage when an older lineage remain
 it("allows a restore after Start clears retirement", async () => {
   const f = await fixture(); enrollService(f);
   f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 11, guard() {}});
-  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 12, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, nowMs: 12, guard() {}});
   expect(f.begin().phase).toBe("authority-invalidated");
 });
 
@@ -112,7 +112,7 @@ it("does not retire at the old generation while a restore has begun", async () =
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId,binding.currentPath,"b".repeat(64));
-  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
   expect(f.begin().phase).toBe("authority-invalidated");
   expect(() => f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 101, guard() {}})).toThrowError(expect.objectContaining({code: "restore-in-progress", statusCode: 409}));
   const advanced = advanceStopRestoreFence(f.context,{workspaceId: scope.workspaceId,ownerUserId,operationId:"restore"},102);

@@ -70,7 +70,7 @@ async function fixture(lookupUserDisplayName?: LogAuthorNameLookup) {
       VALUES (?,?,'user','reader-2',NULL,?,1,'active',0,NULL,NULL)`).run(`grant-${shareId}`, shareId, access);
   };
   const setGrant = (shareId: string, change: string) => f.raw.prepare(`UPDATE sync_relay_share_grants SET ${change} WHERE share_id=?`).run(shareId);
-  const enroll = (path: string, shareId = scope.shareId) => f.storage.enrollServiceHostDocument({workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
+  const enroll = (path: string, shareId = scope.shareId) => f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enroll("docs/a.md"), {key, namespace});
   const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true, lookupUserDisplayName,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
@@ -149,8 +149,10 @@ it("serves hosted rows unchanged and refuses private files, their blobs and coor
 
 it("keeps documents shared only with View or Comment access out of the feed", async () => {
   const f = await fixture();
-  f.share("view-share", ["view"], "view");
+  // Enrolling needs Edit, so the share drops to View after it enrolls.
+  f.share("view-share", ["view"], "edit");
   f.enroll("view/c.md", "view-share");
+  f.setGrant("view-share", "access='view'");
   expect((await f.page()).scope.documents.map(row => row.objectId)).toEqual([binding.objectId]);
   expect(f.objects(await f.read())).not.toContain("object-view");
   expect(await f.blobStatus(C.sha256)).toBe(404);
@@ -428,7 +430,8 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   const activationId = retainServiceActivation(f.raw, namespace, true);
   const stop = preparedStop(f.storage, {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 20, guard() {}});
   expect(stop?.acceptedCursor).toBe(0);
-  f.enroll("docs/a.md");
+  // Only the owner's Resume clears a Stop.
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 20, guard() {}});
   expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({enabled: true, retired: false});
   const current = f.storage.readServiceHostFeedScope(ws)!;
   expect([[...current.hosted.keys()], [...current.shared.keys()]]).toEqual([["object-b"], ["object-b"]]);
@@ -461,7 +464,9 @@ it("moves a paused document with an activation from hosted to settling and keeps
   };
   expect(documents()).toEqual({hosted: [binding.objectId], settling: []});
   for (const enabled of [false, true]) {
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled, nowMs: 20, guard() {}});
+    const input = {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 20, guard() {}};
+    if (enabled) f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...input});
+    else f.storage.setServiceHostEnrollmentEnabled({...input, enabled});
     expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({ownerStop: enabled ? null : "pause"});
     expect(documents()).toEqual({hosted: [], settling: [binding.objectId]});
   }
@@ -783,8 +788,9 @@ it("keeps an aged blob the host uploads again until its write lands", async () =
 it("drops upload proof when the workspace stops being hosted", async () => {
   const f = await fixture();
   const {uploads} = f;
-  const setEnabled = (path: string, enabled: boolean) =>
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
+  const setEnabled = (path: string, enabled: boolean) => enabled
+    ? f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path, ownerUserId: "owner-1", nowMs: 30, guard() {}})
+    : f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const kept = blob("kept upload");
   await f.upload(kept);
@@ -885,8 +891,9 @@ it("after an epoch rotation hosts only documents enrolled again from above the f
 it("cuts a paused document's reads at once and keeps its writes until the session host releases it, and drops a stopped one at once", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");
-  const set = (path: string, enabled: boolean, retire = false) =>
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
+  const set = (path: string, enabled: boolean, retire = false) => enabled
+    ? f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path, ownerUserId: "owner-1", nowMs: 30, guard() {}})
+    : f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
@@ -917,8 +924,12 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect(release(binding.objectId)).toBeNull();
   expect(await documents()).toEqual([binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
-  // Revocation cuts reads at once; writes stay open until the release retires the document.
+  // The Resume's demand keeps the document readable past revocation, and its release keeps it.
   f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=40");
+  expect(await documents()).toEqual([binding.objectId]);
+  expect(release(binding.objectId)).toBeNull();
+  // Without that demand, revocation cuts reads at once; writes stay open until the release retires the document.
+  f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?").run(ws, binding.objectId);
   expect(await documents()).toEqual([]);
   expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   expect(release(binding.objectId)).toMatchObject({enabled: false, retired: true});
@@ -960,7 +971,7 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
   expect(hosted()).toBeNull();
   expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
 
-  f.storage.enrollServiceHostDocument({workspaceId: ws, path: "docs/a.md", shareId: scope.shareId, ownerUserId: "owner-1", nowMs: 22, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 22, guard() {}});
   f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 23, guard() {}});
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 24})).toBe("rotated");
   expect(hosted()).toBeNull();

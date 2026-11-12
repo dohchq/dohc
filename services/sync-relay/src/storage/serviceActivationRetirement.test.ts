@@ -16,7 +16,7 @@ it.each(["pause", "revoke"] as const)("refuses a validated update whose commit f
     const document = f.input.evidence.document;
     f.storage.claimWorkspaceIdentity({workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream"});
     const enrollment = {workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: "owner", nowMs: 10, guard() {}};
-    f.storage.enrollServiceHostDocument(enrollment);
+    f.storage.ensureOwnedLiveDocument({intent: "share", ...enrollment});
     expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "First"), "first")).result.kind).toBe("accepted");
     f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
         source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('history',?,?,'main',?,?,?,?,?,x'0000','owner','{}',1)`)
@@ -29,7 +29,7 @@ it.each(["pause", "revoke"] as const)("refuses a validated update whose commit f
     const cursor = f.raw.prepare("SELECT journal_cursor FROM sync_relay_live_update_journal WHERE delivery_id='first'").get()!.journal_cursor;
     const recorded = {relayDatabaseNamespace: "history", activationId, ...document, path: "docs/a.md", restoreFenceGeneration: 1, acceptedThrough: cursor, requestedAtMs: 20};
     expect(readServiceActivationRetirement(f.storage as StorageContext, document)).toEqual(recorded);
-    if (cause === "pause") f.storage.setServiceHostEnrollmentEnabled({...enrollment, enabled: true, nowMs: 30});
+    if (cause === "pause") f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...enrollment, nowMs: 30});
     else f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',revoked_at_ms=NULL WHERE grant_id='grant'").run());
     expect(f.storage.commitLiveUpdateJournal(delayed).result).toEqual({kind: "refused", reason: "authority-refused"});
     expect(() => f.capture(f.update("title", "After return"), "after")).toThrow("host-unavailable");

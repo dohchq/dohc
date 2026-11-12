@@ -63,6 +63,8 @@ export interface PersonalRunningEntry {
   fenceEpoch: number;
   workspaceIds: readonly string[];
   kind: "wait" | "stream" | "live";
+  /** Work that needs Edit also ends when its workspace drops a level. */
+  needs?: "edit";
   terminate(): void;
 }
 
@@ -288,10 +290,11 @@ export function createPersonalAgents(input: {
         if (result.reason === "invalid") throw badRequest(`${route.action} is invalid`);
         throw notFound();
       }
-      const ended = new Set(result.endedWorkspaceIds);
+      const ended = new Set(result.endedWorkspaceIds), lowered = new Set(result.loweredWorkspaceIds);
       const credentialsEnded = change.kind === "sign-out" || change.kind === "remove";
       endAndWake(
-        entry => entry.agentId === route.agentId && (credentialsEnded || entry.workspaceIds.some(id => ended.has(id))),
+        entry => entry.agentId === route.agentId && (credentialsEnded ||
+          entry.workspaceIds.some(id => ended.has(id) || (entry.needs === "edit" && lowered.has(id)))),
         result.wakeWorkspaceIds,
       );
       return jsonResponse({ ok: true, revision: result.revision, agent: toAgent(result.agent) });

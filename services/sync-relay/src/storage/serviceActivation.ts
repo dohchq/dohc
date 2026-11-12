@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
@@ -24,6 +24,10 @@ export class ServiceActivationDamaged extends Error {
 }
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 export {ServiceActivationHistoryOverBudget} from "./ordinaryActivationValidation";
+/** The activation fields readiness reads, without its state or baseline bytes. */
+export interface ServiceActivationReadiness {
+  readonly activationId: string; readonly objectId: string; readonly lineageClaimId: string; readonly completed: boolean; readonly binding: LiveObjectBinding;
+}
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -333,6 +337,28 @@ export class ServiceActivationStore {
       throw error instanceof ServiceActivationDamaged ? error : new ServiceActivationDamaged({cause: error});
     }
     });
+  }
+
+  /**
+   * What readiness needs of the activation `read` finds: its id, lineage,
+   * completion and binding, without its state or baseline bytes. The callers
+   * that use the bytes read and check them with `read`.
+   */
+  readiness(workspaceId: string, path: string, objectId?: string): ServiceActivationReadiness | null {
+    requireLiveJournalHistory(this.storage, this.history);
+    const row = this.storage.db.prepare(`SELECT a.activation_id,a.workspace_id,a.object_id,a.lineage_claim_id,a.binding_json,a.completion_json IS NOT NULL AS completed
+      FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
+      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL
+        AND (? IS NULL OR a.object_id=?)`).get(this.history.namespace, workspaceId, path, objectId ?? null, objectId ?? null);
+    if (!row) return null;
+    try {
+      const binding = parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
+      if (row.workspace_id !== workspaceId || binding.currentPath !== path) throw new ServiceActivationDamaged();
+      return {activationId: String(row.activation_id), objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id),
+        completed: row.completed === 1, binding};
+    } catch (error) {
+      throw error instanceof ServiceActivationDamaged ? error : new ServiceActivationDamaged({cause: error});
+    }
   }
 
   /**

@@ -139,6 +139,31 @@ export function createServerOwnerConnection(options: {
           assertCurrent();
           return value;
         },
+        // The owner's open of a document the server does not list as ready. The
+        // server enrolls one that retired without a Stop, and answers `refused`
+        // for any answer only the owner can change: a Pause or Stop, a document
+        // it can't host, a full host, or quota.
+        async open(path, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`, {
+            method: "POST", headers: {authorization: `Bearer ${session.value.token}`, "content-type": "application/json"},
+            body: JSON.stringify({path, open: true}), signal: requestSignal, redirect: "error",
+          });
+          assertCurrent(); requestSignal.throwIfAborted();
+          if (response.status === 404 || response.status === 409 || response.status === 413) {
+            await response.body?.cancel();
+            discovery.delete(workspace.workspaceId);
+            return "refused";
+          }
+          if (!response.ok) {await response.body?.cancel(); throw new Error("Owner live open failed.");}
+          const value = z.object({ok: z.literal(true), status: z.enum(["ready", "preparing", "paused", "unavailable"])})
+            .parse(await readBoundedJson(response, 16 * 1024, requestSignal));
+          assertCurrent();
+          // The next pass reads the list the open changed, not one cached before it.
+          discovery.delete(workspace.workspaceId);
+          return value.status === "ready" || value.status === "preparing" ? "hosted" : "refused";
+        },
         async retire(binding, attempt) {
           assertCurrent();const requestSignal=AbortSignal.any([signal,attempt]);
           const response=await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,{
@@ -153,12 +178,12 @@ export function createServerOwnerConnection(options: {
           const retired=z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired"),acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(value);
           discovery.delete(workspace.workspaceId);return retired.acceptedCursor;
         },
-        async documents(attempt) {
+        async documents(attempt, fresh = false) {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]);
           requestSignal.throwIfAborted();
           const cached = discovery.get(workspace.workspaceId);
-          if (cached?.credentials === session.value && cached.until > Date.now()) return cached.value;
+          if (!fresh && cached?.credentials === session.value && cached.until > Date.now()) return cached.value;
           const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`, {
             headers: {authorization: `Bearer ${session.value.token}`}, signal: requestSignal, redirect: "error",
           });
