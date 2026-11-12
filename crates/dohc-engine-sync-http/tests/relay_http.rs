@@ -1387,11 +1387,14 @@ fn expected_relay_error(code: &str) -> RelayError {
         "authorship_mismatch" => RelayError::AuthorshipMismatch,
         "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
+        "workspace_name_required" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
         "conflict"
         | "dependents_changed"
         | "link_name_already_set"
+        | "member_exists"
+        | "member_removed"
         | "notice_list_full"
         | "restore-in-progress"
         | "edits-pending"
@@ -1401,7 +1404,9 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "host-moved"
         | "host-start-failed"
         | "host-not-loaded"
-        | "stale" => RelayError::Conflict,
+        | "stale"
+        | "workspace_full"
+        | "workspace_share_managed" => RelayError::Conflict,
         "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
@@ -1413,6 +1418,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
         "link_discussion_blocked"
         | "link_discussion_paused"
+        | "members_forbidden"
         | "notice_refused"
         | "personal_agent_edit_needed"
         | "personal_agent_not_collection"
