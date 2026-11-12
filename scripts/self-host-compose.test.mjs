@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import test from 'node:test';
-import { defineMappingTag, defineScalarTag, load, YAML11_SCHEMA } from 'js-yaml';
+import { defineMappingTag, defineScalarTag, defineSequenceTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
 import { accountsDatabaseError, deploymentChecks, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, startupWaitSeconds, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { accountsSchemaState, postgresUrl, relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
@@ -37,7 +37,7 @@ test('production services use built images without source mounts or install comm
 test('startup gates data services on their single-use initialization jobs', () => {
   assert.equal(compose.services['workspace-api'].depends_on['postgres-migrate'].condition, 'service_completed_successfully');
   assert.equal(compose.services['sync-relay'].depends_on['relay-initialize'].condition, 'service_completed_successfully');
-  for (const name of ['workspace-api', 'sync-relay', 'share-web']) assert.equal(compose.services.gateway.depends_on[name].condition, 'service_healthy');
+  assert.equal(compose.services.gateway.depends_on['workspace-api'].condition, 'service_healthy');
 });
 
 test('startup waits through the relay start period, then 180 s for its failing checks and the services after it', () => {
@@ -329,7 +329,52 @@ test('every later start needs an accounts database, checked before any container
 
 const RESET = Symbol('!reset');
 const overlaySchema = YAML11_SCHEMA.withTags(defineScalarTag('!reset', {resolve: () => RESET}),
-  defineMappingTag('!reset', {create: () => RESET, addPair: () => '', has: () => false, keys: () => [], get: () => undefined}));
+  defineMappingTag('!reset', {create: () => RESET, addPair: () => '', has: () => false, keys: () => [], get: () => undefined}),
+  defineSequenceTag('!override', {create: () => [], addItem: (items, value) => { items.push(value); }}));
+
+// Each service's dependencies after Compose merges the files: a later file adds to them, and !reset removes them or the service.
+function composeDependencies(files) {
+  const services = {};
+  for (const file of files) {
+    for (const [name, service] of Object.entries(load(readFileSync(file, 'utf8'), { schema: overlaySchema }).services ?? {})) {
+      assert.ok(!Array.isArray(service.depends_on), `${file} ${name}: name each dependency's condition`);
+      if (service === RESET) delete services[name];
+      else services[name] = service.depends_on === RESET ? {} : { ...services[name], ...service.depends_on };
+    }
+  }
+  return services;
+}
+
+// True when Compose starts the service only after the relay is healthy, directly or through another service it waits for.
+function waitsForHealthyRelay(services, name, seen = new Set()) {
+  if (seen.has(name)) return false;
+  seen.add(name);
+  return Object.entries(services[name] ?? {}).some(([dependency, { condition }]) =>
+    (dependency === 'sync-relay' && condition !== 'service_started') || waitsForHealthyRelay(services, dependency, seen));
+}
+
+test('the gateway starts before the relay is healthy, because the relay needs the public route to become ready', () => {
+  // A relay that hosts a note for live editing confirms the hosted copy through the public origin before it is ready.
+  const choices = { DOHC_SERVER_NETWORK_ACCESS: 'private', DOHC_DATA_DIRECTORY: '/mnt/disk/dohc', DOHC_POSTGRES_HOST: 'db.provider.invalid',
+    DOHC_BEHIND_CLOUDFLARE: '1', DOHC_SHARE_WEB_APP_DOMAIN: 'apps.team.invalid' };
+  const names = Object.keys(choices), selections = new Map();
+  for (let mask = 0; mask < 2 ** names.length; mask++) {
+    const args = composeArgs('.env.self-host', Object.fromEntries(names.filter((_, bit) => mask & (1 << bit)).map(name => [name, choices[name]])));
+    const files = args.filter((_, index) => args[index - 1] === '-f');
+    selections.set(files.join(' '), files);
+  }
+  const overlays = readdirSync('tools/self-host').filter(file => /^compose\..+\.yml$/.test(file)).map(file => `tools/self-host/${file}`);
+  assert.deepEqual([...new Set([...selections.values()].flat())].sort(), ['docker-compose.self-host.yml', ...overlays].sort());
+  for (const [selection, files] of selections) {
+    const services = composeDependencies(files);
+    assert.ok(services.gateway && services['sync-relay'], selection);
+    assert.equal(waitsForHealthyRelay(services, 'gateway'), false, selection);
+    // A wait through another service counts: the viewer still starts only after a healthy relay.
+    assert.equal(waitsForHealthyRelay(services, 'share-web'), true, selection);
+    assert.equal(waitsForHealthyRelay({ ...services, gateway: { 'share-web': { condition: 'service_started' } } }, 'gateway'), true, selection);
+  }
+});
+
 const externalOverlay = () => load(readFileSync('tools/self-host/compose.external-postgres.yml', 'utf8'), { schema: overlaySchema });
 const external = () => ({...settings(), DOHC_POSTGRES_HOST: 'db.provider.invalid', DOHC_POSTGRES_PORT: '25060',
   DOHC_POSTGRES_CA_FILE: '/etc/dohc/provider-ca.pem', POSTGRES_PASSWORD: 'provider-password'});
