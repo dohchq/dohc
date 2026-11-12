@@ -1857,10 +1857,12 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
     expect(proof.journal(note.objectId)).toEqual([]);
     expect(await proof.documents()).not.toContainEqual(expect.objectContaining({path}));
     // Later passes do nothing more for it: no pull for unfinished work, no departure left waiting, no capture.
-    await twelvePasses(proof);
+    // The host first finds nothing to do after a reconciliation. Another reconciliation and the passes after it
+    // then add none of the three.
+    await settledPasses(proof);
     const work = () => ({pulls: proof.live().hostedPulls("workspace").reasons.pending ?? 0, waiting: proof.live().passCounts().lifecycleRetries, captures: proof.started("captureOwnerActivation")});
     const settled = work();
-    await twelvePasses(proof);
+    await settledPasses(proof);
     expect(work()).toEqual(settled);
     return {refusals: refusals(), ...settled};
   }), 120000);
