@@ -548,9 +548,20 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   }
 });
 
+test("the compiler confinement archive has no build-time paths", async () => {
+  // Preparation can build this archive on another runner type than the one that runs it.
+  const directory = fileURLToPath(new URL("../crates/dohc-compiler-owner/", import.meta.url));
+  const sources = (await readdir(directory, { recursive: true })).filter(file => file.endsWith(".rs"));
+  assert.ok(sources.length > 0);
+  for (const file of sources) {
+    assert.doesNotMatch(await readFile(join(directory, file), "utf8"), /env!\(\s*"CARGO_/u, file);
+  }
+});
+
 test("confinement jobs reuse identified artifacts without occupying worker runners", () => {
   const {jobs} = load(workflow), prepare = jobs["javascript-prepare"];
-  assert.equal(jobs["rust-archive"]["runs-on"], jobs["rust-tests"]["runs-on"]);
+  // Rust tests read build-time paths, so the archive and its consumers share one runner type.
+  for (const name of ["rust-tests", "rust", "rust-policy"]) assert.equal(jobs[name]["runs-on"], jobs["rust-archive"]["runs-on"], name);
   const preparedUpload = prepare.steps.findIndex(step => step.with?.name === "javascript-prepared-${{ github.run_attempt }}");
   assert.ok(prepare.steps.findIndex(step => step.uses?.startsWith("taiki-e/install-action@")) > preparedUpload);
   assert.ok(prepare.steps.findIndex(step => step.name === "Archive compiler confinement test binaries") > preparedUpload);
