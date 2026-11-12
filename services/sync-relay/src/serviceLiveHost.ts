@@ -1295,9 +1295,12 @@ export async function startServiceLiveHost(options: {
           catch(error){
             failed=true;
             const message=error instanceof Error?error.message:String(error);
-            if(!signal.aborted && message!==lastError){
-              lastError=message;
-              try{console.error("Service activation pass failed.",message);}catch{ /* Reporting must not stop activation. */ }
+            // A refusal also names its code and the engine call refused, never what the call carried.
+            const shown=error instanceof EngineRequestError
+              ?`${message} (code ${error.wireError?.code}${error.method===undefined?"":`, method ${error.method}`})`:message;
+            if(!signal.aborted && shown!==lastError){
+              lastError=shown;
+              try{console.error("Service activation pass failed.",shown);}catch{ /* Reporting must not stop activation. */ }
             }
           }
         };
