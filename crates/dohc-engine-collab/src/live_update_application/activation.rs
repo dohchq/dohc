@@ -375,7 +375,9 @@ pub fn capture_imported_owner_activation(
         let (cursor, epoch, stream) = committed_position(tx, key)?;
         integer(cursor, 0, SAFE)?;
         if base_relay_seq > cursor { return Err(ApplicationError::Conflict); }
-        let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+        // What the owner holds for its service host is never applied, so it
+        // is no document input; the end of its binding decides it.
+        let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND deferred_while_bound=0)",
             params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(read_sql)?;
         if pending { return Err(invalid("ordinary activation has deferred document input")); }
         let payload: String = tx.query_row("SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND imported=1 AND apply_disposition='applied' AND op_kind='ydoc.update'",

@@ -1175,7 +1175,9 @@ fn close_stranded_owner_bindings(store: &mut EngineStore, now_ms: i64) {
     };
     for key in keys {
         if let Err(error) = store.write_with::<_, OwnerOutboxError>(&NoFaults, |tx| {
-            close_retired_in_tx(tx, &key, now_ms)
+            dohc_engine_sync::unbind_owner_in_tx(tx, &key, ydoc::owner_hold_error, |tx| {
+                close_retired_in_tx(tx, &key, now_ms)
+            })
         }) {
             eprintln!("engine: stranded owner binding kept: {error}");
         }

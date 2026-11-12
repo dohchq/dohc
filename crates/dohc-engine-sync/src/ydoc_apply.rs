@@ -61,11 +61,14 @@ struct YdocUpdatePayload {
 pub(crate) const LIVE_UNADMITTED_UPDATE: &str = "ordinary update has no native live admission";
 
 // Historical audit imports never populate either native binding table.
+// A `held` update is matched by lineage, not path: a recovery may have moved
+// the binding since it was held.
 fn live_ordinary_classification(
     conn: &Connection,
     key: &DocKey,
     payload: &YdocUpdatePayload,
     update: &[u8],
+    held: bool,
 ) -> Result<Option<bool>, SyncError> {
     let bound: bool = conn
         .query_row(
@@ -84,7 +87,7 @@ fn live_ordinary_classification(
         dohc_engine_collab::owner_outbox::publication::contains_observed_update_in(
             conn,
             key,
-            &payload.path,
+            (!held).then_some(payload.path.as_str()),
             &payload.lineage_claim_id,
             update,
         )
@@ -117,14 +120,20 @@ fn live_ordinary_classification(
 /// goes, instead of refusing it: a hosted replica does for an ordinary
 /// update of the document's current lineage, whose content here would
 /// otherwise miss it. A base of that lineage carries only what the lineage
-/// started from.
+/// started from. An owner holds its service host's update until its feed
+/// can tell whether it is an echo ([`owner_holds`]).
 fn keeps_unadmitted(
     conn: &Connection,
     key: &DocKey,
     payload: &YdocUpdatePayload,
+    origin_id: &str,
+    origin_seq: i64,
 ) -> Result<bool, SyncError> {
-    if payload.is_base_state || !crate::hosted::is_hosted(conn, &key.workspace_id)? {
+    if payload.is_base_state {
         return Ok(false);
+    }
+    if !crate::hosted::is_hosted(conn, &key.workspace_id)? {
+        return owner_holds(conn, key, payload, origin_id, origin_seq);
     }
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
@@ -138,6 +147,443 @@ fn keeps_unadmitted(
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)
+}
+
+/// How many of its service host's updates an owner holds for one note, and
+/// for its workspace. One more than either is refused when it arrives, and
+/// no held update makes way for it.
+const OWNER_HOLDS_PER_NOTE: i64 = 64;
+const OWNER_HOLDS_PER_WORKSPACE: i64 = 1024;
+
+/// The queued rows `d` an owner holds for its service host: what ordinary
+/// sync delivered from the host's origin while a binding existed for its
+/// lineage, whatever the reason it queued ([`defer_ydoc_update_in_tx`]).
+fn owner_held(d: &str) -> String {
+    format!("{d}.deferred_while_bound=1")
+}
+
+/// Whether the owner binding `o` is not also this device's own live host
+/// binding. A device that holds the note's host activation, available or
+/// not, as the Stop refusal reads it (`require_not_host_in`), holds nothing
+/// for its service host: its host updates are decided as on main, and what
+/// it held before it became the host is decided at the next pass.
+fn not_own_host(o: &str) -> String {
+    format!(
+        "NOT EXISTS(SELECT 1 FROM live_device_application_bindings h \
+         WHERE h.relay_database_namespace={o}.relay_database_namespace \
+         AND h.workspace_id={o}.workspace_id AND h.main_version_id={o}.main_version_id \
+         AND h.object_id={o}.object_id AND h.lineage_claim_id={o}.lineage_claim_id)"
+    )
+}
+
+/// Whether `key`'s queued row at (`origin_id`, `origin_seq`) is one the
+/// owner holds ([`owner_held`]).
+fn owner_held_row(
+    conn: &Connection,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates d WHERE d.workspace_id=?1 \
+             AND d.version_id=?2 AND d.object_id=?3 AND d.origin_id=?4 AND d.origin_seq=?5 \
+             AND {})",
+            owner_held("d")
+        ),
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            origin_id,
+            origin_seq
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether a Stop released `key`'s note but keeps its binding until a
+/// Resume or the retirement. Then no new hold starts: the Stop decided the
+/// holds when it was recorded.
+fn owner_stop_released(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 \
+         AND main_version_id=?2 AND object_id=?3 AND state='released')",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// The accepted cursor and relay namespace of the owner binding of `key`'s
+/// `lineage`, unless this device is the note's own live host
+/// ([`not_own_host`]): the binding under which the owner holds its service
+/// host's updates.
+fn owner_binding_off_host(
+    conn: &Connection,
+    key: &DocKey,
+    lineage: &str,
+) -> Result<Option<(i64, String)>, SyncError> {
+    conn.query_row(
+        &format!(
+            "SELECT o.accepted_cursor,o.relay_database_namespace FROM ydoc_owner_bindings o \
+             WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 \
+             AND o.lineage_claim_id=?4 AND {}",
+            not_own_host("o")
+        ),
+        params![key.workspace_id, key.version_id, key.object_id, lineage],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether an owner still holds `payload`, the update at (`origin_id`,
+/// `origin_seq`) of its service host, which its bound feed has not shown it.
+/// Ordinary sync can deliver the host's update before the owner's feed
+/// accepts the same event. The host journals a live delivery's update and
+/// its audit in one transaction, the audit next in the host's origin
+/// (`journal_live_event_in_tx`). So the owner holds the update until it has
+/// the op after it: the audit of this update, until its feed reaches the
+/// journal cursor of the event that audit names, or anything else, when the
+/// update was no live delivery. The end of the binding decides it
+/// ([`unbind_owner_in_tx`]). The note's own live host holds nothing
+/// ([`not_own_host`]).
+fn owner_holds(
+    conn: &Connection,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<bool, SyncError> {
+    if !origin_id.starts_with(crate::hosted::SERVICE_HOST_ORIGIN_PREFIX)
+        || owner_stop_released(conn, key)?
+    {
+        return Ok(false);
+    }
+    let Some((accepted_cursor, namespace)) =
+        owner_binding_off_host(conn, key, &payload.lineage_claim_id)?
+    else {
+        return Ok(false);
+    };
+    let Some((op_kind, disposition, next)) = conn
+        .query_row(
+            "SELECT op_kind,apply_disposition,payload_json FROM replication_log \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![key.workspace_id, origin_id, origin_seq + 1],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+    else {
+        return Ok(true);
+    };
+    if op_kind != "live.audit.application" || disposition != "applied" {
+        return Ok(false);
+    }
+    let audit: serde_json::Value = serde_json::from_str(&next).map_err(SyncError::corrupt)?;
+    let names_it = audit["relayDatabaseNamespace"].as_str() == Some(namespace.as_str())
+        && audit["mainVersionId"].as_str() == Some(key.version_id.as_str())
+        && audit["objectId"].as_str() == Some(key.object_id.as_str())
+        && audit["lineageClaimId"].as_str() == Some(payload.lineage_claim_id.as_str())
+        && audit["updateBlobSha256"].as_str() == Some(payload.update_blob_sha256.as_str());
+    let Some(count) = audit["eventCount"].as_i64().filter(|_| names_it) else {
+        return Ok(false);
+    };
+    // The relay's journal cursor counts every note's events, so the feed
+    // reaches the event at the cursor its audit kept, not at its count. An
+    // applied audit always kept its event; without it the owner can't tell,
+    // so it keeps holding.
+    let cursor: Option<i64> = conn
+        .query_row(
+            "SELECT journal_cursor FROM live_audit_events WHERE relay_database_namespace=?1 \
+             AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 \
+             AND lineage_claim_id=?5 AND event_count=?6",
+            params![
+                namespace,
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                payload.lineage_claim_id,
+                count
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(cursor.is_none_or(|cursor| accepted_cursor < cursor))
+}
+
+/// Whether an owner holds any of its service host's updates for `key`'s note.
+fn owner_holds_queued_in(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates d WHERE d.workspace_id=?1 \
+             AND d.version_id=?2 AND d.object_id=?3 AND {}) \
+             AND NOT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
+            owner_held("d")
+        ),
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether an owner holds as many of its service host's updates as it may,
+/// for `key`'s note or for its workspace. A hosted replica holds none of
+/// these.
+fn owner_holds_full(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    let held = owner_held("d");
+    conn.query_row(
+        &format!(
+            "SELECT NOT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1) AND (\
+             (SELECT COUNT(*) FROM ydoc_deferred_updates d WHERE d.workspace_id=?1 \
+               AND d.version_id=?2 AND d.object_id=?3 AND {held})>=?4 \
+             OR (SELECT COUNT(*) FROM ydoc_deferred_updates d WHERE d.workspace_id=?1 AND {held})>=?5)"
+        ),
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            OWNER_HOLDS_PER_NOTE,
+            OWNER_HOLDS_PER_WORKSPACE
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether the owner holds any of its service host's updates for `key`'s
+/// note: one indexed read, which an owner runs as each frame of its feed
+/// commits, so it decides them only when there are some.
+pub(crate) fn owner_holds_queued(store: &EngineStore, key: &DocKey) -> Result<bool, SyncError> {
+    store.read_with(|conn| owner_holds_queued_in(conn, key))
+}
+
+/// What an owner runs as each commit that can move its accepted checkpoint
+/// ends, a frame of its feed or an enrollment: [`decide_owner_holds`], after
+/// one indexed read that finds whether it holds anything for `key`'s note.
+pub fn decide_owner_holds_after_commit(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    if owner_holds_queued(store, key)? {
+        decide_owner_holds(store, cache, key, faults)?;
+    }
+    Ok(())
+}
+
+/// Decide again each update the owner holds for `key`'s note, in the order
+/// they arrived: an echo leaves, one whose hold has ended is refused as on
+/// arrival, and the first still held keeps it and everything after it.
+pub(crate) fn decide_owner_holds(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let (drained, cleanup) = drain_deferred_ydoc(
+        store,
+        cache,
+        key,
+        DeferredDrainMode::Live(None),
+        faults,
+        None,
+    )?;
+    complete_drain(store, drained, cleanup, faults)
+}
+
+/// [`decide_owner_holds`] for every note of the workspace whose updates the
+/// owner holds, as a pull pass ends: the ops it applied can end holds.
+pub(crate) fn decide_owner_holds_in_workspace(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let notes: Vec<(String, String)> = store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT DISTINCT d.version_id,d.object_id FROM ydoc_deferred_updates d \
+                 WHERE d.workspace_id=?1 AND {} \
+                 AND NOT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1) \
+                 ORDER BY d.version_id,d.object_id",
+                owner_held("d")
+            ))
+            .map_err(SyncError::corrupt)?;
+        let notes = statement
+            .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?;
+        Ok::<_, SyncError>(notes)
+    })?;
+    let mut decided = YdocDrainResult::default();
+    for (version_id, object_id) in notes {
+        let key = DocKey::new(workspace_id, &version_id, &object_id)
+            .map_err(|_| local_corruption("a held update names an invalid document"))?;
+        let drained = decide_owner_holds(store, cache, &key, faults)?;
+        decided.refusals.extend(drained.refusals);
+        if drained.waiting.is_some() {
+            decided.waiting = drained.waiting;
+            break;
+        }
+    }
+    Ok(decided)
+}
+
+/// End an owner's binding for `key`'s note with `unbind`, or record a Stop
+/// that releases it, and decide in the same transaction each update the
+/// owner holds for the note, as the drain would once the hold ended: an echo
+/// leaves, anything else is refused as on arrival. Every deletion of a
+/// binding row goes through here; a test fails on one that does not. A
+/// lineage is not bound again while a row queued under its binding remains.
+pub fn unbind_owner_in_tx<T, E>(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    hold_error: impl Fn(SyncError) -> E,
+    unbind: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, E>,
+) -> Result<T, E> {
+    // The echo check reads the binding, so it runs before the binding goes.
+    let held = owner_holds_before_unbind_in_tx(tx, key).map_err(&hold_error)?;
+    let unbound = unbind(tx)?;
+    held.end_in_tx(tx, false).map_err(hold_error)?;
+    Ok(unbound)
+}
+
+/// Decide now each update the owner holds for `key`'s note, as the end of
+/// its binding would: an echo leaves, anything else is refused as on arrival.
+/// An imported replacement or archive of the lineage runs this after its own
+/// checks, and a restore fence runs it as it commits.
+pub fn decide_owner_holds_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), SyncError> {
+    owner_holds_before_unbind_in_tx(tx, key)?.end_in_tx(tx, true)
+}
+
+#[derive(Debug)]
+struct OwnerHoldsAtUnbind {
+    key: DocKey,
+    /// Each held row, in arrival order, its lineage and whether it is an echo.
+    held: Vec<(String, i64, String, bool)>,
+}
+
+/// Read what the owner holds for `key`'s note and which of those are echoes,
+/// in the transaction about to end the note's binding. One indexed read when
+/// it holds nothing.
+fn owner_holds_before_unbind_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<OwnerHoldsAtUnbind, SyncError> {
+    let mut decided = OwnerHoldsAtUnbind {
+        key: key.clone(),
+        held: Vec::new(),
+    };
+    if !owner_holds_queued_in(tx, key)? {
+        return Ok(decided);
+    }
+    let rows: Vec<(String, i64, String)> = {
+        let mut statement = tx
+            .prepare(&format!(
+                "SELECT d.origin_id,d.origin_seq,log.payload_json FROM ydoc_deferred_updates d \
+                 JOIN replication_log log ON log.workspace_id=d.workspace_id \
+                   AND log.origin_id=d.origin_id AND log.origin_seq=d.origin_seq \
+                 WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 AND {} \
+                   AND log.op_kind='ydoc.update' \
+                 ORDER BY d.relay_seq,d.origin_id,d.origin_seq",
+                owner_held("d")
+            ))
+            .map_err(SyncError::corrupt)?;
+        statement
+            .query_map(
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (origin_id, origin_seq, payload_json) in rows {
+        let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
+            .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
+        // Ending the binding must not wait on a held update's bytes: without
+        // them it cannot be an echo.
+        let bytes: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&payload.update_blob_sha256],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let echo = match bytes {
+            Some(bytes)
+                if dohc_engine_storage::hex_sha256(&bytes) == payload.update_blob_sha256 =>
+            {
+                live_ordinary_classification(tx, key, &payload, &bytes, true)? == Some(true)
+            }
+            _ => false,
+        };
+        decided
+            .held
+            .push((origin_id, origin_seq, payload.lineage_claim_id, echo));
+    }
+    Ok(decided)
+}
+
+impl OwnerHoldsAtUnbind {
+    /// Decide each held update: an echo leaves, as from the drain, and
+    /// anything else is refused exactly as on arrival. Unless `all`, only
+    /// those the owner no longer waits for: its lineage has no binding now,
+    /// or a Stop released the note but keeps its binding. That Stop decides
+    /// each one, echo or not, by the rule the binding's end uses, so no hold
+    /// outlives the release. The ordinary drain must never apply one.
+    fn end_in_tx(self, tx: &rusqlite::Transaction<'_>, all: bool) -> Result<(), SyncError> {
+        let key = &self.key;
+        let released = !all && owner_stop_released(tx, key)?;
+        for (origin_id, origin_seq, lineage_claim_id, echo) in self.held {
+            if !all {
+                let bound: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 \
+                         AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+                        params![
+                            key.workspace_id,
+                            key.version_id,
+                            key.object_id,
+                            lineage_claim_id
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                if bound && !released {
+                    continue;
+                }
+            }
+            if !echo {
+                let refusal =
+                    deferred_ydoc_refusal(key, &origin_id, origin_seq, LIVE_UNADMITTED_UPDATE);
+                crate::apply::persist_refusal(tx, &refusal)?;
+                retain_refused_ydoc_blob(tx, &key.workspace_id, &origin_id, origin_seq)?;
+            }
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![key.workspace_id, origin_id, origin_seq],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn retain_refused_ydoc_blob(
@@ -1761,8 +2207,10 @@ fn drain_deferred_ydoc(
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
             .ok_or(SyncError::BlobInvalid)?;
-        let live_classification =
-            store.read_with(|conn| live_ordinary_classification(conn, key, &payload, &bytes))?;
+        let live_classification = store.read_with(|conn| {
+            let held = owner_held_row(conn, key, &origin_id, origin_seq)?;
+            live_ordinary_classification(conn, key, &payload, &bytes, held)
+        })?;
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
             && live_classification.is_none()
@@ -1774,13 +2222,23 @@ fn drain_deferred_ydoc(
         }
         if let Some(echo) = live_classification {
             let parked = parked_refusal(store, key, &origin_id, origin_seq)?;
-            // What follows it stays queued too.
-            if !echo
-                && parked.is_none()
-                && store.read_with(|conn| keeps_unadmitted(conn, key, &payload))?
-            {
-                unadmitted = true;
-                break;
+            // What follows it stays queued too. An owner keeps only a row it
+            // marked as it queued; any other is decided as on main.
+            if !echo && parked.is_none() {
+                let (keeps, hosted) = store.read_with(|conn| {
+                    let hosted = crate::hosted::is_hosted(conn, &key.workspace_id)?;
+                    Ok::<_, SyncError>((
+                        keeps_unadmitted(conn, key, &payload, &origin_id, origin_seq)?
+                            && (hosted || owner_held_row(conn, key, &origin_id, origin_seq)?),
+                        hosted,
+                    ))
+                })?;
+                if keeps {
+                    // Only a hosted replica has a document to hold. An owner's
+                    // row waits in its queue, and the pass writes nothing.
+                    unadmitted = hosted;
+                    break;
+                }
             }
             record_facts.extend(read_parked_record_facts(
                 store, key, &origin_id, origin_seq,
@@ -2612,6 +3070,8 @@ pub fn retire_ydoc_lineage_in_tx(
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
+    // What the owner holds for its service host stays held here: retiring
+    // ends the binding, and that end decides it, after retirement's checks.
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     if complete
         .state
@@ -3183,11 +3643,30 @@ pub(crate) fn defer_ydoc_update_in_tx(
     } else {
         ("local", None, None, None)
     };
+    // A service host's update queued while its lineage is bound is marked
+    // from the binding as it queues ([`owner_held`]). A held update is decided
+    // only after the feed that could deliver its echo has ended for good:
+    // when its binding is deleted, when a Stop is recorded, at the first pass
+    // after the device becomes the note's own live host, at a restore fence,
+    // or at the re-judge after the binding is rebound. A device that is a
+    // note's own live host holds nothing ([`not_own_host`]); its host updates
+    // are decided as on main. Anything else decides nothing, and checks that
+    // the note's queue is empty skip the held update.
+    let service_host = feed.0 == "local"
+        && op
+            .origin_id
+            .starts_with(crate::hosted::SERVICE_HOST_ORIGIN_PREFIX);
     tx.execute(
-        "INSERT INTO ydoc_deferred_updates \
-         (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id, \
-          relay_seq,ingress_kind,relay_namespace,replication_epoch,stream_identity) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT DO NOTHING",
+        &format!(
+            "INSERT INTO ydoc_deferred_updates \
+             (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id, \
+              relay_seq,ingress_kind,relay_namespace,replication_epoch,stream_identity,deferred_while_bound) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12, \
+              ?13 AND EXISTS(SELECT 1 FROM ydoc_owner_bindings o WHERE o.workspace_id=?1 \
+                AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?7 AND {})) \
+             ON CONFLICT DO NOTHING",
+            not_own_host("o")
+        ),
         params![
             key.workspace_id,
             key.version_id,
@@ -3200,7 +3679,8 @@ pub(crate) fn defer_ydoc_update_in_tx(
             feed.0,
             feed.1,
             feed.2,
-            feed.3
+            feed.3,
+            service_host
         ],
     )
     .map_err(SyncError::persist)?;
@@ -3485,8 +3965,19 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         .optional()
         .map_err(SyncError::corrupt)?
         .unwrap_or(0);
-    dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(tx, key, changed_at_ms)
-        .map_err(map_owner_retirement_error)?;
+    unbind_owner_in_tx(
+        tx,
+        key,
+        |error| error,
+        |tx| {
+            dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(
+                tx,
+                key,
+                changed_at_ms,
+            )
+            .map_err(map_owner_retirement_error)
+        },
+    )?;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -3920,10 +4411,13 @@ fn ydoc_lineage_completeness_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
 ) -> Result<YdocLineageCompleteness, SyncError> {
+    // What the owner holds for its service host is never applied, so the
+    // lineage is complete without it; the end of its binding decides it.
     let deferred: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+               AND deferred_while_bound=0)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -7480,19 +7974,34 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         };
     }
     if let Some(echo) =
-        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
+        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes, false))?
     {
         return crate::apply::apply_envelope_with_mutation_outcome(
             store,
             envelope,
             faults,
             |tx, op| {
-                if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
+                if live_ordinary_classification(tx, &key, &payload, &bytes, false)? != Some(echo) {
                     return Err(SyncError::RetryableState {
                         reason: "native live binding changed",
                     });
                 }
-                if echo {
+                // An owner decides its service host's updates in the order
+                // they arrived, so one arriving behind a held update queues
+                // behind it, unless the owner holds all it may, a Stop
+                // released the note, or this device has since become the
+                // note's own live host.
+                let behind_held = op
+                    .origin_id
+                    .starts_with(crate::hosted::SERVICE_HOST_ORIGIN_PREFIX)
+                    && !owner_stop_released(tx, &key)?
+                    && owner_holds_queued_in(tx, &key)?
+                    && owner_binding_off_host(tx, &key, &payload.lineage_claim_id)?.is_some();
+                let queues = (behind_held
+                    || (!echo
+                        && keeps_unadmitted(tx, &key, &payload, &op.origin_id, op.origin_seq)?))
+                    && !owner_holds_full(tx, &key)?;
+                if echo && !queues {
                     Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
                         deferred: false,
                         reason: Some("native-live-content-echo"),
@@ -7500,7 +8009,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         lineage_replacement: None,
                         record_facts: Vec::new(),
                     }))
-                } else if keeps_unadmitted(tx, &key, &payload)? {
+                } else if queues {
                     defer_ydoc_update_in_tx(
                         tx,
                         &key,

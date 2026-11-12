@@ -3703,6 +3703,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_stage_receipts.sql"),
         sets_user_version: None,
     },
+    // An owner marks a service host's update it queued while bound.
+    Migration {
+        ordinal: 98,
+        id: "v2-ydoc-deferred-while-bound",
+        sql: include_str!("ydoc_deferred_while_bound.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5746,6 +5753,10 @@ mod tests {
             (
                 "v2-chat-stage-receipts",
                 "19ac78d41361ece77935fc56ee6d3d8d07170e8c3edbd4bc8967319387d08582",
+            ),
+            (
+                "v2-ydoc-deferred-while-bound",
+                "30bd92335f7e5afbb08144a5340745fc0dd4d90ba891062a79f236a7f1869323",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7795,6 +7806,96 @@ mod tests {
             r#"[["hosted","legacy-unknown",null],["ordinary","local",null]]"#
         );
         released_hold_and_deferred_feed_constraints_hold(&conn);
+    }
+
+    /// The upgrade marks no queued row. An older build queued none of an
+    /// owner's updates while its note was bound, so a service host's row on
+    /// a lineage bound now was queued under no binding, before this binding
+    /// or between an earlier one and it, and one under a Stop that released
+    /// its note was too. Each stays unmarked and is decided as before: by the
+    /// echo check while the binding stands, or applied once it is gone. A
+    /// peer's row, another lineage's, an unbound note's and one with an
+    /// unknown feed stay unmarked too. The column takes only 0 and 1, and new
+    /// rows start at 0.
+    #[test]
+    fn deferred_while_bound_upgrade_marks_no_queued_row() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-ydoc-deferred-while-bound");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) \
+               VALUES ('ws','main','main','main',0); \
+             INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+               VALUES ('ws','bound',0),('ws','unbound',0),('ws','released',0); \
+             INSERT INTO binary_blobs (sha256,byte_length,bytes) \
+               VALUES (printf('%064d',1),1,x'01'),(printf('%064d',9),1,x'09'); \
+             INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) \
+               VALUES ('ws','main','released',0); \
+             INSERT INTO ydoc_owner_bindings VALUES ('ws','main','bound',printf('%064d',1),'{}', \
+               'relay',1,0,0,printf('%064d',9),1,1); \
+             INSERT INTO ydoc_owner_bindings VALUES ('ws','main','released',printf('%064d',1),'{}', \
+               'relay',1,0,0,printf('%064d',9),1,1); \
+             INSERT INTO owner_live_stops VALUES ('ws','main','released','relay','released','{}',1,1); \
+             INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id, \
+               origin_seq,recorded_at_ms,lineage_claim_id,relay_seq,ingress_kind) VALUES \
+               ('ws','main','bound','service-host:a',1,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','bound','peer',1,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','bound','service-host:a',2,5,printf('%064d',2),NULL,'local'), \
+               ('ws','main','bound','service-host:a',3,5,printf('%064d',1),3,'legacy-unknown'), \
+               ('ws','main','unbound','service-host:a',4,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','released','service-host:a',6,5,printf('%064d',1),NULL,'local');",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let marks: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(object_id,origin_id,origin_seq,deferred_while_bound)) \
+                 FROM (SELECT * FROM ydoc_deferred_updates ORDER BY origin_id,origin_seq)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            marks,
+            r#"[["bound","peer",1,0],["bound","service-host:a",1,0],["bound","service-host:a",2,0],["bound","service-host:a",3,0],["unbound","service-host:a",4,0],["released","service-host:a",6,0]]"#
+        );
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' \
+                 AND name='ydoc_deferred_updates_while_bound'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        assert!(
+            conn.execute(
+                "UPDATE ydoc_deferred_updates SET deferred_while_bound=2",
+                []
+            )
+            .is_err()
+        );
+        conn.execute(
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id, \
+               origin_seq,recorded_at_ms,lineage_claim_id,relay_seq,ingress_kind) \
+             VALUES ('ws','main','bound','service-host:a',5,5,printf('%064d',1),NULL,'local')",
+            [],
+        )
+        .unwrap();
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT deferred_while_bound FROM ydoc_deferred_updates WHERE origin_seq=5",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 0, "only the defer insert marks a row");
     }
 
     #[test]

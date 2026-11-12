@@ -39,6 +39,16 @@ fn fixture_with_binding_generation(
     source: Option<&str>,
     generation: i64,
 ) -> Fixture {
+    fixture_of_origin(replicates, source, generation, "owner-origin")
+}
+
+/// A fixture whose store journals its own ops under `origin`.
+fn fixture_of_origin(
+    replicates: bool,
+    source: Option<&str>,
+    generation: i64,
+    origin: &str,
+) -> Fixture {
     let (scratch, path, mut store) = open_store();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 0, &NoFaults)
@@ -46,7 +56,7 @@ fn fixture_with_binding_generation(
     crate::journal_local_replication_op(
         &mut store,
         "ws",
-        "owner-origin",
+        origin,
         "epoch",
         "stream",
         "workspace.init",
@@ -5368,4 +5378,389 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     assert_eq!(resumed.activation_id, activation.activation_id);
     assert_eq!(resumed.source, activation.source);
     assert_eq!(resumed.full_state, activation.full_state);
+}
+
+/// An owner holding the service host's ordinary update ends the hold on the
+/// host's next op, so the host must journal each live delivery's update and
+/// its audit as adjacent ops in one transaction. When the same update is
+/// already journaled, the audit names that coordinate and no update is
+/// journaled, so nothing waits on it.
+#[test]
+fn a_live_delivery_journals_its_update_and_then_its_audit_in_one_transaction() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationResult,
+        LiveUpdateReceipt, RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority,
+        apply_committed,
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    let event = |cursor: i64, update: Vec<u8>| AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: format!("delivery-{cursor}"),
+                    update_digest: hex_sha256(&update),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "link-principal".into(),
+                    grant_id: "link-grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
+        },
+        update_bytes: update,
+    };
+    let journal = |tx: &rusqlite::Transaction<'_>,
+                   namespace: &str,
+                   binding: &LiveObjectBinding,
+                   count: i64| {
+        journal_live_event_in_tx(tx, namespace, binding, count, 200)
+            .map(|_| ())
+            .map_err(|error| {
+                ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error))
+            })
+    };
+    let before = operations(&f.store).len();
+    let updates = [
+        doc.richdoc_append_paragraph("First delivery."),
+        doc.richdoc_append_paragraph("Second delivery."),
+    ];
+    for (index, update) in updates.iter().enumerate() {
+        let applied = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event(index as i64 + 1, update.clone()),
+            &NoFaults,
+            100_000_000,
+            journal,
+        )
+        .unwrap();
+        assert!(matches!(applied, ApplicationResult::Applied(..)));
+    }
+    let ops = operations(&f.store);
+    let audits: Vec<_> = ops[before..]
+        .iter()
+        .filter(|op| op.op_kind == application_record::EVENT_OP)
+        .collect();
+    assert_eq!(audits.len(), 2);
+    for (index, audit) in audits.into_iter().enumerate() {
+        let digest = json!(hex_sha256(&updates[index]));
+        assert_eq!(audit.payload["updateBlobSha256"], digest);
+        assert_eq!(audit.payload["eventCount"], json!(index as i64 + 1));
+        let update = ops
+            .iter()
+            .find(|op| op.origin_seq == audit.origin_seq - 1)
+            .unwrap();
+        assert_eq!(
+            (update.op_kind.as_str(), &update.payload["updateBlobSha256"]),
+            ("ydoc.update", &digest),
+            "the audit's update is the op journaled just before it"
+        );
+    }
+
+    // A delivery whose transaction fails journals neither.
+    let third = doc.richdoc_append_paragraph("Never committed.");
+    let failed = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event(3, third),
+        &NoFaults,
+        100_000_000,
+        |tx, namespace, binding, count| {
+            journal(tx, namespace, binding, count)?;
+            Err(ApplicationError::Interrupted)
+        },
+    );
+    assert!(failed.is_err());
+    assert_eq!(operations(&f.store), ops);
+}
+
+/// Two live notes share the relay's journal, so another note's events take
+/// cursors between this note's: its first event at cursor 3, its second at
+/// cursor 6. The service host journals each delivery's update and audit as
+/// the host in this test does, and its owner receives them by ordinary sync.
+/// The owner holds the second update until its feed reaches cursor 6, not
+/// until it passes the event's count of 2, and it then leaves as an echo.
+/// A host records no event at a cursor its previous event passed, so an
+/// event's cursor is never below its count.
+#[test]
+fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationResult,
+        LiveUpdateReceipt, RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority,
+        apply_committed,
+    };
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxLimits,
+        accepted::{OwnerAcceptedFrameInput, apply_frame_in_tx},
+        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
+    };
+    use dohc_engine_storage::TxnOutcome;
+    const HOST: &str = "service-host:host";
+    let mut host = fixture_of_origin(true, None, 0, HOST);
+    let host_operations =
+        |store: &EngineStore| crate::list_replication_ops(store, "ws", HOST, -1, 500).unwrap();
+    bootstrap(&mut host, false).unwrap();
+    let event = |binding: &LiveObjectBinding, cursor: i64, update: Vec<u8>| AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: format!("delivery-{cursor}"),
+                    update_digest: hex_sha256(&update),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "link-principal".into(),
+                    grant_id: "link-grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
+        },
+        update_bytes: update,
+    };
+    let journal = |tx: &rusqlite::Transaction<'_>,
+                   namespace: &str,
+                   binding: &LiveObjectBinding,
+                   count: i64| {
+        journal_live_event_in_tx(tx, namespace, binding, count, 200)
+            .map(|_| ())
+            .map_err(|error| {
+                ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error))
+            })
+    };
+    let deliver = |host: &mut Fixture, cursor: i64, update: &[u8]| {
+        let binding = host.binding.clone();
+        apply_committed(
+            &mut host.store,
+            &mut WriterDocCache::new(),
+            &host.handle,
+            event(&binding, cursor, update.to_vec()),
+            &NoFaults,
+            100_000_000,
+            journal,
+        )
+    };
+    let writer = dohc_engine_collab::Ydoc::wire();
+    writer.apply(&host.bytes).unwrap();
+    let published = host_operations(&host.store).len();
+    let first = writer.richdoc_append_paragraph("The note's first event.");
+    let second = writer.richdoc_append_paragraph("The note's second event.");
+    assert!(matches!(
+        deliver(&mut host, 3, &first).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    // The other direction is refused at apply, not merely unbuildable: an
+    // event at or below the last accepted cursor is a conflict
+    // (`append_inner`, accepted_history.rs), and a note's n-th event follows
+    // n-1 at rising cursors from 1, so no event's cursor falls below its count.
+    assert!(!matches!(
+        deliver(&mut host, 1, &second),
+        Ok(ApplicationResult::Applied(..))
+    ));
+    assert!(matches!(
+        deliver(&mut host, 6, &second).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+
+    // The owner receives the service host's ops.
+    let ops: Vec<ReplicationEnvelope> = host_operations(&host.store)
+        .into_iter()
+        .map(|mut op| {
+            op.relay_seq = Some(1_000 + op.origin_seq);
+            op
+        })
+        .collect();
+    let (_scratch, _path, mut owner) = open_store();
+    let (binary, text) = host
+        .store
+        .read_with(|conn| {
+            let binary: Vec<Vec<u8>> = conn
+                .prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            let text: Vec<(String, i64, String)> = conn
+                .prepare("SELECT sha256,byte_length,text FROM blobs")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            Ok::<_, rusqlite::Error>((binary, text))
+        })
+        .unwrap();
+    owner
+        .write_with(&NoFaults, |tx| {
+            for bytes in &binary {
+                put_binary_blob(tx, bytes)?;
+            }
+            for (digest, length, body) in &text {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![digest, length, body],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let mut cache = WriterDocCache::new();
+    let apply = |owner: &mut EngineStore, cache: &mut WriterDocCache, op: &ReplicationEnvelope| {
+        crate::apply_replication_envelope(owner, cache, op, &NoFaults, &NoLiveLeases)
+            .unwrap()
+            .primary
+    };
+    for op in &ops[..published] {
+        let applied = apply(&mut owner, &mut cache, op);
+        assert!(
+            matches!(
+                applied,
+                ApplyDisposition::Applied(_) | ApplyDisposition::Skipped
+            ),
+            "{}: {applied:?}",
+            op.op_kind
+        );
+    }
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let marker = dohc_engine_collab::read_marker(&owner, &key)
+        .unwrap()
+        .unwrap();
+    let checkpoint = owner
+        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+        .unwrap()
+        .encode_full_state();
+    let mut observed = ObservedOwnerBinding {
+        binding: host.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: marker.head_update_seq,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 60_000,
+        },
+    };
+    owner
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
+        })
+        .unwrap();
+    // The owner's feed accepts `update` at `cursor`, as a committed frame.
+    let mut feed = |owner: &mut EngineStore, update: &[u8], cursor: i64| {
+        let TxnOutcome::Committed(result) = owner
+            .write_with(&NoFaults, |tx| {
+                apply_frame_in_tx(
+                    tx,
+                    "ws",
+                    &OwnerAcceptedFrameInput {
+                        binding: observed.binding.clone(),
+                        relay_database_namespace: "relay".into(),
+                        expected_revision: observed.revision,
+                        expected_native_head_sequence: observed.native_head_sequence,
+                        previous_accepted_cursor: observed.accepted_cursor,
+                        journal_cursor: cursor,
+                        update_bytes: update.to_vec(),
+                    },
+                    10 + cursor,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("frame must commit")
+        };
+        observed.revision = result.revision;
+        observed.native_head_sequence = result.native_head_sequence;
+        observed.accepted_cursor = result.accepted_cursor;
+    };
+    let held = |owner: &EngineStore| {
+        owner
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT origin_seq FROM ydoc_deferred_updates WHERE origin_id=?1 \
+                     AND deferred_while_bound=1 ORDER BY origin_seq",
+                )?
+                .query_map([HOST], |row| row.get(0))?
+                .collect::<Result<Vec<i64>, _>>()
+            })
+            .unwrap()
+    };
+    // What the owner decides as a pull pass ends.
+    let decide = |owner: &mut EngineStore, cache: &mut WriterDocCache| {
+        let decided =
+            crate::ydoc_apply::decide_owner_holds_in_workspace(owner, cache, "ws", &NoFaults)
+                .unwrap();
+        assert!(decided.waiting.is_none());
+        decided.refusals
+    };
+    let [first_update, first_audit, second_update, second_audit] = &ops[published..] else {
+        panic!(
+            "each delivery journals its update and then its audit: {:?}",
+            &ops[published..]
+        );
+    };
+    assert_eq!(second_audit.payload["eventCount"], json!(2));
+
+    // The first event: held through its audit until the feed reaches it.
+    assert!(matches!(
+        apply(&mut owner, &mut cache, first_update),
+        ApplyDisposition::Applied(_)
+    ));
+    assert_eq!(held(&owner), [first_update.origin_seq]);
+    assert!(matches!(
+        apply(&mut owner, &mut cache, first_audit),
+        ApplyDisposition::Applied(_)
+    ));
+    assert!(decide(&mut owner, &mut cache).is_empty());
+    assert_eq!(held(&owner), [first_update.origin_seq]);
+    feed(&mut owner, &first, 3);
+    assert!(decide(&mut owner, &mut cache).is_empty());
+    assert!(held(&owner).is_empty());
+
+    // The second event: the feed has passed cursor 3, above the event's
+    // count of 2, and has not reached cursor 6.
+    assert!(matches!(
+        apply(&mut owner, &mut cache, second_update),
+        ApplyDisposition::Applied(_)
+    ));
+    assert_eq!(held(&owner), [second_update.origin_seq]);
+    assert!(matches!(
+        apply(&mut owner, &mut cache, second_audit),
+        ApplyDisposition::Applied(_)
+    ));
+    assert!(
+        decide(&mut owner, &mut cache).is_empty(),
+        "the feed has not reached cursor 6"
+    );
+    assert_eq!(held(&owner), [second_update.origin_seq]);
+    feed(&mut owner, &second, 6);
+    assert!(decide(&mut owner, &mut cache).is_empty());
+    assert!(held(&owner).is_empty());
+    let refused: i64 = owner
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id=?1",
+                [HOST],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(refused, 0, "both leave as echoes");
 }

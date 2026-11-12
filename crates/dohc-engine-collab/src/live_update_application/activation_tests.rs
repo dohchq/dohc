@@ -1120,9 +1120,9 @@ fn reader_restore_can_fence_before_lazy_proof_dispatch() {
     let mut receipt = None;
     for reconnect in [false, true] {
         let result = if reconnect {
-            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
         } else {
-            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults)
+            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
         };
         let result = result.unwrap();
         if let Some(previous) = &receipt { assert_eq!(previous, &result); }
