@@ -57,15 +57,21 @@ describe("live host cancellation lifetime", () => {
     expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
   });
 
-  it("leaves no deadline signal behind after work that derives from it and returns early", async () => {
-    const host = new AbortController(), connection = new AbortController(), signals: WeakRef<AbortSignal>[] = [];
-    for (let i = 0; i < 100; i++) await withDeadline(host.signal, 60_000, async signal => {
+  it.each(["ends early", "completes"] as const)("holds no deadline signal over passes that %s", async shape => {
+    const host = new AbortController(), connection = new AbortController(), signals: WeakRef<AbortSignal>[] = [], held: number[] = [];
+    const pass = () => withDeadline(host.signal, 60_000, async signal => {
       signals.push(new WeakRef(signal));
+      // A completing pass first runs work that listens to its signal directly.
+      if (shape === "completes") await withLiveHostSignal(signal, new AbortController().signal, async () => undefined);
       // Hosted replication derives its own signal from the pass's.
       AbortSignal.any([connection.signal, signal]);
     });
-    await new Promise(setImmediate); gc();
-    expect(signals.filter(signal => signal.deref() !== undefined)).toHaveLength(0);
+    for (let batch = 0; batch < 2; batch++) {
+      for (let i = 0; i < 50; i++) await pass();
+      await new Promise(setImmediate); gc();
+      held.push(signals.filter(signal => signal.deref() !== undefined).length);
+    }
+    expect(held).toEqual([0, 0]);
     expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
   });
 
