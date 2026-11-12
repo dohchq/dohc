@@ -144,7 +144,11 @@ export type OperationLookup =
   /** The write settled long ago and only its tombstone is left. */
   | { kind: "too-old" };
 
-export type OperationClaim = { kind: "recorded"; record: OperationRecord } | Exclude<OperationLookup, { kind: "absent" }>;
+export type OperationClaim =
+  | { kind: "recorded"; record: OperationRecord }
+  | Exclude<OperationLookup, { kind: "absent" }>
+  /** The key is new and the account doesn't own the workspace, so nothing was written. */
+  | { kind: "not-owner" };
 
 export interface RecordOperationInput {
   /** From the session, never from the request. */
@@ -221,7 +225,9 @@ export function lookupOperation(
 /**
  * Records a write before the engine is asked to change anything. The primary
  * key admits one row per key: a request that finds one already answers from
- * it, and writes nothing.
+ * it, and writes nothing. A new row needs the account to own the workspace in
+ * the same transaction, so a write that arrives after its workspace was
+ * deleted leaves nothing behind.
  */
 export function recordOperation(storage: StorageContext, input: RecordOperationInput): OperationClaim {
   const hash = bindingHash(input.binding);
@@ -230,18 +236,18 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
       `INSERT INTO sync_relay_account_operations (account_id, operation_id, binding_hash, stage, workspace_id, incarnation,
          replication_epoch, stream_identity, operation, command_json, message_state, result_json, active_until_ms,
          created_at_ms, updated_at_ms, settled_at_ms)
-       VALUES (?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)
+       SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL
+       WHERE EXISTS (SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?)
        ON CONFLICT (account_id, operation_id) DO NOTHING`,
     ).run(
       input.accountId, input.operationId, hash, input.binding.workspaceId, input.incarnation, input.replicationEpoch,
       input.streamIdentity, input.binding.operation, JSON.stringify(input.command), input.writesMessage ? "pending" : null,
-      input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs,
+      input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs, input.binding.workspaceId, input.accountId,
     );
     const row = readRow(storage, input.accountId, input.operationId);
     if (Number(inserted.changes) === 1) return { kind: "recorded", record: recordOf(row!) };
     const found = classify(row, hash);
-    if (found.kind === "absent") throw new Error("An account operation conflicted without a row.");
-    return found;
+    return found.kind === "absent" ? { kind: "not-owner" } : found;
   });
 }
 

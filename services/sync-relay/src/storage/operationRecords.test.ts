@@ -33,6 +33,22 @@ function input(overrides: Partial<RecordOperationInput> = {}): RecordOperationIn
   };
 }
 
+async function own(storage: SyncRelayStorage, accountId: string, ...workspaceIds: string[]): Promise<void> {
+  const h = testHandler(storage);
+  for (const workspaceId of workspaceIds) await claimWorkspace(h, accountId, workspaceId);
+}
+
+function giveWorkspace(storage: SyncRelayStorage, workspaceId: string, ownerUserId: string): void {
+  const db = inspectDatabase(storagePath(storage));
+  db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(ownerUserId, workspaceId);
+  db.close();
+}
+
+function rowCount(storage: SyncRelayStorage): unknown {
+  const db = inspectDatabase(storagePath(storage));
+  try { return db.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get(); } finally { db.close(); }
+}
+
 function recorded(claim: OperationClaim) {
   if (claim.kind !== "recorded") throw new Error(`expected a new record, got ${claim.kind}`);
   return claim.record;
@@ -53,6 +69,7 @@ function tombstones(storage: SyncRelayStorage): Array<{ accountId: unknown; oper
 
 it("creates the operation table on an older relay once, and refuses an unmarked or damaged one", async () => {
   const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace");
   const path = storagePath(storage);
   closeTestStorage(storage);
   const marker = () => {
@@ -88,6 +105,8 @@ it("creates the operation table on an older relay once, and refuses an unmarked 
 
 it("records a write once and answers a retry with the same binding from its row", async () => {
   const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace");
+  await own(storage, "another-account", "theirs");
   expect(storage.lookupAccountOperation(key("operation-1"))).toEqual({ kind: "absent" });
   const record = recorded(storage.recordAccountOperation(input()));
   expect(record).toEqual({
@@ -105,25 +124,26 @@ it("records a write once and answers a retry with the same binding from its row"
     expect(storage.lookupAccountOperation(key("operation-1", changed))).toEqual({ kind: "mismatch" });
   }
   expect(storage.lookupAccountOperation(key("operation-1"))).toEqual({ kind: "found", record });
-  expect(recorded(storage.recordAccountOperation(input({ accountId: "another-account" }))).accountId).toBe("another-account");
+  expect(recorded(storage.recordAccountOperation(input({ accountId: "another-account", binding: binding(ARGS, "theirs") }))).accountId)
+    .toBe("another-account");
   expect(recorded(storage.recordAccountOperation(input({ operationId: "reaction", writesMessage: false }))).messageState).toBeNull();
 });
 
 it("admits one row per key across two connections", async () => {
   const first = await testStorage();
+  await own(first, ACCOUNT, "workspace");
   const second = reopenTestStorage(storagePath(first));
   const claims = [first, second].map((storage, attempt) => storage.recordAccountOperation(input({ command: { attempt } })));
   const record = recorded(claims[0]!);
   expect(record.command).toEqual({ attempt: 0 });
   expect(claims[1]).toEqual({ kind: "found", record });
   expect(second.recordAccountOperation(input({ binding: binding({ ...ARGS, body: "Other" }) }))).toEqual({ kind: "mismatch" });
-  const db = inspectDatabase(storagePath(first));
-  expect(db.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()).toEqual({ n: 1 });
-  db.close();
+  expect(rowCount(first)).toEqual({ n: 1 });
 });
 
 it("moves a stage only forward and never out of saved or refused", async () => {
   const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace");
   recorded(storage.recordAccountOperation(input()));
   expect(advance(storage, "operation-1", "reply-written")).toMatchObject({ moved: true, record: { stage: "reply-written", updatedAtMs: NOW + 10 } });
   expect(advance(storage, "operation-1", "recorded")).toMatchObject({ moved: false, record: { stage: "reply-written" } });
@@ -151,6 +171,7 @@ it("moves a stage only forward and never out of saved or refused", async () => {
 
 it("lists a copy's unfinished writes, stalled ones included, oldest first", async () => {
   const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace", "other-workspace");
   for (const [index, operationId] of ["stalled", "recorded", "saved", "refused"].entries()) {
     recorded(storage.recordAccountOperation(input({ operationId, nowMs: NOW + index })));
   }
@@ -163,6 +184,7 @@ it("lists a copy's unfinished writes, stalled ones included, oldest first", asyn
 
 it("turns writes settled more than 30 days ago into tombstones that answer too old", async () => {
   const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace");
   for (const operationId of ["settled", "later", "unfinished"]) recorded(storage.recordAccountOperation(input({ operationId })));
   advance(storage, "settled", "saved", { result: { messageId: "message" }, nowMs: NOW });
   advance(storage, "later", "refused", { nowMs: NOW + 1 });
@@ -184,7 +206,7 @@ it("turns writes settled more than 30 days ago into tombstones that answer too o
 
 it("leaves a deleted workspace's writes as tombstones, so a retry is too old", async () => {
   const storage = await testStorage();
-  await claimWorkspace(testHandler(storage), ACCOUNT, "workspace");
+  await own(storage, ACCOUNT, "workspace", "other-workspace");
   const unfinished = input({ operationId: "unfinished" });
   const saved = input({ operationId: "saved" });
   const elsewhere = input({ operationId: "elsewhere", binding: binding(ARGS, "other-workspace") });
@@ -202,20 +224,25 @@ it("leaves a deleted workspace's writes as tombstones, so a retry is too old", a
   expect(storage.lookupAccountOperation(saved)).toEqual({ kind: "too-old" });
   expect(storage.recordAccountOperation({ ...saved, binding: binding({ ...ARGS, body: "Other" }) })).toEqual({ kind: "mismatch" });
   expect(storage.listUnfinishedAccountOperations({ workspaceId: "workspace", incarnation: 1 })).toEqual([]);
+  // A write that reaches storage after the deletion leaves nothing behind.
+  expect(storage.recordAccountOperation(input({ operationId: "late" }))).toEqual({ kind: "not-owner" });
+  expect(storage.lookupAccountOperation(key("late"))).toEqual({ kind: "absent" });
   expect(storage.lookupAccountOperation(elsewhere)).toMatchObject({ kind: "found", record: { workspaceId: "other-workspace" } });
 });
 
 it("deletes an account's writes and tombstones, and leaves another account's on its workspaces as tombstones", async () => {
   const storage = await testStorage();
-  await claimWorkspace(testHandler(storage), "leaving", "owned");
+  await own(storage, "former-owner", "owned");
+  await own(storage, "bystander", "workspace");
   const owned = (accountId: string, operationId: string) => input({ accountId, operationId, binding: binding(ARGS, "owned") });
-  recorded(storage.recordAccountOperation(owned("leaving", "unfinished")));
-  recorded(storage.recordAccountOperation(input({ accountId: "leaving", operationId: "forgotten" })));
-  storage.advanceAccountOperation({ accountId: "leaving", operationId: "forgotten", stage: "saved", nowMs: NOW });
-  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(1);
-  // A former owner's write on the deleted workspace, and a write elsewhere.
+  // A former owner's write on the workspace the deleted account then owned, and a write elsewhere.
   const former = owned("former-owner", "former");
   recorded(storage.recordAccountOperation(former));
+  giveWorkspace(storage, "owned", "leaving");
+  recorded(storage.recordAccountOperation(owned("leaving", "unfinished")));
+  recorded(storage.recordAccountOperation(owned("leaving", "forgotten")));
+  storage.advanceAccountOperation({ accountId: "leaving", operationId: "forgotten", stage: "saved", nowMs: NOW });
+  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(1);
   const elsewhere = input({ accountId: "bystander", operationId: "elsewhere" });
   recorded(storage.recordAccountOperation(elsewhere));
 
@@ -233,4 +260,24 @@ it("deletes an account's writes and tombstones, and leaves another account's on 
   db.close();
   expect(storage.recordAccountOperation(former)).toEqual({ kind: "too-old" });
   expect(storage.lookupAccountOperation(elsewhere)).toMatchObject({ kind: "found" });
+  // A write the deleted account's request started before the purge records nothing after it.
+  expect(storage.recordAccountOperation(owned("leaving", "late"))).toEqual({ kind: "not-owner" });
+  expect(rowCount(storage)).toEqual({ n: 2 });
+});
+
+it("records a new write only for the workspace's owner, and answers a retry from its row after ownership changes", async () => {
+  const storage = await testStorage();
+  expect(storage.recordAccountOperation(input())).toEqual({ kind: "not-owner" });
+  await own(storage, "someone-else", "workspace");
+  expect(storage.recordAccountOperation(input())).toEqual({ kind: "not-owner" });
+  expect(storage.lookupAccountOperation(key("operation-1"))).toEqual({ kind: "absent" });
+  expect(rowCount(storage)).toEqual({ n: 0 });
+
+  giveWorkspace(storage, "workspace", ACCOUNT);
+  const record = recorded(storage.recordAccountOperation(input()));
+  giveWorkspace(storage, "workspace", "someone-else");
+  expect(storage.recordAccountOperation(input())).toEqual({ kind: "found", record });
+  expect(storage.recordAccountOperation(input({ binding: binding({ ...ARGS, body: "Other" }) }))).toEqual({ kind: "mismatch" });
+  expect(storage.recordAccountOperation(input({ operationId: "operation-2" }))).toEqual({ kind: "not-owner" });
+  expect(rowCount(storage)).toEqual({ n: 1 });
 });
