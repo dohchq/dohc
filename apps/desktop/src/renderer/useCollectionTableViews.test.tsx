@@ -183,6 +183,21 @@ it("reads the file again after a write that failed, so the next change saves",as
   expect(file.views().map(view=>view.name)).toEqual(["Ours"]);
   expect(onError).not.toHaveBeenCalled();
 });
+it("reports nothing of a failed save once its table closed while the views were read again",async()=>{
+  const file=viewsFile(),onError=vi.fn();
+  const mounted=render(<Views workspaceId="w" dataset={dataset} tableId={id(2)} onError={onError}/>);
+  await ready();
+  await act(async()=>{await latest!.create({name:"Board",kind:"board",groupBy:id(3)});});
+  const board=file.views()[0]!.viewId as string;
+  backend.writeWorkspaceText.mockRejectedValueOnce(Error("The disk is full."));
+  const again=deferred<{text:string;contentHash:string;truncated:false}>();
+  backend.readWorkspaceText.mockReturnValueOnce(again.promise);
+  // The field's save fails, and the table closes before the views are read again.
+  await act(async()=>{latest!.setField(board,{groupBy:id(3)});});
+  mounted.unmount();
+  await act(async()=>{again.resolve({text:JSON.stringify({formatVersion:1,datasetId:id(1),tableId:id(2),views:[]}),contentHash:"b".repeat(64),truncated:false});});
+  expect(onError).not.toHaveBeenCalled();
+});
 it("renames a view, refuses a name another view has, and saves the field a board groups by",async()=>{
   const file=viewsFile(),onError=vi.fn();
   render(<Views workspaceId="w" dataset={dataset} tableId={id(2)} onError={onError}/>);

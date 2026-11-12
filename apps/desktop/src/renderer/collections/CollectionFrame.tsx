@@ -490,12 +490,12 @@ function ViewTabs(props: {
       ) : null}
       {views && adding ? (
         <Popover anchor={addButton} label="Add a view" held={held} onClose={() => setAdding(false)}>
-          <AddViewForm views={views} taken={names} onHeld={setHeld} onDone={() => setAdding(false)} />
+          <AddViewForm views={views} taken={names} paused={disabled} onHeld={setHeld} onDone={() => setAdding(false)} />
         </Popover>
       ) : null}
       {views && renamed ? (
         <Popover anchor={renameAnchor} label={`Rename ${renamed.name}`} held={held} onClose={() => setRenaming(null)}>
-          <RenameViewForm key={renamed.id} views={views} tab={renamed} taken={names} onHeld={setHeld} onDone={() => setRenaming(null)} />
+          <RenameViewForm key={renamed.id} views={views} tab={renamed} taken={names} paused={disabled} onHeld={setHeld} onDone={() => setRenaming(null)} />
         </Popover>
       ) : null}
     </>
@@ -563,7 +563,8 @@ function useAlive(): RefObject<boolean> {
 
 type Problem = { at: "name" | "group" | "date" | "form"; text: string };
 
-function AddViewForm(props: { views: CollectionFrameViews; taken: readonly string[]; onHeld: (held: boolean) => void; onDone: () => void }) {
+/** `paused`: the page holds its tabs, so a form kept open for its answer saves nothing more until they are free. */
+function AddViewForm(props: { views: CollectionFrameViews; taken: readonly string[]; paused: boolean; onHeld: (held: boolean) => void; onDone: () => void }) {
   const { views, taken } = props;
   const ids = useId();
   const alive = useAlive();
@@ -598,7 +599,7 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (pending) return;
+    if (pending || props.paused) return;
     const trimmed = name.trim();
     if (trimmed === "") return fail({ at: "name", text: NAME_MISSING });
     if (taken.includes(trimmed)) return fail({ at: "name", text: nameTaken(trimmed) });
@@ -703,13 +704,13 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
       ) : null}
       {problem ? <FieldError id={errorId}>{problem.text}</FieldError> : null}
       <div className="flex justify-end">
-        <PrimaryButton type="submit" disabled={pending}>{pending ? "Creating…" : "Create view"}</PrimaryButton>
+        <PrimaryButton type="submit" disabled={pending || props.paused}>{pending ? "Creating…" : "Create view"}</PrimaryButton>
       </div>
     </form>
   );
 }
 
-function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFrameTab; taken: readonly string[]; onHeld: (held: boolean) => void; onDone: () => void }) {
+function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFrameTab; taken: readonly string[]; paused: boolean; onHeld: (held: boolean) => void; onDone: () => void }) {
   const { views, tab } = props;
   const ids = useId();
   const alive = useAlive();
@@ -723,7 +724,7 @@ function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFra
   }, []);
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (pending) return;
+    if (pending || props.paused) return;
     const trimmed = name.trim();
     if (trimmed === tab.name) return props.onDone();
     const wrong = trimmed === "" ? NAME_MISSING : props.taken.includes(trimmed) ? nameTaken(trimmed) : null;
@@ -763,7 +764,7 @@ function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFra
       </label>
       {problem !== null ? <FieldError id={errorId}>{problem}</FieldError> : null}
       <div className="flex justify-end">
-        <PrimaryButton type="submit" disabled={pending}>{pending ? "Renaming…" : "Rename"}</PrimaryButton>
+        <PrimaryButton type="submit" disabled={pending || props.paused}>{pending ? "Renaming…" : "Rename"}</PrimaryButton>
       </div>
     </form>
   );

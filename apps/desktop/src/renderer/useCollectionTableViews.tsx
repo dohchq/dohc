@@ -85,7 +85,7 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
     const previous=held.current;
     if(!previous){void refresh();return NOT_READ;}
     if(saving.current)return "dohc is saving another change to these views. Try again.";
-    saving.current=true;setBusy(true);const request=current.current;
+    saving.current=true;setBusy(true);const request=current.current,signal=controller.current.signal;
     try {
       const next=await writeTableViews(workspaceId,previous,{...previous.document,views},controller.current.signal);
       if(request!==current.current)return null;keep(next);select(next.document.views.find(view=>view.viewId===selection?.viewId)??null);after?.();
@@ -95,6 +95,8 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
       if(report)onError("Could not save Collection views.",error,()=>{void refresh();});
       // The file may have changed, so the next change starts from what it holds now.
       await refresh();
+      // The table closed while its views were read again, so nothing is left to tell.
+      if(signal.aborted)return null;
       return withErrorWords("dohc could not save this view.",error);
     }
     finally{saving.current=false;if(request===current.current)setBusy(false);}

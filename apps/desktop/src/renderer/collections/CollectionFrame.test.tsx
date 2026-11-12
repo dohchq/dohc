@@ -566,6 +566,13 @@ describe("tabs the page holds, or takes away, while something is open", () => {
     saving.resolve("dohc could not save this view. The saved views changed elsewhere. Try again.");
     await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Add a view" })).getByRole("alert").textContent)
       .toBe("dohc could not save this view. The saved views changed elsewhere. Try again."));
+    // The answer shows, and nothing more saves until the page frees the tabs.
+    const create = () => screen.getByRole<HTMLButtonElement>("button", { name: "Create view" });
+    expect(create().disabled).toBe(true);
+    fireEvent.submit(create().closest("form")!);
+    expect(views.create).toHaveBeenCalledTimes(1);
+    page.rerender(<Frame views={views} />);
+    expect(create().disabled).toBe(false);
   });
 
   it("closes a tab's menu and the popovers when the person can no longer save views", async () => {

@@ -1623,6 +1623,30 @@ describe("collection authoring", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it.each(["a rename", "a deletion"])("changes nothing in the shell when the Views dialog's write of %s ends after the page closed", async (change) => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onActiveViewChange = vi.fn();
+    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange });
+    await screen.findByText("Plan");
+    const write = deferred<{ status: "written"; contentHash: string }>();
+    bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Views" }));
+    const dialog = within(screen.getByTestId("collection-views-dialog"));
+    if (change === "a rename") {
+      fireEvent.click(dialog.getByRole("button", { name: "Rename view Sorted" }));
+      fireEvent.change(dialog.getByLabelText("New view name"), { target: { value: "Late view" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Save view" }));
+    } else {
+      fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
+      fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
+    }
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    page.unmount();
+    await act(async () => write.resolve({ status: "written", contentHash: hashFor(1) }));
+    expect(onActiveViewChange).not.toHaveBeenCalled();
+  });
+
   it("says in the popover why a view could not be added, and reports a delete that failed", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
     const onError = vi.fn();

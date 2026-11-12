@@ -558,6 +558,8 @@ export function CollectionPage({
   // the page closed changes nothing: applySchemaChange answers null for it too.
   const openViewName = useRef(activeViewName);
   openViewName.current = activeViewName;
+  // Current while the page is open: schemaWrites moves on only as the page closes.
+  const pageWrites = schemaWrites.current();
   const createView = useCallback(
     async (view: NewCollectionView): Promise<string | null> => {
       const request = schemaWrites.current();
@@ -863,11 +865,12 @@ export function CollectionPage({
           schema={schema}
           apply={applySchemaChange}
           onClose={() => setViewsOpen(false)}
+          // A write that ends after the page closed answers as a success, and changes nothing in the shell.
           onRenamed={(from, to) => {
-            if (activeViewName === from) onActiveViewChange(to);
+            if (schemaWrites.isCurrent(pageWrites) && openViewName.current === from) onActiveViewChange(to);
           }}
           onDeleted={(name) => {
-            if (activeViewName === name) onActiveViewChange(null);
+            if (schemaWrites.isCurrent(pageWrites) && openViewName.current === name) onActiveViewChange(null);
           }}
         />
       ) : null}
