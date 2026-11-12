@@ -1,4 +1,4 @@
-import {ServiceActivationDriver,type ServiceActivationConfig} from "../../../services/sync-relay/src/serviceActivationDriver.js"
+import {parseServiceActivationConfig,ServiceActivationDriver,type ServiceActivationConfig} from "../../../services/sync-relay/src/serviceActivationDriver.js"
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js"
 import {LiveDocumentWork} from "../../../services/sync-relay/src/liveDocumentWork.js"
 import {parseLiveDocumentKey,type LiveUpdateHostApplicationAck,type LiveUpdateReceipt} from '@dohc/live-session-contract/live-update-admission'
@@ -1234,6 +1234,90 @@ it('captures a document whose history is past the self-host read budget once, th
     expect(capture).toHaveBeenCalledTimes(3)
     expect(d.driver.blocked(d.target)).toBe('history-over-budget')
   }finally{vi.restoreAllMocks();f.close();within.close()}
+})
+// The self-host profile's activation limits as the relay parses them, checked in this process under the profile's own policy.
+function selfHostActivation(){
+  const {validation,...limits}=selfHostLiveProfile().service.activation
+  const {targets:_targets,...config}=parseServiceActivationConfig({validation,...limits,targets:[]})!
+  const validate:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,validation)
+  return {...config,validateActivation:validate,validation}
+}
+// Types after the fixture's edit, one keystroke per relay row as one person types, until the history since the
+// base has `entries` rows. The capture's source moves to the last row, as the engine names it.
+function typeNote(f:ReturnType<typeof fixture>,entries:number){
+  const doc=new Y.Doc();doc.clientID=7;Y.applyUpdate(doc,f.capture.fullState)
+  const body=doc.getXmlFragment('body'),words='we should book early and keep a list of what each person brings '
+  let text=(body.get(0) as Y.XmlElement).get(0) as Y.XmlText
+  f.raw.exec('BEGIN')
+  // The base and the fixture's edit are the first two rows.
+  for(let seq=3;seq<=entries;seq++){
+    const before=Y.encodeStateVector(doc),typed=seq-3
+    if(typed>0&&typed%400===0){const paragraph=new Y.XmlElement('paragraph');text=new Y.XmlText();paragraph.insert(0,[text]);body.insert(body.length,[paragraph])}
+    else text.insert(text.length,words[typed%words.length]!)
+    const update=Y.encodeStateAsUpdate(doc,before)
+    append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(update)}),update)
+  }
+  f.raw.exec('COMMIT')
+  const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
+  const projected=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:fullState})
+  if(projected.kind!=='accepted')throw new Error(JSON.stringify(projected))
+  Object.assign(f.capture,{fullState})
+  Object.assign(f.capture.source,{sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin',String(entries)].join('\0')))}`,
+    sourceDigest:projected.evidence.projectedMarkdownSha256,sourceByteLength:projected.evidence.projectedMarkdownByteLength,
+    fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+}
+// 1,075 rows is the longest note on the real server; 2,000 rows is about 400 words typed before a note is first shared.
+it.each([1_075,2_000])('activates a typed note with %i rows since its base under the self-host limits',async entries=>{
+  const config=selfHostActivation(),f=fixture();try{
+    typeNote(f,entries)
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_log WHERE relay_seq>=?').get(f.capture.source.baseRelaySeq)!.n).toBe(entries)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
+    const d=activationDriver(f,vi.fn(async()=>f.capture),undefined,undefined,undefined,config)
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
+  }finally{vi.restoreAllMocks();f.close()}
+},60_000)
+it('refuses a typed note one row past the self-host activation limit once, then waits for a new base or its owner',async()=>{
+  const config=selfHostActivation(),f=fixture();try{
+    typeNote(f,config.maxActivationHistoryEntries+1)
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,config),signal=()=>new AbortController().signal
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+  }finally{f.close()}
+},60_000)
+// A real typed row carries about 490 bytes of operation JSON, more than these rows do.
+it('charges a typed note at the self-host activation limit well within the byte budget',async()=>{
+  const {maxCaptureBytes,maxActivationHistoryEntries,maxBytesPerDrain,validation}=selfHostActivation(),f=fixture();try{
+    typeNote(f,maxActivationHistoryEntries)
+    const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,
+      bounds:{maxCaptureBytes,maxHistoryEntries:maxActivationHistoryEntries,maxBytesPerDrain}}
+    const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    const result=validateOrdinaryActivation({document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
+      cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain}},validation)
+    if(result.kind!=='accepted')throw new Error(JSON.stringify(result))
+    const json=f.raw.prepare('SELECT sum(length(CAST(payload_json AS BLOB))) AS bytes FROM sync_relay_log WHERE relay_seq>=?').get(f.capture.source.baseRelaySeq)!.bytes as number
+    // With every row's JSON at 490 bytes, the whole charge stays under half the budget.
+    expect(result.proof!.charged-json+maxActivationHistoryEntries*490).toBeLessThan(maxBytesPerDrain/2)
+    expect(await verifyOrdinaryActivationCut(f.storage as StorageContext,{...input,baseline:result.baseline,history,proof:result.proof})).toEqual({verified:true})
+  }finally{f.close()}
+},60_000)
+// The owner outbox drain keeps its own page bound, apart from how much history one activation may check.
+it('pages the owner outbox drain at the self-host drain bound, not the activation history limit',async()=>{
+  const config=selfHostActivation(),f=fixture();try{
+    expect(config.maxActivationHistoryEntries).toBe(2_000)
+    let page:number|undefined
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockImplementation(async function(this:OwnerCommittedDelivery){
+      page=(this as unknown as {connection:{ownerAdmission:{maxEntriesPerDrain:number}}}).connection.ownerAdmission.maxEntriesPerDrain
+      return {kind:'pending',reason:'transport interrupted',continueDrain:false}
+    })
+    const d=activationDriver(f,vi.fn(async()=>f.capture),undefined,undefined,undefined,config)
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(page).toBe(128)
+  }finally{vi.restoreAllMocks();f.close()}
 })
 it('blocks a capture whose history check runs out of its work budget, as one past the read budget',async()=>{
   const f=fixture();try{
