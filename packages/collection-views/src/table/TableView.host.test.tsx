@@ -358,9 +358,9 @@ describe("what the host allows and has not confirmed", () => {
 
   it("keeps the Escape that cancels an edit, and leaves Escape to a host that shows a record open before it clears the selection", () => {
     const escapes = vi.fn();
-    const table = (openRecordId: string | null) => (
+    const table = (openRecordId: string | null, editingDisabled = false) => (
       <div onKeyDown={(event) => { if (event.key === "Escape") escapes(); }}>
-        <TableView schema={schema} records={records()} onCellChange={() => 1} openRecordId={openRecordId} />
+        <TableView schema={schema} records={records()} onCellChange={() => 1} openRecordId={openRecordId} editingDisabled={editingDisabled} />
       </div>
     );
     const view = render(table("rec-a"));
@@ -374,6 +374,17 @@ describe("what the host allows and has not confirmed", () => {
     expect(escapes).not.toHaveBeenCalled();
     // So is Escape on the grid while an editor is open.
     fireEvent.click(title());
+    fireEvent.keyDown(grid, { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(escapes).not.toHaveBeenCalled();
+    // A paused editor stays open with what it holds, and Escape on the grid is still not the host's.
+    fireEvent.click(title());
+    fireEvent.change(editor()!.querySelector("input")!, { target: { value: "Typed" } });
+    view.rerender(table("rec-a", true));
+    fireEvent.keyDown(grid, { key: "Escape" });
+    expect(editor()!.querySelector("input")!.value).toBe("Typed");
+    expect(escapes).not.toHaveBeenCalled();
+    view.rerender(table("rec-a"));
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();

@@ -751,10 +751,13 @@ export function TableView({
     if (event.altKey || ((event.ctrlKey || event.metaKey) && !opens)) return;
     if (editorRef.current) {
       // An editor left open without focus takes the first Escape, which is then not the host's.
-      if (key === "Escape" && !editingDisabled) {
+      // One that is paused stays open, and still takes it.
+      if (key === "Escape") {
         event.stopPropagation();
-        cancelled.current = true;
-        setEditing(null);
+        if (!editingDisabled) {
+          cancelled.current = true;
+          setEditing(null);
+        }
       }
       return;
     }
