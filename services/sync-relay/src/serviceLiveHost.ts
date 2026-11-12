@@ -18,7 +18,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineRequestError, isHostedDocumentUnready, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
@@ -217,6 +217,8 @@ interface HostedAttachment {
    */
   overlapped: boolean;
 }
+// The engine requests a pass sends when it finds nothing to do: it asks for each document's waiting owner edits and pushes each workspace.
+const IDLE_PASS_REQUESTS = new Set(["liveApplication.ownerState", "sync.push"]);
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
 const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
@@ -237,8 +239,13 @@ export async function startServiceLiveHost(options: {
    * the next idle deadline, unless a test injects others.
    */
   idleClock?: {nowMs: () => number; schedule: (atMs: number, fire: () => void) => () => void};
-  /** Called as each activation pass ends, so a test can wait on passes rather than on the requests they send. */
-  onPass?: () => void;
+  /**
+   * Called as each activation pass ends, with whether it was idle, so a test can wait on passes rather than on the
+   * requests they send.
+   */
+  onPass?: (idle: boolean) => void;
+  /** The timer that ends the pause between passes, on the clock `nowMs` reads, unless a test injects another. Returns its cancel. */
+  pauseTimer?: (delayMs: number, fire: () => void) => () => void;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -328,7 +335,13 @@ export async function startServiceLiveHost(options: {
   // A wake during a pass runs one more pass after it; one during the pause ends the pause.
   // Only the pause clears it, so a wake that lands while its pass runs is not lost.
   let woken = false, rouse: (() => void) | undefined;
-  const wakePass = () => {woken = true; rouse?.();};
+  // Whether anything asked for a pass since the last one ended, and what cuts a long pause short.
+  let stirred = false, hurry: (() => void) | undefined;
+  const wakePass = () => {woken = true; stirred = true; rouse?.();};
+  // An input that may leave a pass work, such as a relay write, has the next pass start no later than one poll
+  // interval after the last one ended, as when every pause lasted that long. It ends no pause sooner than that,
+  // so a pass whose own writes are noticed cannot run passes back to back.
+  const nudgePass = () => {stirred = true; hurry?.();};
   // A publication that pushed a page and has more wakes the pass that pushes the rest. One that pushed nothing waits.
   const paged = async <T extends {pushed: number; hasMore: boolean}>(work: Promise<T>): Promise<T> => {
     const page = await work;
@@ -371,7 +384,8 @@ export async function startServiceLiveHost(options: {
   const touch = (key: string) => {idle.set(key, {due: idleClock.nowMs() + config.activation!.idleUnloadMs, generation: ++generation}); armIdle();};
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
-  let requestId = 0;
+  // Engine requests numbered so far, and how many of those sent were ones an idle pass sends.
+  let requestId = 0, idleRequests = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
     return ++requestId;
@@ -430,7 +444,8 @@ export async function startServiceLiveHost(options: {
   };
   // A restore can fence the binding while a call waits for the document or the
   // engine. The call then fails as incomplete; cancellation, lost standing,
-  // and damage on the same binding stay visible.
+  // and damage on the same binding stay visible. A pass then settles or publishes
+  // what the call delivered or settled, as after an editor's accepted edit.
   const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
     run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
     configuredConsumer(document);
@@ -438,7 +453,7 @@ export async function startServiceLiveHost(options: {
       const consumer = configuredConsumer(document);
       try { return await run(consumer, joined); }
       catch (error) { joined.throwIfAborted(); check(); configuredConsumer(document); throw error; }
-    });
+    }).finally(nudgePass);
   };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
@@ -457,14 +472,15 @@ export async function startServiceLiveHost(options: {
       const stop = changes || config.activation ? observeRelayWrites(storage, () => {
         for (const attached of attachments.values()) attached.check = true;
         changes?.notify();
+        nudgePass();
       }) : () => {};
       signal.addEventListener("abort",stop,{once: true});
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
-    // Every connection change restarts the document's idle period.
+    // Every connection change restarts the document's idle period, and a pass follows it as soon as before.
     yield* Effect.acquireRelease(Effect.sync(() => editors.subscribe(document => {
       const key = hostedKey(document);
-      if (key) touch(key);
+      if (key) {touch(key); nudgePass();}
     })),stop => Effect.sync(stop));
     const temporary = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "dohc-service-live-host-"))),
@@ -488,9 +504,19 @@ export async function startServiceLiveHost(options: {
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
     // Caller input retention and native upload buffers each have their own cap.
-    const client = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+    const queued = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
       maxRetainedInputBytes: config.client.aggregateBytes,
       deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
+    // Counts the requests an idle pass sends. Every request takes a number, so a pass sent only those when both counts moved alike.
+    const sendRequest: EngineClient["sendRequest"] = (request, ...rest) => {
+      if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
+      return queued.sendRequest(request, ...rest);
+    };
+    const client = new Proxy(queued, {get(target, property) {
+      if (property === "sendRequest") return sendRequest;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     const discovery = yield* Effect.promise(() => client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs }));
     const reply = record(discovery.result, ["relayNamespace", "host", "workspaces"]);
@@ -1432,6 +1458,8 @@ export async function startServiceLiveHost(options: {
         }
         // Only membership changes send updates, so a wake after one that failed runs one more pass, not a loop.
         if (lifecycle) wakePass();
+        // A document or workspace it added waits for the next pass.
+        nudgePass();
         armIdle();
       }
     }));
@@ -1618,6 +1646,7 @@ export async function startServiceLiveHost(options: {
           });
         }
         if(!failed)lastError=undefined;
+        return failed;
       });
       // Unloads hosted documents with no live connection for the idle period.
       // Unfinished delivery, settlement, publication, or engine work keeps a
@@ -1641,30 +1670,79 @@ export async function startServiceLiveHost(options: {
         }
         if(visited===0)idleSweepsBeforeDue++;
       };
+      // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
+      // recovers, unloads or is kept, none that moved away is still listed, every activation finished or blocked, and
+      // every workspace is checked, ready, pushed and quiet with its relay state read and its recovery probe not due.
+      const settled=()=>{
+        if(leaving.size || recovering.size || parking.size || retained.size || movedRestores.size || movedDepartures.size || unloading.size ||
+          activation!.unfinished)return false;
+        for(const [workspaceId,attached] of attachments){
+          if(!attached.hosted.checked || attached.hosted.diverged || !attached.hosted.pushedAll || !activation!.workspaceReady(workspaceId))return false;
+          if(attached.last===undefined || !hostedReplicaQuiet(pullDuties(workspaceId,attached)) || attached.seen===undefined ||
+            attached.overlapped || attached.check || now()>=attached.probeAt)return false;
+        }
+        return true;
+      };
+      // How long the next pause lasts, and how many passes in a row were idle. A pass is idle when no step failed,
+      // no idle sweep ran, it sent the engine nothing but what an idle pass sends, nothing asked for a pass since
+      // the last one ended, and nothing is left to do. Once idle passes have visited every document, each pause
+      // lasts twice the one before, up to idlePollIntervalMs, and ends by the next recovery probe. Any other pass
+      // puts it back to pollIntervalMs. No pause is shorter than that.
+      let rest=config.activation.pollIntervalMs,doubled=rest,idlePasses=0;
+      const judge=(clean:boolean)=>{
+        const bounds=config.activation!,idle=clean && !stirred && settled();
+        stirred=false;
+        idlePasses=idle?idlePasses+1:0;
+        const awake=activation!.targets.filter(target=>!activation!.dormant(target)).length;
+        if(idlePasses<Math.max(1,Math.ceil(awake/bounds.maxDocumentsPerPass))){rest=doubled=bounds.pollIntervalMs;return idle;}
+        doubled=Math.min(Math.max(bounds.pollIntervalMs,bounds.idlePollIntervalMs),doubled*2);
+        let probe=Infinity;
+        for(const attached of attachments.values())probe=Math.min(probe,attached.probeAt);
+        rest=Math.max(bounds.pollIntervalMs,Math.min(doubled,probe-now()));
+        return idle;
+      };
+      const pauseTimer = options.pauseTimer ?? ((delayMs: number, fire: () => void) => {
+        const timer = setTimeout(fire,delayMs);
+        timer.unref();
+        return () => clearTimeout(timer);
+      });
       const pause = Effect.callback<void>(resume => {
-        let ended = false;
+        const poll = config.activation!.pollIntervalMs, began = now();
+        // A nudge since the pass was judged came before this pause could hear it.
+        let ended = false, lasts = stirred ? poll : rest, cancel = () => {};
         const end = () => {
           if (ended) return;
-          ended = true; woken = false; rouse = undefined;
-          clearTimeout(timer);
+          ended = true; woken = false; rouse = undefined; hurry = undefined;
+          cancel();
           resume(Effect.void);
         };
-        const timer = setTimeout(end,config.activation!.pollIntervalMs);
-        timer.unref();
+        cancel = pauseTimer(lasts,end);
+        // A nudge leaves a pause of one poll interval or less as it is.
+        hurry = () => {
+          if (lasts <= poll) return;
+          lasts = poll;
+          const left = poll - (now() - began);
+          if (left <= 0) {end(); return;}
+          cancel();
+          cancel = pauseTimer(left,end);
+        };
         if (woken) end(); else rouse = end;
-        return Effect.sync(() => {rouse = undefined; clearTimeout(timer);});
+        return Effect.sync(() => {rouse = undefined; hurry = undefined; cancel();});
       });
       yield* Effect.forkScoped(Effect.gen(function* () {
         while (!signal.aborted) {
+          let idle = false;
           // Native passes retain ownership until their actual work settles.
           // A sweep runs only once an idle deadline is due. Its timer, armed after each pass, wakes the pass that runs it.
           yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {
-            await pass();
-            const due = nextIdleDue();
-            if (due !== undefined && due <= idleClock.nowMs()) await sweep();
+            const numbered = requestId, counted = idleRequests;
+            const failed = await pass();
+            const due = nextIdleDue(), sweeping = due !== undefined && due <= idleClock.nowMs();
+            if (sweeping) await sweep();
             armIdle(); checkProgress();
+            idle = judge(!failed && !sweeping && requestId - numbered === idleRequests - counted);
           })));
-          options.onPass?.();
+          options.onPass?.(idle);
           yield* pause;
         }
       }));
@@ -1776,8 +1854,9 @@ export async function startServiceLiveHost(options: {
        * whether it was blocked or its owner saw it failing.
        */
       unblock(document: {workspaceId: string; objectId: string}): boolean {
-        const key = hostedKey(document);
-        return key !== undefined && activation!.unblock(hosted.get(key)!.target);
+        const key = hostedKey(document), unblocked = key !== undefined && activation!.unblock(hosted.get(key)!.target);
+        if (unblocked) nudgePass();
+        return unblocked;
       },
       /**
        * Reads one bounded page of a refused queue this host keeps, as the

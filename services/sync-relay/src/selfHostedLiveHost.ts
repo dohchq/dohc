@@ -339,7 +339,7 @@ export async function startSelfHostedLiveHost(options: {
         yield* Effect.promise(() => exclusive(stopCurrent));
       }),
     );
-    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? profile.reconcileIntervalMs).pipe(Effect.andThen(Effect.sync(schedule)))));
     // Once a minute, starting a retention period in: after a restart, clients reconnect before any document counts as unconnected.
     yield* Effect.forkScoped(pause(RECLAIM_RETENTION_MS).pipe(Effect.andThen(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))))));
     schedule();

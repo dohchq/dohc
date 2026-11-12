@@ -402,7 +402,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
     settlement:{maxApplicationsPerSettlement:8},sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
     activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,maxActivationHistoryEntries:10,
-      maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
+      maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,idlePollIntervalMs:1,passDeadlineMs:1000,
       idleUnloadMs:600_000,idleRetryMs:30_000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
         maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000},...limits}});
@@ -545,8 +545,9 @@ type IdleClock = {nowMs: () => number; schedule: (atMs: number, fire: () => void
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 // `pollIntervalMs` replaces the pause between passes, and `idleClock` the clock idle unloading reads and arms.
+// `paced` puts the pauses on its manual clock, with its poll and idle intervals.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock} = {}) {
+  maxApplications?: number; limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock; paced?: Paced} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -611,6 +612,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
   await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
     ...(options.pollIntervalMs ? {pollIntervalMs: options.pollIntervalMs} : options.empty || options.polling ? {pollIntervalMs: 20} : {}),
+    ...(options.paced ? {pollIntervalMs: options.paced.poll, idlePollIntervalMs: options.paced.ceiling} : {}),
     ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {}), ...options.limits});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
@@ -1046,7 +1048,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     native.outboxId = NATIVE;
   };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {}),
-    ...(options.idleClock ? {idleClock: options.idleClock} : {})});
+    ...(options.idleClock ? {idleClock: options.idleClock} : {}), ...options.paced?.timers});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
@@ -1254,7 +1256,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock} = {}) {
+  limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock; paced?: Paced} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md"};
@@ -1530,8 +1532,9 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 // With `polls`, passes run only when the host wakes itself, or the test runs one, as in setup here, and a
 // supervisor reconciles only on its own wakes too.
 async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false,
-  polls = undefined as ReturnType<typeof heldPolls> | undefined} = {}) {
-  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised, ...(polls ? {pollIntervalMs: HELD_POLL_MS} : {})});
+  polls = undefined as ReturnType<typeof heldPolls> | undefined, paced = undefined as Paced | undefined} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised, ...(polls ? {pollIntervalMs: HELD_POLL_MS} : {}),
+    ...(paced ? {paced} : {})});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   const errors: unknown[] = [];
@@ -1540,13 +1543,17 @@ async function enrolledServiceHost({freshRegistrations = false, frameChanges = f
     const data = join(o.f.root, "self-host"); await mkdir(data);
     supervisor = await startSelfHostedLiveHost({trustedAccount: o.f.trustedAccount, storage: o.f.storage, history: o.f.history, root: data,
       engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(16),
-      startHost: async () => o.host, onError: error => errors.push(error), ...(polls ? {reconcileIntervalMs: HELD_RECONCILE_MS} : {})});
+      startHost: async () => o.host, onError: error => errors.push(error), ...(polls || paced ? {reconcileIntervalMs: HELD_RECONCILE_MS} : {})});
     cleanup.push(() => supervisor!.close());
   } else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   if (polls) {
     // The supervisor's first update reaches the host on its own, and passes then wait their turn behind it.
     if (supervised) await vi.waitFor(() => expect(o.membership.map(row => row.method)).toContain("liveApplication.attachWorkspace"), {timeout: 10_000});
     await polls.until(o.f, () => o.host.isDocumentReady(o.document));
+  }
+  if (paced) {
+    if (supervised) await vi.waitFor(() => expect(o.membership.map(row => row.method)).toContain("liveApplication.attachWorkspace"), {timeout: 10_000});
+    await paced.until(o.f, () => o.host.isDocumentReady(o.document));
   }
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner"}});
@@ -7099,13 +7106,30 @@ it.each(["running without this workspace", "running without this document"] as c
 // next pull in flight before it reads the relay, or after, until released. `pushWrites` is how many of a
 // workspace's next pushes each append a row, as the host's settled work does.
 // Each workspace has one enrolled document, so the relay holds a hosted scope for it, unless `unscoped`.
-async function readyHostedHost(workspaceIds: readonly string[], {unscoped = false} = {}) {
+// `notes` gives the first workspace that many activation targets, eight to a pass as in the live profile. Their
+// activation is replaced: each visit sends the engine the two waiting-edit reads a ready note's does and ends done.
+// `intervals` are the pause between passes and the longest one while the host is idle.
+async function readyHostedHost(workspaceIds: readonly string[], {unscoped = false, notes = 0, intervals = {pollIntervalMs: 1, idlePollIntervalMs: 1}} = {}) {
   const f = await fixture();
-  await configureActivation(f, {targets: [], pollIntervalMs: 1});
+  const targets = Array.from({length: notes}, (_, index) => ({workspaceId: workspaceIds[0]!, path: `docs/note-${index}.md`}));
+  await configureActivation(f, {targets, ...intervals, ...(notes ? {maxDocumentsPerPass: 8} : {})});
+  if (notes) {
+    const activate = vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(async function (this: ServiceActivationDriver, target) {
+      const o = this.options;
+      for (let read = 0; read < 2; read++) {
+        await o.client.sendRequest({id: o.nextRequestId(), workspace: `handle-${target.workspaceId}`, deadlineMs: o.deadlineMs,
+          method: "liveApplication.ownerState", params: {workspaceId: target.workspaceId, registrationId: 1}});
+      }
+      return {kind: "done", document: {workspaceId: target.workspaceId, mainVersionId: "main", objectId: target.path, lineageClaimId: "a".repeat(64)}} as
+        Awaited<ReturnType<ServiceActivationDriver["activate"]>>;
+    });
+    const ready = vi.spyOn(ServiceActivationDriver.prototype, "workspaceReady").mockReturnValue(true);
+    cleanup.push(async () => {activate.mockRestore(); ready.mockRestore();});
+  }
   const base = f.config.workspaces[0]!;
   f.config.workspaces = await Promise.all(workspaceIds.map(async workspaceId => {
     const root = join(f.root, `root-${workspaceId}`); await mkdir(root);
-    return {...base, root, workspaceId};
+    return {...base, root, workspaceId, maxRegistrations: 64};
   }));
   await f.save();
   const raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite")); cleanup.push(async () => raw.close());
@@ -7137,6 +7161,7 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
         case "liveApplication.hosts": return {result: {relayNamespace: captured.config.relayNamespace, host: captured.config.host,
           workspaces: captured.config.workspaces.map((row: {workspaceId: string}) => ({workspaceId: row.workspaceId, workspaceHandle: `handle-${row.workspaceId}`}))}} as never;
         case "sync.createHostedReplica": return {result: {hosted: true}} as never;
+        case "liveApplication.ownerState": return {result: {pendingBytes: 0}} as never;
         case "sync.push": {
           const writes = pushWrites.get(workspaceId) ?? 0;
           if (writes > 0) {pushWrites.set(workspaceId, writes - 1); append(workspaceId);}
@@ -7182,7 +7207,16 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
     holds[at].set(workspaceId, held);
     return held;
   };
-  return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull};
+  // How many requests of each method the engine was sent.
+  const sent = () => {
+    const counts: Record<string, number> = {};
+    for (const call of client.sendRequest.mock.calls) {
+      const {method} = (call as unknown[])[0] as {method: string};
+      counts[method] = (counts[method] ?? 0) + 1;
+    }
+    return counts;
+  };
+  return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull, sent};
 }
 
 // Issue #1967: a ready workspace pulled its hosted replica on every 250 ms pass, with nothing new on the relay.
@@ -7758,4 +7792,253 @@ it("retires a confirmed stopped document once a publication that had more pages 
   expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
   expect(o.host.retains(o.sibling)).toBe(false);
+});
+
+// A host's pauses on a manual clock, which also times its recovery probe. `timers` are the host options that put them
+// there, `poll` the pause after a pass that did or left work, and `ceiling` the longest pause while idle. `step`
+// moves the clock to the end of the pause the host waits in, and resolves once the pass after it ended and the next
+// pause began. `until` steps until `done` holds. `over` steps through `ms` of clock time and resolves to how many
+// passes ended in it. `resting` is how long the pause the host waits in has left.
+function pacedPasses(poll = 250, ceiling = 2_000) {
+  const clock = manualClock();
+  const timers = {nowMs: clock.nowMs, pauseTimer: (delayMs: number, fire: () => void) => clock.schedule(clock.nowMs() + delayMs, fire)};
+  // The clock time at which the pause the host waits in ends. A wake can end a pause before its caller runs, so it
+  // resolves only while that pause still stands.
+  const paused = async () => {
+    for (;;) {
+      const due = await vi.waitFor(() => {expect(clock.armed()).toHaveLength(1); return clock.armed()[0]!;}, {interval: 1, timeout: 5_000});
+      if (clock.armed().length === 1 && clock.armed()[0] === due) return due;
+    }
+  };
+  const step = async (f: {passEnds: Set<() => void>}) => {
+    const due = await paused(), ended = afterPasses(f, 0);
+    clock.advance(due);
+    await ended;
+    await paused();
+  };
+  return {clock, timers, poll, ceiling, step,
+    async until(f: {passEnds: Set<() => void>}, done: () => boolean) {for (let pass = 0; pass < 40 && !done(); pass++) await step(f);},
+    async over(f: {passEnds: Set<() => void>}, ms: number) {
+      let passes = 0;
+      const count = () => {passes++;}, until = clock.nowMs() + ms;
+      f.passEnds.add(count);
+      for (let due = await paused(); due <= until; due = await paused()) {
+        const ended = afterPasses(f, 0);
+        clock.advance(due);
+        await ended;
+      }
+      clock.advance(until);
+      f.passEnds.delete(count);
+      return passes;
+    },
+    resting: () => clock.armed().length === 1 ? clock.armed()[0]! - clock.nowMs() : undefined};
+}
+type Paced = ReturnType<typeof pacedPasses>;
+
+// Issue #1967: a host ran a pass every 250 ms for as long as it ran, whether or not the last one found anything.
+// Measures: the passes and engine requests of one simulated minute for one, five and twenty ready, quiet notes,
+// at an idle interval equal to the poll interval, as before, and at the live profile's two seconds.
+// Proves: an idle host's pause grows to its idle interval, and the recovery probe still pulls every 30 s.
+it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes, 2_000]]))(
+  "runs %i idle notes for a minute at an idle interval of %i ms", async (notes, idlePollIntervalMs) => {
+    const paced = pacedPasses(250, idlePollIntervalMs);
+    const h = await readyHostedHost(["workspace"], {notes, intervals: {pollIntervalMs: 250, idlePollIntervalMs}});
+    const host = await startServiceLiveHost({...h.f, ...paced.timers});
+    cleanup.push(() => host.close());
+    await vi.waitFor(() => h.caughtUp("workspace"));
+    for (let pass = 0; pass < 8; pass++) await paced.step(h.f);
+    await paced.until(h.f, () => paced.resting() === idlePollIntervalMs);
+    const before = h.sent(), pulls = host.hostedPulls("workspace").total;
+    const passes = await paced.over(h.f, 60_000);
+    const requests: Record<string, number> = {};
+    for (const [method, count] of Object.entries(h.sent())) if (count !== (before[method] ?? 0)) requests[method] = count - (before[method] ?? 0);
+    console.info(`Idle host, ${notes} notes, idle interval ${idlePollIntervalMs} ms: ${passes} passes in 60 s, engine requests ${JSON.stringify(requests)}`);
+    // Each pass asks for the waiting edits of up to eight notes, twice each, and pushes once.
+    expect(requests["sync.push"]).toBe(passes);
+    expect(requests["liveApplication.ownerState"]).toBe(2 * Math.min(notes, 8) * passes);
+    // Only the recovery probe pulled, once every 30 s.
+    expect(host.hostedPulls("workspace").total - pulls).toBe(2);
+    expect(host.hostedPulls("workspace").reasons.probe).toBeGreaterThanOrEqual(2);
+    if (idlePollIntervalMs === 250) expect(passes).toBe(240);
+    else {
+      // No pause is longer than the idle interval, and the passes after each probe start again from the poll interval.
+      expect(passes).toBeGreaterThanOrEqual(30);
+      expect(passes).toBeLessThanOrEqual(40);
+    }
+  });
+
+// Proves: a relay write asks for a pass no sooner than one poll interval after the last one, so a host whose own
+// passes write cannot run them back to back, and at once when that long has gone by. A burst of writes runs one pass.
+it("runs the pass a relay write asks for one poll interval after the last pass, and at once when that long has gone by", async () => {
+  const paced = pacedPasses(), h = await readyHostedHost(["workspace"], {intervals: {pollIntervalMs: paced.poll, idlePollIntervalMs: paced.ceiling}});
+  const host = await startServiceLiveHost({...h.f, ...paced.timers});
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  await paced.until(h.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  let passes = 0;
+  h.f.passEnds.add(() => {passes++;});
+  const began = paced.clock.nowMs();
+  // Right after a pass, the write only cuts the pause to one poll interval.
+  for (let write = 0; write < 50; write++) h.append("workspace");
+  await vi.waitFor(() => expect(paced.resting()).toBe(paced.poll));
+  expect(passes).toBe(0);
+  await paced.step(h.f);
+  expect(paced.clock.nowMs()).toBe(began + paced.poll);
+  expect(passes).toBe(1);
+  h.caughtUp("workspace");
+  // The pass pulled, so the next pause is one poll interval, and the pauses after it grow again.
+  expect(paced.resting()).toBe(paced.poll);
+  await paced.until(h.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  // More than one poll interval into a long pause, the write runs the pass at once.
+  const idle = paced.clock.nowMs();
+  paced.clock.advance(idle + paced.poll);
+  passes = 0;
+  h.append("workspace");
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  expect(paced.clock.nowMs()).toBe(idle + paced.poll);
+  expect(passes).toBe(1);
+});
+
+// A real hosted note, delivered and settled by the real activation, on a host that reached its idle interval.
+// The clock then stands one poll interval into that pause, so the fixed pass is not due for the rest of it.
+// `passes` counts the passes that ended since.
+async function idleNote(options: {supervised?: boolean} = {}) {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true, ...options});
+  await paced.until(o.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  const idle = paced.clock.nowMs();
+  paced.clock.advance(idle + paced.poll);
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  return {paced, o, methods, passes: () => passes,
+    // Whether the clock still stands where the wake found it, with the fixed pass not yet due.
+    held: () => paced.clock.nowMs() === idle + paced.poll, idle};
+}
+
+// Issue #1967, with the real activation and delivery of one note against the test engine.
+// Measures: the passes and engine requests of one simulated minute, at the old and the new idle interval.
+// Proves: an idle pass sends the engine only the note's two waiting-edit reads and its workspace's push.
+it.each([250, 2_000])("runs one hosted, ready note for a minute at an idle interval of %i ms", async ceiling => {
+  const paced = pacedPasses(250, ceiling), o = await enrolledServiceHost({paced});
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  for (let pass = 0; pass < 8; pass++) await paced.step(o.f);
+  await paced.until(o.f, () => paced.resting() === ceiling);
+  const sent = methods().length;
+  const passes = await paced.over(o.f, 60_000);
+  const requests: Record<string, number> = {};
+  for (const method of methods().slice(sent)) requests[method] = (requests[method] ?? 0) + 1;
+  console.info(`Idle host, 1 hosted note, idle interval ${ceiling} ms: ${passes} passes in 60 s, engine requests ${JSON.stringify(requests)}, pulls ${JSON.stringify(o.host.hostedPulls("workspace"))}`);
+  expect(requests["sync.push"]).toBe(passes);
+  expect(requests["liveApplication.ownerState"]).toBe(2 * passes);
+  expect(Object.keys(requests).sort()).toEqual(["liveApplication.ownerState", "sync.commitCursor", "sync.materializePendingCursor", "sync.pullHosted", "sync.push"]);
+  expect(requests["sync.pullHosted"]).toBe(2);
+  if (ceiling === 250) expect(passes).toBe(240);
+  else {
+    expect(passes).toBeGreaterThanOrEqual(30);
+    expect(passes).toBeLessThanOrEqual(40);
+  }
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: an editor that opens a note on an idle host is served without a pass, and the pass after it runs at once.
+it("serves an editor that opens a note on an idle host at once, with the fixed pass held back", async () => {
+  const {o, passes, held} = await idleNote();
+  const native = await o.host.captureNative(o.binding);
+  expect(native.coordinate).toEqual(o.host.coordinate);
+  await vi.waitFor(() => expect(passes()).toBeGreaterThanOrEqual(1));
+  expect(held()).toBe(true);
+});
+
+// Proves: an edit an editor's session commits and delivers on an idle host is settled and published by a pass the
+// edit itself wakes, as soon as when passes ran every poll interval.
+it("settles and publishes an editor's edit on an idle host at once, with the fixed pass held back", async () => {
+  const {o, methods, held} = await idleNote();
+  const edit = o.acceptEdit("typed");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  expect(o.tip()).toEqual(edit);
+  await vi.waitFor(() => expect(engineParams(o, "liveApplication.settle").at(-1)).toMatchObject({terminalReceipt: edit}));
+  await vi.waitFor(() => expect(methods().lastIndexOf("sync.push")).toBeGreaterThan(methods().lastIndexOf("liveApplication.settle")));
+  expect(held()).toBe(true);
+});
+
+// An owner's desktop that is not in a live session pushes its edit to the relay's log. The host's pull brings it to
+// the engine, which queues it for the note's owner, and the next pass admits it.
+// Proves: the relay write wakes the pass that pulls, and the pass after it, one poll interval later as before, admits the edit.
+it("admits an owner's pushed edit on an idle host one poll interval after the pull its write wakes", async () => {
+  const {paced, o, held, idle} = await idleNote();
+  o.native.binding = o.binding;
+  let queued = false;
+  o.requestListeners.add(method => {if (method === "sync.pullHosted" && !queued) {queued = true; o.nativeEdits("desktop");}});
+  // The relay appends the pushed row and raises its write notice, as `storage.tx` does.
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  notifyRelayWrite(o.f.storage);
+  await vi.waitFor(() => expect(queued).toBe(true));
+  expect(held()).toBe(true);
+  expect(journaled(o, "edit-desktop")).toEqual([]);
+  await paced.until(o.f, () => journaled(o, "edit-desktop").length === 1);
+  expect(journaled(o, "edit-desktop")).toHaveLength(1);
+  console.info(`Owner edit admitted ${paced.clock.nowMs() - (idle + paced.poll)} ms after its relay write`);
+  expect(paced.clock.nowMs()).toBeLessThanOrEqual(idle + 3 * paced.poll);
+});
+
+// Proves: an owner's Stop on an idle host retires the note's activation, and its departure ends, through the passes
+// Stop and the membership update wake.
+it("stops a note on an idle host at once, with the fixed pass held back", async () => {
+  const {o, held} = await idleNote();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const sent = o.ownerCalls().length;
+  await expect(hostStop(o)).resolves.toMatchObject({enabled: false, retired: true});
+  await vi.waitFor(() => expect(o.calls(sent)).toContain("liveApplication.reconcileActivation"));
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.calls(sent)).toContain("liveApplication.releaseActivation");
+  expect(held()).toBe(true);
+});
+
+// Proves: revoking a note's share through the relay ends its live session on an idle host at once. The write's
+// notice reaches the supervisor, whose membership update wakes the passes that retire the note's activation.
+// Neither the host's fixed pass nor the supervisor's periodic reconciliation runs.
+it("ends a note's live session on an idle host at once when the relay revokes its share", async () => {
+  const {o, held} = await idleNote({supervised: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const sent = o.ownerCalls().length, late = o.prepareEdit("after");
+  expect(o.f.storage.revokeShare("share", 30)).toBe(true);
+  // The relay admits nothing more, whatever the host has done.
+  expect(late().result).toEqual({kind: "refused", reason: "authority-refused"});
+  await vi.waitFor(() => expect(o.calls(sent)).toContain("liveApplication.releaseActivation"), {timeout: 10_000});
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(held()).toBe(true);
+});
+
+// The relay's storage writing with no write notice, as another process on the same database does.
+const unannounced = (o: Enrolled) => Object.assign(Object.create(o.f.storage) as typeof o.f.storage,
+  {tx: <T>(run: () => T) => (o.f.storage as StorageContext).replicaViewTx(run)});
+// Proves: a Pause, a Stop or a revocation that reaches the relay database with no notice, as from another process,
+// ends the note's live session on an idle host at its next fixed pass, within one idle interval. The relay refuses
+// an edit prepared before it at once, on the request path.
+const unannouncedChanges: [string, (storage: Enrolled["f"]["storage"], o: Enrolled) => void][] = [
+  ["Pause", (storage, o) => {storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 30, guard() {}});}],
+  ["Stop", (storage, o) => {preparedStop(storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 30, guard() {}});}],
+  ["revocation", storage => {expect(storage.revokeShare("share", 30)).toBe(true);}],
+];
+it.each(unannouncedChanges)("ends a note's live session within one idle interval of a %s no notice announced", async (_change, write) => {
+  const {paced, o, passes, idle} = await idleNote();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const sent = o.ownerCalls().length, late = o.prepareEdit("after");
+  write(unannounced(o), o);
+  // No notice came, so no pass ran and the pause stands as it was.
+  await new Promise(resolve => setImmediate(resolve));
+  expect(passes()).toBe(0);
+  expect(paced.resting()).toBe(paced.ceiling - paced.poll);
+  expect(o.calls(sent)).not.toContain("liveApplication.reconcileActivation");
+  await paced.step(o.f);
+  expect(paced.clock.nowMs()).toBe(idle + paced.ceiling);
+  expect(o.calls(sent)).toContain("liveApplication.reconcileActivation");
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.settled(o.sibling)).toBe(false);
+  expect(late().result).toMatchObject({kind: "refused"});
 });
