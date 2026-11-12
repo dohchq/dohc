@@ -778,8 +778,8 @@ function InviteRow(props: {
           <div role="status" className="empty:hidden">
             {sent ? (
               <p data-testid="settings-members-invite-sent" className="m-0 text-[12px] text-muted">
-                Invited <span className="font-medium text-ink">{sent}</span>. Tell them to sign in to dohc with this address. The workspace
-                then shows in their Sharing, under Shared with me.
+                Invited <span className="font-medium text-ink">{sent}</span>. Once they sign in with this address, the workspace shows in
+                their Sharing, under Shared with me.
               </p>
             ) : null}
           </div>

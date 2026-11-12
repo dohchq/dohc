@@ -267,7 +267,7 @@ describe("Members page", () => {
     await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
     const sent = await screen.findByTestId("settings-members-invite-sent");
     expect(within(screen.getByTestId("settings-members-invite")).getByText(/^dohc doesn't send email\. /u)).toBeTruthy();
-    expect(sent.textContent).toContain("Invited eve@test. Tell them to sign in to dohc with this address.");
+    expect(sent.textContent).toContain("Invited eve@test. Once they sign in with this address, the workspace shows in their Sharing");
     expect(sent.textContent).not.toContain("invite link");
     expect(sent.closest('[role="status"]')).not.toBeNull();
     // An email invite never offers to turn on the open invite link.
