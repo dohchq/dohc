@@ -1068,6 +1068,8 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
           withRunnerWait(rows, finalJob, runnerWait);
           final.steps = [
             { name: "Run actions/download-artifact@unrelated-archive", started_at: new Date(start).toISOString(), completed_at: new Date(start + 80_000).toISOString() },
+            ...(scope === "rust" ? [{ name: "Download the shared Rust archive again after a stalled transfer",
+              started_at: new Date(start + 80_000).toISOString(), completed_at: new Date(start + 260_000).toISOString() }] : []),
             { name: `Wait for the complete ${scope === "js" ? "JavaScript" : "Rust"} group`, completed_at: waitedAt },
             ...(step ? [{ name: "Run actions/download-artifact@different-pin", started_at: waitedAt, completed_at: final.completed_at }] : []),
             { name: `Require complete proof and the ${scope} timing ceiling`, started_at: final.completed_at },
