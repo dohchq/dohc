@@ -6212,6 +6212,24 @@ it("retries an agent link creation across restart without minting another creden
   expect(legacyResult).not.toHaveProperty("url");
 });
 
+it("gives no URL to a creation retry after the link's access changed", async () => {
+  const storage = await newStorage(), h = handler(storage);
+  await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
+  const body = { paths: ["docs"], access: "view", operationId: "00000000-0000-4000-8000-000000000102" };
+  const first = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))));
+  const path = `/sync/shares/${String(first.shareId)}/links/${String(first.grantId)}/retune`;
+  const transition = { workspaceId: WORKSPACE, expectedDependentGrantIds: [] };
+  const widened = await h(request(OWNER, path, jsonBody({ ...transition, access: "comment" })));
+  expect(widened.status, await widened.clone().text()).toBe(200);
+  const retry = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))));
+  expect(retry).toMatchObject({ grantId: first.grantId, access: "view", urlUnavailable: true });
+  expect(retry).not.toHaveProperty("url");
+  // Narrowed back, the link has the access asked for again, at the address it has now.
+  expect((await h(request(OWNER, path, jsonBody({ ...transition, access: "view" })))).status).toBe(200);
+  const current = (await ownerLinkInventory(h))[0]!.url;
+  expect(await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))))).toMatchObject({ url: current });
+});
+
 it.each([[[]],[[".env"]],[["docs/.env"]],[[".dohc/secret"]]])("refuses agent link secret paths and empty selectors %j",async paths=>{
   const storage=await newStorage(),h=handler(storage);
   await h(request(OWNER,"/sync/workspaces",jsonBody({workspaceId:WORKSPACE})));

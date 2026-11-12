@@ -1649,7 +1649,7 @@ export function useRelayShareLinkPane(props: {
       expectedDependentGrantIds: dependentGrantIds(row),
     };
     const retiresDisplayedCredential =
-      minted?.grantId === row.grantId &&
+      (minted?.grantId === row.grantId || row.url !== null) &&
       (action.kind === "reset" ||
         action.kind === "end" ||
         (action.kind === "retune" &&
@@ -1740,8 +1740,17 @@ export function useRelayShareLinkPane(props: {
         });
       }
       if (!isCurrentLinkScope(scopeGeneration) || latestMutationRequest.current !== requestId) return;
+      // The change may have landed: neither copy of the old URL is known to
+      // work until the list reads again.
       if (retiresDisplayedCredential) {
-        setMinted(null);
+        setMinted((current) => (current?.grantId === row.grantId ? null : current));
+        setLinks((current) =>
+          current.map((currentRow) =>
+            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
+              ? { ...currentRow, url: null }
+              : currentRow,
+          ),
+        );
       }
       if (action.kind !== "end" || !props.shareRemovals) setLifecycleError(ipcErrorMessage(cause));
       setConfirmation(null);

@@ -2843,6 +2843,36 @@ codex mcp login dohc-share`);
     });
   });
 
+  it("stops copying a kept URL when a reset's answer and the next list are both lost", async () => {
+    const kept = readableLink("kept-reset", { shareId: "share-kept-reset", access: "view", url: LINK_URL_A });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [kept] })
+      .mockRejectedValueOnce(new Error("The relay did not answer."));
+    bridgeMock.rotateRelayShareLink.mockRejectedValueOnce(new Error("The relay did not answer."));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const row = await screen.findByTestId("share-link-row-kept-reset");
+    expect(within(row).getByTestId("share-link-url").textContent).toBe(LINK_URL_A);
+    await chooseLinkOption(user, row, "Reset link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
+    expect(within(screen.getByTestId("share-link-row-kept-reset")).getByTestId("share-link-no-copy")).toBeTruthy();
+  });
+
   it("retires the displayed URL before refreshing after a lost widening response", async () => {
     const retune = controllable<{ outcome: "widened"; url: string }>();
     const viewRow = readableLink("stale-retune", {

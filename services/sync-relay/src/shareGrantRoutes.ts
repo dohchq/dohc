@@ -457,7 +457,9 @@ export function createShareGrantRoutes(
       const receipt = operationId && storage.readLinkCreation(route.workspaceId,operationId,actor.userId);
       if (receipt) {
         if (receipt.requestJson !== requestJson) throw relayError("conflict", "Link operation changed.");
-        const url = recoverPublicLinkUrl(storage.getShareGrant(receipt.grantId), storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin);
+        // A link whose access changed since is not the link this request made.
+        const grant = storage.getShareGrant(receipt.grantId);
+        const url = grant?.access === access ? recoverPublicLinkUrl(grant, storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin) : null;
         return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})}, 200, { "cache-control": "private, no-store" });
       }
       requireEditableSelector(access, JSON.stringify(selector));
