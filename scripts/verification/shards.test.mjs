@@ -80,6 +80,44 @@ test("native fixture dependencies propagate through helpers and cycles", () => {
   assert.deepEqual(nativeTestFiles(["native-test", "pure-test"], { dependencies: file => graph.get(file), roots: ["engine"] }), new Set(["native-test"]));
 });
 
+test("prepared artifact references keep tests and their helpers behind restoration", t => {
+  const parent = resolve(".agent-artifacts/verification/prepared-readers");
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "run-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workflow = readFileSync(resolve(".github/workflows/pr-checks.yml"), "utf8");
+  const pack = workflow.match(/- name: Pack prepared artifacts\s+run: >-\s+([\s\S]*?)(?=\r?\n      -)/u)[1];
+  const paths = pack.trim().split(/\s+/u).slice(pack.trim().split(/\s+/u).indexOf("/tmp/javascript-prepared.tar.zst") + 1);
+  assert.ok(paths.length > 0);
+  const expected = [];
+  for (const [index, path] of paths.entries()) {
+    for (const [style, expression] of Object.entries({
+      literal: `join(repoRoot, ${JSON.stringify(path)})`,
+      joined: `join(repoRoot, ${path.split("/").map(part => JSON.stringify(part)).join(", ")})`,
+      relative: `new URL(${JSON.stringify(relative(root, resolve(path)).replaceAll("\\", "/"))}, import.meta.url)`,
+      template: '`${repoRoot}/' + path + '`',
+    })) {
+      const file = join(root, `${index}-${style}.test.mjs`);
+      writeFileSync(file, `statSync(${expression});`);
+      expected.push(file);
+    }
+  }
+  for (const name of ["DOHC_TEST_ENGINE_BINARY", "DOHC_TEST_RELAY_MAIN"]) {
+    const helper = join(root, `${name}.mjs`), file = join(root, `${name}.test.mjs`);
+    writeFileSync(helper, `export const path = process.env.${name};`);
+    writeFileSync(file, `import {path} from './${name}.mjs'; statSync(path);`);
+    expected.push(file);
+  }
+  const pure = join(root, "pure.test.mjs");
+  writeFileSync(pure, `statSync(join(scratch, 'dist')); statSync(new URL('../packages/app-backend-runtime/dist', import.meta.url));`);
+  assert.deepEqual(nativeTestFiles([...expected, pure]), new Set(expected));
+});
+
+test("prepared artifact readers include the share-web dist fingerprint regression", () => {
+  const file = resolve("services/share-web/src/deviceControl.integration.test.ts");
+  assert.ok(nativeTestFiles([file]).has(file));
+});
+
 test("execution groups preserve files, projects, native prerequisites, and command tasks", () => {
   const files = Array.from({ length: 30 }, (_, index) => ({ id: `file-${index}`, kind: "vitest", package: index % 2 ? "@dohc/workspace-api" : "desktop",
     project: index % 3 ? "node" : "dom", native: index % 4 === 0, weight: index + 1 }));

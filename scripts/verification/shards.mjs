@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
 import { repoRoot } from "./process.mjs";
 import { desktopProofTags } from "./verify.mjs";
@@ -62,8 +62,7 @@ export function assertTaskCoverage(expected, records) {
   if (remaining.size) throw new Error(`Verification tasks did not finish: ${[...remaining].join(", ")}`);
 }
 
-function sourceDependencies(file) {
-  const source = readFileSync(file, "utf8");
+function sourceDependencies(file, source = readFileSync(file, "utf8")) {
   const result = [];
   for (const match of source.matchAll(/["'`](\.{1,2}\/[^"'`\s${}]+)["'`]/gu)) {
     const base = resolve(dirname(file), match[1]);
@@ -76,16 +75,42 @@ function sourceDependencies(file) {
   return result;
 }
 
-// A test that reaches the native fixture stays with the prepared engine, even
-// when that dependency is several shared test helpers away.
+const preparedArtifactPaths = [
+  ".dohc-dev/verification/build.json", "target/debug/dohc-workspace-engine", "apps/desktop/target/debug/dohc-workspace-engine",
+  "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime",
+  "apps/desktop/resources/app-compiler", "apps/desktop/resources/engine-reader", "services/share-web/viewer/dist", "services/sync-relay/dist",
+];
+
+function referencesPreparedArtifact(file, source) {
+  if (/\bDOHC_TEST_(?:ENGINE_BINARY|RELAY_MAIN)\b/u.test(source)) return true;
+  // Recognize both a path literal and adjacent literal segments in join/resolve.
+  const joined = source.replace(/["'`]\s*,\s*["'`]/gu, "/");
+  for (const match of joined.matchAll(/["'`]([^"'`\r\n]+)["'`]/gu)) {
+    const path = match[1].replaceAll("\\\\", "/");
+    const unrooted = path.replace(/^\$\{[^}]+\}\//u, "").replace(/^(?:\.{1,2}\/)+/u, "");
+    if (preparedArtifactPaths.some(root => unrooted === root || unrooted.startsWith(root + "/"))) return true;
+    if (path.startsWith(".") && /(?:dist|resources|target|build\.json)/u.test(path)) {
+      const absolute = resolve(dirname(file), path);
+      if (preparedArtifactPaths.some(root => {
+        const restored = resolve(repoRoot, root);
+        return absolute === restored || absolute.startsWith(restored + sep) || restored.startsWith(absolute + sep);
+      })) return true;
+    }
+  }
+  return false;
+}
+
+// Tests that reference prepared paths wait for extraction, including through helpers.
 export function nativeTestFiles(files, { dependencies = sourceDependencies,
   roots = [resolve(repoRoot, "apps/desktop/src/testing/engineBinary.ts")] } = {}) {
   const parents = new Map();
-  const seen = new Set();
+  const seen = new Set(), native = new Set(roots);
   function visit(file) {
     if (seen.has(file)) return;
     seen.add(file);
-    for (const dependency of dependencies(file)) {
+    const source = existsSync(file) ? readFileSync(file, "utf8") : "";
+    if (referencesPreparedArtifact(file, source)) native.add(file);
+    for (const dependency of dependencies(file, source)) {
       const importers = parents.get(dependency) ?? new Set();
       importers.add(file);
       parents.set(dependency, importers);
@@ -93,8 +118,7 @@ export function nativeTestFiles(files, { dependencies = sourceDependencies,
     }
   }
   files.forEach(visit);
-  const native = new Set(roots);
-  const pending = [...roots];
+  const pending = [...native];
   while (pending.length) for (const file of parents.get(pending.pop()) ?? []) {
     if (!native.has(file)) { native.add(file); pending.push(file); }
   }
