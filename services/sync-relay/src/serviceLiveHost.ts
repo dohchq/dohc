@@ -1700,7 +1700,7 @@ export async function startServiceLiveHost(options: {
       // time. Any other pass puts the pause back to pollIntervalMs, and the pause grows again only after that many
       // idle passes in a row. When documents wake during a long pause, the passes that follow visit from where the
       // last one stopped, so a document can wait that pause and then one rotation of the larger set at
-      // pollIntervalMs. No pause is shorter than pollIntervalMs.
+      // pollIntervalMs. The host schedules no pause shorter than pollIntervalMs. A wake can still end one sooner.
       let rest=config.activation.pollIntervalMs,doubled=rest,idlePasses=0;
       const judge=(clean:boolean)=>{
         const bounds=config.activation!,idle=clean && !stirred && settled();
