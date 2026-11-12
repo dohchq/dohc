@@ -44,6 +44,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import type { QuietRunRefusal } from "../agents/chatDispatchService";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
 import * as chatWriteSignals from "../workspaces/chatWriteSignals";
@@ -2920,6 +2921,69 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
+  // Only the run itself says it has nothing to report, and the chat's own
+  // service decides whether it may.
+  describe("nothing to report", () => {
+    async function automationThread() {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      return (await store!.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
+        author: { kind: "automation", displayName: "Check overdue tasks" }, authorOwnerDisplayName: "Sam",
+        automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 }, body: "Tell the Group about overdue tasks.",
+      })).thread.id;
+    }
+
+    function quietRuns(refusal: QuietRunRefusal | null = null): string[] {
+      const asked: string[] = [];
+      serverOptions.chatRuns = {
+        dispatchStateForThread: async () => { throw new Error("Not read for nothing to report."); },
+        retryStoppedRun: async () => false,
+        endRunQuietly(workspaceId, runId, threadId) {
+          asked.push(`${workspaceId}/${runId}/${threadId}`);
+          return refusal;
+        },
+      };
+      return asked;
+    }
+
+    it("ends the run the request proves, and posts nothing", async () => {
+      const asked = quietRuns();
+      const threadId = await automationThread();
+      holdRun("run-quiet");
+      const before = calls.writes;
+
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId), runId: "run-quiet" }))
+        .resolves.toEqual({ threadId: cliThreadId(threadId), nothingToReport: true });
+      // Without a run id, the secret alone names the run.
+      await invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) });
+
+      expect(asked).toEqual([`${WORKSPACE_ID}/run-quiet/${threadId}`, `${WORKSPACE_ID}/run-quiet/${threadId}`]);
+      expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toHaveLength(1);
+      expect(calls.writes).toBe(before);
+    });
+
+    it("refuses a caller that isn't the run, and says why the service refused", async () => {
+      const asked = quietRuns();
+      const threadId = await automationThread();
+      holdRun("run-quiet");
+      callerRunSecret = "c".repeat(64);
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId), runId: "run-quiet" }))
+        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      callerRunSecret = undefined;
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      expect(asked).toEqual([]);
+
+      callerRunSecret = RUN_SECRET;
+      quietRuns("person");
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("A person asked for this run. Reply to them.");
+      quietRuns("other-thread");
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("Send nothingToReport in the thread this run was started for.");
+    });
+  });
+
   // Try again from the CLI and MCP runs through the chat's own service, which
   // keeps the two-attempt limit, and only for a caller who may post here.
   describe("chat retry", () => {
@@ -2938,6 +3002,7 @@ describe("CLI socket server", () => {
           retried.push(`${workspaceId}/${threadId}/${runId}`);
           return true;
         },
+        endRunQuietly: () => "not-running",
       };
       return retried;
     }

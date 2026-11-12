@@ -4545,6 +4545,114 @@ describe("chatDispatchService", () => {
     expect(prompt).not.toContain("dohc_read_chat");
   });
 
+  // An automation wakes the agent, and the run holds its slot until it exits.
+  async function startAutomationRun(fixture: Fixture) {
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Check overdue tasks" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 },
+      body: "Tell the Group about overdue tasks.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    return { threadId: wake.thread.id, runId: claim.run.runId, process: fixture.spawnCalls[0]!.process };
+  }
+
+  const quietProfile = { tool: "claude" as const, executable: resolve("test-claude.exe") };
+
+  it("tells an automation's run, and only that run, how to end with nothing to report", async () => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { process } = await startAutomationRun(fixture);
+    expect(process.stdinText).toContain("call the same tool with `nothingToReport: true` and no `body` instead of replying");
+
+    const person = await createFixture({ runner: { command: "", profile: quietProfile } });
+    await createAgentThread(person, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(person);
+    await person.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(person.spawnCalls).toHaveLength(1));
+    expect(person.spawnCalls[0]!.process.stdinText).not.toContain("nothingToReport");
+  });
+
+  it.each([false, true])("ends an automation's run with nothing to report as finished, after a restart too, when the reply read fails: %s", async (readFails) => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
+    if (readFails) fixture.rejectNextRunMessageLookup!(new Error("daemon restarted during listRunMessages"));
+    process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
+    expect(fixture.notices).toEqual([]);
+    expect(await fixture.owedRunNotices.list(WORKSPACE_ID)).toEqual([]);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun).toBeUndefined();
+
+    // Nothing is left for recovery to mark failed.
+    await fixture.service.stop();
+    fixture.service = createChatDispatchService(fixture.serviceOptions);
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: false });
+    expect(fixture.notices).toEqual([]);
+  });
+
+  it("still fails an automation's run that ends without a reply and without saying it had nothing", async () => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { runId, process } = await startAutomationRun(fixture);
+
+    process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: true });
+    expect(fixture.notices).toEqual([expect.objectContaining({ title: "Nova didn't reply" })]);
+  });
+
+  it("still fails a quiet run that exits with an error, and tells of a quiet run's reply as usual", async () => {
+    const failing = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const failed = await startAutomationRun(failing);
+    expect(failing.service.endRunQuietly(WORKSPACE_ID, failed.runId, failed.threadId)).toBeNull();
+    failed.process.emitExit(7);
+    await failing.service.scanWorkspace(WORKSPACE_ID);
+    expect(await failing.dispatch.getRunRecord(failed.runId)).toMatchObject({ exitCode: 7, failureHandled: true });
+    expect(failing.notices).toEqual([expect.objectContaining({ title: "Nova didn't reply" })]);
+
+    const replying = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const replied = await startAutomationRun(replying);
+    expect(replying.service.endRunQuietly(WORKSPACE_ID, replied.runId, replied.threadId)).toBeNull();
+    const reply = await linkAgentReply(replying, replied.threadId, replied.runId);
+    replied.process.emitExit(0);
+    await replying.service.scanWorkspace(WORKSPACE_ID);
+    expect(replying.notices).toEqual([expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]);
+  });
+
+  it("refuses to end quietly a person's run, another thread's, or one that isn't running", async () => {
+    const person = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const asked = await createAgentThread(person, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(person);
+    await person.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(person.spawnCalls).toHaveLength(1));
+    const personRun = (await person.dispatch.openRuns(WORKSPACE_ID))[0]!.run.runId;
+    expect(person.service.endRunQuietly(WORKSPACE_ID, personRun, asked.threadId)).toBe("person");
+
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, "another-thread")).toBe("other-thread");
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, "another-run", threadId)).toBe("not-running");
+    process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBe("not-running");
+    // Refused, so the run still ended without its reply.
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: true });
+  });
+
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
     const fixture = await createFixture();
     const writing = deferred<void>();

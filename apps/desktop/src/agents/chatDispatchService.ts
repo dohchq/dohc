@@ -293,7 +293,13 @@ interface LiveRun {
     | { kind: "fail"; exitCode?: number; reason: string }
     | null;
   terminalDurable: boolean;
+  // The automation's run said it has nothing to report, so an end with no
+  // reply is not a failure.
+  quiet: boolean;
 }
+
+// Why an automation's run cannot end with nothing to report.
+export type QuietRunRefusal = "not-running" | "other-thread" | "person";
 
 interface PendingPreRunFailure {
   workspace: ChatDispatchWorkspace;
@@ -385,6 +391,10 @@ function buildRunnerPrompt(
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
+  // Only an automation's run hears of it; a person who asked gets a reply.
+  const quiet = form === "mcp" && dohcTools === "reply"
+    ? " An automation started this run. If you have nothing to report, call the same tool with `nothingToReport: true` and no `body` instead of replying, and post nothing."
+    : "";
   const decisionInstruction = form === "mcp"
     ? "If blocked on the user, set `needsDecision`. To ask them to pick, list the choices in `options`; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc_reply_to_chat` are shown."
     : "If blocked on the user, reply with `--needs-decision`. To ask them to pick, add `--option \"<choice>\"` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc chat` are shown.";
@@ -392,7 +402,7 @@ function buildRunnerPrompt(
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${links}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${links}${replyInstruction}${quiet} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -693,6 +703,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(live.workspace);
     if (!live.terminalDurable) {
       let linkedMessages: string[] | null = null;
+      // A quiet run that posts nothing ends with no notice. Nothing is owed,
+      // so recovery after a crash finds nothing to mark failed.
+      let quietEnd = false;
       if (intent.kind === "complete") {
         try {
           linkedMessages = await dispatch.listRunMessages(
@@ -702,7 +715,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           );
         } catch (error) {
           reportError(error);
-          if (intent.exitCode === 0) {
+          // A quiet run is finished either way; an unread reply loses only
+          // its notice.
+          if (intent.exitCode === 0 && live.quiet) quietEnd = true;
+          else if (intent.exitCode === 0) {
             pendingNoReplyChecks.set(
               runKey(live.workspace.workspaceId, live.claim.run.runId),
               { workspace: live.workspace, run: live.claim.run },
@@ -724,13 +740,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               { workspace: live.workspace, run: live.claim.run },
             );
             scheduleRecoveryScan(live.workspace);
+          } else if (live.quiet) {
+            quietEnd = true;
           } else {
             await markRunFailureHandled(live.workspace, live.claim.run).catch(reportError);
           }
         }
       }
       try {
-        await oweRunNotice(live.workspace, live.claim.run.runId);
+        if (!quietEnd) await oweRunNotice(live.workspace, live.claim.run.runId);
         if (intent.kind === "complete") {
           await dispatch.completeRun({
             runId: live.claim.run.runId,
@@ -747,7 +765,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         live.terminalDurable = true;
         notifyRunUpdated(live.workspace, live.claim.run.threadId);
-        await settleRunNotice(live.workspace, live.claim.run.runId);
+        if (!quietEnd) await settleRunNotice(live.workspace, live.claim.run.runId);
       } catch (error) {
         reportError(error);
         scheduleRecoveryScan(live.workspace);
@@ -762,6 +780,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     notifyRunUpdated(live.workspace, live.claim.run.threadId);
     await releaseLiveWorkspace(live);
     return true;
+  }
+
+  // An automation's run with nothing to report says so before it ends. A run
+  // a person's message started owes them a reply.
+  function endRunQuietly(workspaceId: string, runId: string, threadId: string): QuietRunRefusal | null {
+    const live = liveRuns.get(workspaceId);
+    if (!live || live.claim.run.runId !== runId || live.finalized) return "not-running";
+    if (live.claim.run.threadId !== threadId) return "other-thread";
+    if (live.claim.chainDepth === 0) return "person";
+    live.quiet = true;
+    return null;
   }
 
   async function timeOutLiveRun(live: LiveRun): Promise<void> {
@@ -1142,6 +1171,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         finalized: false,
         terminalIntent: null,
         terminalDurable: false,
+        quiet: false,
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
@@ -2310,6 +2340,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     resumeThreadDispatch,
     dispatchStateForThread,
     retryStoppedRun,
+    endRunQuietly,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,
