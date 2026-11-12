@@ -340,8 +340,8 @@ export async function startSelfHostedLiveHost(options: {
       }),
     );
     yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
-    // Once at start, then once a minute.
-    yield* Effect.forkScoped(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))));
+    // Once a minute, starting a minute in: after a restart, clients reconnect before any document counts as unconnected.
+    yield* Effect.forkScoped(Effect.forever(pause(RECLAIM_SWEEP_MS).pipe(Effect.andThen(Effect.sync(sweep)))));
     schedule();
     while (true) {
       yield* Queue.take(changes);

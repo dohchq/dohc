@@ -1173,16 +1173,20 @@ it("closes the daemon and observer when storage becomes unavailable", async () =
   expect(f.onError).not.toHaveBeenCalled();
 });
 
-// Proves: the host sweeps once as it starts and again each time its minute
-// passes. A failed sweep goes to onError, and the next one tries again and
-// reclaims the note only its owner's long-past open keeps, which the host
-// then drains. Closing the host aborts the pending wait, and no sweep follows.
-it("sweeps idle documents at start and each minute, tries again after a failure, and stops when closed", async () => {
+// Proves: the host sweeps first when its first minute passes, not at start,
+// so clients a restart dropped can reconnect first, and again each minute.
+// A failed sweep goes to onError, and the next one tries again and reclaims
+// the note only its owner's long-past open keeps, which the host then
+// drains. Closing the host aborts the pending wait, and no sweep follows.
+it("sweeps idle documents each minute from the first minute, tries again after a failure, and stops when closed", async () => {
   const f = await fixture({seed: async (_data, relay) => {vi.spyOn(relay.storage, "reclaimIdleLiveDocuments");}});
   const sweeps = vi.mocked(f.storage.reclaimIdleLiveDocuments);
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  // The start's sweep found the shared note covered, so it wrote nothing.
-  await vi.waitFor(() => {expect(sweeps).toHaveBeenCalledTimes(1); expect(sweepWaits).toHaveLength(1);});
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(1));
+  expect(sweeps).not.toHaveBeenCalled();
+  sweepWaits[0]!.pass();
+  // The first sweep found the shared note covered, so it wrote nothing.
+  await vi.waitFor(() => {expect(sweeps).toHaveBeenCalledTimes(1); expect(sweepWaits).toHaveLength(2);});
   expect(sweeps.mock.results[0]).toEqual({type: "return", value: []});
   f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs: 20});
   expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
@@ -1190,23 +1194,23 @@ it("sweeps idle documents at start and each minute, tries again after a failure,
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
   const failure = new Error("Reclaim failed.");
   sweeps.mockImplementationOnce(() => {throw failure;});
-  sweepWaits[0]!.pass();
+  sweepWaits[1]!.pass();
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure));
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerDemand: true, demandAtMs: 20});
   f.onError.mockClear();
-  await vi.waitFor(() => expect(sweepWaits).toHaveLength(2));
-  sweepWaits[1]!.pass();
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(3));
+  sweepWaits[2]!.pass();
   await f.waitUpdate([]);
   await vi.waitFor(() => expect(f.enrollment()).toMatchObject({retired: true, ownerStop: null, demandAtMs: null, hostDrainedAtMs: expect.any(Number)}), {timeout: 10_000});
   expect(sweeps).toHaveBeenCalledTimes(3);
-  await vi.waitFor(() => expect(sweepWaits).toHaveLength(3));
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(4));
   const settled = f.enrollment();
   await f.host.close();
-  expect(sweepWaits[2]!.signal?.aborted).toBe(true);
-  sweepWaits[2]!.pass();
+  expect(sweepWaits[3]!.signal?.aborted).toBe(true);
+  sweepWaits[3]!.pass();
   await Promise.resolve();
   expect(sweeps).toHaveBeenCalledTimes(3);
-  expect(sweepWaits).toHaveLength(3);
+  expect(sweepWaits).toHaveLength(4);
   expect(f.enrollment()).toEqual(settled);
 });
 
