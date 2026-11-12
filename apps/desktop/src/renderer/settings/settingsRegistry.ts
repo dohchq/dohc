@@ -7,6 +7,7 @@ import {
   Settings,
   Shield,
   Sparkles,
+  Users,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -94,8 +95,16 @@ export const SETTINGS_SECTIONS = [
     label: "Sync and sharing",
     scope: "Workspace",
     group: "workspace",
-    keywords: ["sync", "share", "server", "connect", "cloud", "members"],
+    keywords: ["sync", "share", "server", "connect", "cloud"],
     Icon: Cloud,
+  },
+  {
+    id: "members",
+    label: "Members",
+    scope: "Workspace",
+    group: "workspace",
+    keywords: ["members", "people", "invite", "invite link", "admin", "owner", "remove", "leave", "level"],
+    Icon: Users,
   },
   {
     id: "advanced",
