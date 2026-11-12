@@ -72,12 +72,14 @@ describe("recoverable owner link URLs", () => {
     const transition = { workspaceId: WORKSPACE, expectedDependentGrantIds: [] };
     const resetResponse = await h(request(OWNER, `${path}/rotate`, jsonBody(transition)));
     expect(resetResponse.status).toBe(200);
+    expect(resetResponse.headers.get("cache-control")).toBe("private, no-store");
     const reset = await json(resetResponse);
     expect(reset.url).not.toBe(created.url);
     expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(reset.url);
     expect(JSON.stringify(await ownerLinkInventory(h))).not.toContain(String(created.url));
     const widenedResponse = await h(request(OWNER, `${path}/retune`, jsonBody({ ...transition, access: "comment" })));
     expect(widenedResponse.status).toBe(200);
+    expect(widenedResponse.headers.get("cache-control")).toBe("private, no-store");
     const widened = await json(widenedResponse);
     expect(widened.url).not.toBe(reset.url);
     expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(widened.url);
@@ -331,6 +333,7 @@ async function createLink(
     ),
   );
   expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
   return json(response);
 }
 
@@ -360,6 +363,7 @@ async function ownerLinkInventory(
 ): Promise<Array<Record<string, unknown>>> {
   const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`));
   expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
   return (await json(response)).links as Array<Record<string, unknown>>;
 }
 
@@ -6191,6 +6195,7 @@ it("retries an agent link creation across restart without minting another creden
   closeTestStorage(storage);
   const reopened=reopenTestStorage(dbPath), next=handler(reopened);
   const retry=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
+  expect(retry.headers.get("cache-control")).toBe("private, no-store");
   expect(retry.status).toBe(200);
   expect(await json(retry)).toMatchObject({shareId:first.shareId,grantId:first.grantId,url:first.url});
   const links=await ownerLinkInventory(next);
