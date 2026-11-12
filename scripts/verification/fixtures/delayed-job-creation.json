@@ -1,0 +1,102 @@
+{
+  "runId": 43235841741,
+  "attempt": 2,
+  "headSha": "d29fafc862619a1f12f8c7bb0aa7ad633f0833cb",
+  "origin": "2026-11-12T14:23:00Z",
+  "columns": ["name", "createdSeconds", "startedSeconds", "completedSeconds"],
+  "jobs": [
+    ["what changed",0.0,19.0,32.0],
+    ["shared preparation",137.0,155.0,292.0],
+    ["Rust policy checks",137.0,155.0,607.0],
+    ["relay confinement",137.0,155.0,358.0],
+    ["compiler confinement",137.0,155.0,364.0],
+    ["typecheck + tests",137.0,155.0,424.0],
+    ["Rust build once",137.0,155.0,516.0],
+    ["JS worker 3",137.0,155.0,400.0],
+    ["JS worker 5",137.0,155.0,367.0],
+    ["JS worker 1",137.0,155.0,348.0],
+    ["JS worker 2",137.0,155.0,369.0],
+    ["JS worker 11",137.0,155.0,366.0],
+    ["JS worker 13",137.0,155.0,359.0],
+    ["JS worker 6",137.0,155.0,388.0],
+    ["JS worker 7",137.0,155.0,335.0],
+    ["JS worker 15",137.0,155.0,364.0],
+    ["JS worker 16",137.0,155.0,365.0],
+    ["JS worker 18",137.0,155.0,358.0],
+    ["JS worker 12",137.0,155.0,360.0],
+    ["JS worker 8",137.0,158.0,355.0],
+    ["JS worker 17",137.0,155.0,368.0],
+    ["JS worker 10",137.0,155.0,332.0],
+    ["JS worker 9",137.0,155.0,368.0],
+    ["JS worker 19",137.0,155.0,364.0],
+    ["JS worker 14",137.0,155.0,387.0],
+    ["JS worker 4",137.0,155.0,341.0],
+    ["engine gate",633.0,660.0,876.0],
+    ["Rust tests 3",633.0,659.0,775.0],
+    ["Rust tests 4",633.0,659.0,799.0],
+    ["Rust tests 5",633.0,660.0,812.0],
+    ["Rust tests 2",633.0,659.0,790.0],
+    ["Rust tests 1",633.0,659.0,843.0],
+    ["Rust tests 6",633.0,660.0,817.0],
+    ["Rust tests 11",633.0,660.0,841.0],
+    ["Rust tests 7",633.0,660.0,836.0],
+    ["Rust tests 12",633.0,660.0,797.0],
+    ["Rust tests 9",633.0,660.0,797.0],
+    ["Rust tests 17",633.0,660.0,802.0],
+    ["Rust tests 14",633.0,659.0,805.0],
+    ["Rust tests 15",633.0,660.0,839.0],
+    ["Rust tests 10",633.0,659.0,857.0],
+    ["Rust tests 16",633.0,659.0,844.0],
+    ["Rust tests 8",633.0,660.0,810.0],
+    ["Rust tests 18",633.0,660.0,826.0],
+    ["Rust tests 13",633.0,660.0,809.0],
+    ["Rust tests 19",634.0,660.0,843.0]
+  ],
+  "reportingJobs": [
+  {
+    "name": "typecheck + tests",
+    "steps": [
+      {
+        "name": "Wait for the complete JavaScript group",
+        "started_at": "2026-11-12T14:29:02Z",
+        "completed_at": "2026-11-12T14:29:56Z"
+      },
+      {
+        "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "started_at": "2026-11-12T14:29:56Z",
+        "completed_at": "2026-11-12T14:29:59Z"
+      },
+      {
+        "name": "Require complete proof and the JavaScript timing ceiling",
+        "started_at": "2026-11-12T14:29:59Z",
+        "completed_at": "2026-11-12T14:30:00Z"
+      }
+    ]
+  },
+  {
+    "name": "engine gate",
+    "steps": [
+      {
+        "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "started_at": "2026-11-12T14:34:52Z",
+        "completed_at": "2026-11-12T14:34:58Z"
+      },
+      {
+        "name": "Wait for the complete Rust group",
+        "started_at": "2026-11-12T14:36:52Z",
+        "completed_at": "2026-11-12T14:37:29Z"
+      },
+      {
+        "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "started_at": "2026-11-12T14:37:29Z",
+        "completed_at": "2026-11-12T14:37:30Z"
+      },
+      {
+        "name": "Require complete proof and the Rust timing ceiling",
+        "started_at": "2026-11-12T14:37:30Z",
+        "completed_at": "2026-11-12T14:37:32Z"
+      }
+    ]
+  }
+]
+}
