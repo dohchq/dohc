@@ -264,7 +264,7 @@ function PropertyRow(props: RowProps) {
                 indexed={indexed}
                 emit={(value, previousValues) => onCellChange({ ...cell, value, ...(previousValues === undefined ? {} : { previousValues }) })}
                 close={props.onCloseEdit}
-                abandon={props.onDraftAbandoned ? (text) => props.onDraftAbandoned?.({ recordId: record.id, field: field.name, text }) : undefined}
+                abandon={props.onDraftAbandoned ? (text, value) => props.onDraftAbandoned?.({ recordId: record.id, field: field.name, text, ...(value === undefined ? {} : { value }) }) : undefined}
                 onCreateOption={
                   props.onCreateOption
                     ? (option, value, previousValues) =>

@@ -115,6 +115,8 @@ export interface TableAbandonedDraft {
   recordId: string;
   field: string;
   text: string;
+  /** The value a press away from the editor would have saved. Absent when the field cannot take the text, as a number field cannot take a word. */
+  value?: CollectionValue;
 }
 
 export interface TableViewProps {
@@ -1041,8 +1043,8 @@ export function TableView({
                   close={closeEditor}
                   abandon={
                     onDraftAbandoned
-                      ? (text) => {
-                          if (!cancelled.current) onDraftAbandoned({ recordId: editing.recordId, field: editing.field, text });
+                      ? (text, value) => {
+                          if (!cancelled.current) onDraftAbandoned({ recordId: editing.recordId, field: editing.field, text, ...(value === undefined ? {} : { value }) });
                         }
                       : undefined
                   }

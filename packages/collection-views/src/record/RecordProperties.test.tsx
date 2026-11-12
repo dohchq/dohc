@@ -299,7 +299,7 @@ describe("a record's properties", () => {
     // Another record in the same place has no editor open, and the host keeps the text.
     view.rerender({ onDraftAbandoned, record: record("rec-b", "Task b") });
     expect(editor("title")).toBeNull();
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Half typed" });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Half typed", value: "Half typed" });
     expect(view.changes).toEqual([]);
   });
 

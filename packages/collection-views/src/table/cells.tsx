@@ -175,8 +175,8 @@ interface CellInputProps {
   caretAtEnd?: boolean;
   emit: (value: CollectionValue) => void;
   close: CellClose;
-  /** Receives what was typed when the input leaves the page with it neither saved nor cancelled. */
-  abandon?: (text: string) => void;
+  /** Receives what was typed when the input leaves the page with it neither saved nor cancelled, and the value `parse` gives it. */
+  abandon?: (text: string, value: CollectionValue | undefined) => void;
 }
 
 function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, close, abandon }: CellInputProps) {
@@ -187,13 +187,14 @@ function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, clo
   const input = useRef<HTMLInputElement>(null);
   // A character that opened the edit was typed too.
   const typedInto = useRef(caretAtEnd);
-  const abandoned = useRef(abandon);
-  abandoned.current = abandon;
+  const abandoned = useRef({ abandon, parse });
+  abandoned.current = { abandon, parse };
   useEffect(() => {
     const node = input.current;
     // The input is off the page only once its cell or its table is gone.
     return () => {
-      if (node && !node.isConnected && typedInto.current && !done.current) abandoned.current?.(node.value);
+      const { abandon, parse } = abandoned.current;
+      if (node && !node.isConnected && typedInto.current && !done.current) abandon?.(node.value, parse(node.value));
     };
   }, []);
   const save = (raw: string, move?: CellMove) => {
@@ -274,8 +275,8 @@ export interface CellEditorProps {
    */
   emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: CellClose;
-  /** Receives the text of a typed edit that goes with its cell, neither saved nor cancelled. */
-  abandon?: (text: string) => void;
+  /** Receives the text of a typed edit that goes with its cell, neither saved nor cancelled, and the value it saves as, where the field can take it. */
+  abandon?: (text: string, value: CollectionValue | undefined) => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
    * options do not have yet. The host must add `option` to the schema first

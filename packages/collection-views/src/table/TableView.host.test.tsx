@@ -237,19 +237,41 @@ describe("what the host allows and has not confirmed", () => {
     rerender({});
     typeInto(0, 0, "Typed");
     rerender({ records: records().slice(1) });
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed" });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed", value: "Typed" });
     // The field leaves it.
     typeInto(0, 1, "12");
     rerender({ records: records().slice(1), schema: makeSchema([{ name: "title", type: "text" }]) });
-    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "estimate", text: "12" });
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "estimate", text: "12", value: 12 });
     // The table closes. A character that opened the edit was typed too.
     fireEvent.click(cell(0, 0));
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
     fireEvent.keyDown(screen.getByRole("grid"), { key: "x" });
     view.unmount();
-    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "title", text: "x" });
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "title", text: "x", value: "x" });
     expect(onDraftAbandoned).toHaveBeenCalledTimes(3);
     expect(onCellChange).toHaveBeenCalledOnce();
+  });
+
+  it("gives its host the value an edit left open saves as, beside its text, and no value for text its field cannot take", () => {
+    const onDraftAbandoned = vi.fn();
+    const { view, cell, editor, onCellChange } = setup({ onDraftAbandoned });
+    const table = (shown: CollectionRecord[]) => <TableView schema={schema} records={shown} onCellChange={onCellChange} onDraftAbandoned={onDraftAbandoned} />;
+    /** Types into a cell of the first record, takes the record from the table, and answers what the host got. */
+    const leave = (column: number, text: string) => {
+      fireEvent.click(cell(0, column));
+      fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
+      view.rerender(table(records().slice(1)));
+      view.rerender(table(records()));
+      return onDraftAbandoned.mock.lastCall?.[0] as object;
+    };
+    expect(leave(1, " 12 ")).toEqual({ recordId: "rec-a", field: "estimate", text: " 12 ", value: 12 });
+    // Emptied text saves as no value. That is a value, and not text the field cannot take.
+    expect(leave(0, "")).toEqual({ recordId: "rec-a", field: "title", text: "", value: null });
+    const refused = leave(1, "12x");
+    expect(refused).toEqual({ recordId: "rec-a", field: "estimate", text: "12x" });
+    expect("value" in refused).toBe(false);
+    expect(onDraftAbandoned).toHaveBeenCalledTimes(3);
+    expect(onCellChange).not.toHaveBeenCalled();
   });
 
   it("saves nothing when the table closes under a focused editor, where the browser blurs an input as it removes it, and tells its host the text", () => {
@@ -272,7 +294,7 @@ describe("what the host allows and has not confirmed", () => {
     // React hears no event while it changes the page, so that blur saves nothing. A blur while the table is open saves (cells.test.tsx).
     expect(blurred).toHaveBeenCalled();
     expect(onCellChange).not.toHaveBeenCalled();
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed" });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed", value: "Typed" });
   });
 
   it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
