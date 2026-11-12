@@ -1735,7 +1735,7 @@ async fn a_new_page_note_claimed_without_its_schema_version_before_the_fix_stays
     {
         Ok(_) => panic!("a first version claimed without its schema version must stay refused"),
         Err(error) => assert!(
-            format!("{error:?}").contains("invalid public baseline schema"),
+            format!("{error:?}").contains("BaselineSchemaVersionMissing"),
             "refused for the missing schema version: {error:?}"
         ),
     }

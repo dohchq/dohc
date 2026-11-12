@@ -2,6 +2,7 @@ import { decodeHostedSyncResult, hostedWindowCovers, type HostedWindow, type Hos
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
+import { engineRefusalWords } from "./activationFailureLine";
 import { configRecord } from "./deviceLiveHostConfig";
 import { parseServiceRelayAttachment, type ServiceOrdinaryReplicationConfig } from "./serviceOrdinaryReplication";
 
@@ -185,7 +186,8 @@ export class ServiceHostedReplication {
         this.#heldAfter = pass.heldThrough ?? undefined;
         this.#departedAfter = departed.window.through ?? undefined;
         this.#departedNone = departedAfter === undefined && departed.window.through === null && departed.listed.length === 0;
-        if (retirement) throw new Error(`Hosted retirement failed: ${retirement.message}`);
+        // Only its code word: the rest of the engine's message can name a file, and the log prints this message whole.
+        if (retirement) throw new Error(`Hosted retirement failed: ${engineRefusalWords(retirement.message, retirement.code, "sync.commitCursor")}`);
         if (!hasMore) return {hasMore: false, pages};
       }
       return {hasMore: true, pages};

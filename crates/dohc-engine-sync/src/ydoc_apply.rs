@@ -9438,6 +9438,7 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
             reason: "Y.Doc author entry exceeds its metadata limit",
         },
         CollabError::MalformedUpdate { .. }
+        | CollabError::BaselineSchemaVersionMissing
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }

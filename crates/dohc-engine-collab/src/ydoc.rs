@@ -852,7 +852,7 @@ impl Ydoc {
             }
         }
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
-            return Err(invalid());
+            return Err(CollabError::BaselineSchemaVersionMissing);
         }
         if matches!(
             meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
@@ -11849,7 +11849,8 @@ mod projection_tests {
     fn engine_seeded_fix_keeps_inbound_missing_version_invalid() {
         let incoming = Ydoc::wire();
         let bytes = incoming.richdoc_append_paragraph("Incoming without schema metadata");
-        assert!(incoming.validate_public_baseline(&bytes).is_err());
+        let refusal = incoming.validate_public_baseline(&bytes).unwrap_err();
+        assert_eq!(refusal.code(), "baseline-schema-version-missing");
     }
 
     /// New page opens a note before its file exists, so nothing seeds it: its
@@ -11871,7 +11872,7 @@ mod projection_tests {
         assert_eq!(meta.len(&shared.doc.transact()), 0);
         let refusal = shared.validate_public_baseline(&base).unwrap_err();
         assert!(
-            matches!(&refusal, CollabError::MalformedUpdate { reason } if reason == "invalid public baseline schema"),
+            matches!(&refusal, CollabError::BaselineSchemaVersionMissing),
             "{refusal:?}"
         );
         // The same note with the version the seed would have written passes.
