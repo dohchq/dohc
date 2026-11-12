@@ -80,7 +80,10 @@ export interface RecordPanelProps {
   unavailable?: string;
   /** The record's fields. */
   properties?: ReactNode;
-  /** What the record holds under its fields, such as a page's text. */
+  /**
+   * What the record holds under its fields, such as a page's text. Escape
+   * typed into its text stays with its editor and never closes the panel.
+   */
   body?: ReactNode;
   /** One quiet line at the bottom. */
   footer?: ReactNode;
@@ -90,6 +93,20 @@ export interface RecordPanelProps {
   onClose: () => void;
   /** The panel's own element, for a host that moves focus to it. */
   panelRef?: RefObject<HTMLElement | null>;
+}
+
+// Escape typed into the body's text belongs to its editor, which closes its own menus with it. The body marks
+// that key, and neither the panel nor its page closes the record for it, so a record never closes over typing.
+const bodyTextKeys = new WeakSet<Event>();
+/** Whether a key was typed into text the record's body edits. */
+export function isRecordBodyTextKey(event: { nativeEvent: Event }): boolean {
+  return bodyTextKeys.has(event.nativeEvent);
+}
+function typesText(target: EventTarget): boolean {
+  if (target instanceof HTMLTextAreaElement) return !target.readOnly;
+  if (target instanceof HTMLInputElement) return !target.readOnly && !["button", "checkbox", "radio", "submit"].includes(target.type);
+  const editable = target instanceof Element ? target.closest("[contenteditable]") : null;
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
 }
 
 /** The record's name: a heading, and where the host lets it change, the control that opens it for typing. */
@@ -235,7 +252,7 @@ export function RecordPanel(props: RecordPanelProps) {
       className={`flex shrink-0 flex-col border-l border-line bg-bg ${over ? "dohc-popover absolute inset-y-0 right-0 z-20" : "relative"}`}
       onKeyDown={(event) => {
         // An open editor, the open name and the menu each take their own Escape first.
-        if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event)) return;
+        if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event) || isRecordBodyTextKey(event)) return;
         event.preventDefault();
         onClose();
       }}
@@ -306,7 +323,18 @@ export function RecordPanel(props: RecordPanelProps) {
               {props.nameNote}
             </div>
             {props.properties}
-            {props.body}
+            {props.body === undefined || props.body === null ? null : (
+              // The body keeps its own gutters and scrolls in the room under the fields, and keeps room when they are many.
+              <div
+                data-record-body=""
+                className="-mx-3 mt-3 flex min-h-60 flex-1 flex-col"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && typesText(event.target)) bodyTextKeys.add(event.nativeEvent);
+                }}
+              >
+                {props.body}
+              </div>
+            )}
           </div>
           {props.footer ? <footer className="shrink-0 border-t border-line px-3 py-2 text-[12px] text-muted">{props.footer}</footer> : null}
         </>

@@ -74,6 +74,28 @@ describe("the record panel", () => {
     expect(view.onClose).not.toHaveBeenCalled();
   });
 
+  it("leaves Escape to text typed in its body, and closes on Escape from the body's other controls and from text that cannot be typed into", () => {
+    const view = setup({
+      body: (
+        <>
+          <div data-testid="text" contentEditable suppressContentEditableWarning />
+          <textarea aria-label="Source" />
+          <div data-testid="locked" contentEditable={false} suppressContentEditableWarning><span>Read-only text</span></div>
+          <button type="button">Toggle source</button>
+        </>
+      ),
+    });
+    // The editor closes its own menus with Escape, and a slip must not close the record over typing.
+    fireEvent.keyDown(view.in.getByTestId("text"), { key: "Escape" });
+    fireEvent.keyDown(view.in.getByRole("textbox", { name: "Source" }), { key: "Escape" });
+    expect(view.onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(view.in.getByText("Read-only text"), { key: "Escape" });
+    expect(view.onClose).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(view.in.getByRole("button", { name: "Toggle source" }), { key: "Escape" });
+    expect(view.onClose).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a name the host does not let open as a plain heading", () => {
     const view = setup({ onNameChange: vi.fn() });
     expect(within(view.in.getByRole("heading", { name: "Alice" })).queryByRole("button")).toBeNull();
