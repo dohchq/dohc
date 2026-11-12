@@ -68,18 +68,47 @@ function gateJobNames(scope) {
     || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
+function jobReadyAt(job, metadata) {
+  const node = Object.values(CLOUD_JOB_GRAPH).find(node => node.names.includes(job.name));
+  const sameHead = metadata.filter(dependency => dependency.head_sha === job.head_sha);
+  const dependencies = (node?.needs ?? []).flatMap(id => {
+    const { names } = CLOUD_JOB_GRAPH[id], present = sameHead.filter(dependency => names.includes(dependency.name));
+    if (!present.length && names.length > 1) {
+      const prefix = names.reduce((prefix, name) => {
+        while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
+        return prefix;
+      });
+      if (sameHead.some(dependency => {
+        const expression = dependency.name.indexOf("${{");
+        return dependency.conclusion === "skipped" && expression > 0 && prefix.startsWith(dependency.name.slice(0, expression));
+      })) return [];
+    }
+    return names.flatMap(name => {
+      const matches = present.filter(dependency => dependency.name === name);
+      return matches.length !== 1 ? [null] : matches[0].conclusion === "skipped" ? [] : matches;
+    });
+  });
+  const createdAt = Date.parse(job.created_at);
+  if (!dependencies.length || dependencies.some(dependency => !dependency || !Number.isFinite(Date.parse(dependency.completed_at)))) return createdAt;
+  // A partial re-run can carry old jobs. Do not count the pause between attempts as a scheduling wait.
+  if (job.run_attempt && dependencies.every(dependency => dependency.run_attempt < job.run_attempt)) return createdAt;
+  const readyAt = Math.max(...dependencies.map(dependency => Date.parse(dependency.completed_at)));
+  return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
+}
+
 function gateTiming(scope, required, metadata = required, transferSeconds = null) {
   if (required.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
   const start = Date.parse(required.find(job => job.name === "what changed").started_at);
   const spanSeconds = (Math.max(...required.map(job => Date.parse(job.completed_at))) - start) / 1000;
-  const jobs = required.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
-    startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
+  const wait = job => Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+  const jobs = required.map(job => ({ name: job.name, createdAt: job.created_at,
+    startedAt: job.started_at, finishedAt: job.completed_at, conclusion: job.conclusion, runnerWaitSeconds: wait(job) }));
   // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
   const javascriptNames = CLOUD_JOB_GRAPH["javascript-workers"].names;
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
-    runnerWaitSeconds: Math.max(0, (Date.parse(job.started_at) - Date.parse(job.created_at)) / 1000) || 0 })) : [];
+    createdAt: job.created_at, startedAt: job.started_at, runnerWaitSeconds: wait(job) })) : [];
   const preparedAt = Date.parse(required.find(job => job.name === "shared preparation").completed_at);
   const confinementNames = [...CLOUD_JOB_GRAPH["confinement-compiler"].names, ...CLOUD_JOB_GRAPH["confinement-relay"].names];
   const longest = [...jobs.filter(job => job.name !== "what changed"
@@ -91,7 +120,8 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
   const excused = longest.runnerWaitSeconds > 30 || transferSeconds > 30 && seconds - transferSeconds <= budgetSeconds;
   const timing = seconds <= targetSeconds ? "within budget" : excused ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
-  const delay = [longest.runnerWaitSeconds > 30 ? `longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
+  const waitingFor = (Date.parse(longest.startedAt) - Date.parse(longest.createdAt)) / 1000 * 2 >= longest.runnerWaitSeconds ? "runner wait" : "wait for GitHub to start";
+  const delay = [longest.runnerWaitSeconds > 30 ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
     transferSeconds > 30 ? `receipt transfer took ${transferSeconds}s` : null].filter(Boolean).join("; ");
   return { spanSeconds, seconds, targetSeconds, budgetSeconds, transferSeconds, contended, timing, jobs,
     ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${targetSeconds}s target; ${delay}.` }
