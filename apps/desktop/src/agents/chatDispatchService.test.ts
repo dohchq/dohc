@@ -4618,11 +4618,12 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toEqual([]);
   });
 
-  it.each([false, true])("saves a quiet run's end when dohc quits before it reads again, posted: %s", async (posted) => {
-    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+  it.each(["none", "linked", "link pending"] as const)("saves a quiet run's end when dohc quits before it reads again, reply: %s", async (posted) => {
+    let linkPending = posted === "link pending";
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile }, hasPendingRunMessageLink: () => linkPending });
     const { threadId, runId, process } = await startAutomationRun(fixture);
     expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
-    const reply = posted ? await linkAgentReply(fixture, threadId, runId) : undefined;
+    let reply = posted === "linked" ? await linkAgentReply(fixture, threadId, runId) : undefined;
     vi.useFakeTimers();
     const lookupError = new Error("daemon restarted during listRunMessages");
     fixture.rejectNextRunMessageLookup!(lookupError);
@@ -4633,13 +4634,18 @@ describe("chatDispatchService", () => {
 
     await fixture.service.stop();
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false, endedAtMs: expect.any(Number) });
+    // A reply whose link was still being written lands after the restart.
+    if (linkPending) {
+      reply = await linkAgentReply(fixture, threadId, runId);
+      linkPending = false;
+    }
 
-    // After the restart, only a run that posted gets its notice, and neither is marked failed.
+    // After the restart, only a run that posted gets its notice, and none is marked failed.
     fixture.service = createChatDispatchService(fixture.serviceOptions);
     await activate(fixture);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
-    expect(fixture.notices).toEqual(posted
+    expect(fixture.notices).toEqual(posted !== "none"
       ? [expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]
       : []);
   });

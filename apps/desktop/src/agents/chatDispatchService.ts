@@ -2277,7 +2277,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         const { runId } = live.claim.run;
         let posted = false;
         try {
-          posted = (await dispatch.listRunMessages(live.workspace.workspaceId, runId, durableDispatchRequest)).length > 0;
+          posted = await runPosted(live.workspace, runId);
         } catch (error) {
           reportError(error);
         }
