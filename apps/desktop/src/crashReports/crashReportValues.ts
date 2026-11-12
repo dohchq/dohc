@@ -27,7 +27,7 @@ export const ERROR_NAMES: ReadonlySet<string> = new Set([
   // dohc's engine client.
   "EngineDaemonUnavailableError", "EngineClientError", "EngineRequestError", "EngineRequestDeadlineError",
   "EngineWorkspaceRebindError", "EngineWorkspaceRebuildingError", "EngineWorkspaceRetryDeadlineError",
-  "EngineWorkspaceShuttingDownError", "DaemonClientCapabilityError", "DaemonProtocolError",
+  "EngineWorkspaceShuttingDownError", "EngineWorkspaceFolderTimeoutError", "DaemonClientCapabilityError", "DaemonProtocolError",
   "DaemonRefusalError", "ProtocolShapeError", "YdocAdapterError", "YdocOwnerDraftPendingError",
   "VersionedAdapterCapabilityError", "ChatsAdapterCapabilityError", "OwnerYDocOutboxReadChangedError",
 ]);
