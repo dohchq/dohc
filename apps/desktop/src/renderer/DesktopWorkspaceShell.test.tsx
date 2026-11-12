@@ -378,7 +378,7 @@ describe("collection folders", () => {
     const bridge = makeBridge(Promise.resolve(null));
     const files: Array<{ path: string; kind: "file" }> = [];
     bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [...files], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [] }));
     bridge.getCollection.mockResolvedValue({
       path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
       schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }, { name: "notes", type: "text" }], views: [] },
@@ -427,7 +427,7 @@ describe("collection folders", () => {
   /** Opens the tasks Collection, whose records have a title, and answers what types a title in its new row and saves the row. */
   async function openTasksWithTitle(bridge: ReturnType<typeof makeBridge>, render: () => unknown) {
     bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [] }));
     bridge.getCollection.mockResolvedValue({
       path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
       schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }], views: [] },
