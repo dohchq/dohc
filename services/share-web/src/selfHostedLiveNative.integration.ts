@@ -1577,7 +1577,7 @@ it("blocks a document written only as text, and activates it once its owner open
 
 // The file writes a note's Y.Doc projections queued in the host's replica, counted by status.
 const projectionWrites = (proof: SelfHostProof, path: string) => proof.serviceRead(engine =>
-  engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id LIKE 'ydoc-mat_%' GROUP BY status ORDER BY status")
+  engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id GLOB 'ydoc-mat_*' GROUP BY status ORDER BY status")
     .all(path) as {status: string; count: number}[]);
 // None of a note's queued writes waits and none conflicted: each is complete, or cancelled as a state the
 // note's head replaced. `count` is how many there are, when the case knows.
@@ -1590,6 +1590,9 @@ function expectProjectionWritesEnded(proof: SelfHostProof, path: string, count?:
 }
 // The names in a folder of the host's copy, or none when the folder is gone.
 const hostFolder = (proof: SelfHostProof, folder: string) => existsSync(join(proof.store, folder)) ? readdirSync(join(proof.store, folder)).sort() : [];
+// The name the engine gives the conflict file of a queued write: the file's name, then the job's id with
+// every character that is not a letter or a digit as a hyphen. An id of up to 96 characters is kept whole.
+const conflictFileName = (path: string, jobId: string) => `${basename(path)}.${jobId.replace(/[^A-Za-z0-9]/g, "-")}.conflict`;
 
 // #3804: a note with several past versions is shared for editing. The host pulls its history, and each
 // version's projection queues a write of the note's file while the pull's page writes the file itself.
@@ -1619,28 +1622,49 @@ it("takes a note with several past versions live without replaying their file wr
 }), 120000);
 
 // #3804: a store written before the fix holds a hosted note's queued writes. Opening it replayed every
-// one, and each write of a past version left a conflict file. The engine refuses this note's capture, as
-// in the case below, so nothing else ends its writes before the restart.
+// one, and each write of a past version left a conflict file. Such a store also holds writes an earlier
+// replay already conflicted, each with its conflict file. The engine refuses this note's capture, as in
+// the case below, so nothing else ends its writes before the restart.
 it("writes no conflict file for a hosted note's queued writes when the engine restarts", () => withSelfHostProof("self-host-queued-restart", async proof => {
   const from = harness.calls.length, path = "docs/queued.md";
   const note = await proof.ownerDocument(path, "Typed\n", {firstVersion: doc => {doc.getMap("meta").set("schemaVersion", 2);}});
   await vi.waitFor(() => expect(harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.code)).toContain("INVALID_PARAMS"), {timeout: 30000});
+  // The note's first version in the host's copy, before any later edit is pulled: the one write queued so
+  // far is a write of these bytes.
+  let first: {job: string; bytes: Uint8Array} = {job: "", bytes: new Uint8Array()};
+  await vi.waitFor(() => {
+    const bytes = readFileSync(join(proof.store, path));
+    const writes = proof.serviceRead(engine => engine.prepare("SELECT job_id AS job, content_sha256 AS sha FROM materialization_jobs WHERE target_path=? AND job_id GLOB 'ydoc-mat_*'")
+      .all(path) as {job: string; sha: string}[]);
+    expect(writes.map(write => write.sha)).toEqual([hash(bytes)]);
+    first = {job: writes[0]!.job, bytes};
+  }, {timeout: 30000});
   for (const edit of ["second", "third", "fourth", "fifth"]) {
     await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
     await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
   }
   const pulled = readFileSync(join(proof.store, path), "utf8");
-  // With the engine stopped, queue the note's five writes again, as a store from before the fix holds them.
+  // With the engine stopped, put the note's five writes in the state a store from before the fix holds them.
+  // The write of its first version already conflicted in an earlier replay: its job is `conflict` with the
+  // time that ended it, and its content stands beside the note as a conflict file. The four later writes wait.
   await proof.stopSupervisor();
+  const conflictedAt = Date.now(), conflictFile = conflictFileName(path, first.job);
   const engine = new DatabaseSync(toNamespacedPath(join(proof.store, ".dohc/engine/engine.db")));
-  try {engine.prepare("UPDATE materialization_jobs SET status='pending', completed_at_ms=NULL WHERE target_path=? AND job_id LIKE 'ydoc-mat_%'").run(path);}
-  finally {engine.close();}
-  expect(projectionWrites(proof, path)).toEqual([{status: "pending", count: 5}]);
+  try {
+    engine.prepare("UPDATE materialization_jobs SET status='pending', completed_at_ms=NULL WHERE target_path=? AND job_id GLOB 'ydoc-mat_*'").run(path);
+    engine.prepare("UPDATE materialization_jobs SET status='conflict', completed_at_ms=? WHERE job_id=?").run(conflictedAt, first.job);
+  } finally {engine.close();}
+  writeFileSync(join(proof.store, "docs", conflictFile), first.bytes);
+  const conflictRow = () => proof.serviceRead(engine => engine.prepare("SELECT status, completed_at_ms AS at FROM materialization_jobs WHERE job_id=?").get(first.job));
+  expect(projectionWrites(proof, path)).toEqual([{status: "conflict", count: 1}, {status: "pending", count: 4}]);
   await proof.startSupervisor();
   await vi.waitFor(() => expect(projectionWrites(proof, path).map(row => row.status)).not.toContain("pending"), {timeout: 30000});
-  // The four writes of past versions are cancelled and the write of the newest is complete. Nothing was written.
-  expect(projectionWrites(proof, path)).toEqual([{status: "cancelled", count: 4}, {status: "complete", count: 1}]);
-  expect(hostFolder(proof, "docs")).toEqual(["a.md", "queued.md"]);
+  // The three waiting writes of past versions are cancelled and the write of the newest is complete.
+  // The conflicted write and its file stand as they were. Nothing was written.
+  expect(projectionWrites(proof, path)).toEqual([{status: "cancelled", count: 3}, {status: "complete", count: 1}, {status: "conflict", count: 1}]);
+  expect(conflictRow()).toEqual({status: "conflict", at: conflictedAt});
+  expect(hostFolder(proof, "docs")).toEqual(["a.md", "queued.md", conflictFile]);
+  expect(readFileSync(join(proof.store, "docs", conflictFile)).equals(first.bytes)).toBe(true);
   expect(readFileSync(join(proof.store, path), "utf8")).toBe(pulled);
   return {path};
 }), 120000);
