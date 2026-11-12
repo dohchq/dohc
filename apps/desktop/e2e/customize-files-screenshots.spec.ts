@@ -3,6 +3,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { waitForVisibleAnimations } from "./helpers/animations";
+import { collectionCommand } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -99,9 +100,7 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    const manage = collection.getByLabel("Manage Collection", { exact: true });
-    if (!await manage.evaluate((element) => element.closest("details")?.open)) await manage.click();
-    await collection.getByRole("button", { name: "Customize…", exact: true }).click();
+    await (await collectionCommand(collection, "Customize…")).click();
     dialog = page.getByRole("dialog", { name: "Customize Registrations" });
     await expect(dialog.getByText(/automations\.yaml$/)).toBeVisible();
     await shoot(page, "customize-database");

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editorTabTestId } from "../src/testPins";
 import { siteTabPath } from "../src/renderer/workbench/workbenchState";
+import { collectionCommand } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 import type { AppViewEvent } from "../src/ipc/bridgeContract";
@@ -119,9 +120,7 @@ async function createFormApp(electronApp: ElectronApplication, page: Page, works
   await hidden(collectionDialog);
   const collection = page.getByRole("region", { name: "Registrations", exact: true });
   await shown(collection);
-  const management = collection.getByLabel("Manage Collection", { exact: true });
-  if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
-  await collection.getByRole("button", { name: "Create form", exact: true }).click();
+  await (await collectionCommand(collection, "Create form")).click();
   const formDialog = page.getByTestId("create-dataset-form-dialog");
   await shown(formDialog);
   await formDialog.getByRole("button", { name: "Create form", exact: true }).click();

@@ -1,4 +1,4 @@
-import { fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { test, expect, type Page, type Locator } from "@playwright/test";
@@ -60,7 +60,6 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
     // Add a real authored rule through the normal reviewed source-change path.
     const definition = JSON.parse(await readFile(join(workspace.rootPath, "Registrations/dataset.json"), "utf8")) as DatasetDefinition;
     const nameField = definition.tables[0]!.fields.find(field => field.name === "Name")!;
@@ -73,7 +72,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await writeFile(operationPath, customSource);
     await writeFile(join(workspace.rootPath, "Registrations/custom-rule.sql"), "SELECT 1;\n");
     await waitForWorkspaceFile(page, workspaceId, "Registrations/custom-rule.sql");
-    await collection.getByRole("button", { name: "Fields and names", exact: true }).click();
+    await (await collectionCommand(collection, "Fields and names")).click();
     await page.getByRole("dialog", { name: "Fields and names", exact: true }).getByRole("button", { name: "Review source change", exact: true }).click();
     const ruleReview = page.getByRole("dialog", { name: "Review Collection change", exact: true });
     await ruleReview.getByLabel("Collection definition").fill("Registrations/dataset.json");
@@ -84,9 +83,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await ruleReview.getByRole("checkbox", { name: "I reviewed this change and its effect on existing data" }).check();
     await ruleReview.getByRole("button", { name: "Approve change", exact: true }).click();
     await expect(ruleReview).toBeHidden();
-    const management = collection.getByLabel("Manage Collection", { exact: true });
-    if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
-    await collection.getByRole("button", { name: "Create form", exact: true }).click();
+    await (await collectionCommand(collection, "Create form")).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await expect(formDialog).toBeHidden();
@@ -150,13 +147,12 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
     const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(editorTabTestId(path)).click();
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
     const names = await fieldCells(collection, "Name");
     await expect(names).toHaveCount(2);
     expect(await names.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant"]));
     const beforePublications = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ action: "list", workspaceId, appRoot: "registrations-form" }), workspaceId);
-    if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
-    await collection.getByRole("button", { name: "Fields and names", exact: true }).click();
+    await (await collectionCommand(collection, "Fields and names")).click();
     const fields = page.getByRole("dialog", { name: "Fields and names", exact: true });
     await fields.getByLabel("Change", { exact: true }).selectOption("renameField");
     await fields.getByLabel("Field", { exact: true }).selectOption(nameField.fieldId);
@@ -182,7 +178,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await form.getByLabel("Name", { exact: false }).fill("Blocked participant");
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toContainText("This registration is not allowed.");
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
     const participants = await fieldCells(collection, "Participant");
     await expect(participants).toHaveCount(3);
     expect(await participants.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant", "After field rename"]));
@@ -232,8 +228,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     await writeFile(operationPath, custom);
     await writeFile(join(workspace.rootPath, "Registrations/custom-rule.sql"), "SELECT 1;\n");
     await waitForWorkspaceFile(page, workspaceId, "Registrations/custom-rule.sql");
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
-    await collection.getByRole("button", { name: "Fields and names", exact: true }).click();
+    await (await collectionCommand(collection, "Fields and names")).click();
     await page.getByRole("dialog", { name: "Fields and names", exact: true }).getByRole("button", { name: "Review source change", exact: true }).click();
     const review = page.getByRole("dialog", { name: "Review Collection change", exact: true });
     await review.getByLabel("Collection definition").fill("Registrations/dataset.json");
@@ -252,9 +247,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(await fieldCells(collection, "Name")).toHaveText("Registered after rule change");
-    const management = collection.getByLabel("Manage Collection", { exact: true });
-    if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
-    await collection.getByRole("button", { name: "History", exact: true }).click();
+    await (await collectionCommand(collection, "History")).click();
     const history = page.getByRole("dialog", { name: "Collection history", exact: true });
     const change = history.locator("details").filter({ has: page.locator("summary", { hasText: "Fields and rules" }) }).first();
     await change.locator("summary").first().click();
@@ -275,7 +268,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     if (current.kind !== "description") throw Error("Expected reversed Collection.");
     const accepted = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { ...invoke, revision: current.dataset.revision, revisionSha256: current.dataset.revisionSha256, idempotencyKey: "accepted-after-reversal" });
     expect(accepted).toMatchObject({ kind: "invoked", replayed: false });
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
     await expect(await fieldCells(collection, "Name")).toHaveCount(2);
     expect(await (await fieldCells(collection, "Name")).allTextContents()).toEqual(expect.arrayContaining(["Registered after rule change", "Blocked participant"]));
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
@@ -319,8 +312,8 @@ test("@dataset-completion board and calendar page all records and save governed 
       if (result.kind !== "invoked" || !result.result || typeof result.result !== "object" || Array.isArray(result.result)) throw Error("Expected seeded task.");
     }
     const collection = page.getByRole("region", { name: "Tasks", exact: true });
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    await collection.getByRole("button", { name: "Views", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
+    await (await collectionCommand(collection, "Views")).click();
     const views = page.getByRole("region", { name: "Collection views", exact: true });
     await views.getByRole("button", { name: "Create view", exact: true }).click();
     await views.getByLabel("View name").fill("By status");
@@ -348,7 +341,7 @@ test("@dataset-completion board and calendar page all records and save governed 
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.screenshot({ path: info.outputPath(`transactional-board-${theme}.png`) });
     }
-    await collection.getByRole("button", { name: "Views", exact: true }).click();
+    await (await collectionCommand(collection, "Views")).click();
     await views.getByRole("button", { name: "Create view", exact: true }).click();
     await views.getByLabel("View name").fill("Schedule");
     await views.getByLabel("View layout").selectOption("calendar");
@@ -415,8 +408,7 @@ test("@dataset-completion generated form saves two files and an explicitly publi
     await openExplorerHome(page);
     await page.getByRole("region", { name: "Collections", exact: true }).getByRole("button", { name: "Orders", exact: true }).click();
     const collection = page.getByRole("region", { name: "Orders", exact: true });
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
-    await collection.getByRole("button", { name: "Create form", exact: true }).click();
+    await (await collectionCommand(collection, "Create form")).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByLabel("Public choices for Product", { exact: true }).selectOption(`${choiceOperation.operationId}:${productField("Label")}`);
     await expect(formDialog).toContainText("Anyone with this form can call the selected action and read its complete output.");

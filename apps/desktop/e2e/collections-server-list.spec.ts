@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetSources } from "../src/workspaces/datasetGenerator";
-import { fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, fieldCells } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
@@ -151,8 +151,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     // Export, Access and the workspace's History reach the server Collection, as they do on the computer that keeps the Collections.
     const archivePath = join(workspace.baseDir, "registrations.dohc-recovery");
     await desktop.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, archivePath);
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
-    await collection.getByRole("button", { name: "Export recovery", exact: true }).click();
+    await (await collectionCommand(collection, "Export recovery")).click();
     const exportDialog = page.getByRole("dialog", { name: "Export Registrations?", exact: true });
     await exportDialog.getByRole("button", { name: "Save recovery file", exact: true }).click();
     await expect(exportDialog).toBeHidden();

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
-import { editCell, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, editCell, fieldCells } from "./helpers/dataCollection";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
@@ -58,7 +58,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
       input: { id: row.id, expectedVersion: row.version, values: { [nameField.fieldId]: "Before owner edit" } } };
     const agentResult = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: source.rootPath, actor: "agent", request: retryRequest } }, { stateDir: source.homeDir });
     expect(agentResult).toMatchObject({ kind: "invoked", replayed: false });
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
     await expect(await fieldCells(collection, "Name")).toHaveText("Before owner edit");
     await editCell(collection, await fieldCells(collection, "Name"), "Saved before recovery");
     await expect(await fieldCells(collection, "Name")).toHaveText("Saved before recovery");
@@ -70,8 +70,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
 
     // Only the native picker result is supplied by the harness. Export and restore run through the visible controls and production IPC.
     await oldDesktop.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, archivePath);
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
-    await collection.getByRole("button", { name: "Export recovery", exact: true }).click();
+    await (await collectionCommand(collection, "Export recovery")).click();
     const exportDialog = page.getByRole("dialog", { name: "Export Recovery proof?", exact: true });
     await expect(exportDialog).toContainText("private records");
     await exportDialog.getByRole("button", { name: "Save recovery file", exact: true }).click();
@@ -124,8 +123,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     expect(replay).toEqual({ ...(agentResult as object), replayed: true });
     expect(await dataset(restored, readRequest)).toEqual(recoveredRead);
 
-    await recovered.getByLabel("Manage Collection", { exact: true }).click();
-    await recovered.getByRole("button", { name: "History", exact: true }).click();
+    await (await collectionCommand(recovered, "History")).click();
     const history = restored.getByRole("dialog", { name: "Collection history", exact: true });
     const latest = history.locator("details").first();
     await latest.locator(":scope > summary").click();

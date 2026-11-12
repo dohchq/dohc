@@ -1,5 +1,5 @@
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -7,16 +7,11 @@ import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetSchemaChange } from "../src/workspaces/datasetSchemaChanges";
-import { editCell, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, editCell, fieldCells } from "./helpers/dataCollection";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openChatsView, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles } from "./helpers/workspace";
-
-async function openManagement(collection: Locator): Promise<void> {
-  const trigger = collection.getByLabel("Manage Collection", { exact: true });
-  if (!await trigger.evaluate(element => element.closest("details")?.open)) await trigger.click();
-}
 
 test("@dataset-collection owner creates a Collection and form, submits, edits, and undoes from history after restart", async ({ browser }) => {
   test.setTimeout(180_000);
@@ -35,8 +30,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await expect(dialog).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
     await expect(collection.getByRole("button", { name: "New record", exact: true }).first()).toBeVisible();
-    await openManagement(collection);
-    await collection.getByRole("button", { name: "Create form", exact: true }).click();
+    await (await collectionCommand(collection, "Create form")).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await expect(formDialog).toBeHidden();
@@ -61,7 +55,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     const table = dataset.tables[0]!;
     const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(editorTabTestId(path)).click();
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
+    await (await collectionCommand(collection, "Refresh")).click();
     await expect(await fieldCells(collection, "Name")).toHaveText("Synthetic participant");
     await editCell(collection, await fieldCells(collection, "Name"), "Reviewed participant");
     await expect(await fieldCells(collection, "Name")).toHaveText("Reviewed participant");
@@ -87,8 +81,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     const reopened = desktop.page.getByRole("region", { name: "Registrations", exact: true });
     await expect(await fieldCells(reopened, "Name")).toHaveText("Reviewed before restart");
     await expect(reopened.getByRole("button", { name: "Undo last edit" })).toHaveCount(0);
-    await openManagement(reopened);
-    await reopened.getByRole("button", { name: "History", exact: true }).click();
+    await (await collectionCommand(reopened, "History")).click();
     const history = desktop.page.getByRole("dialog", { name: "Collection history", exact: true });
     const latest = history.locator("details").first();
     await latest.locator(":scope > summary").click();
@@ -134,7 +127,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await page.screenshot({ path: test.info().outputPath("record-details-light.png") });
     await page.keyboard.press("Escape");
     await expect(details).toBeHidden();
-    await collection.getByRole("button", { name: "Views", exact: true }).click();
+    await (await collectionCommand(collection, "Views")).click();
     const views = page.getByRole("region", { name: "Collection views" });
     await views.getByRole("button", { name: "Create view", exact: true }).click();
     await views.getByLabel("View name").fill("Cameras");
@@ -142,10 +135,10 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await views.getByRole("button", { name: "Save view", exact: true }).click();
     await expect(views.getByRole("button", { name: "Edit view Cameras" })).toBeVisible();
     await views.getByRole("button", { name: "Done", exact: true }).click();
-    await expect(collection.getByLabel("Saved Collection view")).toHaveValue(/.+/);
+    // The saved view is a tab, and saving it opened it.
+    await expect(collection.getByTestId("collection-view-switcher").getByRole("button", { name: "Cameras", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
-    await openManagement(collection);
-    await collection.getByRole("button", { name: "Fields and names" }).click();
+    await (await collectionCommand(collection, "Fields and names")).click();
     const fields = page.getByRole("dialog", { name: "Fields and names" });
     await fields.getByLabel("Name", { exact: true }).fill("Location");
     await fields.getByRole("button", { name: "Review change", exact: true }).click();
@@ -157,8 +150,8 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await expect(review).toBeHidden();
     await expect(await fieldCells(collection, "Location")).toBeVisible();
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
-    await collection.getByLabel("Manage Collection", { exact: true }).focus();
-    await page.keyboard.press("Escape");
+    // Running a command closed the menu, so the page shows without it.
+    await expect(collection.getByRole("menu")).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"] as const) {
       await page.getByTestId(activityPin("settings")).click();
@@ -170,13 +163,14 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       await page.screenshot({ path: test.info().outputPath(`collection-management-${theme}.png`) });
     }
-    await openManagement(collection);
-    await collection.getByRole("button", { name: "Fields and names" }).focus();
+    // From the keyboard: Enter on the menu's button opens it on its first command, and Enter runs that command.
+    await collection.getByRole("button", { name: "Manage Collection", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(collection.getByRole("menuitem", { name: "Fields and names", exact: true })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(fields.getByLabel("Name", { exact: true })).toBeFocused();
     await fields.getByRole("button", { name: "Cancel", exact: true }).click();
-    await openManagement(collection);
-    await collection.getByRole("button", { name: "Archive", exact: true }).click();
+    await (await collectionCommand(collection, "Archive")).click();
     const archive = page.getByRole("dialog", { name: "Archive Equipment?" });
     await archive.getByRole("button", { name: "Archive", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Equipment is archived" })).toBeVisible();
@@ -189,8 +183,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       request: { action: "export", workspaceId, datasetPath: listed.datasets[0].datasetPath!, savePath } } }, { stateDir: workspace.homeDir });
     expect(result).toMatchObject({ kind: "exported", savedPath: savePath });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
-    await openManagement(collection);
-    await collection.getByRole("button", { name: "Archive", exact: true }).click();
+    await (await collectionCommand(collection, "Archive")).click();
     await page.getByRole("dialog", { name: "Archive Equipment?" }).getByRole("button", { name: "Archive", exact: true }).click();
     await page.getByRole("button", { name: "Delete permanently…", exact: true }).click();
     const deletion = page.getByRole("dialog", { name: "Delete Equipment permanently?" });

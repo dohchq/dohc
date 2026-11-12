@@ -269,6 +269,8 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
     // --- Every v1 field type, added through the Fields dialog (Name/text
     // came from the New collection dialog).
+    // Fields and Views are commands in the Collection's actions menu.
+    await page.getByRole("button", { name: "Collection actions", exact: true }).click();
     await page.getByTestId("collection-fields-button").click();
     await expect(page.getByTestId("collection-fields-dialog")).toBeVisible();
     await addField(page, { name: "Effort", type: "number" });
@@ -351,6 +353,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // --- Views: table, board grouped by Status, and two calendars — the
     // second keyed to the other date field IS the rekey (a view's key is
     // set at creation; switching views switches the key).
+    await page.getByRole("button", { name: "Collection actions", exact: true }).click();
     await page.getByTestId("collection-views-button").click();
     await expect(page.getByTestId("collection-views-dialog")).toBeVisible();
     await addView(page, { name: "All", kind: "table" });

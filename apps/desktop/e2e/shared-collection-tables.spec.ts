@@ -90,7 +90,12 @@ for (const surface of ["standalone", "mount"] as const) {
         await expect(page.getByTestId("collection-page")).toContainText("Shared first");
         if (access === "view" || surface === "mount") {
           await expect(page.getByTestId("collection-new-record")).toHaveCount(0);
+          // Fields is a command in the actions menu, so the menu opens to show it is not offered.
+          await page.getByRole("button", { name: "Collection actions", exact: true }).click();
+          await expect(page.getByRole("menuitem", { name: "Customize…", exact: true })).toBeVisible();
           await expect(page.getByTestId("collection-fields-button")).toHaveCount(0);
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("menu")).toHaveCount(0);
         }
         expect(await page.evaluate(async input => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listCollectionFieldMarks(input), { workspaceId, collectionPath })).toEqual({ marks: [] });
         await page.emulateMedia({ reducedMotion: "reduce" });

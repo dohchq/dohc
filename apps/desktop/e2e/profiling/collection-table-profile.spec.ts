@@ -34,6 +34,8 @@ function statistics(values: number[]) {
  * The table draws only the rows in view, so its row count says how many records it holds.
  */
 async function tableSample(page: Page, initial: boolean) {
+  // Refresh is a command in the Collection's actions menu, so the menu opens before the sample starts at Refresh's click.
+  if (!initial) await page.getByRole("region", { name: title, exact: true }).getByRole("button", { name: "Manage Collection", exact: true }).click();
   return page.evaluate(({ initial, title }) => new Promise<number>((resolve, reject) => {
     const region = () => document.querySelector<HTMLElement>(`section[aria-label="${title}"]`);
     const previous = region();
