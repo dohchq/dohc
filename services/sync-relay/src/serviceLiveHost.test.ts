@@ -401,7 +401,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
     identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
     settlement:{maxApplicationsPerSettlement:8},sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
-    activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,
+    activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,maxActivationHistoryEntries:10,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
       idleUnloadMs:600_000,idleRetryMs:30_000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
@@ -589,7 +589,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner"}, store = f.storage.createServiceActivationStore(f.history);
   await store.prepare({capture, host: earlier, registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
   if (adopted) {
     const adoption = delivery.captureOwnerCut({host: earlier, document, actor, adoptionId: capture.activationId,
@@ -3948,7 +3948,7 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
   const host = o.host.coordinate, actor = {kind: "owner" as const, userId: "owner"};
   const store = o.f.storage.createServiceActivationStore(o.f.history);
   await store.prepare({capture, host, registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, host), delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
   const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: activationId,
     expectedLocalSequence: 2, maxBytes: 1_000_000, maxEvents: 100, throughCursor: 0});
@@ -4305,7 +4305,7 @@ for (const c of [
     .get("workspace")!.cursor)};
   const read = () => readOrdinaryActivationHistory(o.f.storage as StorageContext, {source, document: o.document,
     baselineBytes: capture.baselineBytes, fullState: capture.fullState,
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 100, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000}});
   if (c.changedText) {
     expect(read, "The returned document must refuse a move that changed its text.")
       .toThrow("Ordinary activation history replaced the live document.");
@@ -4487,7 +4487,7 @@ for (const c of [
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   const source = {...o.engine.capture.source, committedCursor: Number(o.raw.prepare("SELECT MAX(relay_seq) AS cursor FROM sync_relay_log WHERE workspace_id=?")
     .get("workspace")!.cursor)};
-  const bounds = {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 100, maxBytesPerDrain: 1_000_000};
+  const bounds = {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000};
   const check = () => {
     const input = {source, document: o.document, baselineBytes: capture.baselineBytes, fullState: capture.fullState, bounds};
     const history = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);

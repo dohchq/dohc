@@ -53,7 +53,7 @@ const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJ
 const validateActivation:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,policy)
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner'}
-const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
+const bounds={maxCaptureBytes:1_000_000,maxHistoryEntries:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
 function fixture(note='Original',large=false,clientID?:number){
@@ -344,7 +344,7 @@ it('refuses a source moment that names a departed Y.Doc row',async()=>{
 it('checks configured history entry and byte budgets before loading relay blobs',async()=>{
   const f=fixture();try{
     const read=vi.spyOn(f.storage,'getBlob')
-    await expect(f.prepare({...bounds,maxEntriesPerDrain:1})).rejects.toThrow('entry budget')
+    await expect(f.prepare({...bounds,maxHistoryEntries:1})).rejects.toThrow('entry budget')
     expect(read).not.toHaveBeenCalled()
     // A baseline past the byte budget is refused before the history read, as the same over-budget history.
     await expect(f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length-1})).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
@@ -405,7 +405,7 @@ it('neither applies nor charges a losing device\'s offline edit',async()=>{
     const delta=Y.encodeStateAsUpdate(loser.doc,before)
     append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(delta)}),delta)
     const read=vi.spyOn(f.storage,'getBlob')
-    expect(await f.prepare({...bounds,maxEntriesPerDrain:2})).toEqual({document:f.document,replayed:false,completed:false})
+    expect(await f.prepare({...bounds,maxHistoryEntries:2})).toEqual({document:f.document,replayed:false,completed:false})
     const digests=read.mock.calls.map(call=>call[1])
     expect(digests).not.toContain(loser.lineageClaimId)
     expect(digests).not.toContain(hash(delta))
@@ -414,15 +414,19 @@ it('neither applies nor charges a losing device\'s offline edit',async()=>{
 })
 it('keeps losing rows out of the self-host entry budget and still charges the winner\'s own',async()=>{
   const f=fixture(),loser=losingDevice(f);try{
-    const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation,readBounds={maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}
-    for(let seq=2;seq<=maxEntriesPerDrain;seq++){
+    const {maxCaptureBytes,maxActivationHistoryEntries:maxHistoryEntries,maxBytesPerDrain}=selfHostLiveProfile().service.activation,readBounds={maxCaptureBytes,maxHistoryEntries,maxBytesPerDrain}
+    f.raw.exec('BEGIN')
+    for(let seq=2;seq<=maxHistoryEntries;seq++){
       append(f,'losing-device',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(Buffer.from(`losing-${seq}`))}))
     }
-    expect(f.capture.source.committedCursor-f.capture.source.baseRelaySeq+1).toBeGreaterThan(maxEntriesPerDrain)
+    f.raw.exec('COMMIT')
+    expect(f.capture.source.committedCursor-f.capture.source.baseRelaySeq+1).toBeGreaterThan(maxHistoryEntries)
     expect(await verify(f,readBounds)).toEqual({verified:true})
-    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++){
+    f.raw.exec('BEGIN')
+    for(let seq=3;seq<=maxHistoryEntries+1;seq++){
       append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`winning-${seq}`))}))
     }
+    f.raw.exec('COMMIT')
     await expect(verify(f,readBounds)).rejects.toThrow('Ordinary activation history exceeds its configured entry budget.')
   }finally{loser.doc.destroy();f.close()}
 })
@@ -461,7 +465,7 @@ it.each([
 // later prefixes must keep the source's projection.
 it('activates a source followed by many projection-neutral rows over a 1 MB baseline within the self-hosted budget',async()=>{
   const f=fixture('x'.repeat(1_000_000)),doc=new Y.Doc();try{
-    const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation
+    const {maxCaptureBytes,maxActivationHistoryEntries:maxHistoryEntries,maxBytesPerDrain}=selfHostLiveProfile().service.activation
     expect(f.capture.baselineBytes.length).toBeGreaterThan(1_000_000)
     Y.applyUpdate(doc,f.capture.baselineBytes);const base=Y.encodeStateVector(doc)
     Y.applyUpdate(doc,f.capture.fullState);const edit=Y.encodeStateAsUpdate(doc,base)
@@ -474,7 +478,7 @@ it('activates a source followed by many projection-neutral rows over a 1 MB base
     }
     const fullState=Buffer.from(Y.encodeStateAsUpdate(doc))
     Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
-    expect(await f.prepare({maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain})).toMatchObject({completed:false})
+    expect(await f.prepare({maxCaptureBytes,maxHistoryEntries,maxBytesPerDrain})).toMatchObject({completed:false})
   }finally{doc.destroy();f.close()}
 })
 // A later native-shaped write of the document under a native settlement name,
@@ -834,7 +838,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
-    config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
+    config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxActivationHistoryEntries:10,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,lifetime:new AbortController().signal,wake,
@@ -1196,16 +1200,18 @@ it('refuses a capture whose validation runs out of heap, blocks it for its owner
 // A history past what the relay reads refuses the same way on every capture, so the document waits for a new
 // start rather than being captured on every pass. One within the same budget still goes live.
 it('captures a document whose history is past the self-host read budget once, then waits for a new base or its owner',async()=>{
-  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture()
+  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture()
   try{
-    const config={maxEntriesPerDrain},signal=()=>new AbortController().signal,drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false}
+    const config={maxActivationHistoryEntries},signal=()=>new AbortController().signal,drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false}
     vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
     const live=activationDriver(within,vi.fn(async()=>within.capture),undefined,undefined,undefined,config)
     expect(await live.driver.activate(live.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
     expect(live.driver.blocked(live.target)).toBeUndefined()
     expect(within.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
     const edit=(seq:number)=>append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
-    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)edit(seq)
+    f.raw.exec('BEGIN')
+    for(let seq=3;seq<=maxActivationHistoryEntries+1;seq++)edit(seq)
+    f.raw.exec('COMMIT')
     const capture=vi.fn(async()=>f.capture),send=vi.fn(async()=>({result:{released:true}}))
     const d=activationDriver(f,capture,send,undefined,undefined,config)
     expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
@@ -1216,7 +1222,7 @@ it('captures a document whose history is past the self-host read budget once, th
     const blocked={kind:'pending',reason:'Hosted document is blocked until the owner tries again.'}
     expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
     // Another edit only lengthens the history.
-    edit(maxEntriesPerDrain+2)
+    edit(maxActivationHistoryEntries+2)
     expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
     expect(capture).toHaveBeenCalledTimes(1)
     // A new base gives the history a new start, so the next pass captures once more.
@@ -1527,15 +1533,15 @@ it.each(['Stop','a restart'] as const)('captures a blocked or waiting document a
 })
 // A history past its budget is blocked, not counted: once a new base clears the block, the next failure is the first.
 it('adds nothing to the wait for a history past its budget',async()=>{
-  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
   try{
     const signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
     const overBudget={kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'}
     f.raw.exec('BEGIN')
-    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+    for(let seq=3;seq<=maxActivationHistoryEntries+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
     f.raw.exec('COMMIT')
     const rebase=(seq:number)=>append(f,'rebased',seq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from(`rebased-${seq}`)),updateBlobSha256:hash(Buffer.from(`rebased-${seq}`))}))
-    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxEntriesPerDrain})
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxActivationHistoryEntries})
     expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
     rebase(1)
     // `append` moves the capture's cut to the new base, as a capture after a complete pull would be.

@@ -36,8 +36,10 @@ export function selfHostLiveProfile() {
       // the 512 MiB ingress budget with live applications and owner delivery.
       restore: {maxBytes: 2 * MiB, maxEvents: 64, aggregateBytes: 40 * MiB, workingReserveBytes: 8 * MiB, maxOperations: 1, validation},
       // A hosted document with no live connection for idleUnloadMs settles and
-      // leaves memory until it is opened again.
-      activation: {validation, maxCaptureBytes: 4 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
+      // leaves memory until it is opened again. One activation checks up to
+      // maxActivationHistoryEntries rows since the note's base, about 400 words
+      // typed; the owner outbox drain pages maxEntriesPerDrain at a time.
+      activation: {validation, maxCaptureBytes: 4 * MiB, maxActivationHistoryEntries: 2_000, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000},
       // Copying and migrating an earlier store for its owner's recovery copy
       // may take this long, the longest the engine answers a request.
