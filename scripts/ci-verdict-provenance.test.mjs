@@ -418,6 +418,22 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   }
 });
 
+test("shared Rust archive downloads retry once under bounded step timeouts", () => {
+  const {jobs} = load(workflow);
+  const action = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
+  const inputs = {name: "rust-tests-${{ github.run_attempt }}", path: ".agent-artifacts/verification"};
+  for (const name of ["rust-tests", "rust"]) {
+    const steps = jobs[name].steps, wait = steps.findIndex(step => step.name === "Wait for the shared Rust archive");
+    assert.ok(wait >= 0);
+    assert.deepEqual(steps[wait + 1], {id: "rust-archive-download", uses: action, "timeout-minutes": 2, "continue-on-error": true, with: inputs});
+    assert.deepEqual(steps[wait + 2], {name: "Download the shared Rust archive again after a stalled transfer",
+      if: "steps.rust-archive-download.outcome == 'failure'", uses: action, "timeout-minutes": 3, with: inputs});
+    assert.equal(steps.filter(step => step.with?.name === inputs.name).length, 2, "there are exactly two archive attempts");
+    assert.equal(steps[wait + 3].run, `node scripts/verification/cloud-rust.mjs tests ${name === "rust" ? "0" : "${{ matrix.shard }}"}`);
+    assert.equal(steps[wait + 3].if, undefined, "tests run only after a successful download");
+  }
+});
+
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
 // Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.
