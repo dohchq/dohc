@@ -1954,7 +1954,7 @@ async function withCopies(identified: readonly string[] = [WS_A, WS_B, OTHER_WS]
           open.set(workspaceId, {
             workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
             root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: workspaceId, signal: lifetime.signal,
-            nextRequestId: () => ++requestId, withRecordWork: (work) => work(),
+            nextRequestId: () => ++requestId, withRecordWork: (work) => work(), step: async () => true,
             sync: async () => { syncs.push(workspaceId); await held; },
           });
           hooks.onChanged?.(workspaceId);

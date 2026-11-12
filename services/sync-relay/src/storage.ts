@@ -1,4 +1,4 @@
-import {accountIsFenced} from "./storage/accountDeletion";
+import {accountIsFenced, workspaceIsDeleted} from "./storage/accountDeletion";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -127,6 +127,7 @@ import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
+import * as operationRecordStorage from "./storage/operationRecords";
 import * as accountFeedStorage from "./storage/accountFeed";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
@@ -909,8 +910,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     automationWorkspaceStorage.forgetAutomationWorkspace(this, input);
   }
 
-  forgetAutomationWorkspaces() {
-    automationWorkspaceStorage.forgetAutomationWorkspaces(this);
+  forgetAutomationWorkspaces(kept?: readonly string[]) {
+    automationWorkspaceStorage.forgetAutomationWorkspaces(this, kept);
   }
 
   endCopyReasonEverywhere(reason: automationWorkspaceStorage.CopyReason) {
@@ -935,6 +936,55 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   endAccountReasonsOfHiddenOrDisownedCopies() {
     accountWorkspaceStorage.endAccountReasonsOfHiddenOrDisownedCopies(this);
+  }
+
+  recordAccountOperation(input: operationRecordStorage.RecordOperationInput) {
+    return operationRecordStorage.recordOperation(this, input);
+  }
+
+  lookupAccountOperation(input: { accountId: string; operationId: string; binding: operationRecordStorage.OperationBinding }) {
+    return operationRecordStorage.lookupOperation(this, input);
+  }
+
+  advanceAccountOperation(input: operationRecordStorage.AdvanceOperationInput) {
+    return operationRecordStorage.advanceOperation(this, input);
+  }
+
+  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }) {
+    return operationRecordStorage.listUnfinishedOperations(this, input);
+  }
+
+  listUnfinishedOperationCopies() {
+    return operationRecordStorage.listUnfinishedOperationCopies(this);
+  }
+
+  fetchAccountOperationLogRow(input: Parameters<typeof operationRecordStorage.operationLogRow>[1]) {
+    return operationRecordStorage.operationLogRow(this, input);
+  }
+
+  publishingCopies() {
+    return this.readTx(() => this.publishingCopiesInTransaction());
+  }
+
+  // Each pass asks, so it writes only when the reasons changed.
+  restorePublicationReasons() {
+    const changed = () => JSON.stringify(this.publishingWorkspaceIds()) !==
+      JSON.stringify(operationRecordStorage.publicationReasonCopiesInTransaction(this).sort());
+    if (!this.readTx(changed)) return;
+    this.tx(() => operationRecordStorage.setPublicationReasonsInTransaction(this, this.publishingWorkspaceIds()));
+  }
+
+  private publishingCopiesInTransaction() {
+    return operationRecordStorage.publishingCopiesInTransaction(this)
+      .filter((copy) => !accountIsFenced(this, copy.ownerUserId) && !workspaceIsDeleted(this, copy.workspaceId));
+  }
+
+  private publishingWorkspaceIds() {
+    return [...new Set(this.publishingCopiesInTransaction().map((copy) => copy.workspaceId))].sort();
+  }
+
+  tombstoneSettledAccountOperations(nowMs: number) {
+    return operationRecordStorage.tombstoneSettledOperations(this, nowMs);
   }
 
   accountFeedStanding(workspaceId: string) {

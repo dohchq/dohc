@@ -187,6 +187,7 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
     workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs, pulledHead: 0,
     root: join(root, "server", "workspace"), metadataDir: join(root, "server", "metadata"), client: copy.client, workspace: copy.workspace,
     signal: copy.lifetime, nextRequestId: copy.nextRequestId, withRecordWork: (work) => work(), sync: () => copy.sync(),
+    step: async () => { await copy.sync(); return true; },
   };
   copies = await startServerCopies({
     storage, root: join(root, "server"), engineExecutable: engine.require(), relayOrigin: "https://relay.example.test", key, namespace,

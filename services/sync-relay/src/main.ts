@@ -78,6 +78,7 @@ import {TokenBucketLimiter} from "@dohc/service-http";
 import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL_PER_SECOND} from "./noticeRoutes";
 import {automationServerLabel, startAutomationServer} from "./automationServer";
 import {removeAutomationReplicas} from "./automationReplicas";
+import {tombstoneSettledOperations} from "./operationPublication";
 import {startServerCopies, type ServerCopies} from "./serverCopies";
 import {AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication} from "./automationReplicaCredential";
 
@@ -572,7 +573,8 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 }
 
 // Presses from shared views go when their retention ends, whether or not
-// more arrive or any host lists them.
+// more arrive or any host lists them. Settled phone writes become tombstones
+// on the same schedule.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 setInterval(() => {
   try {
@@ -582,6 +584,9 @@ setInterval(() => {
   }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", error);
+  });
+  tombstoneSettledOperations(storage, Date.now()).catch((error: unknown) => {
+    console.error("[sync-relay] account operation tombstones failed:", error);
   });
 }, AUTOMATION_PRESS_PRUNE_INTERVAL_MS).unref();
 
@@ -749,7 +754,11 @@ const publicationOperator = await startPublicationOperator(storage, operatorSock
 
 // A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
-if (!copiesOn && automationRoot) await removeAutomationReplicas(storage, automationRoot);
+// Their phone writes settle first, in an engine started for that alone when the server has one.
+if (!copiesOn && automationRoot) {
+  await removeAutomationReplicas(storage, automationRoot, deployment && process.env.DOHC_RELAY_ENGINE_EXECUTABLE
+    ? {namespace: deployment.history.namespace, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE} : undefined);
+}
 if (!automationsOn && copiesOn) storage.endCopyReasonEverywhere("automation");
 // No phone read is open at start, but one a crash cut short can leave the reason a pass gave back after "Show on phone" went off.
 if (copiesOn) storage.endAccountReasonsOfHiddenOrDisownedCopies();

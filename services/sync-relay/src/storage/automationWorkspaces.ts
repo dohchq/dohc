@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { AUTOMATION_SERVER_INSTALL_ID } from "@dohc/workspace-contracts/relay";
 import { readAutomationServerSchedules } from "./automationHosts";
 import type { StorageContext } from "./context";
+import { rebuildTables } from "./rebuildTables";
 import { getWorkspaceIdentity } from "./workspaces";
 import type { SqliteDb } from "./types";
 
@@ -28,27 +29,35 @@ export function initializeAutomationWorkspaceSchema(db: SqliteDb): void {
       left_at_ms INTEGER CHECK (left_at_ms IS NULL OR left_at_ms BETWEEN 0 AND 9007199254740991)
     ) STRICT;
   `);
-  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_automation_workspace_reasons'").get()) return;
-  // Every row written before copies had reasons was made for automations,
-  // so it keeps its hold for Undo and run history.
-  db.exec(`
-    CREATE TABLE sync_relay_automation_workspace_reasons (
-      workspace_id TEXT NOT NULL REFERENCES sync_relay_automation_workspaces(workspace_id) ON DELETE CASCADE,
-      reason TEXT NOT NULL CHECK (reason IN ('automation', 'account')),
-      PRIMARY KEY (workspace_id, reason)
-    ) STRICT;
-    INSERT INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
-      SELECT workspace_id, 'automation' FROM sync_relay_automation_workspaces;
-  `);
+  const marked = () => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(PUBLICATION_REASON_MIGRATION) !== undefined;
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(COPY_REASONS)) {
+    // Every row written before copies had reasons was made for automations,
+    // so it keeps its hold for Undo and run history.
+    db.exec(COPY_REASONS_SQL);
+    db.exec(`INSERT INTO ${COPY_REASONS} (workspace_id, reason) SELECT workspace_id, 'automation' FROM sync_relay_automation_workspaces`);
+  } else if (!marked()) {
+    // A table made before the phone's writes kept copies cannot hold their reason.
+    rebuildTables(db, [COPY_REASONS], () => COPY_REASONS_SQL);
+  }
+  if (!marked()) db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(PUBLICATION_REASON_MIGRATION, Date.now());
 }
+
+const COPY_REASONS = "sync_relay_automation_workspace_reasons";
+const PUBLICATION_REASON_MIGRATION = "copy-publication-reason-v1";
+const COPY_REASONS_SQL = `CREATE TABLE sync_relay_automation_workspace_reasons (
+  workspace_id TEXT NOT NULL REFERENCES sync_relay_automation_workspaces(workspace_id) ON DELETE CASCADE,
+  reason TEXT NOT NULL CHECK (reason IN ('automation', 'account', 'publication')),
+  PRIMARY KEY (workspace_id, reason)
+) STRICT`;
 
 /**
  * Why the server keeps a copy. Automations keep a copy that left for
  * AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, for Undo and run history.
- * The owner's account keeps it only while it reads the workspace, and a row
- * with no reason left goes with its folder.
+ * The owner's account keeps it only while it reads the workspace. A phone
+ * write keeps it until the write is saved or refused, while the copy it was
+ * made on still holds. A row with no reason left goes with its folder.
  */
-export type CopyReason = "automation" | "account";
+export type CopyReason = "automation" | "account" | "publication";
 
 export interface AutomationWorkspace {
   workspaceId: string;
@@ -232,10 +241,11 @@ export function listAutomationWorkspaces(storage: StorageContext): AutomationWor
   return storage.readTx(() => storage.db.prepare(`SELECT a.*, ${WITH_REASONS} FROM sync_relay_automation_workspaces a ORDER BY a.workspace_id`).all().map(rowOf));
 }
 
-/** Every replica row goes: the server keeps no copies. */
-export function forgetAutomationWorkspaces(storage: StorageContext): void {
+/** Every replica row goes but those of `kept`: the server keeps no copies. */
+export function forgetAutomationWorkspaces(storage: StorageContext, kept: readonly string[] = []): void {
   storage.tx(() => {
-    storage.db.prepare("DELETE FROM sync_relay_automation_workspaces").run();
+    storage.db.prepare("DELETE FROM sync_relay_automation_workspaces WHERE workspace_id NOT IN (SELECT value FROM json_each(?))")
+      .run(JSON.stringify(kept));
   });
 }
 

@@ -739,13 +739,25 @@ export interface SyncRelayStorage {
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
-  forgetAutomationWorkspaces(): void;
+  forgetAutomationWorkspaces(kept?: readonly string[]): void;
   endCopyReasonEverywhere(reason: import("./automationWorkspaces").CopyReason): void;
   endCopyReason(workspaceId: string, reason: import("./automationWorkspaces").CopyReason): void;
   listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
   showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
   endAccountReasonsOfHiddenOrDisownedCopies(): void;
+  recordAccountOperation(input: import("./operationRecords").RecordOperationInput): import("./operationRecords").OperationClaim;
+  lookupAccountOperation(input: { accountId: string; operationId: string; binding: import("./operationRecords").OperationBinding }): import("./operationRecords").OperationLookup;
+  advanceAccountOperation(input: import("./operationRecords").AdvanceOperationInput): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
+  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }): import("./operationRecords").OperationRecord[];
+  listUnfinishedOperationCopies(): Array<{ workspaceId: string; incarnation: number }>;
+  /** The relay's row at a phone write's coordinate, only within the log rows the write's own epoch and stream could make. */
+  fetchAccountOperationLogRow(input: Parameters<typeof import("./operationRecords").operationLogRow>[1]): SyncRelayLogRow | null;
+  /** The copies whose phone writes may still publish, those with a write not yet stalled first, then oldest write first. */
+  publishingCopies(): import("./operationRecords").PublishingCopy[];
+  /** Gives exactly those copies the `publication` reason. */
+  restorePublicationReasons(): void;
+  tombstoneSettledAccountOperations(nowMs: number): number;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
   accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;
