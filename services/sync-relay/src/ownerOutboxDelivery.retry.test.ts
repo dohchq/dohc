@@ -175,7 +175,7 @@ it("retries without acknowledging when SQLite is busy before the first journal w
 it("refuses an owner outbox entry validated before the document's last Edit share was deleted", async () => {
   const f = fixture(), entered = deferred(), release = deferred();
   f.relay.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
-  f.relay.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
+  f.relay.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
     path: f.binding.currentPath, nowMs: 10, guard() {}});
   f.validate.mockImplementationOnce(async input => {entered.resolve(); await release.promise; return validateJournal(input);});
   const first = f.run(), firstOutcome = Promise.allSettled([first]);

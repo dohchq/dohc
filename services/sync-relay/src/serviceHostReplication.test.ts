@@ -35,7 +35,7 @@ async function fixture() {
 // ordinary replication route answers as an absent one.
 it("gives the service host credential 404 on every ordinary replication route", async () => {
   const f = await fixture();
-  const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
+  const enrollment = f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
     path: binding.currentPath, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
   const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
@@ -57,7 +57,7 @@ it("gives the service host credential 404 on every ordinary replication route", 
 // It stores nothing and answers the highest position the relay holds at that origin.
 it("answers an empty hosted push with its origin's highest position and stores nothing", async () => {
   const f = await fixture();
-  const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
+  const enrollment = f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
     path: binding.currentPath, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
   const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,

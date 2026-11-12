@@ -116,7 +116,7 @@ it('retires a captured activation the host never adopted when its owner pauses',
   const f=fixture();try{
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
     const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',ownerUserId:'owner',nowMs:10,guard(){}}
-    f.storage.enrollServiceHostDocument(enrollment)
+    f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment})
     expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
     const access=f.store.pending(f.document,host),refused={kind:'refused',reason:'host-unavailable'}
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
@@ -124,7 +124,7 @@ it('retires a captured activation the host never adopted when its owner pauses',
     expect(readServiceActivationRetirement(f.storage as StorageContext,f.document)).toEqual({relayDatabaseNamespace:'history',
       activationId:f.capture.activationId,...f.document,path:'docs/a.md',restoreFenceGeneration:1,acceptedThrough:0,requestedAtMs:20})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
-    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs:30})
+    f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs:30})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
   }finally{f.close()}
 })
@@ -1685,11 +1685,11 @@ const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',owner
 function enroll(f:ReturnType<typeof fixture>){
   f.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)`)
-  return f.storage.enrollServiceHostDocument({...enrollment,nowMs:1})
+  return f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,nowMs:1})
 }
 // Stops as a running service host does, with its preparation of the activation its engine blocked.
 const stopDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>preparedStop(f.storage,{...enrollment,enabled:false,retire:true,nowMs})
-const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs})
+const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs})
 const retirement=(storage:unknown)=>readServiceActivationRetirement(storage as StorageContext,{workspaceId:'workspace',objectId:'object'})
 const generation=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
 const refused={kind:'refused',reason:'host-unavailable'}
@@ -1722,7 +1722,7 @@ it('records the exact activation and F in Stop, and keeps that fence through a d
     expect(retirement(reopened)).toEqual(recorded)
     // Resume enables the enrollment but never reopens the retiring activation.
     expect(resumeDocument(f,40)).toMatchObject({enabled:true,retired:false})
-    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:50})).toMatchObject({enabled:true})
+    expect(f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,nowMs:50})).toMatchObject({enabled:true})
     expect(retirement(f.storage)).toEqual(recorded)
     expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
@@ -1747,7 +1747,7 @@ it("records the held activation's obligation inside its Resume's enrollment tran
   const f=fixture();try{
     enroll(f);await completeActivation(f);const edit=commitEdit(f)
     const held=(changes={})=>({activationId:f.capture.activationId,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){},...changes})
-    const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.enrollServiceHostDocument({...enrollment,nowMs,held:snapshot})
+    const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs,held:snapshot})
     expect(()=>resume(held({activationId:'other-activation'}))).toThrow('changed while live editing was resuming')
     expect(()=>resume(held({streamIdentity:'other-stream'}))).toThrow('changed while live editing was resuming')
     expect(()=>resume(held({assertHeld(){throw new Error('hold ended')}}))).toThrow('hold ended')
@@ -2077,7 +2077,7 @@ it("records a held Resume's obligation for a pending successor",async()=>{
   const f=fixture();try{
     const {edit,boundary}=await retirePredecessor(f)
     await adoptSuccessor(f,boundary)
-    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:30,
+    expect(f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs:30,
       held:{activationId:SUCCESSOR,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){}}})).toMatchObject({enabled:true})
     expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor,requestedAtMs:30})
   }finally{f.close()}
@@ -2608,7 +2608,7 @@ it("publishes a sibling document's write behind a retiring application once its 
       payloadAfterBlobSha256:hash(bytes),payloadAfterByteLength:bytes.length,payloadAfterContentKind:'text',recordedAtMs:1})
     f.storage.putBlob({workspaceId:'workspace',sha256:hash(created),content:created,createdAtMs:1})
     f.storage.appendLogBatch({workspaceId:'workspace',originId:'owner-device',ops:[parseLogOp({originSeq:0,opKind:'moment.append',recordedAtMs:1,payload:write('sibling-created',created)})]})
-    f.storage.enrollServiceHostDocument({...enrollment,path:'docs/b.md',nowMs:2})
+    f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,path:'docs/b.md',nowMs:2})
     for(const bytes of [r.editBytes,edited])await r.upload(bytes)
     const rows=[r.ydocRow(r.editBytes),['moment.append',write('sibling-edited',edited)] as Row]
     expect(await r.push(rows,0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})

@@ -4,7 +4,7 @@ import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActi
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {LATEST_RESTORE, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
-  type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
+  serviceHostOwnerRetains, type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "./accountDeletion";
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./liveJournalHistory";
@@ -20,8 +20,9 @@ async function fixture(quota?: number) {
   const f = await ticketFixture(quota === undefined ? undefined : {workspaceQuotaBytes: quota}); cleanups.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   const input = {workspaceId: scope.workspaceId, path: binding.currentPath, shareId: scope.shareId, ownerUserId: "owner-1", nowMs: 10, guard() {}};
-  const enroll = (changes = {}) => f.storage.enrollServiceHostDocument({...input, ...changes});
-  const setEnabled = (enabled: boolean) => f.storage.setServiceHostEnrollmentEnabled({...input, enabled, nowMs: 20});
+  const enroll = (changes = {}) => f.storage.ensureOwnedLiveDocument({intent: "share", ...input, ...changes});
+  const setEnabled = (enabled: false) => f.storage.setServiceHostEnrollmentEnabled({...input, enabled, nowMs: 20});
+  const resume = (changes = {}) => f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...input, nowMs: 20, ...changes});
   // What the service host does once it no longer holds the document.
   const release = (objectId = binding.objectId) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs: 25});
   const pause = () => {setEnabled(false); return release();};
@@ -41,7 +42,7 @@ async function fixture(quota?: number) {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
       .run(shareId, workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
   }
-  return {...f, input, enroll, setEnabled, release, pause, stop, authorize, seed};
+  return {...f, input, enroll, setEnabled, resume, release, pause, stop, authorize, seed};
 }
 
 it("retains original document, share and credential across pause, new invitation and reopen", async () => {
@@ -52,8 +53,10 @@ it("retains original document, share and credential across pause, new invitation
   expect(f.authorize(bearer)).toBeNull();
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20 WHERE share_id=?").run(scope.shareId);
   f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT 'replacement',workspace_id,granter_user_id,selector_json,30 FROM sync_relay_shares WHERE share_id=?").run(scope.shareId);
-  const resumed = f.enroll({shareId: "replacement", nowMs: 30});
-  expect(resumed).toEqual({...first, enabled: true, ownerStop: null, updatedAtMs: 30});
+  // The new share leaves the Pause. Only Resume clears it.
+  expect(f.enroll({shareId: "replacement", nowMs: 30})).toMatchObject({enabled: false, ownerStop: "pause"});
+  const resumed = f.resume({nowMs: 30});
+  expect(resumed).toEqual({...first, enabled: true, ownerStop: null, updatedAtMs: 30, ownerDemand: true, demandAtMs: 30});
   expect(deriveServiceHostBearer(resumed, key)).toBe(bearer);
   const reopened = openSyncRelayStorage(f.path, f.config);
   try {expect(reopened.listServiceHostEnrollments()).toEqual([resumed]);} finally {reopened.close();}
@@ -79,13 +82,13 @@ it("fences a paused document's admission at once, keeps its credential until its
   expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1"}})).toEqual({kind: "refused", reason: "host-unavailable"});
   expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
   expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBeNull();
-  f.setEnabled(true);
+  f.resume();
   f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id=?").run(scope.workspaceId);
   expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBeNull();
   f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-1',replication_epoch='new-epoch' WHERE workspace_id=?").run(scope.workspaceId);
   expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBeNull();
   expect(() => f.enroll()).toThrow("obsolete");
-  expect(() => f.setEnabled(true)).toThrow("obsolete");
+  expect(() => f.resume()).toThrow("obsolete");
   expect(f.setEnabled(false)?.ownerStop).toBe("pause");
 });
 
@@ -96,7 +99,7 @@ it("checks guards inside the transaction and charges quota exactly once", async 
   expect(() => f.enroll({guard() {throw new Error("retired");}})).toThrow("retired");
   expect(usage()).toBe(before);
   f.enroll(); const charged = usage(); expect(charged).toBeGreaterThan(before);
-  f.enroll(); f.setEnabled(false); f.setEnabled(true); expect(usage()).toBe(charged);
+  f.enroll(); f.setEnabled(false); f.resume(); expect(usage()).toBe(charged);
   f.seed(scope.workspaceId, "quota-object", "docs/quota.md", "quota-share");
   (f.storage as StorageContext).options.workspaceQuotaBytes = usage();
   expect(() => f.enroll({path: "docs/quota.md", shareId: "quota-share"})).toThrow("quota");
@@ -474,12 +477,13 @@ it("retirement frees capacity beyond 64 lifetime documents while preserving ever
   f.seed(scope.workspaceId, "sixty-fifth", "docs/sixty-fifth.md", "sixty-fifth");
   f.enroll({path: "docs/sixty-fifth.md", shareId: "sixty-fifth"});
   expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(65);
-  expect(() => f.enroll()).toThrow("capacity");
-  expect(() => f.setEnabled(true)).toThrow("capacity");
+  // A share leaves the Stop, and Resume needs a free slot.
+  expect(f.enroll()).toMatchObject({retired: true, ownerStop: "retire"});
+  expect(() => f.resume()).toThrow("capacity");
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   retire("docs/sixty-fifth.md");
   // Stop at 20 ended the first run.
-  expect(f.enroll()).toEqual({...first, runToken: 20, updatedAtMs: 25});
+  expect(f.resume()).toEqual({...first, runToken: 20, updatedAtMs: 25, ownerDemand: true, demandAtMs: 20});
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
 });
@@ -488,7 +492,7 @@ it("retired rows stay hidden until an explicit reactivation and still reject for
   const f = await fixture(), first = f.enroll();
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, first.path)).toBe(true);
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBe(false);
-  expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, retire: true})).toThrow("Invalid");
+  expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true as unknown as false, retire: true})).toThrow("Invalid");
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, ownerUserId: "other"})).toBeNull();
   // Stop fences acceptance immediately.
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true})).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
@@ -501,7 +505,7 @@ it("retired rows stay hidden until an explicit reactivation and still reject for
   expect(f.storage.currentServiceHostWorkspace(scope.workspaceId)).toBeNull();
   expect(f.setEnabled(false)).toMatchObject({retired: true, enabled: false});
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  expect(f.setEnabled(true)).toMatchObject({retired: false, enabled: true});
+  expect(f.resume()).toMatchObject({retired: false, enabled: true});
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
 });
 
@@ -590,14 +594,14 @@ it("refuses a document's live binding once no Edit grant of its owner covers it,
   expect(owner()).toEqual(refused);
 });
 
-// Proves: a Stop or an enrollment says it changed live editing only when its
+// Proves: a Stop or a Resume says it changed live editing only when its
 // own transaction found the row in the other state, so of two calls exactly one does.
-it("credits only the Stop or enrollment whose transaction changed the row", async () => {
+it("credits only the Stop or Resume whose transaction changed the row", async () => {
   const f = await fixture(), enrolled = f.enroll();
   const retire = () => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 20});
   expect([retire()?.changed, retire()?.changed]).toEqual([true, false]);
   const heard: boolean[] = [];
-  const resume = () => f.enroll({nowMs: 30, changed: (value: boolean) => heard.push(value)});
+  const resume = () => f.resume({nowMs: 30, changed: (value: boolean) => heard.push(value)});
   resume(); resume();
   expect(heard).toEqual([true, false]);
   // A Pause still waiting for its release is live editing a Resume gives back.
@@ -629,7 +633,7 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/stopped.md", enabled: false, retire: true, nowMs: 20}))
     .toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   // Resuming before the release cancels it.
-  expect(f.setEnabled(true)).toMatchObject({enabled: true, ownerStop: null});
+  expect(f.resume()).toMatchObject({enabled: true, ownerStop: null});
   expect(f.release()).toBeNull();
   f.setEnabled(false);
   expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", hostDrainedAtMs: 25, updatedAtMs: 25});
@@ -678,7 +682,7 @@ it("records one retirement when Pause fences the activation, and Resume leaves i
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBe(true);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
   expect(f.owner()).toBe("refused");
-  expect(f.setEnabled(true)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.resume()).toMatchObject({enabled: true, retired: false, ownerStop: null});
   expect(f.retirement()).toEqual(recorded(20));
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   expect(f.owner()).toBe("refused");
@@ -959,17 +963,18 @@ it("brings live editing back when the owner resumes a paused restored note", asy
   expect(f.covered()).toBe(true);
   expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
   f.retireKept();
-  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50}))
-    .toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10});
+  expect(f.resume({nowMs: 50})).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10, ownerDemand: true, demandAtMs: 50});
   expect(f.covered()).toBe(true);
   expect(f.enabled(f.asOwner)).toBe(true);
-  expect(f.enabled({userId: scope.userId})).toBe(false);
+  // The Resume is the owner's demand, so the host keeps the note whoever edits it. Each editor still needs its own access.
+  expect(f.enabled({userId: scope.userId})).toBe(true);
   expect(f.afterRestart()).toEqual({covered: true, owner: true});
 });
 
-// Proves: Stop ends live editing the restore kept, for good. Neither Resume
-// nor enrolling the note again brings it back.
-it.each([10, 5] as const)("ends live editing for good when the owner stops a restored note (%s)",
+// Proves: Stop ends the live session the restore kept, for good. A share
+// doesn't bring it back; the owner's Resume hosts the note again in a new run,
+// kept by the owner's demand, not by the restore.
+it.each([10, 5] as const)("ends the kept session when the owner stops a restored note, until the owner resumes it (%s)",
   async nowMs => {
     const f = await kept();
     const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
@@ -978,14 +983,14 @@ it.each([10, 5] as const)("ends live editing for good when the owner stops a res
     expect(f.covered()).toBe(false);
     expect(f.release()).toMatchObject({retired: true});
     f.retireKept();
-    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.enroll({nowMs})).toMatchObject({enabled: false, retired: true, ownerStop: "retire", runToken: 11});
     expect(f.covered()).toBe(false);
-    expect(f.enabled(f.asOwner)).toBe(false);
-    expect(f.release()).toMatchObject({enabled: false, retired: true});
-    expect(f.enroll({nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 11});
-    expect(f.covered()).toBe(false);
-    expect(f.enabled(f.asOwner)).toBe(false);
-    expect(f.afterRestart()).toEqual({covered: false, owner: false});
+    expect(f.resume({nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 11, ownerDemand: true});
+    expect(f.covered()).toBe(true);
+    expect(f.enabled(f.asOwner)).toBe(true);
+    expect(f.release()).toBeNull();
+    expect(serviceHostOwnerRetains(f.storage as StorageContext, f.enrolled())).toBe(false);
+    expect(f.afterRestart()).toEqual({covered: true, owner: true});
   });
 
 // Proves: every ordinary end of Edit access after the restore ends the

@@ -1738,7 +1738,7 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
       VALUES (?,?,'user','collaborator',NULL,'edit',1,'active',0,NULL,NULL)`).run(`${shareId}-grant`, shareId);
   });
   f.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
-  f.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, path: "docs/a.md", shareId, ownerUserId: "owner", nowMs: 30, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: f.document.workspaceId, path: "docs/a.md", shareId, ownerUserId: "owner", nowMs: 30, guard() {}});
   const state = Uint8Array.of(0, 0), {evidence} = f.input;
   const source = {version: 1, relayDatabaseNamespace: "restore-test", ...f.document, currentPath: "docs/a.md", replicationEpoch: "epoch",
     streamIdentity: "stream", committedCursor: 1, baseOriginId: "base", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1",

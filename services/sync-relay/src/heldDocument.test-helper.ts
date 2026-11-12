@@ -17,7 +17,7 @@ export async function heldDocumentFixture(workspaceId = ticketScope.workspaceId,
       objectId: index === effectIndex ? binding.objectId : "another-object", versionId: "main", path: binding.currentPath,
       momentId: effect.momentId, conflictId: "conflict-1", conflictEffectIndex: index}), 1, index + 2);
     f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(workspaceId, binding.currentPath, "b".repeat(64));
-    const enrollment = f.storage.enrollServiceHostDocument({workspaceId, path: binding.currentPath, ownerUserId: "owner-1",
+    const enrollment = f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId, path: binding.currentPath, ownerUserId: "owner-1",
       shareId: ticketScope.shareId, nowMs: 10, guard() {}});
     let held = true;
     const host = {

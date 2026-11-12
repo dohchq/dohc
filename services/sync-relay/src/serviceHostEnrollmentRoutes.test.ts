@@ -380,7 +380,10 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
   f.release(binding.objectId);
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
+  // Enrolling the share again leaves the Pause. Only the owner's Resume clears it.
   expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
+  expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({enabled: false, ownerStop: "pause"});
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments().every(row => row.enabled && !row.ownerStop)).toBe(true);
   await f.handle(f.request("DELETE", {path: binding.currentPath}));
   await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: 0}));
@@ -394,7 +397,7 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
 });
 
 it("reports ready only with completed retained activation and the current native runtime", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const state = async () => {
     const response = await f.handle(f.request());
     expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -419,7 +422,7 @@ it("reports ready only with completed retained activation and the current native
 // and leaves the rest of the readiness list served.
 it("lists a document with a damaged activation binding as unavailable and still serves the healthy one", async () => {
   const f = await fixture(); f.seed("docs/b.md", "object-b");
-  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path: "docs/b.md"});
   retainServiceActivation(f.raw, namespace, true);
   f.host.ready.mockReturnValue(true);
   const documents = async () => {
@@ -439,7 +442,7 @@ it("lists a document with a damaged activation binding as unavailable and still 
 // enrolled, and the owner's desktop finds the note ready at the restored
 // generation.
 it("reports a restored note ready to its owner after the restore ended its last Edit grant", async () => {
-  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.host.ready.mockReturnValue(true);
   retainServiceActivation(f.raw, namespace, true);
   keptByOwnerRestore(f.raw, namespace);
@@ -451,7 +454,7 @@ it("reports a restored note ready to its owner after the restore ended its last 
 // Proves: only the owner discovers the restored note. The revoked recipient
 // and another account find nothing, and the owner's Pause still pauses it.
 it("shows a restored note only to its owner, and the owner's Pause still pauses it", async () => {
-  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.host.ready.mockReturnValue(true);
   retainServiceActivation(f.raw, namespace, true);
   keptByOwnerRestore(f.raw, namespace);
@@ -473,7 +476,7 @@ it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held doc
   expect(f.host.holdReason()).toBeUndefined();
   f.storage.releaseServiceHostEnrollment({workspaceId: f.binding.workspaceId, objectId: f.binding.objectId, nowMs: 20});
   expect(await (await f.handle(f.request("GET", "?retired=1"))).json()).toEqual({ok: true, documents: [{
-    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld",
+    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true, reason: "conflict-parent-withheld",
   }], nextCursor: null});
   const resume = await f.handle(f.request("POST", "", {path: f.binding.currentPath}));
   expect(resume.status).toBe(202);
@@ -488,7 +491,7 @@ it.each(["unmatched-parent", "other-document", "other-version", "earlier-epoch"]
   if (change === "other-version") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.versionId','branch') WHERE op_kind='moment.append'");
   if (change === "earlier-epoch") f.raw.exec("UPDATE sync_relay_workspaces SET epoch_log_floor=2");
   expect((await (await f.handle(f.request("GET", "?retired=1"))).json()).documents).toEqual([{
-    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired",
+    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true,
   }]);
 });
 
@@ -497,13 +500,13 @@ it("keeps divergence ahead of retired conflict history, and ignores an obsolete 
   expect((await f.stop()).status).toBe(200);
   vi.spyOn(f.host, "diverged").mockReturnValue(true);
   const documents = async () => (await (await f.handle(f.request("GET", "?retired=1"))).json()).documents;
-  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "session-host-diverged"}]);
+  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true, reason: "session-host-diverged"}]);
   f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'");
-  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired"}]);
+  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true}]);
 });
 
 it("reports only a conflict-parent hold, after document state and existing blocks", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const state = async () => (await (await f.handle(f.request())).json()).documents[0];
   const base = {path: binding.currentPath, objectId: binding.objectId};
   expect(await state()).toEqual({...base, status: "preparing"});
@@ -531,7 +534,7 @@ it("reports only a conflict-parent hold, after document state and existing block
   f.host.diverged.mockReturnValue(true);
   expect(await state()).toEqual({...base, status: "unavailable", reason: "session-host-diverged"});
   f.host.diverged.mockReturnValue(false);
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input});
   f.raw.prepare("UPDATE sync_relay_object_moments SET path='moved.md' WHERE workspace_id=?").run(scope.workspaceId);
   expect(await state()).toEqual({...base, status: "unavailable", reason: "document-unavailable"});
   f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
@@ -545,7 +548,7 @@ it("reports only a conflict-parent hold, after document state and existing block
 // changed live editing, so the desktop credits one author. A Resume of a page
 // a share already made live changes nothing.
 it("tells exactly one of two concurrent Stops, and of two Resumes, that it made the change", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const changed = async (response: Promise<Response>) => (await (await response).json()).changed;
   expect(await changed(f.handle(f.request("POST", {path: binding.currentPath})))).toBe(false);
   const stop = () => changed(f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration})));
@@ -556,7 +559,7 @@ it("tells exactly one of two concurrent Stops, and of two Resumes, that it made 
 });
 
 it("reports a document the session host refused until the owner resumes it", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
   const refused = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-refused"};
   f.host.ready.mockReturnValue(true);
@@ -582,7 +585,7 @@ it("reports a document the session host refused until the owner resumes it", asy
 // Proves: a document blocked for having no live-editing history reads as its
 // own reason, so its owner learns to open it before Resume, which still unblocks it.
 it("reports a document without live-editing history apart from other refusals", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
   f.host.block(enrolled.objectId, "without-lineage");
   expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-document-without-lineage"}]);
@@ -597,7 +600,7 @@ it("reports a document without live-editing history apart from other refusals", 
 // own reason. A Resume still asks for one more attempt, which blocks it again
 // with the same reason.
 it("reports a document missing an owner edit apart from other refusals", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
   const unadmitted = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"};
   f.host.block(enrolled.objectId, "live-edit-unadmitted");
@@ -614,7 +617,7 @@ it("reports a document missing an owner edit apart from other refusals", async (
 // hold that ended before that transaction changes nothing, and the Resume does
 // not reopen the document's admission.
 it.each([["completed", true], ["pending", false]])("retires the held %s activation when its owner resumes a document edited while live editing was off", async (_state, completed) => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const activationId = retainServiceActivation(f.raw, namespace, completed);
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
   f.host.block(enrolled.objectId, "live-edit-unadmitted");
@@ -634,7 +637,7 @@ it.each([["completed", true], ["pending", false]])("retires the held %s activati
 // ahead of a block, a Resume cannot change that, and the owner learns nothing
 // of the store. A workspace that changed identity still reads as changed.
 it("reports a document whose hosted replica diverged, and nothing about its store", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const diverged = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"};
   f.host.ready.mockReturnValue(true);
   f.host.block(enrolled.objectId);
@@ -653,7 +656,7 @@ it("reports a document whose hosted replica diverged, and nothing about its stor
 // reason, and the workspace still reads as diverged once no document is active.
 it("keeps a diverged document's reason after its owner pauses or stops it", async () => {
   const f = await fixture(); f.seed("docs/b.md", "object-b");
-  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path: "docs/b.md"});
   f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
   const reason = "session-host-diverged";
   expect(await (await f.handle(f.request("DELETE", {path: binding.currentPath}))).json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason});
@@ -662,11 +665,11 @@ it("keeps a diverged document's reason after its owner pauses or stops it", asyn
   expect(await stopped.json()).toMatchObject({ok: true, path: "docs/b.md", status: "retired"});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({ownerStop: "retire", retired: true});
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason}]});
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: "docs/b.md", objectId: "object-b", status: "retired", reason}], nextCursor: null});
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: "docs/b.md", objectId: "object-b", status: "retired", stopped: true, reason}], nextCursor: null});
   expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}))).status).toBe(200);
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: []});
   expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
-    {path: binding.currentPath, objectId: binding.objectId, status: "retired", reason}, {path: "docs/b.md", objectId: "object-b", status: "retired", reason}]);
+    {path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: true, reason}, {path: "docs/b.md", objectId: "object-b", status: "retired", stopped: true, reason}]);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {
@@ -691,10 +694,10 @@ it("lists automatic enrollment refusals without enrolling documents or exposing 
 
 it("clears derived capacity refusals when an owner frees space and retries enrollment", async () => {
   const f = await fixture();
-  f.storage.enrollServiceHostDocument(f.input);
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   for (let index = 1; index < 64; index++) {
     const path = `docs/capacity-${index}.md`; f.seed(path, `capacity-${index}`);
-    f.storage.enrollServiceHostDocument({...f.input, path});
+    f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path});
   }
   f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}), scope.shareId);
   f.seed("pending/a.md", "pending-object");
@@ -711,7 +714,7 @@ it("clears derived capacity refusals when an owner frees space and retries enrol
 
 it("advances refusal pages past healthy shares to an oversized share", async () => {
   const f = await fixture();
-  f.storage.enrollServiceHostDocument(f.input);
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
   f.release(binding.objectId);
   for (let index = 0; index < 65; index++) {
@@ -804,12 +807,12 @@ it("rechecks ownership after an enrollment request body finishes", async () => {
   const result = f.handle(pending.request); await pending.started;
   await vi.waitFor(() => expect(f.resolveActor).toHaveBeenCalled());
   f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id=?").run(scope.workspaceId);
-  pending.finish(new TextEncoder().encode(JSON.stringify({shareId: scope.shareId, path: binding.currentPath})));
+  pending.finish(new TextEncoder().encode(JSON.stringify({shareId: scope.shareId})));
   expect((await result).status).toBe(404); expect(f.storage.listServiceHostEnrollments()).toEqual([]);
 });
 
 it("service replication refuses foreign workspaces and account administration", async () => {
-  const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
+  const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}), {key, namespace});
   const handler = serviceReplication(f.storage);
   for (const path of ["/sync/workspaces", "/sync/foreign/hosted/bootstrap", `/sync/${scope.workspaceId}/epoch`, `/sync/${scope.workspaceId}/live-host`,
     `/sync/${scope.workspaceId}/hosted/live-host`]) {
@@ -821,7 +824,7 @@ it("service replication refuses foreign workspaces and account administration", 
 });
 
 it.each(["blob", "log"] as const)("a service token revoked during the %s body cannot mutate storage", async kind => {
-  const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
+  const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}), {key, namespace});
   const handler = serviceReplication(f.storage);
   const bytes = new TextEncoder().encode("unpublished"), digest = createHash("sha256").update(bytes).digest("hex");
   const pending = deferredBody(kind === "blob" ? "PUT" : "POST", `https://relay.test/sync/${scope.workspaceId}/hosted/${kind === "blob" ? `blobs/${digest}` : "log"}`,
@@ -837,7 +840,7 @@ it.each(["blob", "log"] as const)("a service token revoked during the %s body ca
 });
 
 it("reports a renamed enrolled document as unavailable and retains its original enrollment", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.raw.prepare("UPDATE sync_relay_object_moments SET path='docs/renamed.md' WHERE workspace_id=? AND object_id=?").run(scope.workspaceId, binding.objectId);
   f.host.ready.mockReturnValue(true);
   const response = await f.handle(f.request());
@@ -847,14 +850,14 @@ it("reports a renamed enrolled document as unavailable and retains its original 
 });
 
 it("retires an owner document, lists it separately, and resumes its retained identity without a supplied share", async () => {
-  const f = await fixture(), first = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), first = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
   expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0, changed: true});
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, objectId: first.objectId, status: "retired"}], nextCursor: null});
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, objectId: first.objectId, status: "retired", stopped: true}], nextCursor: null});
   // Stopped but undrained: the host's credential still reads the empty scope, and its release ends it.
   const replication = serviceReplication(f.storage);
   const bootstrap = () => replication(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
@@ -868,7 +871,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
 });
 
 it("discovers a new document after more than 64 prior shares without reviving retired enrollment", async () => {
-  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
   f.release(binding.objectId);
   for (let index = 0; index < 65; index++) {
@@ -895,6 +898,11 @@ it("hosts a document retired by revocation again for a new Edit share, but leave
   for (const objectId of [binding.objectId, "paused-object"]) expect(f.release(objectId)).toMatchObject({enabled: false, retired: true});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  // The owner's list tells the revoked document from the ones the owner stopped.
+  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
+    {path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: false},
+    {path: "docs/paused.md", objectId: "paused-object", status: "retired", stopped: true},
+    {path: "docs/stopped.md", objectId: "stopped-object", status: "retired", stopped: true}]);
   // A new Edit share covering the folder; nobody presses Resume.
   f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('new-share',?,'owner-1',?,40)")
     .run(scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
@@ -910,7 +918,7 @@ it("hosts a document retired by revocation again for a new Edit share, but leave
 });
 
 it("compares the restore generation before retirement and accepts a repeat", async () => {
-  const f = await fixture(); f.storage.enrollServiceHostDocuments([f.input]);
+  const f = await fixture(); f.storage.ensureOwnedLiveDocuments([{intent: "share", ...f.input}]);
   const request = (generation: number) => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}));
   const mismatch = await request(binding.restoreFenceGeneration + 1);
   expect(mismatch.status).toBe(409);
@@ -924,7 +932,7 @@ it("compares the restore generation before retirement and accepts a repeat", asy
 // admitted, Stop answers waiting and fences nothing: no retirement opens and
 // the document stays live. Once the edit is delivered, Stop retires through it.
 it("waits to stop a hosted document until its pending edit is delivered, then retires with it", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   retainServiceActivation(f.raw, namespace, true);
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
   const stop = () => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
@@ -953,14 +961,14 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
 // Reading it reports the document retired, and a second Stop replays that
 // retirement at its fence without preparing again.
 it("reports a Stop whose reply was lost as done and replays it without preparing again", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const activationId = retainServiceActivation(f.raw, namespace, true);
   const stop = () => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
   await stop();
   expect(f.host.prepared).toEqual([{activationId, lineageClaimId: binding.lineageClaimId, restoreFenceGeneration: binding.restoreFenceGeneration}]);
   expect((await (await f.handle(f.request("GET"))).json()).documents).toEqual([]);
   expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
-    {path: binding.currentPath, objectId: binding.objectId, status: "retired"}]);
+    {path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: true}]);
   const fence = readServiceActivationRetirement(f.storage as StorageContext, enrolled)!;
   const replayed = await stop();
   expect(replayed.status).toBe(200);
@@ -973,7 +981,7 @@ it("reports a Stop whose reply was lost as done and replays it without preparing
 // Proves: with no running host to deliver its edits, Stop of a document with a
 // retained activation waits and fences nothing.
 it("waits to stop a retained activation that no running host can prepare", async () => {
-  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.host.running = false;
   retainServiceActivation(f.raw, namespace, true);
   const waiting = await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true}));
@@ -984,7 +992,7 @@ it("waits to stop a retained activation that no running host can prepare", async
 });
 
 it("retires an unenrolled desktop without a generation and resolves a moved target by object",async () => {
-  const f=await fixture();f.storage.enrollServiceHostDocument(f.input);
+  const f=await fixture();f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET path='docs/moved.md'").run();
   const response=await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:binding.objectId,retire:true}));
   expect(response.status).toBe(200);
@@ -993,7 +1001,7 @@ it("retires an unenrolled desktop without a generation and resolves a moved targ
 });
 
 it("rejects invalid generations and a stale repeat after the generation moves", async () => {
-  const f = await fixture();f.storage.enrollServiceHostDocument(f.input);
+  const f = await fixture();f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   for (const generation of [-1, 0.5, "7"]) {
     expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}))).status).toBe(400);
   }

@@ -50,6 +50,9 @@ function canonicalPath(value: string, directory: boolean): string {
   return actual;
 }
 
+/** The service host id the self-hosted live host provisions for the relay's history. */
+export const selfHostedLiveHostId = (namespace: string) => `self-host-${namespace}`;
+
 /** Owns the sole service daemon; account requests can select documents, never native paths or credentials. */
 export async function startSelfHostedLiveHost(options: {
   trustedAccount: OwnerOutboxAdmission["trustedAccount"];
@@ -62,7 +65,7 @@ export async function startSelfHostedLiveHost(options: {
   const root = canonicalPath(options.root, true), engineExecutable = canonicalPath(options.engineExecutable, false);
   const relay = new URL(options.relayOrigin);
   if (relay.protocol !== "https:" || relay.origin !== options.relayOrigin || options.key.byteLength < 32) throw new Error("Self-host live editing requires its public HTTPS origin and a private key.");
-  const hostId = `self-host-${history.namespace}`, instanceId = "self-host-service";
+  const hostId = selfHostedLiveHostId(history.namespace), instanceId = "self-host-service";
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
@@ -77,7 +80,7 @@ export async function startSelfHostedLiveHost(options: {
   const changes = Effect.runSync(Queue.sliding<void>(1));
   // Whether the enrollment names its workspace's current owner and identity.
   const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;
@@ -91,8 +94,8 @@ export async function startSelfHostedLiveHost(options: {
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
   // Hosted documents, and those that departed but may remain in their workspace's hosted replica.
-  // A document is hosted while an active Edit grant covers it at its enrolled path and its owner has
-  // not paused or stopped it. A departed document under an obsolete identity has none to leave: its old store is fenced.
+  // A document is hosted while an active Edit grant covers it at its enrolled path, or an open or Resume
+  // asked for it, and its owner has not paused or stopped it. A departed document under an obsolete identity has none to leave: its old store is fenced.
   const select = () => {
     const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
     const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];

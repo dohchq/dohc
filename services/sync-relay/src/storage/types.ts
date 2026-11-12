@@ -634,8 +634,9 @@ export interface SyncRelayStorage {
   resolveWorkReference(input: Parameters<typeof import("./workReferences").resolveWorkReference>[1]): ReturnType<typeof import("./workReferences").resolveWorkReference>;
   listWorkReferences(input: Parameters<typeof import("./workReferences").listWorkReferences>[1]): ReturnType<typeof import("./workReferences").listWorkReferences>;
   createDatasetHost(options: Omit<import("../datasetHost").RelayDatasetHostOptions, "storage">): Promise<import("../datasetHost").RelayDatasetHost>;
-  enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
+  ensureOwnedLiveDocuments(inputs: readonly import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  ensureOwnedLiveDocument(input: import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
+  renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}): boolean;
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;

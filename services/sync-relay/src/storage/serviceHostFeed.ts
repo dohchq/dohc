@@ -80,8 +80,9 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    // The owner's restore that kept its live session keeps it shared.
-    else if (row.ownerStop === null && (selectors.some(selector => pathVisibleThroughShare(selector, row.path)) || serviceHostOwnerRetains(storage, row))) {
+    // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
+    else if (row.ownerStop === null && (row.demandAtMs !== null || selectors.some(selector => pathVisibleThroughShare(selector, row.path)) ||
+      serviceHostOwnerRetains(storage, row))) {
       shared.set(row.objectId, row.path);
     }
   }

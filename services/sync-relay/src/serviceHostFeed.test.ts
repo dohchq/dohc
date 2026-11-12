@@ -70,7 +70,7 @@ async function fixture(lookupUserDisplayName?: LogAuthorNameLookup) {
       VALUES (?,?,'user','reader-2',NULL,?,1,'active',0,NULL,NULL)`).run(`grant-${shareId}`, shareId, access);
   };
   const setGrant = (shareId: string, change: string) => f.raw.prepare(`UPDATE sync_relay_share_grants SET ${change} WHERE share_id=?`).run(shareId);
-  const enroll = (path: string, shareId = scope.shareId) => f.storage.enrollServiceHostDocument({workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
+  const enroll = (path: string, shareId = scope.shareId) => f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enroll("docs/a.md"), {key, namespace});
   const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true, lookupUserDisplayName,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
@@ -461,7 +461,9 @@ it("moves a paused document with an activation from hosted to settling and keeps
   };
   expect(documents()).toEqual({hosted: [binding.objectId], settling: []});
   for (const enabled of [false, true]) {
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled, nowMs: 20, guard() {}});
+    const input = {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 20, guard() {}};
+    if (enabled) f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...input});
+    else f.storage.setServiceHostEnrollmentEnabled({...input, enabled});
     expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({ownerStop: enabled ? null : "pause"});
     expect(documents()).toEqual({hosted: [], settling: [binding.objectId]});
   }
@@ -783,8 +785,9 @@ it("keeps an aged blob the host uploads again until its write lands", async () =
 it("drops upload proof when the workspace stops being hosted", async () => {
   const f = await fixture();
   const {uploads} = f;
-  const setEnabled = (path: string, enabled: boolean) =>
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
+  const setEnabled = (path: string, enabled: boolean) => enabled
+    ? f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path, ownerUserId: "owner-1", nowMs: 30, guard() {}})
+    : f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const kept = blob("kept upload");
   await f.upload(kept);
@@ -885,8 +888,9 @@ it("after an epoch rotation hosts only documents enrolled again from above the f
 it("cuts a paused document's reads at once and keeps its writes until the session host releases it, and drops a stopped one at once", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");
-  const set = (path: string, enabled: boolean, retire = false) =>
-    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
+  const set = (path: string, enabled: boolean, retire = false) => enabled
+    ? f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path, ownerUserId: "owner-1", nowMs: 30, guard() {}})
+    : f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
@@ -960,7 +964,7 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
   expect(hosted()).toBeNull();
   expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
 
-  f.storage.enrollServiceHostDocument({workspaceId: ws, path: "docs/a.md", shareId: scope.shareId, ownerUserId: "owner-1", nowMs: 22, guard() {}});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 22, guard() {}});
   f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 23, guard() {}});
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 24})).toBe("rotated");
   expect(hosted()).toBeNull();

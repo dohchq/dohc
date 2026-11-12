@@ -245,7 +245,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const identity = storage.getWorkspaceBootstrap("workspace").identity, serviceConfig = join(root, "service.json");
     if (!identity) throw new Error("Ordinary source owner did not establish a relay identity.");
     // Enrollment puts the document in the service host's scope and gives the host its credential.
-    const enrolled = storage.enrollServiceHostDocument({workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: ownerUser.id,
+    const enrolled = storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: ownerUser.id,
       nowMs: Date.now(), guard: storage.captureStanding()});
     writeFileSync(serviceConfig, JSON.stringify({version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
       workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: 2, hostedReplication: {relay: {baseUrl: "https://service-activation-relay.example.test",

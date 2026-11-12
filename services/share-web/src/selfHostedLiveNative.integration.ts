@@ -997,7 +997,7 @@ it("parks a stopped document in its store and resumes it as a successor activati
   expect(proof.relayRead.prepare("SELECT delivery_id,update_digest FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? AND journal_cursor=?")
     .get(saved.source.objectId, accepted.journalCursor)).toEqual({delivery_id: accepted.deliveryId, update_digest: accepted.updateDigest});
   const captures = harness.captures.length;
-  expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
+  expect((await proof.route("POST", {path: "docs/a.md"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
   // It resumed as the successor of its retired activation, from one capture, in
   // the store it parked in, with its Y.Doc as it was.
@@ -1152,7 +1152,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
   const waiting = proof.unpushed();
   expect(waiting.map(row => [row.op_kind, JSON.parse(row.payload_json).objectId ?? null])).toEqual([["ydoc.update", second.objectId], ["live.audit.application", second.objectId],
     ["live.audit.settlement", null], ["moment.append", second.objectId]]);
-  expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
+  expect((await proof.route("POST", {path: "docs/a.md"})).status).toBe(202);
   // The daemon goes, and the supervisor reconnects with another. docs/a.md resumes as a successor holding the owner's edit.
   const before = proof.live().coordinate.connectionId;
   await proof.retire();
@@ -1271,7 +1271,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   // Its owner edits it on their device while it is stopped, so its state differs from the relay's journal. Resume activates a successor.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
   const captures = harness.captures.length;
-  expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
+  expect((await proof.route("POST", {path: "docs/a.md"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]), {timeout: 30000});
   const successor = proof.activation()!, S = successor.activationId, resumed = await proof.hostState();
   const markdown = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\nwhileStopped: ordinary-owner\n---\n\nHello\n";
@@ -1360,7 +1360,7 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   // The owner keeps editing on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
   const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
-  expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
+  expect((await proof.route("POST", {path: "docs/a.md"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
   // One capture, in the store it parked in, starts a successor holding the edit.
   expect(attempts()).toBe(before + 1);

@@ -394,15 +394,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
 
-  enrollServiceHostDocument(input: serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput) {
-    const result = serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+  ensureOwnedLiveDocument(input: serviceHostEnrollmentStorage.EnsureOwnedLiveDocumentInput) {
+    const result = serviceHostEnrollmentStorage.ensureOwnedLiveDocument(this, input);
     notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }
-  enrollServiceHostDocuments(inputs: readonly serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput[]) {
-    const result = serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+  ensureOwnedLiveDocuments(inputs: readonly serviceHostEnrollmentStorage.EnsureOwnedLiveDocumentInput[]) {
+    const result = serviceHostEnrollmentStorage.ensureOwnedLiveDocuments(this, inputs);
     for (const enrollment of result) notifyDesktopReadiness(this, {workspaceId: enrollment.workspaceId, path: enrollment.path});
     return result;
+  }
+  renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}) {
+    return serviceHostEnrollmentStorage.renewPersonalSessionDemand(this, input);
   }
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
