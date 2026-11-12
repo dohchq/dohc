@@ -2006,42 +2006,42 @@ export function useRelayShareLinkPane(props: {
   function renderOwnerConfirmation(pending: OwnerConfirmation) {
     return (
       <div
-            data-testid="owner-comments-confirmation"
-            className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
+        data-testid="owner-comments-confirmation"
+        className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
+      >
+        <p className="m-0 text-[13px] leading-relaxed text-ink">
+          {pending.kind === "delete"
+            ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+            : pending.kind === "block"
+              ? `Block ${pending.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
+              : pending.kind === "promote"
+                ? `Make ${pending.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
+                : `End ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}
+        </p>
+        <div className="flex justify-end gap-2">
+          <SecondaryButton
+            disabled={ownerMutationBusy !== null}
+            onClick={() => setOwnerConfirmation(null)}
           >
-            <p className="m-0 text-[13px] leading-relaxed text-ink">
-              {pending.kind === "delete"
-                ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
-                : pending.kind === "block"
-                  ? `Block ${pending.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
-                  : pending.kind === "promote"
-                    ? `Make ${pending.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
-                    : `End ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}
-            </p>
-            <div className="flex justify-end gap-2">
-              <SecondaryButton
-                disabled={ownerMutationBusy !== null}
-                onClick={() => setOwnerConfirmation(null)}
-              >
-                Cancel
-              </SecondaryButton>
-              <OwnerConfirm
-                disabled={ownerMutationBusy !== null}
-                aria-busy={ownerMutationBusy !== null}
-                onClick={() =>
-                  executeOwnerConfirmation(pending)
-                }
-              >
-                {pending.kind === "delete"
-                  ? "Delete comment"
-                  : pending.kind === "block"
-                    ? "Block"
-                    : pending.kind === "promote"
-                      ? "Make independent"
-                      : "End access"}
-              </OwnerConfirm>
-            </div>
-          </div>
+            Cancel
+          </SecondaryButton>
+          <OwnerConfirm
+            disabled={ownerMutationBusy !== null}
+            aria-busy={ownerMutationBusy !== null}
+            onClick={() =>
+              executeOwnerConfirmation(pending)
+            }
+          >
+            {pending.kind === "delete"
+              ? "Delete comment"
+              : pending.kind === "block"
+                ? "Block"
+                : pending.kind === "promote"
+                  ? "Make independent"
+                  : "End access"}
+          </OwnerConfirm>
+        </div>
+      </div>
     );
   }
 
@@ -2069,86 +2069,86 @@ export function useRelayShareLinkPane(props: {
     if (linkedPeople.length === 0 && shareIndependentGrants.length === 0) return null;
     return (
       <div className="flex flex-col gap-2 border-t border-line px-3 py-3">
-          <section aria-labelledby={`share-people-heading-${group.shareId}`} className="flex flex-col gap-1">
-            <SectionLabel as="h4" id={`share-people-heading-${group.shareId}`} className="m-0">
-              People
-            </SectionLabel>
-            {linkedPeople.map(({ row, dependent }) => {
-              const actionKey = `promote:${dependent.grantId}`;
-              return (
-                <div
-                  key={`${row.grantId}:${dependent.grantId}`}
-                  data-testid={`share-dependent-${dependent.grantId}`}
-                  className="flex flex-col gap-1"
-                >
-                  <div className="flex min-h-8 items-center justify-between gap-3">
-                    <span className="flex min-w-0 flex-col">
-                      <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
-                      <span className="text-[12px] text-subtle">Joined through a link</span>
-                    </span>
-                    <SecondaryButton
-                      size="compact"
-                      disabled={ownerMutationBusy !== null}
-                      onClick={() => {
-                        setOwnerConfirmation({
-                          kind: "promote",
-                          shareId: group.shareId,
-                          grantId: dependent.grantId,
-                          parentGrantId: row.grantId,
-                          parentGeneration: row.generation,
-                          name: dependentName(dependent),
-                        });
-                      }}
-                    >
-                      Make independent
-                    </SecondaryButton>
-                  </div>
-                  {ownerMutationError?.shareId === group.shareId &&
-                  ownerMutationError.actionKey === actionKey ? (
-                    <p role="alert" className="m-0 text-[12px] text-danger">
-                      dohc could not complete that change.
-                    </p>
-                  ) : null}
+        <section aria-labelledby={`share-people-heading-${group.shareId}`} className="flex flex-col gap-1">
+          <SectionLabel as="h4" id={`share-people-heading-${group.shareId}`} className="m-0">
+            People
+          </SectionLabel>
+          {linkedPeople.map(({ row, dependent }) => {
+            const actionKey = `promote:${dependent.grantId}`;
+            return (
+              <div
+                key={`${row.grantId}:${dependent.grantId}`}
+                data-testid={`share-dependent-${dependent.grantId}`}
+                className="flex flex-col gap-1"
+              >
+                <div className="flex min-h-8 items-center justify-between gap-3">
+                  <span className="flex min-w-0 flex-col">
+                    <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
+                    <span className="text-[12px] text-subtle">Joined through a link</span>
+                  </span>
+                  <SecondaryButton
+                    size="compact"
+                    disabled={ownerMutationBusy !== null}
+                    onClick={() => {
+                      setOwnerConfirmation({
+                        kind: "promote",
+                        shareId: group.shareId,
+                        grantId: dependent.grantId,
+                        parentGrantId: row.grantId,
+                        parentGeneration: row.generation,
+                        name: dependentName(dependent),
+                      });
+                    }}
+                  >
+                    Make independent
+                  </SecondaryButton>
                 </div>
-              );
-            })}
-            {shareIndependentGrants.map((grant) => {
-              const actionKey = `revoke:${grant.grantId}`;
-              return (
-                <div
-                  key={grant.grantId}
-                  data-testid={`share-independent-${grant.grantId}`}
-                  className="flex flex-col gap-1"
-                >
-                  <div className="flex min-h-8 items-center justify-between gap-3">
-                    <span className="min-w-0 break-all text-[13px] text-ink">
-                      {namedGrantName(grant)}
-                    </span>
-                    <SecondaryButton
-                      size="compact"
-                      disabled={ownerMutationBusy !== null}
-                      onClick={() => {
-                        setOwnerConfirmation({
-                          kind: "revoke",
-                          shareId: group.shareId,
-                          grantId: grant.grantId,
-                          name: namedGrantName(grant),
-                        });
-                      }}
-                    >
-                      End access
-                    </SecondaryButton>
-                  </div>
-                  {ownerMutationError?.shareId === group.shareId &&
-                  ownerMutationError.actionKey === actionKey ? (
-                    <p role="alert" className="m-0 text-[12px] text-danger">
-                      dohc could not complete that change.
-                    </p>
-                  ) : null}
+                {ownerMutationError?.shareId === group.shareId &&
+                ownerMutationError.actionKey === actionKey ? (
+                  <p role="alert" className="m-0 text-[12px] text-danger">
+                    dohc could not complete that change.
+                  </p>
+                ) : null}
+              </div>
+            );
+          })}
+          {shareIndependentGrants.map((grant) => {
+            const actionKey = `revoke:${grant.grantId}`;
+            return (
+              <div
+                key={grant.grantId}
+                data-testid={`share-independent-${grant.grantId}`}
+                className="flex flex-col gap-1"
+              >
+                <div className="flex min-h-8 items-center justify-between gap-3">
+                  <span className="min-w-0 break-all text-[13px] text-ink">
+                    {namedGrantName(grant)}
+                  </span>
+                  <SecondaryButton
+                    size="compact"
+                    disabled={ownerMutationBusy !== null}
+                    onClick={() => {
+                      setOwnerConfirmation({
+                        kind: "revoke",
+                        shareId: group.shareId,
+                        grantId: grant.grantId,
+                        name: namedGrantName(grant),
+                      });
+                    }}
+                  >
+                    End access
+                  </SecondaryButton>
                 </div>
-              );
-            })}
-          </section>
+                {ownerMutationError?.shareId === group.shareId &&
+                ownerMutationError.actionKey === actionKey ? (
+                  <p role="alert" className="m-0 text-[12px] text-danger">
+                    dohc could not complete that change.
+                  </p>
+                ) : null}
+              </div>
+            );
+          })}
+        </section>
         {ownerConfirmation?.shareId === group.shareId &&
         (ownerConfirmation.kind === "promote" || ownerConfirmation.kind === "revoke")
           ? renderOwnerConfirmation(ownerConfirmation)
