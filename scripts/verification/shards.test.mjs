@@ -10,6 +10,7 @@ import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, co
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
+import { cloudApi } from "./cloud-api.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
 
 // A successful group wait records when it ended. These tests keep that record out of the checkout.
@@ -172,6 +173,9 @@ test("JavaScript receipts reject missing, failed, duplicated, or different-head 
     assigned: [`task-${index}`], completed: [`task-${index}`], tests: [], ...(!index ? { selfHostNative: {} } : {}),
   });
   assert.equal(aggregateJavascript(records).tasks, JS_SHARDS);
+  assert.throws(() => aggregateJavascript(records.slice(1)), {
+    message: "The JavaScript preparation receipt is missing, duplicated, or unsuccessful; check preparation and worker jobs.",
+  });
   for (const mutate of [
     rows => rows.pop(), rows => { rows[1].completed = []; }, rows => { rows[1].verdict = "FAIL"; },
     rows => { rows[1].commit = "other"; }, rows => { rows[1].planned.push("forgotten"); }, rows => rows.push(rows[1]),
@@ -434,6 +438,128 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
   }
 });
 
+test("prepared artifact body aborts get one fresh transfer inside the preparation cap", async t => {
+  t.mock.method(console, "log", () => {});
+  for (const failures of [0, 1, 2]) for (const kind of ["TimeoutError", "AbortError", "TypeError"]) {
+    let clock = 0, downloads = 0;
+    const cause = kind === "TypeError" ? new TypeError("terminated") : new DOMException("body aborted", kind);
+    const result = waitForPreparation("js", { env: apiEnv, now: () => clock, pause: async () => assert.fail("no readiness pause for body aborts"),
+      download: response => response.text(), request: async url => {
+        if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }] });
+        if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+        downloads++;
+        return new Response(downloads > failures ? "complete archive" : new ReadableStream({ pull(controller) {
+          clock += 60_000; controller.error(cause);
+        } }, { highWaterMark: 0 }));
+      } });
+    if (failures === 2) await assert.rejects(result, error => {
+      assert.equal(error.cause, cause);
+      assert.equal(error.message, "Preparation artifact javascript-prepared-2 (42) body transfer failed after 120s (2 attempts).");
+      return true;
+    });
+    else assert.equal((await result).value, "complete archive");
+    assert.equal(downloads, failures === 0 ? 1 : 2);
+  }
+  let clock = 0, downloads = 0;
+  await assert.rejects(waitForPreparation("js", { env: apiEnv, now: () => clock, download: response => response.text(), request: async url => {
+    if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: "shared preparation", status: "in_progress" }] });
+    if (url.includes("/artifacts?")) { clock = 850_000; return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] }); }
+    downloads++;
+    return new Response(new ReadableStream({ pull(controller) { clock = 900_000; controller.error(new DOMException("body aborted", "TimeoutError")); } }, { highWaterMark: 0 }));
+  } }), /javascript-prepared-2.*body transfer failed after 50s \(1 attempt\)/u);
+  assert.equal(downloads, 1, "the preparation deadline must prevent a second transfer");
+});
+
+test("workflow reads retry transient responses and request errors within their caller's deadline", async t => {
+  for (const first of [500, 429, new TypeError("fetch failed"), new DOMException("request stalled", "TimeoutError")]) {
+    let clock = 0, attempts = 0;
+    const api = cloudApi({ env: apiEnv, now: () => clock, deadline: 15_000, pause: async ms => { assert.equal(ms, 1_000); clock += ms; },
+      request: async () => { if (++attempts > 1) return apiResponse({ ok: true }); if (typeof first !== "number") throw first; return apiResponse(null, first); } });
+    assert.deepEqual(await api.read("/artifacts"), { ok: true });
+    assert.equal(attempts, 2);
+    assert.equal(clock, 1_000);
+  }
+  for (const [status, expected] of [[500, 3], [429, 3], [404, 1]]) {
+    let clock = 0, attempts = 0;
+    const api = cloudApi({ env: apiEnv, now: () => clock, pause: async ms => { clock += ms; }, request: async () => { attempts++; return apiResponse(null, status); } });
+    await assert.rejects(api.read("/artifacts"), new RegExp(`Cannot read workflow /artifacts: HTTP ${status} after ${expected} attempt`, "u"));
+    assert.equal(attempts, expected);
+    assert.equal(clock, (expected - 1) * 1_000);
+  }
+  for (const deadline of [0, 500, 1_500]) {
+    let clock = 0, attempts = 0;
+    const api = cloudApi({ env: apiEnv, now: () => clock, deadline, pause: async ms => { clock += ms; }, request: async () => {
+      assert.ok(clock < deadline); attempts++; return apiResponse(null, 500);
+    } });
+    await assert.rejects(api.jobs(), /Cannot read workflow.*after.*attempt/u);
+    assert.equal(clock, deadline);
+    assert.equal(attempts, Math.ceil(deadline / 1_000));
+  }
+  for (const scope of ["js", "rust"]) {
+    let clock = 0, reads = 0;
+    const jobs = passingCloudJobs(), waitOutput = mkdtempSync(join(tmpdir(), "read-retry-"));
+    t.after(() => rmSync(waitOutput, { recursive: true, force: true }));
+    await waitForGate(scope, { env: apiEnv, outputDirectory: waitOutput, now: () => clock, pause: async ms => { clock += ms; },
+      request: async () => ++reads === 1 ? apiResponse(null, 500) : apiResponse({ jobs }) });
+    assert.equal(reads, 2);
+    assert.equal(clock, 1_000);
+  }
+  for (const failedRead of ["jobs", "artifacts"]) {
+    let clock = 0, failures = 0;
+    await waitForPreparation("js", { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; }, request: async url => {
+      if (url.includes(`/${failedRead}?`) && failures++ === 0) return apiResponse(null, 500);
+      if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }] });
+      if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+      return apiResponse("archive");
+    } });
+    assert.equal(failures, 2);
+    assert.equal(clock, 1_000);
+  }
+});
+
+test("workflow reads retry cut-off JSON bodies within the caller deadline", async () => {
+  for (const kind of ["TypeError", "TimeoutError"]) for (const failures of [0, 1, 3]) {
+    let clock = 0, requests = 0;
+    const cause = kind === "TypeError" ? new TypeError("terminated") : new DOMException("body timed out", kind);
+    const api = cloudApi({ env: apiEnv, now: () => clock, deadline: 15_000, pause: async ms => { clock += ms; }, request: async () => {
+      requests++;
+      return requests > failures ? apiResponse({ ok: true }) : new Response(new ReadableStream({ pull(controller) {
+        clock += 200; controller.error(cause);
+      } }, { highWaterMark: 0 }));
+    } });
+    if (failures === 3) await assert.rejects(api.read("/artifacts"), error => {
+      assert.equal(error.cause, cause);
+      assert.equal(error.message, `Cannot read workflow /artifacts: ${cause.message} after 3 attempts.`);
+      return true;
+    });
+    else assert.deepEqual(await api.read("/artifacts"), { ok: true });
+    assert.equal(requests, failures === 0 ? 1 : failures === 1 ? 2 : 3);
+    assert.equal(clock, failures === 0 ? 0 : failures === 1 ? 1_200 : 2_600);
+  }
+  let clock = 0, requests = 0;
+  const api = cloudApi({ env: apiEnv, now: () => clock, deadline: 500, pause: async ms => { clock += ms; }, request: async () => {
+    requests++;
+    return new Response(new ReadableStream({ pull(controller) { clock = 200; controller.error(new TypeError("terminated")); } }, { highWaterMark: 0 }));
+  } });
+  await assert.rejects(api.read("/artifacts"), /terminated after 1 attempt/u);
+  assert.equal(clock, 500);
+  assert.equal(requests, 1, "the deadline prevents another JSON-body attempt");
+});
+
+test("prepared artifact body timing excludes readiness retries", async t => {
+  t.mock.method(console, "log", () => {});
+  let clock = 0, downloads = 0;
+  await assert.rejects(waitForPreparation("js", { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
+    download: response => response.text(), request: async url => {
+      if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }] });
+      if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+      if (++downloads <= 2) return apiResponse(null, 404);
+      return new Response(new ReadableStream({ pull(controller) { clock += 1000; controller.error(new TypeError("terminated")); } }, { highWaterMark: 0 }));
+    } }), /body transfer failed after 2s \(2 attempts\)/u);
+  assert.equal(clock, 6000);
+  assert.equal(downloads, 4);
+});
+
 for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascript-prepared"], ["rust", "Rust build once", "rust-tests"]]) {
   test(`${scope} preparation polls conditionally only after the build starts`, async t => {
     let clock = 0, jobReads = 0, artifactReads = 0;
@@ -459,27 +585,29 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
     assert.match(log.mock.calls.at(-1).arguments[0], /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=5 304=1/u);
   });
 
-  test(`${scope} listed artifacts retry download 404s before returning`, async () => {
-    let clock = 0, downloads = 0;
-    const result = await waitForPreparation(scope, { env: apiEnv, download: scope === "js", now: () => clock,
-      pause: async ms => { assert.equal(ms, 2_000); clock += ms; },
-      request: async (url, { headers }) => {
-        if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
-        if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
-        assert.equal(url, "https://api.example.test/repos/test/repo/actions/artifacts/42/zip");
-        assert.equal(headers["If-None-Match"], undefined);
-        return ++downloads < 3 ? apiResponse(null, 404) : apiResponse("archive");
-      },
-    });
-    assert.equal(downloads, 3);
-    assert.equal(clock, 4_000);
-    assert.equal(result.artifact.id, 42);
-    if (scope === "js") assert.equal(await result.response.json(), "archive", "JS consumes the successful response without another request");
-    else assert.equal(result.response, undefined, "Rust only checks readiness before its download action");
+  test(`${scope} listed artifacts retry transient download statuses before returning`, async () => {
+    for (const status of [404, 429, 500, 503]) {
+      let clock = 0, downloads = 0;
+      const result = await waitForPreparation(scope, { env: apiEnv, download: scope === "js" ? response => response.json() : false, now: () => clock,
+        pause: async ms => { assert.equal(ms, 2_000); clock += ms; },
+        request: async (url, { headers }) => {
+          if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+          if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+          assert.equal(url, "https://api.example.test/repos/test/repo/actions/artifacts/42/zip");
+          assert.equal(headers["If-None-Match"], undefined);
+          return ++downloads < 3 ? apiResponse(null, status) : apiResponse("archive");
+        },
+      });
+      assert.equal(downloads, 3);
+      assert.equal(clock, 4_000);
+      assert.equal(result.artifact.id, 42);
+      if (scope === "js") assert.equal(result.value, "archive", "JS consumes the successful response without another request");
+      else assert.equal(result.value, undefined, "Rust only checks readiness before its download action");
+    }
   });
 
-  test(`${scope} listed artifacts stop download 404s at 30 seconds and do not retry other failures`, async () => {
-    for (const status of [404, 403, 500]) {
+  test(`${scope} listed artifacts cap transient download statuses at 30 seconds and reject other failures`, async () => {
+    for (const status of [404, 429, 500, 503, 403]) {
       let clock = 0, downloads = 0;
       await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
         request: async url => {
@@ -487,9 +615,9 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
           if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
           downloads++; return apiResponse(null, status);
         },
-      }), status === 404 ? /listed but never became downloadable.*30/u : new RegExp(`HTTP ${status}`, "u"));
-      assert.equal(clock, status === 404 ? 30_000 : 0);
-      assert.equal(downloads, status === 404 ? 15 : 1);
+      }), status !== 403 ? /listed but never became downloadable.*30/u : /HTTP 403/u);
+      assert.equal(clock, status !== 403 ? 30_000 : 0);
+      assert.equal(downloads, status !== 403 ? 15 : 1);
     }
   });
 
@@ -535,7 +663,7 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
     assert.equal(clock, 22_500);
   });
 
-  test(`${scope} preparation stops after 15 minutes with the final build state`, async () => {
+  test(`${scope} preparation stops after 15 minutes with the last observed build state`, async () => {
     for (const state of ["queued", "in_progress", "missing", "completed"]) {
       let clock = 0, lastJobRead = -1;
       await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
@@ -546,7 +674,7 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
         },
       }), new RegExp(`15-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`, "u"));
       assert.equal(clock, 900_000);
-      assert.equal(lastJobRead, 900_000);
+      assert.ok(lastJobRead >= 840_000 && lastJobRead < 900_000, "the last build read is within a minute of the cap, before its deadline");
     }
     for (const conclusion of ["failure", "cancelled", "skipped"]) await assert.rejects(waitForPreparation(scope, {
       env: apiEnv, request: async () => apiResponse({ jobs: [{ name: jobName, status: "completed", conclusion }] }),
@@ -613,6 +741,27 @@ test("reporting joins its own successful group and caps queued or running siblin
   }
 });
 
+test("API-backed group waits retain the cap message and last observed jobs", async t => {
+  t.mock.method(console, "log", () => {});
+  for (const scope of ["js", "rust"]) for (const state of ["queued", "in_progress", "missing"]) {
+    let clock = 0, lastRead = -1;
+    const jobs = passingCloudJobs(), sibling = jobs.find(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"));
+    Object.assign(sibling, { status: state, conclusion: null });
+    await assert.rejects(waitForGate(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; }, request: async () => {
+      assert.ok(clock < 1_200_000, "requests must start before the group deadline");
+      lastRead = clock;
+      return apiResponse({ jobs: state === "missing" ? jobs.filter(job => job !== sibling) : jobs });
+    } }), { message: `The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${state === "queued" ? "still queued for a runner" : state === "in_progress" ? "still running" : "missing"}.` });
+    assert.equal(clock, 1_200_000);
+    assert.ok(lastRead >= 1_190_000 && lastRead < 1_200_000);
+  }
+  let clock = 0;
+  await assert.rejects(waitForGate("js", { env: apiEnv, now: () => clock, request: async () => {
+    clock = 1_200_000;
+    return apiResponse({ jobs: [{ name: "JS worker 1", status: "completed", conclusion: "failure" }] });
+  } }), /did not finish successfully/u, "a failure returned by the last permitted read still takes precedence");
+});
+
 test("aggregate polling bounds latency by scope and counts each jobs request", async t => {
   const log = t.mock.method(console, "log", () => {});
   for (const [scope, interval, name] of [["js", 3_000, "JS worker 1"], ["rust", 10_000, "Rust tests 1"]]) {
@@ -645,9 +794,9 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
       : apiResponse({ artifacts: [{ id: 1, name: "javascript-prepared-2" }] }) });
   assert.equal(clock, 60_000);
   for (const status of [304, 503]) {
-    await assert.rejects(waitForPreparation("js", { env: apiEnv, request: async () => apiResponse(null, status) }),
+    await assert.rejects(waitForPreparation("js", { env: apiEnv, pause: async () => {}, request: async () => apiResponse(null, status) }),
       status === 304 ? /no cached data/u : /HTTP 503/u);
-    await assert.rejects(waitForGate("js", { env: apiEnv, request: async () => apiResponse(null, status) }),
+    await assert.rejects(waitForGate("js", { env: apiEnv, pause: async () => {}, request: async () => apiResponse(null, status) }),
       status === 304 ? /no cached data/u : /HTTP 503/u);
   }
   await assert.rejects(waitForPreparation("js", { env: apiEnv, request: async url => url.includes("/jobs?")
