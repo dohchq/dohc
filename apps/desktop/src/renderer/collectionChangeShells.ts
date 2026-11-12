@@ -3,8 +3,9 @@ export interface CollectionChangeReports {
   /**
    * `identity` names one row in Notices, which a newer report with it replaces.
    * `quiet` changes that row where it stands, with no new toast.
+   * `onDismiss` runs when the person dismisses the row.
    */
-  onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean): void;
+  onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void): void;
   /** Removes the row in Notices a report with this identity left. */
   onSettled?(identity: string): void;
   onNotice?(message: string): void;

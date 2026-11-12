@@ -29,6 +29,8 @@ export interface QueuedWrite {
   readonly label: string;
   readonly undo: boolean;
   state: "queued" | "sending" | "unconfirmed";
+  /** A send ended with no answer, so the change may have run, whatever a later try answers. */
+  doubted?: boolean;
   /** The request as first sent. Try again sends it unchanged. */
   request?: TransactionalInvoke;
 }
@@ -429,8 +431,9 @@ export class WriteQueue {
       this.changed();
       this.pump();
     } : null;
-    if (first) shell.onError(words, new Error(words), retry, this.reminder());
-    else shell.onError(words, new Error(words), retry, this.reminder(), true);
+    // A row the person dismissed stays gone until the workspace opens again. Its changes still show on the table's page.
+    const dismissed = () => { this.reminded = null; };
+    shell.onError(words, new Error(words), retry, this.reminder(), !first, dismissed);
   }
   private reminder(): string { return `collection-changes:${this.scope}`; }
 
@@ -652,14 +655,18 @@ export class WriteQueue {
       this.drop(write, cause instanceof Error && cause.message ? `${REFUSED} ${cause.message}` : REFUSED, true);
       reports?.onError(open ? REFUSED : `${rules.tableName} refused the change. Open it to check its records.`, cause, null);
     } else if (isCollectionRulesReplaced(cause)) {
-      // The host ran nothing: the request names rules it has replaced, so the same request can never save.
+      // The host ran nothing this time: the request names rules it has replaced, so the same request can never save.
+      // The host checks the rules before it looks for the request's receipt, so an earlier try with no answer may still have run.
       this.outcome();
       if (write.record) this.forget(write.record.key);
-      this.drop(write, RULES_CHANGED, false, true);
-      reports?.onError(open ? "The Collection's rules changed. Check the records before making another change." : `The rules of ${rules.tableName} changed, so dohc did not save the change. Open it to check its records.`, cause, null);
+      this.drop(write, RULES_CHANGED, false, !write.doubted);
+      reports?.onError(open ? "The Collection's rules changed. Check the records before making another change."
+        : write.doubted ? `The rules of ${rules.tableName} changed before dohc could confirm a change. Open it to check its records.`
+        : `The rules of ${rules.tableName} changed, so dohc did not save the change. Open it to check its records.`, cause, null);
       for (const page of this.pages) page.host?.describe();
     } else {
       write.state = "unconfirmed";
+      write.doubted = true;
       if (reports) this.ownRows.add(write);
       for (const page of this.pages) page.host?.unconfirmed(write);
       // Try again sends the change only while it still waits, so a row left in Notices can't send it twice.

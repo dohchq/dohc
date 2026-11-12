@@ -3326,8 +3326,8 @@ export function DesktopWorkspaceShell(props: {
   const collectionReports = useMemo(() => {
     const owner = workspaceId;
     return {
-      onError: (fallback: string, error: unknown, retry?: (() => void) | null, identity?: string, quiet?: boolean) => {
-        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null, undefined, identity, quiet);
+      onError: (fallback: string, error: unknown, retry?: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void) => {
+        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null, undefined, identity, quiet, onDismiss);
       },
       onSettled: (identity: string) => {
         if (workspaceIdRef.current === owner) clearIdentity(identity);

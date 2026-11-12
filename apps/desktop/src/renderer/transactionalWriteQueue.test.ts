@@ -542,7 +542,7 @@ describe("while the window shows another workspace", () => {
     expect(shell.onError).not.toHaveBeenCalled();
     // The workspace's shell opens again: one row for the table, for the change dohc could not confirm and the one that waits behind it.
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People. Another change is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People. Another change is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String), false, expect.any(Function));
     const [, , retry, identity] = back.onError.mock.calls[0]!;
     // Try again sends the exact request, and the row goes once nothing needs the person.
     (retry as () => void)();
@@ -565,7 +565,7 @@ describe("while the window shows another workspace", () => {
     expect([shell, other].map(reports => [reports.onError, reports.onNotice, reports.onSettled].map(report => report.mock.calls.length))).toEqual([[0, 0, 0], [0, 0, 0]]);
     other.close();
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, expect.any(String), false, expect.any(Function));
     expect(other.onError).not.toHaveBeenCalled();
     // The row goes once the person has cleared the value.
     queue.dismiss("1", "name");
@@ -592,12 +592,12 @@ describe("while the window shows another workspace", () => {
     rules.calls[0]!.answer.reject(new Error("Collection changes stopped because this window changed workspaces."));
     await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String), false, expect.any(Function));
     const [, , retry, identity] = back.onError.mock.calls[0]!;
     // Try again sends the change. The row stays, changed where it stands, for the value that still needs the person.
     (retry as () => void)();
     expect(rules.calls[1]!.request).toEqual(rules.calls[0]!.request);
-    expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, identity, true);
+    expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, identity, true, expect.any(Function));
     rules.calls[1]!.answer.resolve({ result: { id: 1, version: 3 } });
     await vi.waitFor(() => expect(back.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
     expect(back.onError).toHaveBeenCalledTimes(2);
@@ -605,6 +605,27 @@ describe("while the window shows another workspace", () => {
     // The row goes once nothing needs the person.
     queue.dismiss("2", "name");
     expect(back.onSettled).toHaveBeenCalledWith(identity);
+  });
+
+  it("leaves the table's row gone once the person dismissed it, and files it again when the workspace opens again", () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.hold(row(1, 2), name, "typed", "This edit was still open, so dohc did not save it.");
+    queue.hold(row(2, 4), name, "typed", "This edit was still open, so dohc did not save it.");
+    shell.close();
+    close();
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledTimes(1);
+    expect(back.onError.mock.calls[0]![0]).toBe("dohc did not save 2 changes to People. Open it to check its records.");
+    // The person dismisses the row, then clears one of the two values. The row does not come back.
+    (back.onError.mock.calls[0]![5] as () => void)();
+    queue.dismiss("1", "name");
+    expect(back.onError).toHaveBeenCalledTimes(1);
+    expect(back.onSettled).not.toHaveBeenCalled();
+    // The workspace opens again, and the value that still needs the person has its row.
+    back.close();
+    const again = openShell();
+    expect(again.onError).toHaveBeenCalledTimes(1);
+    expect(again.onError.mock.calls[0]![0]).toBe("dohc did not save a change to People. Open it to check its records.");
   });
 
   it("leaves a change out of the table's row once it has a row of its own, so a change that fails again is said once", async () => {
@@ -744,7 +765,7 @@ describe("a record the queue can't read by a key", () => {
     await vi.waitFor(() => expect(queue.attention()).toHaveLength(1));
     expect(shell.onError).not.toHaveBeenCalled();
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("A change to People is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("A change to People is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String), false, expect.any(Function));
     (back.onError.mock.calls[0]![2] as () => void)();
     rules.calls[2]!.answer.resolve({ result: { rows: [row(1, 8)], nextCursor: null } });
     await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
@@ -770,11 +791,27 @@ describe("a deletion that did not happen", () => {
     expect(shell.onError).not.toHaveBeenCalled();
     expect(writeQueueFor(scope)).toBe(queue);
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not delete Alice from People. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not delete Alice from People. Open it to check its records.", expect.any(Error), null, expect.any(String), false, expect.any(Function));
     // Dismiss lets it go, and the row and the queue with it.
     queue.dismissDeletion(gone);
     expect(back.onSettled).toHaveBeenCalledExactlyOnceWith(back.onError.mock.calls[0]![3]);
     expect(hasWriteQueueForTests(scope)).toBe(false);
+  });
+
+  it("is not claimed for a deletion whose first try got no answer, when Try again is refused for replaced rules", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const gone = queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    close();
+    // The first try may have deleted the record: its answer never came.
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(gone)?.state).toBe("unconfirmed"));
+    queue.retry(gone);
+    // The host checks the rules before it looks for the first try's receipt, so this answer says nothing of the first try.
+    rules.calls[1]!.answer.reject(replaced());
+    await vi.waitFor(() => expect(queue.find(gone)).toBeUndefined());
+    expect(queue.attention()).toEqual([]);
+    expect(shell.onError).toHaveBeenLastCalledWith("The rules of People changed before dohc could confirm a change. Open it to check its records.", expect.any(Error), null);
+    expect(shell.onError.mock.calls.some(([words]) => String(words).includes("did not delete"))).toBe(false);
   });
 
   it("is named by its record's id when the page gave no name, counted with the others, and replaced by a new deletion of its record", async () => {
@@ -788,9 +825,9 @@ describe("a deletion that did not happen", () => {
     await vi.waitFor(() => expect(rules.calls).toHaveLength(1));
     await vi.waitFor(() => expect(queue.attention().filter(item => item.kind === "deletion")).toHaveLength(1));
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People, and did not delete Alice. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People, and did not delete Alice. Open it to check its records.", expect.any(Error), null, expect.any(String), false, expect.any(Function));
     rules.calls[1]!.answer.reject(refusal("No."));
-    await vi.waitFor(() => expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People, and did not delete Alice and 1 other record. Open it to check its records.", expect.any(Error), null, back.onError.mock.calls[0]![3], true));
+    await vi.waitFor(() => expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People, and did not delete Alice and 1 other record. Open it to check its records.", expect.any(Error), null, back.onError.mock.calls[0]![3], true, expect.any(Function)));
     expect(queue.attention().filter(item => item.kind === "deletion").map(item => item.name)).toEqual(["Alice", "record 2"]);
     // The person deletes the first record again, and that deletion is no longer one that did not happen.
     queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
