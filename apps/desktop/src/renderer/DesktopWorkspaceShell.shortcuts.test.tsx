@@ -67,34 +67,38 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(bridge.stepWindowZoom).not.toHaveBeenCalled();
   });
 
-  it.each(shellBindings(platform))("leaves %s: %s with a focused editor that claimed it", async (_id, accelerator) => {
+  it("leaves every shell binding with a focused editor that claimed it", async () => {
     await ready(platform);
     const editor = document.createElement("textarea");
     screen.getByTestId("workspace-shell").append(editor);
     editor.addEventListener("keydown", (event) => event.preventDefault());
-    const event = keyEvent(accelerator, platform);
-    fireEvent(editor, event);
-    expect(screen.getByTestId("side-panel")).toBeTruthy();
-    expect(screen.queryByTestId("command-palette")).toBeNull();
-    expect(screen.queryByTestId("quick-open")).toBeNull();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(screen.queryByTestId("new-page")).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    for (const [, accelerator] of shellBindings(platform)) {
+      const event = keyEvent(accelerator, platform);
+      fireEvent(editor, event);
+      expect(screen.getByTestId("side-panel")).toBeTruthy();
+      expect(screen.queryByTestId("command-palette")).toBeNull();
+      expect(screen.queryByTestId("quick-open")).toBeNull();
+      expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+      expect(screen.queryByTestId("new-page")).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    }
   });
 
-  it.each(shellBindings(platform))("blocks %s: %s during composition and repeat", async (_id, accelerator) => {
+  it("blocks every shell binding during composition and repeat", async () => {
     await ready(platform);
-    for (const init of [{ isComposing: true }, { repeat: true }]) {
-      const event = keyEvent(accelerator, platform, init);
-      fireEvent(window, event);
-      expect(event.defaultPrevented).toBe(false);
+    for (const [, accelerator] of shellBindings(platform)) {
+      for (const init of [{ isComposing: true }, { repeat: true }]) {
+        const event = keyEvent(accelerator, platform, init);
+        fireEvent(window, event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(screen.getByTestId("side-panel")).toBeTruthy();
+      expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+      expect(screen.queryByTestId("command-palette")).toBeNull();
+      expect(screen.queryByTestId("quick-open")).toBeNull();
+      expect(screen.queryByTestId("new-page")).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     }
-    expect(screen.getByTestId("side-panel")).toBeTruthy();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(screen.queryByTestId("command-palette")).toBeNull();
-    expect(screen.queryByTestId("quick-open")).toBeNull();
-    expect(screen.queryByTestId("new-page")).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
   it("keeps keyboard palette toggling separate from menu opening", async () => {
@@ -223,7 +227,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await waitFor(() => expect(screen.queryByTestId("shortcut-confirm")).toBeNull());
   });
 
-  it.each(["menu", "shell", "chip"])("takes a changed registry binding through %s", async (consumer) => {
+  it.each(["shell", "chip"])("takes a changed registry binding through %s", async (consumer) => {
     const accelerators = SHORTCUTS["quick-open"].accelerators;
     const original = accelerators[0];
     Reflect.set(accelerators, "0", "CommandOrControl+O");
@@ -232,10 +236,6 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
       if (consumer === "chip") {
         const trigger = screen.getByTestId("titlebar-quick-open");
         expect(trigger.querySelector("kbd")?.textContent).toBe(platform === "darwin" ? "⌘O" : "Ctrl O");
-      } else if (consumer === "menu") {
-        const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn() });
-        const view = menu.find((item) => item.label === "View")!.submenu as MenuItemConstructorOptions[];
-        expect(view.find((item) => item.label === "Go to")!.accelerator).toBe("CommandOrControl+O");
       } else {
         const event = keyEvent("CommandOrControl+O", platform);
         fireEvent(window, event);

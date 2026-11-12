@@ -3,7 +3,7 @@
 //! record them autonomously — no RPC involved — across text, binary, and
 //! secret content; policy flips re-offer; teardown is clean and ordered.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_protocol::{

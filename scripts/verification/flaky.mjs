@@ -7,7 +7,7 @@
 // reruns each one. It also records the slowest tests, so the suites' time can be
 // kept in budget.
 
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readerTests } from "../../tools/rust-engine-program/reader-tests.mjs";
 
@@ -182,3 +182,13 @@ export function rerunCommand(row) {
 /** The slowest rows, longest first. */
 export const slowest = (rows, count = slowestKept) => rows.toSorted((a, b) => b.seconds - a.seconds).slice(0, count)
   .map(row => ({ ...row, seconds: Math.round(row.seconds * 10) / 10 }));
+
+export function reportFlaky(tests = [], { summary, annotate = false } = {}) {
+  for (const row of tests) {
+    const message = row.id + " › " + row.test;
+    const line = "Passed on retry: " + message;
+    console.log(line);
+    if (summary) appendFileSync(summary, line + "\n");
+    if (annotate) console.log("::warning title=Passed on retry::" + message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A"));
+  }
+}

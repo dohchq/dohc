@@ -3,7 +3,7 @@
 //! When it cannot keep the group or the ACL, it keeps only the owner's bits.
 //! A new file follows the umask, and a secret stays owner-only.
 #![cfg(unix)]
-mod common;
+use crate::common;
 
 #[cfg(target_vendor = "apple")]
 use common::FatVolume;

@@ -36,7 +36,7 @@ export async function runHistoryBenchmark({ exe, mode, root = process.cwd() }, {
     await saveReceipt();
     lane = admit(process.env, { metadata: { purpose: "History query and write benchmark", checkout: root, mode } });
     lane.check();
-    const result = await execute(exe, ["history_page_benchmark", "--exact", "--ignored", "--nocapture"], {
+    const result = await execute(exe, ["history_page_benchmark", "--ignored", "--nocapture"], {
       cwd: root, signal: lane.signal, quietStdout: true, log: join(output, "benchmark.log"),
       env: { ...process.env, HISTORY_BENCH_ENTRIES: "100000", HISTORY_BENCH_MODE: mode,
         DOHC_TEST_SCRATCH_ROOT: join(output, "scratch"), TEMP: join(output, "tmp"), TMP: join(output, "tmp") },

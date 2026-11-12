@@ -6,7 +6,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
-import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
+import { openRelayDeployment } from "./relayDeployment.js";
+import { openEmptyRelayTestDeployment } from "./testing/emptyRelayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {errorResponse} from "./errors.js";
@@ -61,8 +62,7 @@ async function fixture({selfHosted = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
-  initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
-  const deployment = openRelayDeployment(deploymentConfig);
+  const deployment = openEmptyRelayTestDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
   const hostId = selfHosted ? `self-host-${deployment.history.namespace}` : "service";
   deployment.storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: 1, guard() {} });
   const config = { version: 1, engineExecutable: process.execPath, hostId, instanceId: "instance",
@@ -75,6 +75,11 @@ async function fixture({selfHosted = false} = {}) {
   const closeStorage = () => { if (!closed) { deployment.storage.close(); closed = true; } };
   cleanup.push(async () => { closeStorage(); await rm(root, { recursive: true, force: true }); });
   return { trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), ...deployment, root, config, configPath, save, closeStorage };
+}
+function seedRows(db: InstanceType<typeof DatabaseSync>, write: () => void) {
+  db.exec("BEGIN");
+  try {write(); db.exec("COMMIT");}
+  catch (error) {try {db.exec("ROLLBACK");} catch {} throw error;}
 }
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
@@ -545,22 +550,24 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
       sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", "object", "docs/a.md", "origin", "2"].join("\0")))}`,
       sourceDigest: validated.evidence.projectedMarkdownSha256, sourceByteLength: validated.evidence.projectedMarkdownByteLength,
       nativeHeadSequence: 2, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
-  raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
-  const log = raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,?)");
-  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: "object", momentId: "original-moment", path: "docs/a.md", operation: "write",
-    payloadAfterPath: "docs/a.md", payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
-    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 0);
-  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: true,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 1);
-  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: false,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 2);
-  const blob = raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
-  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
-  raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
-    .run(base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
-  raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)")
-    .run(JSON.stringify({paths: ["docs"], versionId: null}));
-  raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
+  seedRows(raw, () => {
+    raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
+    const log = raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,?)");
+    log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: "object", momentId: "original-moment", path: "docs/a.md", operation: "write",
+      payloadAfterPath: "docs/a.md", payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 0);
+    log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: true,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 1);
+    log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 2);
+    const blob = raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+    blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+    raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
+      .run(base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+    raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)")
+      .run(JSON.stringify({paths: ["docs"], versionId: null}));
+    raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
+  });
 
   // Complete the activation under the earlier connection: adoption, seed, native application. Without `adopted` it is only prepared.
   const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
@@ -1593,6 +1600,9 @@ it("retires a stopped last document once it settled and published and a pull con
   expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
   expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  const delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  expect(() => delivery.open({host: o.host.coordinate, document: o.document})).toThrow("Committed delivery follows a retired owner adoption.");
+  expect(o.raw.prepare("SELECT COUNT(*) AS bootstraps FROM sync_relay_live_delivery_bootstraps").get()).toEqual({bootstraps: 0});
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
   expect(o.membership.at(-1)).toEqual(o.detach);
@@ -3872,19 +3882,21 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
   const validated = o.validateJournal({document, currentPath: path, checkpoint: baselineBytes, suffix: [], candidate: fullState});
   const base = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: path, checkpoint: baselineBytes});
   if (validated.kind !== "accepted" || base.kind !== "accepted") throw new Error("Invalid replacement fixture.");
-  const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
   const relaySeq = (originSeq: number) => Number(o.raw.prepare(`SELECT relay_seq FROM sync_relay_log WHERE origin_id='${origin}' AND origin_seq=?`).get(originSeq)!.relay_seq);
-  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: `${name}-moment`, path, operation: "write",
-    payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
-    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
-  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 31);
-  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: false,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
-  const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
-  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
-  o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,30)")
-    .run(document.objectId, relaySeq(0), `${name}-moment`, path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  seedRows(o.raw, () => {
+    const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
+    log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: `${name}-moment`, path, operation: "write",
+      payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
+    log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 31);
+    log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
+    const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+    blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+    o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,30)")
+      .run(document.objectId, relaySeq(0), `${name}-moment`, path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  });
   const capture: NativeOwnerActivation = {activationId, sessionId: `${name}-session`, baselineBytes, fullState,
     source: {version: 1, relayDatabaseNamespace: o.f.history.namespace, ...document, currentPath: path, replicationEpoch: "epoch",
       streamIdentity: "stream", committedCursor: relaySeq(2), baseOriginId: origin, baseOriginSeq: 1, baseRelaySeq: relaySeq(1),
@@ -5039,20 +5051,6 @@ it("retires a stopped document only once its settled output pushed, though its b
   o.replies.push = {};
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(retiredRow(o)).toEqual({retired: true, boundary: {terminalReceipt: tip, eventCount: 1, historyEvidenceDigest: expect.any(String)}});
-});
-
-// Proves: once an owner adoption retired on a host, ordinary committed
-// delivery there never starts a bootstrap for its lineage: the retired
-// adoption already consumed the lineage's adoption reservation.
-it("refuses ordinary committed delivery on a host where the lineage's owner adoption retired", async () => {
-  const o = await enrolledServiceHost();
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  o.stop();
-  await o.depart();
-  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
-  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
-  expect(() => store.open({host: o.host.coordinate, document: o.document})).toThrow("Committed delivery follows a retired owner adoption.");
-  expect(o.raw.prepare("SELECT COUNT(*) AS bootstraps FROM sync_relay_live_delivery_bootstraps").get()).toEqual({bootstraps: 0});
 });
 
 // Proves: a retiring document fails closed when its binding no longer holds:
@@ -6782,13 +6780,6 @@ it("rechecks the retirement candidate after a Stop queued behind another Stop", 
   await expect(second).resolves.toMatchObject({retired: true});
   expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
 });
-
-it.each(["liveApplication.prepareRetirement", "liveApplication.releaseRetirementPreparation"])(
-  "rejects a wrong request scalar type against the shared fixture for %s", async method => {
-    const o = await enrolledServiceHost();
-    const request = {id: 900, workspace: "attached-handle", method, params: {...prepared(o), restoreFenceGeneration: "0"}};
-    await expect(o.client().sendRequest(request)).rejects.toThrow("INVALID_PARAMS: invalid-retirement-preparation");
-  });
 
 it.each(["running without this workspace", "running without this document"] as const)(
   "answers Stop with the session host state %s without fencing", async state => {

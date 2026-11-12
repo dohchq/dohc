@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { openSyncRelayStorage, type OpenSyncRelayStorageOptions, type SyncRelayStorage } from "./storage.js";
+import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage.js";
+import { openEmptyRelayTestStorage } from "./testing/emptyRelayStorage";
 import type { SetServiceHostEnrollmentEnabledInput } from "./storage/serviceHostEnrollment.js";
 import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
@@ -119,7 +120,7 @@ export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: 
   const path = join(root, "relay.sqlite");
   let time = 1000;
   const config = options ?? { liveTickets: { retainedTicketsPerPrincipalGrant: 2, expiredTicketCleanupBatchSize: 1, now: () => time } };
-  const storage = openSyncRelayStorage(path, config);
+  const storage = openEmptyRelayTestStorage(path, config);
   const raw = new DatabaseSync(path);
   try {
   raw.exec("PRAGMA foreign_keys=ON");

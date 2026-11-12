@@ -1,7 +1,7 @@
 //! The session host's hosted replica through the daemon RPCs, against a relay
 //! that serves only the hosted feed. Any other route fails the test.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

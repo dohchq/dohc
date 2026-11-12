@@ -15,6 +15,7 @@ import {EngineRequestError} from '../../workspace-engine-client/src/daemon/engin
 import {markdownToYDoc} from './import-export.js'
 import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator,createLiveMarkdownHistoryValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
+import {openEmptyRelayTestStorage} from '../../../services/sync-relay/src/testing/emptyRelayStorage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationStore,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
@@ -57,7 +58,7 @@ const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
 function fixture(note='Original',large=false,clientID?:number){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
-  const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
+  const storage=openEmptyRelayTestStorage(path),raw=new DatabaseSync(path)
   const history=createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}),store=storage.createServiceActivationStore(history)
   const doc=markdownToYDoc(note,{clientID}),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
   doc.getMap('frontmatter').set('title','Edited')

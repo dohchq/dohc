@@ -1,5 +1,5 @@
 //! Who stopped or resumed live editing of an owner document, through the RPC.
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_protocol::{

@@ -30,7 +30,7 @@ pub fn unique_dir(tag: &str) -> ScratchDir {
 /// Open a fresh store at a unique temp path.
 pub fn fresh_store(tag: &str) -> TempStore {
     let dir = unique_dir(tag);
-    let store = EngineStore::open(&dir.join("engine.db"), 1_000).expect("open store");
+    let store = dohc_engine_testkit::open_empty_store(&dir.join("engine.db"), 1_000);
     TempStore {
         store,
         cache: WriterDocCache::new(),

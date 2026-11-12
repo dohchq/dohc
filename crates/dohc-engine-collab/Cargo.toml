@@ -6,6 +6,7 @@
 # cross-engine fixtures before bumping):
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below, matching yrs-interop)
 [package]
+autotests = false
 license.workspace = true
 name = "dohc-engine-collab"
 version.workspace = true
@@ -86,3 +87,7 @@ dohc-heap-profiler = { path = "../dohc-heap-profiler" }
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

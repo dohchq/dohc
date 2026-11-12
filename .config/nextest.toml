@@ -40,7 +40,7 @@ threads-required = "num-test-threads"
 
 # Run the WAL-pressure held-proof test alone: it grows the WAL past the write limit, and other tests slow the checkpoints it waits for (#2960).
 [[profile.default.overrides]]
-filter = 'binary_id(=dohc-engine-runtime::owner_publication) & test(=held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
+filter = 'binary_id(=dohc-engine-runtime::integration) & test(=owner_publication::held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
 threads-required = "num-test-threads"
 
 # This test syncs the disk after each of 2,000 link placements, so a slow or

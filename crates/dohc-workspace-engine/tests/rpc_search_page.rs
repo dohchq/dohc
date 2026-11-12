@@ -1,7 +1,7 @@
 //! Desktop workspace-search RPC: active-version scoping and bounded paging
 //! through the real in-process daemon transport.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_domain::VersionedTextStore;

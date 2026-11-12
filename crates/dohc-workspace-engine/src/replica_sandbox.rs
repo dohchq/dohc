@@ -411,10 +411,24 @@ mod linux {
                 "relay": {"socketPath": root.join("relay.sock"), "bearerToken": "lease"},
             }),
         };
-        let opened = runtime.block_on(service.call(RequestContext::unbounded(), request));
+        runtime
+            .block_on(service.call(RequestContext::unbounded(), request))
+            .map_err(|e| format!("{e:?}"))?;
         let db = root.join(".dohc/engine/engine.db");
-        let _ = dohc_engine_runtime::WorkspaceSupervisor::global().close(&db);
-        opened.map(drop).map_err(|e| format!("{e:?}"))
+        drop(service);
+        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::global();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while supervisor
+            .generation_of(&db)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err("replica workspace teardown did not finish within 10 seconds".into());
+            }
+            std::thread::yield_now();
+        }
+        Ok(())
     }
 }
 

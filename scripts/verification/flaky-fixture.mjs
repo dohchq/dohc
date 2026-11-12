@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 export const flakyFixtureFiles = [
   "scripts/verification/flaky.mjs",
   "tools/rust-engine-program/reader-tests.mjs",
+  "tools/rust-engine-program/reader-test-node.mjs",
   "tools/rust-engine-program/gate-commands.mjs",
   "tools/rust-engine-program/scratch-leak-report.mjs",
+  "apps/desktop/scripts/pinned-node.mjs",
 ];
 
 export function copyFlakyFixture(root, sourceRoot = fileURLToPath(new URL("../../", import.meta.url))) {

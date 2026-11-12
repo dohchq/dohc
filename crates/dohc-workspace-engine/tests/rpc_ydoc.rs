@@ -1,7 +1,7 @@
 //! RPC-C acceptance: daemon-owned Y.Doc sessions over the in-process
 //! transport, with real domain writes, materialization, capture, and leases.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { NOTICE_LIST_ROW_LIMIT, NOTICE_UNREAD_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { expect } from "vitest";
+import { openEmptyRelayTestStorage } from "./emptyRelayStorage";
 import {
   createSyncRelayHandler,
   type CreateSyncRelayHandlerOptions,
@@ -66,7 +67,10 @@ export async function testStorage(
   options?: OpenSyncRelayStorageOptions,
 ): Promise<SyncRelayStorage> {
   const dbPath = join(await tempRoot("db"), "relay.sqlite");
-  return reopenTestStorage(dbPath, options);
+  const storage = openEmptyRelayTestStorage(dbPath, options);
+  storages.push(storage);
+  storagePaths.set(storage, dbPath);
+  return storage;
 }
 
 export function storagePath(storage: SyncRelayStorage): string {

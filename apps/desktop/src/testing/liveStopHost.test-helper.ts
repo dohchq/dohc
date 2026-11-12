@@ -49,6 +49,11 @@ export const HOST_STOP_CASES = [
   ]
 ] as const;
 
+export const HOST_STOP_UI_CASES = HOST_STOP_CASES
+  .filter(([code]) => ["host-paused", "host-diverged", "host-moved"].includes(code))
+  .map(([code, sessionHost, words, control]) => ({code, sessionHost, words, control,
+    status: code === "host-paused" ? "ready" as const : "paused" as const}));
+
 // Match Electron's rejected-handler string; code and metadata survive in the name.
 export function hostStopWireError(code: string, sessionHost: string, words: string): Error {
   const detail = {code, sessionHost, ...(code === "host-moved" ? {path: "old/plan.md"} : {})};

@@ -1,13 +1,18 @@
 import {describe, expect, it} from "vitest";
 import {RELAY_ERROR_MESSAGES} from "../../../../services/sync-relay/src/errors";
-import {liveStopError, liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
+import {liveStopError, liveStopHostCopy, liveStopMessage, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
 import {HOST_STOP_CASES, hostStopWireError} from "../testing/liveStopHost.test-helper";
 
 describe("session-host Stop contract", () => {
-  it.each(HOST_STOP_CASES)("keeps the relay and desktop sentence equal for %s (%s)", (code, sessionHost, words) => {
+  it.each(HOST_STOP_CASES)("keeps the relay and desktop contract equal for %s (%s)", (code, sessionHost, words, action) => {
     const relay = (RELAY_ERROR_MESSAGES as Readonly<Record<string, string>>)[code];
     expect(relay?.replaceAll("{path}", "old/plan.md")).toBe(words);
     expect(liveStopHostCopy(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined)).toBe(`${words}\nServer: ${sessionHost}`);
+    const refusal = {code, sessionHost, ...(code === "host-moved" ? {path: "old/plan.md"} : {})};
+    for (const canResume of [false, true]) {
+      expect(liveStopAction(refusal, {canResume})).toBe(action);
+      expect(liveStopMessage(refusal, {canResume})).toBe(words);
+    }
   });
   it.each(HOST_STOP_CASES)("reads %s by code without trusting the sentence", (code, sessionHost) => {
     expect(readLiveStopRefusal(hostStopWireError(code, sessionHost, "untrusted relay text"))).toEqual({code, sessionHost,

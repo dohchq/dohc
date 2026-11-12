@@ -1669,7 +1669,7 @@ impl Fixture {
     }
     fn with_doc_at(doc: Ydoc, source: &str, path: &str) -> Self {
         let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
-        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut store = dohc_engine_testkit::open_empty_store(&dir.join("engine.db"), 0);
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();

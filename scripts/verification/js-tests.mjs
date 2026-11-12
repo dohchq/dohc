@@ -28,64 +28,48 @@ export function testPlan(packages) {
   });
 }
 
-// PR checks split the gate across runners with DOHC_JS_SHARD, so a four-CPU runner
-// doesn't run the desktop tests, other packages and proofs at once. Unset, one run does every part.
-export const jsShards = ["desktop", "packages", "proofs"];
-
-// Removed from the environment, so a verifier that a test starts runs whole.
-export function takeJsShard(env = process.env) {
-  const shard = env.DOHC_JS_SHARD;
-  delete env.DOHC_JS_SHARD;
-  if (shard === undefined || shard === "") return null;
-  if (!jsShards.includes(shard)) throw new Error(`DOHC_JS_SHARD must be one of ${jsShards.join(", ")}, not ${JSON.stringify(shard)}.`);
-  return shard;
-}
-
-// desktop: its unit tests and scripts. packages: every other package. proofs: the repository tests and integration proofs.
-export function shardTasks(tasks, shard) {
-  if (shard === "desktop") return tasks.filter(task => task.name === "@dohc/desktop");
-  if (shard === "packages") return tasks.filter(task => task.name !== "@dohc/desktop");
-  if (shard === "proofs") return [];
-  return tasks;
-}
-
 // Stop admitting work after failure, then let already-running commands close.
 // Once `more` resolves, one more command can run.
-export async function runBounded(tasks, execute, concurrency = 2, more) {
+export async function runBounded(tasks, execute, concurrency = 2, more, availability) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Test concurrency must be a positive integer.");
   const pending = [...tasks], active = new Set(), resources = new Set();
-  let failure, limit = concurrency;
-  let widening = more?.then(() => { limit += 1; widening = undefined; });
+  if (pending.some(task => !Number.isInteger(task.slots ?? 1) || (task.slots ?? 1) < 1)) throw new Error("Task slots must be a positive integer.");
+  let failure, limit = concurrency, slotsInUse = 0;
+  let widening = more?.then(() => { limit += 1; widening = undefined; }, error => { failure ??= error; widening = undefined; });
+  let ready = availability?.changed.then(() => { ready = undefined; }, error => { failure ??= error; ready = undefined; });
   while (pending.length || active.size) {
-    while (!failure && active.size < limit) {
-      const index = pending.findIndex(task => !task.resource || !resources.has(task.resource));
+    while (!failure && slotsInUse < limit) {
+      const index = pending.findIndex(task => (!availability || availability.canRun(task)) && (!task.resource || !resources.has(task.resource))
+        && (!active.size || slotsInUse + (task.slots ?? 1) <= limit));
       if (index < 0) break;
       const [task] = pending.splice(index, 1);
+      const slots = task.slots ?? 1;
+      slotsInUse += slots;
       if (task.resource) resources.add(task.resource);
       const work = Promise.resolve().then(() => execute(task)).catch(error => { failure ??= error; }).finally(() => {
         active.delete(work);
+        slotsInUse -= slots;
         if (task.resource) resources.delete(task.resource);
       });
       active.add(work);
     }
-    if (!active.size) break;
-    await Promise.race(widening ? [...active, widening] : active);
+    if (failure && !active.size) break;
+    const changes = [...active, widening, ready].filter(Boolean);
+    if (!changes.length) break;
+    await Promise.race(changes);
   }
   if (failure) throw failure;
+  if (pending.length) throw new Error("Verification tasks never became ready.");
 }
 
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
 // `repositoryTests` is the repository lane's script: every repository test, or "test:repo:tree" for the ones that read the source tree.
 // `full` runs each desktop unit test file in a worker of its own, so a test that passes only after another file in a shared worker fails.
 // `onlyPackage` runs one package's steps as a full run does, without the repository lane. The desktop release tests the desktop package this way.
-// `shard` runs one of `jsShards`, one package at a time.
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", full = false, onlyPackage = null, shard = null, stop } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", full = false, onlyPackage = null, stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
-  if (shard !== null && !jsShards.includes(shard)) throw new Error(`Unknown JavaScript shard ${JSON.stringify(shard)}.`);
   mkdirSync(output, { recursive: true });
-  if (shard === "desktop" || shard === "packages") runProofs = undefined;
-  const repositoryLane = onlyPackage === null && (shard === null || shard === "proofs");
-  const report = { version: 1, ...(shard ? { shard } : {}), concurrency: shard ? 1 : 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
@@ -219,7 +203,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const planned = testPlan(packages);
     if (!planned.length) throw new Error("No workspace package tests were discovered.");
     // A change confined to some packages runs only their tests and their dependents'.
-    const tasks = shardTasks(only ? planned.filter(task => only.includes(task.name)) : planned, shard);
+    const tasks = only ? planned.filter(task => only.includes(task.name)) : planned;
     if (onlyPackage !== null && !tasks.length) throw new Error(`No workspace package named ${onlyPackage} has tests.`);
     if (only) report.skippedPackages = planned.filter(task => !only.includes(task.name)).map(task => task.name);
     report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
@@ -230,7 +214,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = repositoryLane ? command("repository", ["run", repositoryTests], { rerun: repoRoot }) : null;
+    const repositoryChecks = onlyPackage !== null ? null : command("repository", ["run", repositoryTests], { rerun: repoRoot });
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
@@ -247,8 +231,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
           databasePending.delete(task.name);
           if (!databasePending.size) databaseFinished.resolve();
         }
-        // A shard keeps one package at a time, even after its repository lane frees.
-      }, report.concurrency, shard ? undefined : repositoryFree.promise);
+      }, report.concurrency, repositoryFree.promise);
       return tasks;
     }).catch(fail);
     // Isolated scripts, proofs, and then any package test that has not started
@@ -257,10 +240,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const runRepository = async () => {
       await repositoryChecks;
       const tasks = await plan;
-      // Desktop-only release preflight and the desktop shard each have a four-CPU hosted runner,
-      // so isolated scripts wait for the unit tests. The preflight's Windows compiler owner
-      // must compile C# before its deadline expires.
-      if (onlyPackage === "@dohc/desktop" || shard === "desktop") await packages;
+      // Desktop-only release preflight shares a four-CPU hosted runner. Its
+      // Windows compiler owner must compile C# before its deadline expires.
+      if (onlyPackage === "@dohc/desktop") await packages;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: desktopRoot });
       }
@@ -298,7 +280,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const interrupted = await cancellation.dispose();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     const desktop = report.packages?.some(task => task.name === "@dohc/desktop");
-    const stopped = stopper.unfinished(report.steps, [...(repositoryLane ? ["repository"] : []),...(report.packages ?? []).map(task => task.name),
+    const stopped = stopper.unfinished(report.steps, [...(onlyPackage !== null ? [] : ["repository"]), ...(report.packages ?? []).map(task => task.name),
       ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
     if (stopped) report.stopped = stopped;
     const error = (step, test) => step.testErrors?.[test] ? { error: step.testErrors[test] } : {};

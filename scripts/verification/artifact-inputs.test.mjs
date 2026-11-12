@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import childProcess, {execFileSync, spawn, spawnSync} from "node:child_process";
 import {once} from "node:events";
 import {createRequire, syncBuiltinESMExports} from "node:module";
-import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
+import {copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -27,6 +27,39 @@ function fixture(t) {
   put("apps/desktop/src/main.mjs", "export {permission} from '../../../packages/consumer/src/index.mjs';");
   return {root, put};
 }
+
+test("prepared engines transfer across checkout paths and still reject changed inputs", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepared-transfer-"));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const producer = join(root, "producer", "checkout"), worker = join(root, "worker", "checkout");
+  mkdirSync(producer, {recursive: true});
+  const prepare = createPrepareFixture(producer, new URL("./build.mjs", import.meta.url));
+  const built = prepare();
+  assert.equal(built.status, 0, built.stderr);
+  cpSync(producer, worker, {recursive: true});
+  const check = () => spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import cp from 'node:child_process';
+    import {syncBuiltinESMExports} from 'node:module';
+    const exec = cp.execFileSync;
+    cp.execFileSync = (command, ...args) => command === 'rustc' ? Buffer.from('fixture rustc') : exec(command, ...args);
+    syncBuiltinESMExports();
+    const {assertPrepared, enginePath} = await import('./scripts/verification/build.mjs');
+    assertPrepared({engineOnly: true, engineBinary: enginePath});
+  `], {cwd: worker, encoding: "utf8", timeout: 20_000});
+  assert.equal(check().status, 0, "an unchanged engine transfers to the worker");
+  const cargo = join(root, "worker", ".cargo");
+  mkdirSync(cargo);
+  writeFileSync(join(cargo, "config.toml"), '[build]\nrustflags = ["--cfg", "changed"]\n');
+  const changedConfig = check();
+  assert.equal(changedConfig.status, 1);
+  assert.match(changedConfig.stderr, /does not match this checkout/);
+  rmSync(cargo, {recursive: true});
+  assert.equal(check().status, 0, "removing the extra configuration restores compatibility");
+  writeFileSync(join(worker, "target/debug/dohc-workspace-engine" + (process.platform === "win32" ? ".exe" : "")), "changed binary");
+  const changedBinary = check();
+  assert.equal(changedBinary.status, 1);
+  assert.match(changedBinary.stderr, /does not match this checkout/);
+});
 
 test("production receipts ignore unconsumed tests while verification still checks them", t => {
   const {root, put} = fixture(t);
@@ -166,7 +199,7 @@ test("preparation reuses artifacts after a verification-only edit", async t => {
     assert.equal(second.status, 0, second.stderr);
     assert.equal(JSON.parse(second.stdout.trim().split("\n").at(-1)).desktopPrepared, true);
     const builds = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(call => call.command === "cargo" || call.args.at(-1) === "build");
-    assert.equal(builds.length, 3);
+    assert.equal(builds.length, 4);
   });
 });
 

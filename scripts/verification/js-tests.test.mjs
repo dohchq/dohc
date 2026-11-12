@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
-import { jsShards, runBounded, shardTasks, takeJsShard, testPlan, testWorkspace } from "./js-tests.mjs";
+import { run } from "./process.mjs";
+import { runJavascript } from "./cloud.mjs";
+import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
@@ -19,6 +21,78 @@ function deferred() {
   const promise = new Promise((pass, fail) => { resolve = pass; reject = fail; });
   return { promise, resolve, reject };
 }
+
+for (const [limit, slots] of [[3, 2], [2, 2], [2, 4]]) {
+  test(`slot reservations at limit ${limit} keep a ${slots}-slot task within its capacity`, async () => {
+    const hold = deferred(), started = [], active = new Set(), snapshots = [];
+    const tasks = [{name: "wide", slots}, {name: "one"}, {name: "two"}];
+    const run = runBounded(tasks, async task => {
+      started.push(task.name); active.add(task);
+      snapshots.push([...active]);
+      await hold.promise;
+      active.delete(task);
+    }, limit);
+    try {
+      await new Promise(setImmediate);
+      assert.deepEqual(started, limit === 3 ? ["wide", "one"] : ["wide"]);
+    } finally { hold.resolve(); await run; }
+    assert.equal(started.length, tasks.length);
+    for (const snapshot of snapshots) {
+      assert.ok(snapshot.length === 1 || snapshot.reduce((n, task) => n + (task.slots ?? 1), 0) <= limit);
+    }
+  });
+}
+
+test("slots preserve first-runnable order, resource exclusions, preparation and widening", async () => {
+  const preparation = deferred(), more = deferred(), started = [], controls = new Map();
+  const tasks = [{name:"native", slots:2, native:true, resource:"postgres"}, {name:"same-resource", native:true, resource:"postgres"},
+    ...["one", "two", "three"].map(name => ({name}))];
+  for (const task of tasks) controls.set(task.name, deferred());
+  let ready = false, followerReady = false;
+  const changed = preparation.promise.then(() => { ready = true; });
+  const run = runBounded(tasks, async task => { started.push(task.name); await controls.get(task.name).promise; },
+    2, more.promise, {changed, canRun: task => (!task.native || ready) && (task.name !== "same-resource" || followerReady)});
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two"]);
+    preparation.resolve(); more.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two", "three"]);
+    controls.get("one").resolve(); controls.get("two").resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two", "three", "native"]);
+    followerReady = true;
+    controls.get("three").resolve();
+    await new Promise(setImmediate);
+    assert.ok(!started.includes("same-resource"));
+    controls.get("native").resolve();
+    await new Promise(setImmediate);
+    assert.equal(started.at(-1), "same-resource");
+  } finally { for (const control of controls.values()) control.resolve(); await run; }
+});
+
+test("a failing two-slot task stops new starts and drains its sibling", async () => {
+  const fail = deferred(), hold = deferred(), started = [], error = Error("browser failed");
+  const run = runBounded([{name:"browser", slots:2}, {name:"sibling"}, {name:"waiting"}], async task => {
+    started.push(task.name);
+    if (task.name === "browser") { await fail.promise; throw error; }
+    await hold.promise;
+  }, 3);
+  const outcome = assert.rejects(run, cause => cause === error);
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["browser", "sibling"]);
+    fail.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["browser", "sibling"]);
+  } finally { fail.resolve(); hold.resolve(); await outcome; }
+});
+
+test("task slot reservations are positive integers", async () => {
+  for (const slots of [0, -1, 1.5, NaN]) {
+    await assert.rejects(runBounded([{slots}], () => {}, 2), /slots.*positive integer/);
+  }
+});
 
 test("package scheduling bounds concurrency and serializes shared database consumers", async () => {
   const tasks = [{name: "db-one", resource: "postgres"}, {name: "db-two", resource: "postgres"}, {name: "disk"}, {name: "last"}];
@@ -44,6 +118,32 @@ test("package scheduling bounds concurrency and serializes shared database consu
   assert.equal(active.size, 0);
 });
 
+test("pure work fills both lanes before native preparation and admits native work when ready", async () => {
+  const preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
+  let ready = false;
+  const changed = preparation.promise.then(() => { ready = true; });
+  const tasks = [{ name: "native", native: true }, { name: "pure-one" }, { name: "pure-two" }];
+  const run = runBounded(tasks, async task => {
+    started.push(task.name);
+    if (task.name === "pure-two") second.resolve();
+    if (task.native) { native.resolve(); return; }
+    if (task.name === "pure-one") await release.promise;
+    else await preparation.promise;
+  }, 2, undefined, { changed, canRun: task => !task.native || ready });
+  await second.promise;
+  assert.deepEqual(started, ["pure-one", "pure-two"]);
+  preparation.resolve();
+  await native.promise;
+  assert.deepEqual(started, ["pure-one", "pure-two", "native"]);
+  release.resolve();
+  await run;
+  const failure = new Error("preparation failed");
+  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
+    { changed: Promise.reject(failure), canRun: () => false }), error => error === failure);
+  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
+    { changed: Promise.resolve(), canRun: () => false }), /never became ready/);
+});
+
 test("a freed lane runs a waiting package beside the running ones", async () => {
   const more = deferred(), hold = deferred(), second = deferred(), started = [];
   const run = runBounded([{name: "one"}, {name: "two"}, {name: "waiting"}], async task => {
@@ -61,14 +161,29 @@ test("a freed lane runs a waiting package beside the running ones", async () => 
   await run;
 });
 
+test("a rejected preparation stops admission and drains commands before returning", async () => {
+  const preparation = deferred(), held = deferred(), entered = deferred(), failure = Error("preparation failed");
+  let drained = false, returned = false;
+  const running = runBounded(["held", "waiting"], async task => {
+    assert.equal(task, "held"); entered.resolve(); await held.promise; drained = true;
+  }, 1, preparation.promise).finally(() => { returned = true; });
+  const outcome = assert.rejects(running, error => error === failure);
+  await entered.promise;
+  preparation.reject(failure);
+  await new Promise(setImmediate);
+  assert.equal(returned, false);
+  held.resolve(); await outcome;
+  assert.equal(drained, true);
+});
+
 test("a failed package stops admission and waits for its running sibling", async () => {
-  const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), started = [];
+  const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), more = deferred(), started = [];
   const run = runBounded([{name:"fail"}, {name:"sibling"}, {name:"must-not-start"}], async task => {
     started.push(task.name);
     if (task.name === "fail") { await entered.promise; throw failure; }
     entered.resolve();
     await sibling.promise;
-  });
+  }, 2, more.promise);
   // Observe rejection immediately so the test cannot create an unhandled rejection.
   const outcome = run.then(() => assert.fail("must fail"), error => assert.equal(error, failure));
   await entered.promise;
@@ -779,87 +894,6 @@ for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failu
   });
 }
 
-test("DOHC_JS_SHARD names one shard, leaves the environment, and defaults to one whole run", () => {
-  const env = {DOHC_JS_SHARD: "packages", OTHER: "kept"};
-  assert.equal(takeJsShard(env), "packages");
-  assert.deepEqual(env, {OTHER: "kept"}, "a verifier that a test starts must run whole");
-  assert.equal(takeJsShard({}), null);
-  assert.equal(takeJsShard({DOHC_JS_SHARD: ""}), null);
-  for (const shard of ["Desktop", "all", "desktop,packages"]) assert.throws(() => takeJsShard({DOHC_JS_SHARD: shard}), /must be one of desktop, packages, proofs/);
-});
-
-test("the shards split every package test between them exactly once", () => {
-  const tasks = ["@dohc/desktop", "@dohc/sync-relay", "@dohc/ydoc-projection", "@dohc/workspace-api"].map(name => ({name}));
-  assert.deepEqual(shardTasks(tasks, null), tasks);
-  assert.deepEqual(shardTasks(tasks, "desktop").map(task => task.name), ["@dohc/desktop"]);
-  assert.deepEqual(shardTasks(tasks, "packages").map(task => task.name), ["@dohc/sync-relay", "@dohc/ydoc-projection", "@dohc/workspace-api"]);
-  assert.deepEqual(shardTasks(tasks, "proofs"), []);
-  assert.deepEqual(jsShards.flatMap(shard => shardTasks(tasks, shard)).map(task => task.name).sort(), tasks.map(task => task.name).sort());
-});
-
-test("each shard runs its own lanes one package at a time, and together they run what one whole run does", () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-js-shards-"));
-  const put = (path, value) => {
-    mkdirSync(dirname(join(root, path)), {recursive: true});
-    writeFileSync(join(root, path), value);
-  };
-  try {
-    put("package.json", '{"type":"module"}');
-    for (const name of ["desktop", "share-web", "relay", "tail"]) {
-      put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {})}}));
-    }
-    copyFlakyFixture(root);
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
-    put("scripts/verification/process.mjs", `
-      import {resolve} from 'node:path';
-      import {setImmediate} from 'node:timers/promises';
-      export const repoRoot=resolve(import.meta.dirname,'../..');
-      export const pnpm=args=>['pnpm',args];
-      export const started=[], active=new Set();
-      export let packagePeak=0, scriptsBesideDesktop=false;
-      export async function run(_command,args){
-        if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','relay','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
-        const name=args[0]==='proof'?'proofs':args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
-        started.push(name);active.add(name);
-        if(active.has('@dohc/desktop')&&[...active].some(name=>name.startsWith('test:scripts:')))scriptsBesideDesktop=true;
-        packagePeak=Math.max(packagePeak,[...active].filter(name=>name.startsWith('@dohc/')).length);
-        for(let i=0;i<5;i++)await setImmediate();
-        active.delete(name);return {stdout:''};
-      }
-    `);
-    put("driver.mjs", `
-      import {readFileSync} from 'node:fs';
-      import {testWorkspace} from './scripts/verification/js-tests.mjs';
-      import {run,started,packagePeak,scriptsBesideDesktop} from './scripts/verification/process.mjs';
-      const shard=process.argv[2]||null;
-      await testWorkspace({prepared:true,output:'evidence',shard,runProofs:async()=>{await run('fixture',['proof']);}});
-      const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
-      console.log(JSON.stringify({started:started.filter(name=>name!=='inventory').sort(),packagePeak,scriptsBesideDesktop,concurrency:report.concurrency,shard:report.shard??null,proofs:report.proofs,verdict:report.verdict}));
-    `);
-    const drive = shard => {
-      const result = spawnSync(process.execPath, ["driver.mjs", ...(shard ? [shard] : [])], {cwd: root, encoding: "utf8", timeout: 20_000});
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(result.stdout.trim().split("\n").at(-1));
-    };
-    const whole = drive(null);
-    assert.deepEqual(whole.started, ["@dohc/desktop", "@dohc/relay", "@dohc/share-web", "@dohc/tail", "proofs", "repository", "test:scripts:isolated", "test:scripts:runtime"]);
-    assert.equal(whole.concurrency, 2);
-    const desktop = drive("desktop"), packages = drive("packages"), proofs = drive("proofs");
-    assert.deepEqual(desktop.started, ["@dohc/desktop", "test:scripts:isolated", "test:scripts:runtime"]);
-    assert.equal(desktop.scriptsBesideDesktop, false, "the desktop shard's isolated scripts wait for its unit tests");
-    assert.deepEqual(packages.started, ["@dohc/relay", "@dohc/share-web", "@dohc/tail"]);
-    assert.deepEqual(proofs.started, ["proofs", "repository"]);
-    assert.deepEqual([...desktop.started, ...packages.started, ...proofs.started].sort(), whole.started, "the shards together run every step once");
-    for (const [shard, run] of Object.entries({desktop, packages, proofs})) {
-      assert.equal(run.verdict, "PASS");
-      assert.equal(run.shard, shard);
-      assert.equal(run.concurrency, 1);
-      assert.ok(run.packagePeak <= 1, `${shard} ran ${run.packagePeak} packages at once`);
-      assert.equal(run.proofs, shard === "proofs");
-    }
-  } finally { rmSync(root, {recursive: true, force: true}); }
-});
-
 for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false, onlyDesktop = false} of [
   {name:"desktop preflight finishes unit tests before starting isolated scripts",onlyDesktop:true},
   {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},
@@ -1007,4 +1041,100 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     assert.ok(report.steps.every(step => step.seconds >= 0 && step.finishedAt));
     assert.ok(report.seconds >= Math.max(...report.steps.map(step => step.seconds)));
   } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+for (const kind of ["desktop", "accounts"]) {
+  test("cloud " + kind + " accepts a flaky proof but rejects failed, skipped, empty, and missing-tag proofs", async t => {
+    const root = mkdtempSync(join(tmpdir(), "cloud-browser-retry-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const task = { id: kind + ":proof", kind, tag: "@proof" };
+    const group = { ...task, tasks: [task], weight: 1 };
+    for (const status of ["flaky", "unexpected", "skipped", "empty", "missing", "mixed"]) {
+      const record = { steps: [], tests: [], completed: [], flaky: [] };
+      const executeCommand = async (_command, args, options) => {
+        assert.ok(args.includes("--retries=1"));
+        const passing = ["flaky", "missing", "mixed"].includes(status);
+        writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME, JSON.stringify({
+          stats: { expected: status === "missing" ? 1 : 0, flaky: ["flaky", "mixed"].includes(status) ? 1 : 0, unexpected: ["unexpected", "mixed"].includes(status) ? 1 : 0, skipped: status === "skipped" ? 1 : 0 },
+          suites: [{ specs: status === "empty" ? [] : [{ file: "proof.spec.ts", title: status === "missing" ? "another proof" : "@proof recovered", ok: passing,
+            tests: [{ status: status === "missing" ? "expected" : status === "mixed" ? "flaky" : status, results: passing ? [{ status: "failed", retry: 0 }, { status: "passed", retry: 1 }] : [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] },
+          ...(status === "mixed" ? [{ file: "proof.spec.ts", title: "failed proof", ok: false, tests: [{ status: "unexpected", results: [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] }] : [])] }],
+        }));
+        if (status === "mixed") throw new Error("proof command failed");
+      };
+      const action = () => runJavascript([group], record, () => {}, undefined, { executeCommand, directory: root });
+      if (status === "flaky") {
+        await action();
+        assert.deepEqual(record.completed, [task.id]);
+        assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+      } else {
+        await assert.rejects(action(), status === "mixed" ? /proof command failed/u : status === "missing" ? /Missing desktop proof/u : /Browser proof failed or skipped/u);
+        assert.deepEqual(record.completed, []);
+        if (status === "mixed") assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+      }
+    }
+  });
+}
+
+test("cloud browser report recording preserves command errors and still rejects invalid reports after success", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-browser-report-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const kind of ["desktop", "accounts"]) {
+    for (const malformed of [false, true]) {
+      for (const commandFails of [false, true]) {
+        const task = { id: kind + ":proof", kind, tag: "@proof" };
+        const record = { steps: [], tests: [], completed: [], flaky: [] };
+        const commandError = new Error("proof command failed");
+        const executeCommand = async (_command, _args, options) => {
+          const path = options.env.PLAYWRIGHT_JSON_OUTPUT_NAME;
+          rmSync(path, { force: true });
+          if (malformed) writeFileSync(path, "{");
+          if (commandFails) throw commandError;
+        };
+        await assert.rejects(runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { executeCommand, directory: root }),
+          error => commandFails ? error === commandError : malformed ? error instanceof SyntaxError : error.code === "ENOENT");
+        assert.deepEqual(record.completed, []);
+        assert.deepEqual(record.flaky, []);
+      }
+    }
+  }
+});
+
+test("cloud node:test files rerun once after a test failure; other commands do not", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-node-retry-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const [name, failures, nodeTest] of [["once", 1, true], ["twice", 2, true], ["check", 2, false]]) {
+    const marker = join(root, name + ".count"), file = join(root, name + ".mjs");
+    writeFileSync(file, "import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import test from 'node:test'; import assert from 'node:assert/strict'; const marker=" + JSON.stringify(marker) + "; const count=existsSync(marker)?Number(readFileSync(marker,'utf8'))+1:1; writeFileSync(marker,String(count)); " + (nodeTest ? "test('recovers',()=>assert.ok(count>" + failures + "));" : "process.exit(1);"));
+    const task = { id: "node:" + name, kind: "command", command: "node", args: [...(nodeTest ? ["--test"] : []), file], cwd: root };
+    const record = { steps: [], tests: [], completed: [], flaky: [] };
+    const action = () => runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root, executeCommand: (command, args, options) => {
+      const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
+      return run(command, args, { ...options, env });
+    } });
+    if (name === "once") {
+      await action();
+      assert.deepEqual(record.completed, [task.id]);
+      assert.equal(record.flaky.length, 1);
+      assert.match(record.flaky[0].test, /recovers/u);
+      assert.equal(record.flaky[0].retries, 1);
+    } else {
+      await assert.rejects(action());
+      assert.deepEqual(record.completed, []);
+    }
+    assert.equal(Number(readFileSync(marker, "utf8")), nodeTest ? 2 : 1);
+  }
+});
+
+test("cloud workers retain the errors and retry count from recovered Vitest files", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-vitest-retry-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const task = { id: "vitest:fixture", package: "fixture", cwd: root };
+  const flakyTests = [{ name: "recovered case", errors: ["first error"], retries: 1 }];
+  const record = { steps: [], tests: [], completed: [] };
+  await runJavascript([{ kind: "vitest", pkg: "fixture", tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root,
+    executeCommand: async (_command, args) => writeFileSync(args.at(-1), JSON.stringify({ verdict: "PASS", completed: [task.id], tests: [{ id: task.id, flakyTests }] })),
+  });
+  assert.deepEqual(record.completed, [task.id]);
+  assert.deepEqual(record.flaky, [{ id: task.id, test: "recovered case", errors: ["first error"], retries: 1 }]);
 });

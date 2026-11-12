@@ -2,7 +2,7 @@
 import { LIVE_STOP_SERVER_NOT_READY, LIVE_STOP_WAITING, liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
-import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
+import { HOST_STOP_CASES, HOST_STOP_UI_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
@@ -4160,8 +4160,7 @@ describe("owner live documents", () => {
     await act(async () => {});
     expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
   });
-  it.each(HOST_STOP_CASES.flatMap(([code, sessionHost, words, control]) =>
-    (["ready", "paused"] as const).map(status => ({code, sessionHost, words, control, status}))))(
+  it.each(HOST_STOP_UI_CASES)(
     "keeps out-of-sight $code with $sessionHost and $status row in toast and Notices", async ({code, sessionHost, words, control, status}) => {
     const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
     bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [{...LIVE_ROW, status, canResume: true}], nextCursor: null}));

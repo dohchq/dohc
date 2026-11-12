@@ -1,4 +1,5 @@
 [package]
+autotests = false
 license.workspace = true
 name = "dohc-workspace-engine"
 version.workspace = true
@@ -87,3 +88,7 @@ dohc-linux-files = { path = "../dohc-linux-files", features = ["test-support"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

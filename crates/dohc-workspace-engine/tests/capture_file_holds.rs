@@ -1,5 +1,5 @@
 //! Outside Markdown refusal is an observed file hold, never a recorded edit.
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_collab::{

@@ -5,13 +5,20 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { stageReaderTestNode } from "../tools/rust-engine-program/reader-test-node.mjs";
+import { stageReaderTestNode, stagesReaderNode } from "../tools/rust-engine-program/reader-test-node.mjs";
 import { testScratchParent } from "../tools/rust-engine-program/scratch-leak-report.mjs";
 
 const bytes = Buffer.from("a stand-in for the pinned Node");
 const hash = createHash("sha256").update(bytes).digest("hex");
 const readNode = async () => bytes;
-// Staging is macOS-only; Windows refuses to rename a folder onto another one.
+
+test("targets without a desktop pin retain their supplied reader runtime", () => {
+  for (const [platform, arch, expected] of [
+    ["linux", "x64", true], ["linux", "arm64", false], ["linux", "riscv64", false],
+    ["win32", "x64", false], ["darwin", "arm64", true], ["darwin", "x64", false],
+  ]) assert.equal(stagesReaderNode(platform, arch), expected, `${platform}-${arch}`);
+});
+// Windows refuses to rename a folder onto another one.
 const posix = { skip: process.platform === "win32" };
 // What a starting reader compares, plus the write time.
 const identity = path => { const { ino, ctimeNs, mtimeNs } = statSync(path, { bigint: true }); return { ino, ctimeNs, mtimeNs }; };

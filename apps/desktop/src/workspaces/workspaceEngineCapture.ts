@@ -6364,7 +6364,10 @@ export function createWorkspaceEngineCapture(
             ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
           }),
           settleNow: opts => publicSession.settleNow(opts),
-          close: opts => publicSession.close(opts),
+          // A later record open must follow this writer's lease release.
+          close: opts => stopped
+            ? publicSession.close(opts)
+            : enqueueResult("close record session", () => publicSession.close(opts)),
         } satisfies RecordEditSession;
         return publicSession;
       }
@@ -7436,15 +7439,18 @@ export function createWorkspaceEngineCapture(
         // Only materialize a choice that changes the active version's content.
         const activeVersionId = await activeVersionIdOf(engine);
         if (result.conflict.targetVersionId === activeVersionId) {
+          const materializeResolution = async (writes: Parameters<typeof materialize>[0]) => {
+            await materialize(writes, policy);
+            // Establish the restored baseline before the next external edit.
+            await engine.reconcileCapture?.();
+          };
           if (result.write && resolution.kind !== "keep-current") {
-            await materialize(
+            await materializeResolution(
               [await materializeWriteForSnapshot(engine, result.write.snapshot)],
-              policy,
             );
           } else if (result.delete) {
-            await materialize(
+            await materializeResolution(
               [{ kind: "delete", path: result.delete.before.path }],
-              policy,
             );
           } else if (
             result.conflict.chosenFrom === "incoming" &&
@@ -7472,9 +7478,8 @@ export function createWorkspaceEngineCapture(
                 },
               );
             }
-            await materialize(
+            await materializeResolution(
               [await materializeWriteForSnapshot(engine, head)],
-              policy,
             );
           }
         }
