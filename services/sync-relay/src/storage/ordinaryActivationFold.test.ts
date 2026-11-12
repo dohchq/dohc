@@ -94,6 +94,48 @@ it("a page validation refuses saves nothing, and the next fold refuses it again"
   expect(await f.fold()).toMatchObject({kind: "refused"});
 });
 
+/** Records the largest string or byte value any statement returns from now on. */
+function largestRead(storage: StorageContext) {
+  let largest = 0;
+  const note = (value: unknown) => {
+    for (const field of Object.values(value && typeof value === "object" ? value : {}))
+      largest = Math.max(largest, typeof field === "string" || field instanceof Uint8Array ? field.length : 0);
+    return value;
+  };
+  const prepare = storage.db.prepare.bind(storage.db);
+  storage.db.prepare = (sql: string) => {
+    const statement = prepare(sql);
+    return new Proxy(statement, {get(target, key) {
+      const value = Reflect.get(target, key);
+      if (key === "get") return (...args: never[]) => note(target.get(...args));
+      if (key === "all") return (...args: never[]) => target.all(...args).map(note);
+      if (key === "iterate") return function* (...args: never[]) {for (const row of target.iterate(...args)) yield note(row);};
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
+  };
+  return () => largest;
+}
+
+it("pages end at the byte bound, and the fold still reaches one replay's state", async () => {
+  const note = await seed(200), f = folding(note, {pageRows: 1_024, pageBytes: 8 * 1024});
+  expect(await f.fold()).toMatchObject({kind: "folded", reachedCursor: false});
+  expect(f.read()!.foldedEntries).toBeLessThan(100);
+  expect(await f.all()).toEqual({kind: "current"});
+  expect(f.read()!.stateSha256).toBe(replayed(note, 200).stateUpdateSha256);
+});
+
+it("rows of oversized payloads are refused at the byte bound without reading past it", async () => {
+  const bound = 32 * 1024, longer = typedNote(60), note = await seed(40), f = folding(note, {pageRows: 1_024, pageBytes: bound});
+  const oversized = note.appendMoment({momentId: "large", path: note.path, operation: "write", payloadAfterPath: note.path,
+    payloadAfterContentKind: "text", payloadAfterBlobSha256: "0".repeat(64), payloadAfterByteLength: 1, padding: "x".repeat(bound)});
+  for (const update of longer.updates.slice(40)) note.appendUpdate(update);
+  const largest = largestRead(f.storage);
+  expect(await f.all()).toEqual({kind: "blocked", relaySeq: oversized});
+  expect(f.read()!.throughRelaySeq).toBe(oversized - 1);
+  expect(await f.fold()).toEqual({kind: "blocked", relaySeq: oversized});
+  expect(largest()).toBeLessThan(bound);
+});
+
 it("a fold another fold overtook saves nothing", async () => {
   const note = await seed(150);
   let release!: () => void;
