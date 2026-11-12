@@ -209,8 +209,10 @@ export interface CreateSyncRelayHandlerOptions {
   serverRuns?: () => ServerRuns | undefined;
   // This server's copies of workspaces, which the account routes read through; undefined until they start.
   serverCopies?: () => ServerCopies | undefined;
-  // An account's reads through those copies, keyed by sign-in.
+  // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;
+  // This server's public HTTPS origin, which issues its accounts' actor keys. The phone's chat writes need it.
+  relayPublicOrigin?: string;
   // Button presses from shared views, per grant, and the host's answers, per owner.
   automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
@@ -296,6 +298,7 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
   serverCopies = () => undefined,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
+  relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
@@ -503,6 +506,7 @@ export function createSyncRelayHandler({
   const respondToAccountOperation = resolveAccountSession
     ? createAccountOperationRoute({
       storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter, feedWaits: accountFeedWaits,
+      lookupUserDisplayName, serverUrl: relayPublicOrigin,
     }) : undefined;
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
