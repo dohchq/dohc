@@ -11,6 +11,7 @@ import { resetAutomationButtonsForTests } from "./collections/useAutomationButto
 import { beginCollectionWriteOperation, CollectionFieldWriteHost, resetCollectionFieldWritesForTests } from "./collections/recordFieldWrites";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { deferred } from "../testing/deferred";
 
 // A document Collection's record, open in the panel beside its view. The
 // page, the panel, the fields and the write queue are real. The record's
@@ -172,6 +173,9 @@ function makeBridge(records: CollectionRecord[], schema: CollectionSchema = TASK
 /** The queries that looked for the open record by its id, and not the view's own. */
 const searches = (bridge: ReturnType<typeof makeBridge>) =>
   bridge.queryCollectionRecords.mock.calls.filter(([params]) => params.limit === FIND_RECORD_PAGE);
+/** How many records each read for the open record asked for, in order. The view's own queries name no number. */
+const lookups = (bridge: ReturnType<typeof makeBridge>) =>
+  bridge.queryCollectionRecords.mock.calls.flatMap(([params]) => (params.limit === undefined ? [] : [params.limit]));
 
 /** What the shell draws as a record's body: the file's text, where a caret can be, and a control of the file's view. */
 const body = (path: string) => (
@@ -477,7 +481,7 @@ describe("a document record's panel", () => {
     expect(within(panel()).queryByRole("heading")).toBeNull();
   });
 
-  it("finds a kept record the table has not loaded by its id, and reads it again from its page of records when the Collection changes", async () => {
+  it("finds a kept record the table has not loaded by its id, and reads only that record again when the Collection changes", async () => {
     const records = Array.from({ length: 600 }, (_, index) => task(`rec-${index}`, `Task ${index}`));
     const bridge = makeBridge(records);
     renderPage(bridge, { initialOpenRecord: "rec-550" });
@@ -485,14 +489,127 @@ describe("a document record's panel", () => {
     expect(shownBody().dataset.path).toBe("tasks/Task 550.md");
     // The table holds its first records only. The search read the Collection a page at a time, up to the record's.
     expect(screen.queryByRole("button", { name: "Open Task 550" })).toBeNull();
-    expect(searches(bridge)).toHaveLength(2);
+    expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE]);
 
     records[550] = task("rec-550", "Task 550, done", "tasks/Task 550.md");
     act(() => bridge.changed());
     await screen.findByRole("complementary", { name: "Task 550, done" });
-    // The record kept its panel through the read, and one query of its own page found it.
+    // The record kept its panel through the read. A refresh costs one read of one record, from where the record was.
     expect(panel()).toBe(record);
-    expect(searches(bridge)).toHaveLength(3);
+    expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE, 1]);
+    expect(bridge.queryCollectionRecords).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", collectionPath: "tasks", resolveRelations: true, limit: 1,
+      cursor: { sortValues: [], recordPath: "tasks/Task 549.md", recordId: "rec-549" },
+    });
+
+    // A record that takes the place before it moves it. The search finds it again, and the next refresh reads it where it is now.
+    records.splice(550, 0, task("rec-new", "Task 549a"));
+    act(() => bridge.changed());
+    await waitFor(() => expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE, 1, 1, FIND_RECORD_PAGE, FIND_RECORD_PAGE]));
+    records[551] = task("rec-550", "Task 550, shipped", "tasks/Task 550.md");
+    act(() => bridge.changed());
+    await screen.findByRole("complementary", { name: "Task 550, shipped" });
+    expect(lookups(bridge).slice(6)).toEqual([1]);
+    expect(bridge.queryCollectionRecords.mock.lastCall?.[0].cursor?.recordId).toBe("rec-new");
+  });
+
+  it("keeps where a record was while the table holds it, so a refresh that drops its row reads one record", async () => {
+    // The record is found outside the table's rows, then the table loads it, then a refresh drops its row again.
+    const records = Array.from({ length: 150 }, (_, index) => task(`rec-${index}`, `Task ${index}`));
+    const bridge = makeBridge(records);
+    renderPage(bridge, { initialOpenRecord: "rec-120" });
+    await screen.findByRole("complementary", { name: "Task 120" });
+    expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE]);
+    // The table reads its next page, which holds the record.
+    grid().scrollTop = 2800;
+    fireEvent.scroll(grid());
+    await waitFor(() => expect(grid().getAttribute("aria-rowcount")).toBe("152"));
+
+    records[120] = task("rec-120", "Task 120, done", "tasks/Task 120.md");
+    act(() => bridge.changed());
+    await screen.findByRole("complementary", { name: "Task 120, done" });
+    expect(lookups(bridge).filter((limit) => limit === FIND_RECORD_PAGE)).toHaveLength(1);
+  });
+
+  it("stops reading pages for a record the panel no longer shows", async () => {
+    const records = Array.from({ length: 1200 }, (_, index) => task(`rec-${index}`, `Task ${index}`));
+    const bridge = makeBridge(records);
+    const read = bridge.queryCollectionRecords.getMockImplementation()!;
+    const firstPage = deferred<void>();
+    bridge.queryCollectionRecords.mockImplementation(async (params) => {
+      if (params.limit === FIND_RECORD_PAGE && !params.cursor) await firstPage.promise;
+      return read(params);
+    });
+    renderPage(bridge, { initialOpenRecord: "rec-1100" });
+    await waitFor(() => expect(searches(bridge)).toHaveLength(1));
+    // The person closes the record while its first page of records is still being read.
+    fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
+    expect(sides()).toEqual([]);
+    await act(async () => {
+      firstPage.resolve();
+      await firstPage.promise;
+    });
+    // A whole refresh of the table later, the search has read no second page.
+    records[0] = task("rec-0", "Task 0, done", "tasks/Task 0.md");
+    act(() => bridge.changed());
+    await screen.findByRole("button", { name: "Open Task 0, done" });
+    expect(searches(bridge)).toHaveLength(1);
+  });
+
+  it("looks once for a record that is gone, and again only for another record", async () => {
+    const records = Array.from({ length: 600 }, (_, index) => task(`rec-${index}`, `Task ${index}`));
+    const bridge = makeBridge(records);
+    renderPage(bridge, { initialOpenRecord: "rec-gone" });
+    await screen.findByText("This record is no longer in this Collection.");
+    expect(searches(bridge)).toHaveLength(2);
+
+    records[0] = task("rec-0", "Task 0, done", "tasks/Task 0.md");
+    act(() => bridge.changed());
+    await screen.findByRole("button", { name: "Open Task 0, done" });
+    expect(screen.getByText("This record is no longer in this Collection.")).toBeTruthy();
+    expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE]);
+
+    // Another record takes the panel, and a refresh drops its row from the table: it is looked for.
+    open("Task 3");
+    records.push(...records.splice(3, 1));
+    act(() => bridge.changed());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Open Task 3" })).toBeNull());
+    await waitFor(() => expect(searches(bridge)).toHaveLength(4));
+    expect(sides()).toEqual(["Task 3"]);
+  });
+
+  it("never shows one record's fields or body under another record's name when the first is still being looked for", async () => {
+    const records = Array.from({ length: 600 }, (_, index) => task(`rec-${index}`, `Task ${index}`));
+    records[550] = { ...task("rec-550", "Task 550"), values: [value("title", "Task 550"), value("done", true), value("tags", ["beta"]), value("notes", "Only on Task 550")] };
+    const bridge = makeBridge(records);
+    const read = bridge.queryCollectionRecords.getMockImplementation()!;
+    const lastPage = deferred<void>();
+    bridge.queryCollectionRecords.mockImplementation(async (params) => {
+      if (params.limit === FIND_RECORD_PAGE && params.cursor) await lastPage.promise;
+      return read(params);
+    });
+    renderPage(bridge, { initialOpenRecord: "rec-550" });
+    await waitFor(() => expect(searches(bridge)).toHaveLength(2));
+    // Record 550 is still being looked for when the person opens record 3 from its row.
+    open("Task 3");
+    const shown = () => ({
+      name: within(panel()).getByRole("heading").textContent,
+      body: shownBody().dataset.path,
+      notes: property("notes").textContent,
+      done: within(property("done")).getByRole<HTMLInputElement>("checkbox").checked,
+    });
+    const third = { name: "Task 3", body: "tasks/Task 3.md", notes: "notesEmpty", done: false };
+    expect(shown()).toEqual(third);
+    await act(async () => {
+      lastPage.resolve();
+      await lastPage.promise;
+    });
+    // A whole refresh of the table later, the panel still shows only record 3.
+    records[0] = task("rec-0", "Task 0, done", "tasks/Task 0.md");
+    act(() => bridge.changed());
+    await screen.findByRole("button", { name: "Open Task 0, done" });
+    expect(shown()).toEqual(third);
+    expect(sides()).toEqual(["Task 3"]);
   });
 
   it("stops looking for a kept record after the search's limit, and says so", async () => {
@@ -504,6 +621,12 @@ describe("a document record's panel", () => {
       : read(params));
     renderPage(bridge, { initialOpenRecord: "rec-9" });
     expect(await screen.findByText("dohc could not find this record in the first 5,000 records. Close it, then open it from its view.")).toBeTruthy();
+    expect(searches(bridge)).toHaveLength(FIND_RECORD_LIMIT / FIND_RECORD_PAGE);
+
+    // A later refresh of the table does not look for it again.
+    bridge.records[0] = task("rec-1", "Plan, done", "tasks/Plan.md");
+    act(() => bridge.changed());
+    await screen.findByRole("button", { name: "Open Plan, done" });
     expect(searches(bridge)).toHaveLength(FIND_RECORD_LIMIT / FIND_RECORD_PAGE);
   });
 

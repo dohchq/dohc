@@ -92,27 +92,34 @@ const RECORD_GONE = "This record is no longer in this Collection.";
 const RECORD_NOT_FOUND = "dohc could not find this record in the first 5,000 records. Close it, then open it from its view.";
 const RECORD_NOT_READ = "dohc could not read this record. Close it, then open it again.";
 
-/** What a search for the open record found: the record and the page of records it is on, or why there is none. */
-type FoundRecord = { record: CollectionRecord; cursor: CollectionQueryCursor | undefined } | { record: null; problem: string };
+/** Where a record is in the Collection's own order: the cursor that reads from it on. Undefined for the first record. */
+type RecordPlace = CollectionQueryCursor | undefined;
+/** What a search for the open record found: the record and its place, or why there is none. */
+type FoundRecord = { record: CollectionRecord; place: RecordPlace } | { record: null; problem: string };
 
+/** Answers null once `superseded`, having read no further page. */
 async function findRecord(
   read: (params: CollectionQueryParams) => Promise<CollectionQueryResult>,
   collectionPath: string,
   recordId: string,
-  // The page the record was on when it was last found, which is read first.
-  hint: CollectionQueryCursor | undefined,
-): Promise<FoundRecord> {
-  const page = (cursor: CollectionQueryCursor | undefined) =>
-    read({ collectionPath, resolveRelations: true, limit: FIND_RECORD_PAGE, ...(cursor ? { cursor } : {}) });
-  if (hint) {
-    const record = (await page(hint)).records.find((entry) => entry.id === recordId);
-    if (record) return { record, cursor: hint };
+  // The record's place when it was last found, which one read of one record checks first.
+  known: { place: RecordPlace } | null,
+  superseded: () => boolean,
+): Promise<FoundRecord | null> {
+  const page = (cursor: RecordPlace, limit: number) =>
+    read({ collectionPath, resolveRelations: true, limit, ...(cursor ? { cursor } : {}) });
+  if (known) {
+    const record = (await page(known.place, 1)).records[0];
+    if (record?.id === recordId) return { record, place: known.place };
   }
-  let cursor: CollectionQueryCursor | undefined;
+  let cursor: RecordPlace;
   for (let seen = 0; seen < FIND_RECORD_LIMIT; seen += FIND_RECORD_PAGE) {
-    const result = await page(cursor);
-    const record = result.records.find((entry) => entry.id === recordId);
-    if (record) return { record, cursor };
+    if (superseded()) return null;
+    const result = await page(cursor, FIND_RECORD_PAGE);
+    const at = result.records.findIndex((entry) => entry.id === recordId);
+    // The cursor a page ending at the record before it would give: the Collection's own order sorts by no field.
+    const before = result.records[at - 1];
+    if (at >= 0) return { record: result.records[at]!, place: before ? { sortValues: [], recordPath: before.path, recordId: before.id } : cursor };
     if (result.nextCursor === null) return { record: null, problem: RECORD_GONE };
     cursor = result.nextCursor;
   }
@@ -552,15 +559,22 @@ export function CollectionPage({
   const shownRecord = lastRecord.current;
   const recordProblem = heldRecord === undefined && found !== null && found.record === null ? found.problem : undefined;
   const held = heldRecord !== undefined;
+  // Where the open record was last found. It outlives the rows that hold the record, which a refresh drops.
+  const foundAt = useRef<{ id: string; place: RecordPlace } | null>(null);
   useEffect(() => {
-    if (openRecordId === null || state.status !== "ready") return;
+    // A closed record is looked for again when a person opens it again.
+    if (openRecordId === null) return setSought(null);
+    if (state.status !== "ready") return;
     // A record the view holds needs no search, and what an earlier search found is older than the view's.
     if (held) return setSought(null);
+    // A search that ended without the record is not run again for it.
+    if (sought !== null && sought.id === openRecordId && sought.record === null && sought.problem !== RECORD_NOT_READ) return;
     let stale = false;
-    const hint = sought !== null && sought.id === openRecordId && sought.record !== null ? sought.cursor : undefined;
-    findRecord(executor, collectionPath, openRecordId, hint).then(
+    findRecord(executor, collectionPath, openRecordId, foundAt.current?.id === openRecordId ? foundAt.current : null, () => stale).then(
       (result) => {
-        if (!stale) setSought({ id: openRecordId, ...result });
+        if (stale || result === null) return;
+        foundAt.current = result.record === null ? null : { id: openRecordId, place: result.place };
+        setSought({ id: openRecordId, ...result });
       },
       () => {
         // A record the panel already shows keeps its last values: the next refresh looks again.
@@ -570,8 +584,13 @@ export function CollectionPage({
     return () => {
       stale = true;
     };
-    // Each refresh of the view's records looks again, so a record outside them shows its changes.
+    // Each refresh of the view's records reads the record again, so a record outside them shows its changes.
   }, [openRecordId, held, state.status, state.records, state.groups, executor, collectionPath]);
+  /** Reads the Collection's records again because a person asked, which looks again for a record an earlier search did not find. */
+  const readAgain = () => {
+    setSought(null);
+    void store.refresh();
+  };
   const recordDrafts = [...new Map([...state.records, ...(state.groups?.flatMap(group => group.records) ?? [])]
     .filter(record => record.creationDelivery === "pending" || record.creationDelivery === "offline" || record.creationDelivery === "refused").map(record => [record.path, record])).values()];
   const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
@@ -821,7 +840,7 @@ export function CollectionPage({
           type="button"
           onClick={() => {
             void refreshDetails();
-            void store.refresh();
+            readAgain();
           }}
 
         >
@@ -995,7 +1014,7 @@ export function CollectionPage({
           <span className="truncate text-[12px] text-danger">
             dohc could not read this collection's records. {state.error}
           </span>
-          <SecondaryButton size="compact" onClick={() => void store.refresh()}>
+          <SecondaryButton size="compact" onClick={readAgain}>
             Retry
           </SecondaryButton>
         </>
