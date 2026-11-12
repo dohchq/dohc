@@ -29,6 +29,8 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
   readonly threads: ChatThread[] = [];
   readonly messages = new Map<string, ChatMessage[]>();
   readonly decisions = new Map<string, Decision[]>();
+  /** Active reactions, oldest first. */
+  readonly reactions: ChatReaction[] = [];
   readonly readSequence = new Map<string, number>();
   readonly wireIds = new Map<string, string>();
   readonly agentUnread = new Set<string>();
@@ -92,6 +94,19 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
     const list = this.decisions.get(threadId) ?? [];
     list.push({ workspaceId: WORKSPACE_ID, threadId, atMs: this.now(), ...decision });
     this.decisions.set(threadId, list);
+  }
+
+  addReaction(message: Pick<ChatMessage, "id" | "threadId">, emoji: string, author: ChatReaction["author"]): ChatReaction {
+    const reaction: ChatReaction = {
+      reactionId: `${message.id}:${emoji}:${author.authorId}`, threadId: message.threadId, messageId: message.id, emoji, author,
+      state: "added", atMs: this.now(),
+    };
+    this.reactions.push(reaction);
+    return reaction;
+  }
+
+  private reactionsOn(messageId: string): ChatReaction[] {
+    return this.reactions.filter((reaction) => reaction.messageId === messageId);
   }
 
   async ensureGeneralChannel(input: { workspaceId: string }): Promise<ChatChannel> {
@@ -158,6 +173,11 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
     return [...(this.decisions.get(threadId) ?? [])];
   }
 
+  async listReactions(input: { workspaceId: string; threadId: string }): Promise<ChatReaction[]> {
+    this.enter("listReactions", input.workspaceId);
+    return this.reactions.filter((reaction) => reaction.threadId === input.threadId);
+  }
+
   async getThreadProjection(input: ProjectionInput) {
     this.enter("getThreadProjection", input.workspaceId);
     this.projections.push(input);
@@ -190,7 +210,7 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
           position: { createdAtMs: first.createdAtMs, lane: "posts", id: thread.id },
           message: first,
           ...decisionFor(first),
-          reactions: [],
+          reactions: this.reactionsOn(first.id),
           post: {
             replyCount: replies.length,
             repliers: replies.slice(-1).map((reply) => ({ author: reply.author, lastReplyAtMs: reply.createdAtMs })),
@@ -200,7 +220,7 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
         });
       } else {
         for (const message of messages.filter((candidate) => !candidate.parentMessageId)) {
-          items.push({ position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id }, message, ...decisionFor(message), reactions: [] });
+          items.push({ position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id }, message, ...decisionFor(message), reactions: this.reactionsOn(message.id) });
         }
       }
     }

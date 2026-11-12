@@ -172,7 +172,7 @@ describe("a phone write's publication", () => {
     const answered = await publishOperation({ storage, copy: engine.replica, record: write, authorize, ...time });
     expect(answered).toMatchObject({ state: "saved", record: { stage: "saved", messageState: "published", result: { threadId: THREAD } } });
     expect(engine.steps()).toBe(1);
-    expect(authorize, "the caller is checked again before the answer").toHaveBeenCalledOnce();
+    expect(authorize, "the caller is checked again after the step and before the answer").toHaveBeenCalledTimes(2);
     // A retry answers from the record, without another sync or read.
     const again = await publishOperation({ storage, copy: engine.replica, record: answered.record!, ...time });
     expect(again.state).toBe("saved");
@@ -327,6 +327,24 @@ describe("a phone write's publication", () => {
     const answered = await publishing.answer;
     expect(answered).toMatchObject({ state: "pending", record: { stage: "publishing" } });
     expect(engine.signals[0]?.aborted).toBe(true);
+  });
+
+  it("checks the caller after each step and each wait, and rejects without an answer or more work once access is gone", async () => {
+    for (const [lostAt, reads] of [[1, 0], [2, 1]] as const) {
+      const { storage } = await relay();
+      const write = record(storage, { stages: [replyStage()] });
+      const engine = copy(new Map([["reply-1:reply", written("reply-1:reply", [[1, "pending"]])]]));
+      // The first check follows the first step; the second follows the wait after that attempt.
+      let checks = 0;
+      const authorize = vi.fn(async () => {
+        if (++checks === lostAt) throw new Error("access ended");
+      });
+      await expect(publishOperation({ storage, copy: engine.replica, record: write, authorize, deadlineMs: 1_000, ...clock() }),
+        `check ${lostAt}`).rejects.toThrow("access ended");
+      expect(engine.steps(), `check ${lostAt}: no step after it`).toBe(1);
+      expect(engine.sent, `check ${lostAt}: receipt reads`).toHaveLength(reads);
+      expect(authorize).toHaveBeenCalledTimes(lostAt);
+    }
   });
 
   it("rejects when its caller gives up, instead of answering", async () => {

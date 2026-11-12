@@ -1266,6 +1266,14 @@ const rawChatMessageSchema = z
     options: z.array(z.string()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
+    // The message's active reactions, oldest first per cell. Absent when it has none.
+    reactions: z.array(z.object({
+      emoji: z.string().min(1),
+      authorId: z.string().min(1),
+      authorKind: z.enum(["human", "agent"]),
+      authorDisplayName: z.string(),
+      atMs: z.number().int().nonnegative(),
+    }).strict()).min(1).optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
     authorReported: chatReportedAgentSchema.optional(),
     work: chatWorkReportSchema.optional(),
