@@ -176,7 +176,7 @@ _Avoid_: permission, ACL, private folder, private channel
 
 **Invite link**:
 A URL that lets anyone who signs in with a server account join a workspace as a member. The owner or an admin can turn it off or reset it. Planned, not built yet.
-_Avoid_: share link (that grants one share without an account), share code
+_Avoid_: share link (that grants one share without an account), share code, named-account invite link (the link for one share invite)
 
 ### Sharing
 

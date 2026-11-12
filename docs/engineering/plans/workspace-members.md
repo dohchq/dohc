@@ -24,7 +24,7 @@ The first version serves up to about 1,000 members with about 100 online at once
 
 | Role | What they can do |
 | --- | --- |
-| Owner | Everything. Only the owner adds or removes admins. Each workspace has one owner. |
+| Owner | Everything an admin can do. Only the owner adds or removes admins and accepts change proposals. Like an admin, the owner does not reach other people's private chats. Each workspace has one owner. |
 | Admin | Reaches everything except other people's private chats: direct messages, General, and chats with agents. Invites and removes members. Sets the member level and access rules. Creates folders and Groups. Moderates. |
 | Member | Reaches the workspace at the member level, except where an access rule says otherwise. |
 
@@ -55,11 +55,18 @@ An item a member cannot reach is hidden. dohc does not list its name in the file
 
 Hiding covers only the names dohc lists. Text that a member can read still shows whatever it says, such as a page link written as `[[Team/Plan]]` or a folder name typed in a message.
 
-An automation reaches only what all the editors of its Collection reach. When the member level is Edit, every member edits every Collection they reach, so an automation step that touches a folder hidden from members stops.
+An automation runs a step only if every editor of its Collection could take that step. The editors are the owner, the admins, and every member with Edit, from the member level or from a rule. When members can edit a Collection:
+
+- A step that touches a folder hidden from any editor stops.
+- A step that posts in a Group stops if any editor cannot post there, such as an Announcements Group with "Members: View".
+- A step that reads a Group stops if any editor cannot read it.
+- A step that acts as one person, such as waking that person's agent, stops whenever anyone else can edit the Collection, even a single admin.
+
+To keep such an automation running, keep its Collection in a folder where members have View or Comment.
 
 A folder's rule lives in a file inside it, `access.yaml`. The rule moves with its folder, whatever renames it, and it can be read and exported like any other file. Only the owner and admins see and change `access.yaml`; members never see it. It names people by a verified account email, as share invites do. The owner changes it like any file. An admin changes it through the relay's checked write path, which `collection.yaml` uses today. The relay alone checks that the writer is an admin, and the owner's computer accepts `access.yaml` on that path. If the file cannot be read, members lose access to the folder until it is fixed.
 
-A Group's rule is saved on the Group itself, by its lasting id, and changed in the Group's settings. A Group is not a file, and its link to a folder does not follow renames, so its rule cannot live in a folder. Only the owner and admins see and change a Group's rule.
+A Group's rule is saved on the Group itself, by its lasting id, and changed in the Group's settings. A Group is not a file, and its link to a folder does not follow renames, so its rule cannot live in a folder. The Group's rule covers its messages. The Group's folder is an ordinary folder with its own `access.yaml`. When the owner or an admin changes a Group's rule, dohc writes the same rule into that folder's `access.yaml` in the same action, and says so if either change fails. If the folder is no longer at the path the Group recorded, dohc says so and changes only the Group's rule. Only the owner and admins see and change a Group's rule.
 
 A folder's files must never reach members before its rule. The owner's computer sends a folder's `access.yaml` with or before the folder's other files, so a restricted folder copied in from outside dohc is never briefly visible. [ADR 0015](../adr/0015-access-rules-live-in-the-folder.md) records why a folder's rule lives in the folder and a Group's rule lives on the Group.
 
@@ -72,23 +79,23 @@ When an item is hidden from a member, or a member is removed, the copies already
 ## Joining and leaving
 
 - **Email invites.** They work as share invites do today.
-- **One invite link.** Anyone with the link who signs in to the server becomes a member. The owner or an admin can turn the link off or reset it. Resetting stops the old link working. Turning the link off or resetting it does not remove anyone who already joined. On a server where sign-up is closed, the link also lets a new person create an account, only to join this workspace. Turning the link off stops that.
+- **One invite link.** Anyone with the link who signs in to the server becomes a member. The owner or an admin can turn the link off or reset it. Resetting stops the old link working. Turning the link off or resetting it does not remove anyone who already joined. On a server where sign-up is closed, the link also lets a new person create an account, only to join this workspace. That account is then an ordinary account on the server. The server's operator can turn this off for the whole server, and turning the link off stops it too.
 - **Accounts.** Members need a server account.
-- **Leaving and removal.** A member can leave. The owner or an admin can remove a member, which ends their access immediately. What they posted and changed stays in History under their name. A removed person cannot rejoin through the invite link. The Members page lists them as removed, with **Let back in** as the way back.
+- **Leaving and removal.** A member can leave. The owner or an admin can remove a member, which ends their access immediately. What they posted and changed stays in History under their name. A removed person's account cannot rejoin through the invite link. Someone with a different account can, until the link is reset. The Members page lists them as removed, with **Let back in** as the way back.
 - **Ending membership.** The owner can end membership for everyone at once, after a warning, as deleting a share does today. The owner cannot leave, and moving the owner role to someone else is not in this version.
 
 ## What a member sees
 
 - The workspace opens as its own workspace in the member's app, and in a browser. It does not open as a read-only folder inside another workspace, because Comment and Edit would not work there.
 - A new member sees everything they can reach, including messages and History from before they joined.
-- Members see the other members' names and roles. The owner and admins also see emails.
+- Members see the names and roles of everyone in the workspace. The owner and admins also see emails.
 - A member gets a Notice for a mention, a reply to their message, or a direct message. Other Group messages show as unread.
 
 ## Chats
 
 Members see the Groups they can reach and the Comments on files they can see. Only the owner and admins create Groups. A new Group reaches members without an invite.
 
-A member can start a direct message with any other member from the member list. The server connects them without showing either person's email. General, direct messages, and chats with agents stay private to the people in them.
+A member can start a direct message with anyone in the workspace from the member list. The server connects them without showing either person's email. General, direct messages, and chats with agents stay private to the people in them.
 
 General is each workspace's personal chat. In a community, people may expect a "general" room to be public. The community makes a Group for that.
 
@@ -98,9 +105,9 @@ The owner and admins can delete any message in a Group and remove a member. Anyo
 
 ## Members' agents
 
-A person's agent acts with at most that person's access. Today an agent's reach covers only workspaces its owner owns. A member can also give their agent reach in a workspace where they are a member, up to their own access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members. It cannot manage members or change access rules.
+A person's agent acts with at most that person's access. Today an agent's reach covers only workspaces its owner owns. A member can also give their agent reach in a workspace where they are a member, up to their own access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members. dohc gives it no tool to manage members or change access rules. That is not a boundary: an agent that runs as the admin can do what the admin can.
 
-The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the Members page does: list, invite, and remove members, set the member level, and change access rules. dohc's owner tools already manage share links this way. Admins use the app.
+The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the Members page does: list, invite, and remove members, set the member level, and change access rules. Today those tools list share grants, read a grant's details, and list or disconnect a link's agents. Admins use the app.
 
 ## Not in this version
 
@@ -119,11 +126,12 @@ The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the
 dohc already has email invites, the three access levels, grants with revocation, Groups, a checked write path for Collection files, server reads while the owner is offline, and per-workspace agent reach. These parts are new:
 
 - **A share of the whole workspace.** Every live share today names specific paths, a Group, or a chat. A version share with no paths covers the whole workspace, but frozen at one version (`packages/security-contract/src/shareSelector.ts`). The relay's file filter allows nothing for a live file share with no paths (`services/sync-relay/src/shareFilter.ts`). A member's share covers the current workspace and anything added later.
-- **Roles held by the relay**, next to the grants. A folder's rule comes from its `access.yaml` file in the owner's workspace. A Group's rule is saved on the Group.
-- **One reachable set per member, used everywhere.** Files, search, History, links, Collections, chats, and agent tools all read through it. Piece 1 builds this set before any rule exists, so piece 3 does not have to change every surface again.
+- **Roles held by the relay**, next to the grants. A folder's rule comes from its `access.yaml` file in the owner's workspace. A Group's rule is saved on the Group, and the Group's folder has its own `access.yaml`.
+- **One reachable set per member, used everywhere.** Files, search, History, links, Collections, chats, Notices, presence, and agent tools all read through it. Piece 1 builds this set before any rule exists, so piece 3 does not have to change every surface again.
 - **New Markdown pages under Edit.** The checked write path that creates Collection records today also creates pages in folders where the person has Edit.
+- **Sign-up through an invite link.** On a server with closed sign-up, only an invited email can create an account today (`services/workspace-api/src/signUpAdmission.ts`). The invite link is a new way in, so the server gets a setting that turns it off.
 - **Deleting Group messages.** Only share discussion messages can be deleted today (`services/sync-relay/src/discussionRoutes.ts`).
-- **Chat limits for a community.** The relay holds at most 128 signed-in browser follow requests for a workspace's chats at once (`MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE` in `services/sync-relay/src/namedRecipientChat.ts`). Each request follows one Group, so 100 members online who each follow 10 Groups need about 1,000. Piece 2 gives each member one follow request for all their Groups, or raises the cap to fit. The share-link caps do not apply to signed-in members.
+- **Chat limits for a community.** The relay holds at most 128 signed-in browser follow requests for a workspace's chats at once (`MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE` in `services/sync-relay/src/namedRecipientChat.ts`). Each request follows one Group, so 100 members online who each follow 10 Groups need about 1,000. Piece 2 gives each member one follow request for all their Groups, or raises the cap to fit. The relay also allows 32 follow requests per person and 96 live connections per workspace, 16 of them kept for the owner (`services/sync-relay/src/selfHostLiveProfile.ts`). 100 members online do not fit in 96 connections, so piece 2 raises that cap or shares connections. The share-link caps do not apply to signed-in members.
 - **Agent reach in workspaces the person does not own** (`services/sync-relay/src/storage/personalAgents.ts`).
 
 Roles, access rules, and the whole-workspace share are authorization changes. Each piece needs a second reviewer for authorization and isolation, as `AGENTS.md` requires.
@@ -132,9 +140,9 @@ Roles, access rules, and the whole-workspace share are authorization changes. Ea
 
 Each piece is one pull request, in this order:
 
-1. **Members.** The whole-workspace share, the Owner, Admin, and Member roles, the member level, email invites, the invite link, leaving and removal, a Members page in Settings, and the same actions in the owner's CLI and MCP tools. The relay builds each member's reachable set, which is the whole workspace until piece 3.
+1. **Members.** The whole-workspace share, the Owner, Admin, and Member roles, the member level, email invites, the invite link, leaving and removal, the server setting for sign-up through the invite link, a Members page in Settings, and the same actions in the owner's CLI and MCP tools. The relay builds each member's reachable set, which is the whole workspace until piece 3.
 2. **The member's workspace.** Opening it in the app and the browser, reaching every Group, direct messages between members, new pages under Edit, and the chat limits.
-3. **Access rules.** `access.yaml` for folders, rules on Groups, inheritance, hiding everywhere, the move warning, and the warning before hiding an item.
+3. **Access rules.** `access.yaml` for folders, rules on Groups and their folders, inheritance, hiding everywhere, the move warning, and the warning before hiding an item.
 4. **Moderation.** Deleting messages and removing members.
 5. **Members' agents.** Agent reach in workspaces where its person is a member.
 

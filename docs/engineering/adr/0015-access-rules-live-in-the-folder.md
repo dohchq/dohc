@@ -10,7 +10,7 @@ An access rule decides which members reach a folder or a Group. We keep a folder
 
 Folders have no lasting id. A rule kept anywhere else would have to follow a folder by its path. If someone renamed the folder outside dohc, for example in File Explorer, the rule would stop matching and the folder would open to every member. A file inside the folder moves with it, whatever renames it. The rule also stays a plain file the owner can read, back up, and export, which AGENTS.md commitment 1 asks for.
 
-A Group's rule is saved on the Group, by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename, so a rule in the Group's folder could separate from the Group and open it to every member.
+A Group's rule is saved on the Group, by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename, so a rule in the Group's folder could separate from the Group and open it to every member. The Group's rule covers its messages. The Group's folder keeps its own `access.yaml`, and Group settings writes the same rule into it when it changes the Group's rule.
 
 ## Considered options
 
@@ -20,7 +20,7 @@ A Group's rule is saved on the Group, by the Group's lasting id. A Group is not 
 ## Consequences
 
 - Access fails closed. If `access.yaml` cannot be read, members lose access to its folder, and the owner and admins still reach it.
-- The relay takes a rule from the owner's log or from an admin's write on the checked path. An admin's change takes effect when the relay commits it. The relay alone vouches for the writer's role, so the owner's computer accepts `access.yaml` on that path. A member's write never changes a rule: a member cannot create, change, or delete an `access.yaml` file.
+- The relay takes a rule from the owner's log or from an admin's write on the checked path. An admin's change takes effect when the relay commits it. The relay alone vouches for the writer's role, so the owner's computer accepts `access.yaml` on that path. A member's write never changes a rule: a member cannot create, change, or delete an `access.yaml` file, directly or through a change proposal.
 - The owner's computer sends a folder's `access.yaml` with or before the folder's other files, so a restricted folder is never briefly visible to members.
 - An agent or tool the owner runs can change a rule by editing the file. History records that change like any other.
 - Moving a folder keeps its own rule. Moving a file or a folder without a rule into another folder gives it that folder's rule.
