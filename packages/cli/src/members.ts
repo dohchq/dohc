@@ -57,7 +57,7 @@ const WorkspacePersonSchema = z.object({
   removedAtMs: time,
 }).strict();
 
-export const WorkspaceMembersViewSchema = z.object({
+const WorkspaceMembersViewSchema = z.object({
   workspaceId: z.string().min(1).max(256),
   workspaceName: z.string().max(1024),
   viewer: z.object({ memberId: z.string().min(1).max(256), role: z.enum(WORKSPACE_ROLES) }).strict(),
