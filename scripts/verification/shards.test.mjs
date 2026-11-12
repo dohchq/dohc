@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
@@ -607,13 +607,16 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
   const gate = await aggregateCloud("js", root.replaceAll("\\", "/"), { readJobs: async () => jobs, now: () => Date.parse(jobs.find(job => job.name === "typecheck + tests").completed_at), env, outputDirectory });
   assert.equal(gate.verdict, "PASS");
   assert.deepEqual(gate.flaky, flaky);
+  assert.equal(existsSync(summary), false);
+  assert.equal(log.mock.calls.some(call => call.arguments[0].startsWith("::warning")), false);
   await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
   const completed = JSON.parse(readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"));
   assert.equal(completed.verdict, "PASS");
   assert.deepEqual(completed.flaky, flaky);
   assert.equal(completed.commit, jobs[0].head_sha);
-  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]).filter(line => line.startsWith("Passed on retry:")), ["Passed on retry: recovered test", "Passed on retry: recovered test"]);
-  assert.equal(readFileSync(summary, "utf8"), "Passed on retry: recovered test\nPassed on retry: recovered test\n");
+  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]).filter(line => line.startsWith("Passed on retry:")), ["Passed on retry: task-1 › recovered test", "Passed on retry: task-1 › recovered test"]);
+  assert.equal(readFileSync(summary, "utf8"), "Passed on retry: task-1 › recovered test\n");
+  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]).filter(line => line.startsWith("::warning")), ["::warning title=Passed on retry::task-1 › recovered test"]);
   await assert.rejects(verifyCompletedCloud("js", { env: { ...env, GITHUB_SHA: "another-checkout" }, readJobs: async () => jobs, outputDirectory }), /aggregate.*commit/u);
   rmSync(join(outputDirectory, "js-result.json"));
   await assert.rejects(verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }), /ENOENT/u);

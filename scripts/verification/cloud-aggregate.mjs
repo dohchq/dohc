@@ -127,7 +127,7 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
   } finally {
     mkdirSync(outputDirectory, { recursive: true });
     writeFileSync(`${outputDirectory}/${scope}-completed-result.json`, JSON.stringify(report, null, 2) + "\n");
-    if (scope === "js") reportFlaky(report.flaky, env.GITHUB_STEP_SUMMARY);
+    if (scope === "js") reportFlaky(report.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
     console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
   }
 }
@@ -176,7 +176,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
       for (const step of report.steps) console.log(`  ${step.status} ${step.name}`);
       console.log(`  ${report.verdict} complete gate${report.error ? `: ${report.error}` : ""}`);
     }
-    if (scope === "js") reportFlaky(report.flaky, env.GITHUB_STEP_SUMMARY);
+    if (scope === "js") reportFlaky(report.flaky);
     console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s (${report.timing ?? "unavailable"}), ${report.tasks ?? 0} tasks`);
   }
 }

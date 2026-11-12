@@ -183,10 +183,12 @@ export function rerunCommand(row) {
 export const slowest = (rows, count = slowestKept) => rows.toSorted((a, b) => b.seconds - a.seconds).slice(0, count)
   .map(row => ({ ...row, seconds: Math.round(row.seconds * 10) / 10 }));
 
-export function reportFlaky(tests = [], summary = process.env.GITHUB_STEP_SUMMARY) {
+export function reportFlaky(tests = [], { summary, annotate = false } = {}) {
   for (const row of tests) {
-    const line = "Passed on retry: " + row.test;
+    const message = row.id + " › " + row.test;
+    const line = "Passed on retry: " + message;
     console.log(line);
     if (summary) appendFileSync(summary, line + "\n");
+    if (annotate) console.log("::warning title=Passed on retry::" + message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A"));
   }
 }

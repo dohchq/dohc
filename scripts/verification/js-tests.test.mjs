@@ -1076,6 +1076,30 @@ for (const kind of ["desktop", "accounts"]) {
   });
 }
 
+test("cloud browser report recording preserves command errors and still rejects invalid reports after success", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-browser-report-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const kind of ["desktop", "accounts"]) {
+    for (const malformed of [false, true]) {
+      for (const commandFails of [false, true]) {
+        const task = { id: kind + ":proof", kind, tag: "@proof" };
+        const record = { steps: [], tests: [], completed: [], flaky: [] };
+        const commandError = new Error("proof command failed");
+        const executeCommand = async (_command, _args, options) => {
+          const path = options.env.PLAYWRIGHT_JSON_OUTPUT_NAME;
+          rmSync(path, { force: true });
+          if (malformed) writeFileSync(path, "{");
+          if (commandFails) throw commandError;
+        };
+        await assert.rejects(runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { executeCommand, directory: root }),
+          error => commandFails ? error === commandError : malformed ? error instanceof SyntaxError : error.code === "ENOENT");
+        assert.deepEqual(record.completed, []);
+        assert.deepEqual(record.flaky, []);
+      }
+    }
+  }
+});
+
 test("cloud node:test files rerun once after a test failure; other commands do not", async t => {
   const root = mkdtempSync(join(tmpdir(), "cloud-node-retry-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

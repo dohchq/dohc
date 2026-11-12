@@ -105,7 +105,7 @@ export async function runJavascript(groups, record, save, availability, { execut
       const executable = task.kind === "accounts" ? [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]] : desktopProofCommand(args);
       try { await command(task, ...executable, { env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: path, DOHC_QA_OUTPUT: directory } }); }
       finally {
-        record.flaky.push(...playwrightFlaky(readJson(path)?.suites).map(test => ({ id: task.id, test })));
+        try { record.flaky.push(...playwrightFlaky(readJson(path)?.suites).map(test => ({ id: task.id, test }))); } catch {}
         save();
       }
       const result = passingBrowserReport(path);
