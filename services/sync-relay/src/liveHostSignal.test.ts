@@ -71,7 +71,8 @@ describe("live host cancellation lifetime", () => {
       await new Promise(setImmediate); gc();
       held.push(signals.filter(signal => signal.deref() !== undefined).length);
     }
-    expect(held).toEqual([0, 0]);
+    // A held signal would add 50 a batch. V8 can keep one briefly reachable, which a later collection frees.
+    expect(held.every(count => count < 5), `held ${held.join(", ")}`).toBe(true);
     expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
   });
 
