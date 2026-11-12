@@ -6313,6 +6313,11 @@ it("pushes a live document's settled edit on the next pass while another documen
   expect(after).not.toContain("liveApplication.unloadDocument");
   expect(o.host.retains(o.other)).toBe(true);
   expect(o.host.settled(o.other)).toBe(false);
+  // The other document still holds readiness, so the workspace keeps its pull every pass. A pass that tries
+  // the other document again catches up instead, at most once across these three passes since each wait is longer.
+  const unreadyPulls = () => o.host.hostedPulls(o.workspace.workspaceId).reasons.unready ?? 0, pulled = unreadyPulls();
+  await o.nextPass(); await o.nextPass(); await o.nextPass();
+  expect(unreadyPulls(), "The workspace must keep pulling every pass while the other document backs off.").toBeGreaterThanOrEqual(pulled + 2);
 });
 
 // A review of the fix above: one check served both "may this target capture

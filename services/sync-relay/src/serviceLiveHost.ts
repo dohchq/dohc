@@ -1578,9 +1578,10 @@ export async function startServiceLiveHost(options: {
         });
         // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
         // recovery probe. One with no documents still pulls while its replica has departures to finish.
-        // One that is not ready only pulls, once a pass unless an activation above caught it up, so its held lists page
-        // on and an ended hold is freed, however long another document holds readiness back. One whose replica has not
-        // checked its origin does neither.
+        // One that is not ready pulls once a pass unless an activation above caught it up, so its held lists page
+        // on and an ended hold is freed, however long another document holds readiness back. It pushes first while
+        // only documents with no owner waiting out a backoff hold it back. One whose replica has not checked its
+        // origin does neither.
         for(const [workspaceId,attached] of [...attachments]){
           if(!attached.hosted.checked)continue;
           if(activation!.workspaceReady(workspaceId))await step(async()=>{
@@ -1588,6 +1589,11 @@ export async function startServiceLiveHost(options: {
             // The pull uses the attachment standing now, not one the pass saw before the push.
             const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
             if(current && reason)await pull(current,passSignal,reason);
+          });
+          else if(activation!.workspacePushes(workspaceId))await step(async()=>{
+            await attached.hosted.push(passSignal);
+            const current=checked(workspaceId);
+            if(current && !catchUp.has(workspaceId))await pull(current,passSignal,"unready");
           });
           else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal,"unready"));
         }

@@ -369,9 +369,14 @@ export class ServiceActivationDriver {
     },{binding:operation.basis.ownerBinding,activationPending:false,ownerUserId:saved.ownerUserId},undefined,slot);
     return owner.consumer;
   }
-  // A document with no owner that waits out a backoff after a failed activation does not hold its workspace back,
-  // so its siblings' settled edits still publish while it waits.
   workspaceReady(workspaceId:string){
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
+      !this.#blocked.has(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+  }
+  // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
+  // holds readiness, so the workspace keeps pulling as an unready one does.
+  workspacePushes(workspaceId:string){
     return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
       !this.#blocked.has(targetKey(target)) && !this.#backingOff(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
   }
