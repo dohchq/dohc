@@ -9,11 +9,11 @@ afterEach(() => vi.restoreAllMocks());
 
 /** A relay stand-in that knows one pending invite and records what it was asked. */
 function relay(invites: string[]) {
-  const asked: Array<{ url: string; key: string | null; email: unknown }> = [];
+  const asked: Array<{ url: string; key: string | null; email: unknown; inviteToken?: unknown }> = [];
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
-    const { email } = JSON.parse(String(init?.body)) as { email: unknown };
-    asked.push({ url: String(input), key: headers.get(SIGN_UP_INVITE_KEY_HEADER), email });
+    const { email, ...rest } = JSON.parse(String(init?.body)) as { email: unknown; inviteToken?: unknown };
+    asked.push({ url: String(input), key: headers.get(SIGN_UP_INVITE_KEY_HEADER), email, ...rest });
     return Response.json({ invited: typeof email === "string" && invites.includes(email) });
   });
   return { asked, fetch: fetch as unknown as typeof globalThis.fetch };
@@ -27,20 +27,26 @@ describe("closed sign-up", () => {
   it("admits a listed address without asking the relay, whatever its case or whitespace", async () => {
     const { asked, fetch } = relay([]);
     const admit = admission(fetch);
-    expect(await admit("owner@example.com")).toBe("admitted");
-    expect(await admit("  Owner@EXAMPLE.com\t")).toBe("admitted");
+    expect(await admit("owner@example.com", null)).toBe("admitted");
+    expect(await admit("  Owner@EXAMPLE.com\t", "invite-token-0123456789")).toBe("admitted");
     expect(asked).toEqual([]);
   });
 
   it("admits an address with a pending invite, asking the relay with the key and the normalized address", async () => {
     const { asked, fetch } = relay(["guest@example.com"]);
-    expect(await admission(fetch)(" Guest@Example.com ")).toBe("admitted");
+    expect(await admission(fetch)(" Guest@Example.com ", null)).toBe("admitted");
     expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" }]);
+  });
+
+  it("passes an invite-link token to the relay, which decides", async () => {
+    const { asked, fetch } = relay([]);
+    expect(await admission(fetch)("newcomer@example.com", "invite-token-0123456789")).toBe("refused");
+    expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "newcomer@example.com", inviteToken: "invite-token-0123456789" }]);
   });
 
   it("refuses an address that is neither listed nor invited", async () => {
     const { fetch } = relay(["guest@example.com"]);
-    expect(await admission(fetch)("stranger@example.com")).toBe("refused");
+    expect(await admission(fetch)("stranger@example.com", null)).toBe("refused");
   });
 
   it("reports the check as unavailable when the relay fails or does not answer", async () => {
@@ -55,7 +61,7 @@ describe("closed sign-up", () => {
       },
     ];
     for (const fetch of failing) {
-      expect(await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com")).toBe("unavailable");
+      expect(await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com", null)).toBe("unavailable");
     }
   });
 });
