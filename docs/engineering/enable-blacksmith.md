@@ -77,7 +77,7 @@ Manual runs execute the requested gates. Automatic PR runs execute the gates tha
 Cloud timing targets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
 Uncontended runs above target warn and pass through ceilings of 400 s and 700 s, respectively; runs above those ceilings fail.
 Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
-A run above target with more than 30 s of counted gate-job runner wait warns that timing is unmeasured and does not fail for time.
+A run above target with a counted runner wait or receipt transfer above 30 s warns that timing is unmeasured and does not fail for time.
 Final verification alone emits timing warning annotations and step summary lines.
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).

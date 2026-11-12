@@ -138,13 +138,14 @@ Rust's job list excludes JavaScript jobs.
 `seconds` equals `spanSeconds`. No runner-wait discount estimates the workload.
 Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
 A gate is `contended` when a job inside its span waited more than 30 s for a runner.
+Receipt transfers above 30 s also count as contention: aggregates measure from the saved group-wait finish to verification start, while completed checks use the download step duration; unavailable timing is `transferSeconds: null` and does not count.
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Selection's pre-span wait does not count.
 Rust also counts waits of non-skipped JavaScript worker matrix jobs because its tests need that matrix. JavaScript conclusions do not affect Rust's verdict.
 At or below the target, timing is `"within budget"`.
 Above the target, an uncontended run reports `"over target"` and passes with a warning through the ceiling, inclusive.
 Above the ceiling, an uncontended run reports `"over budget"` and fails.
-A contended run above the target reports `"unmeasured"`, warns with the longest wait, and does not fail for time, even above the ceiling.
+A contended run above the target reports `"unmeasured"`, warns with the runner wait or receipt transfer, and does not fail for time, even above the ceiling.
 Only final verification emits timing warning annotations and writes their step summary lines; aggregates retain warnings in their receipts.
 Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 Aggregate receipts include confinement and remain `complete: false` until final verification checks the reporting jobs' completed times.

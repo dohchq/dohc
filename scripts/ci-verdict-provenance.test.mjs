@@ -649,6 +649,11 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
     const ownReceipt = reporting.findIndex(step => step.with?.name === `verification-${scope}-0-\${{ github.run_attempt }}`);
     const wait = reporting.findIndex(step => step.run?.startsWith("node scripts/verification/cloud-aggregate.mjs wait "));
     assert.ok(run >= 0 && ownReceipt > run && wait > ownReceipt, "partition zero must execute and publish its receipt before reporting waits");
+    assert.equal(reporting[wait].name, `Wait for the complete ${scope === "js-worker" ? "JavaScript" : "Rust"} group`);
+    const verify = reporting.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope === "js-worker" ? "js" : "rust"}`);
+    assert.ok(verify > wait);
+    assert.match(reporting[verify].name, /^Require complete proof and /u);
+    assert.equal(reporting.slice(wait + 1, verify).filter(step => step.uses?.startsWith("actions/download-artifact@")).length, 1);
   }
 });
 

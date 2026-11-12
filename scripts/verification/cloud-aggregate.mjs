@@ -68,7 +68,7 @@ function gateJobNames(scope) {
     || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
-function gateTiming(scope, required, metadata = required) {
+function gateTiming(scope, required, metadata = required, transferSeconds = null) {
   if (required.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
   const start = Date.parse(required.find(job => job.name === "what changed").started_at);
@@ -85,18 +85,41 @@ function gateTiming(scope, required, metadata = required) {
   const longest = [...jobs.filter(job => job.name !== "what changed"
     && (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt)), ...javascriptWaits]
     .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
-  const contended = longest.runnerWaitSeconds > 30, seconds = spanSeconds;
+  const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30, seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
   const budgetSeconds = scope === "js" ? 400 : 700;
   const timing = seconds <= targetSeconds ? "within budget" : contended ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
-  return { spanSeconds, seconds, targetSeconds, budgetSeconds, contended, timing, jobs,
-    ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${targetSeconds}s target; longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s.` }
+  const delay = [longest.runnerWaitSeconds > 30 ? `longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
+    transferSeconds > 30 ? `receipt transfer took ${transferSeconds}s` : null].filter(Boolean).join("; ");
+  return { spanSeconds, seconds, targetSeconds, budgetSeconds, transferSeconds, contended, timing, jobs,
+    ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${targetSeconds}s target; ${delay}.` }
       : timing === "over target" ? { warning: `${scope} timing over target: ${seconds}s exceeds the ${targetSeconds}s target; the gate fails above ${budgetSeconds}s.` } : {}) };
 }
 
 function requireBudget(scope, timing) {
   if (timing.timing === "over budget") throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
   return timing;
+}
+
+function completedTransferSeconds(scope, jobs) {
+  const steps = jobs.find(job => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"))?.steps;
+  if (!Array.isArray(steps)) return null;
+  const wait = steps.findIndex(step => step.name === `Wait for the complete ${scope === "js" ? "JavaScript" : "Rust"} group`);
+  const verify = steps.findIndex((step, index) => index > wait && /^Require complete proof and /u.test(step.name));
+  if (wait < 0 || verify < 0) return null;
+  const downloads = steps.slice(wait + 1, verify).filter(step => /^Run actions\/download-artifact@/u.test(step.name));
+  if (downloads.length !== 1) return null;
+  const seconds = (Date.parse(downloads[0].completed_at) - Date.parse(downloads[0].started_at)) / 1000;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+function pendingTransferSeconds(scope, outputDirectory, startedAt, verificationStartedAt) {
+  try {
+    const { finishedAt } = JSON.parse(readFileSync(`${outputDirectory}/${scope}-wait-finished.json`, "utf8"));
+    const waitedAt = Date.parse(finishedAt);
+    return Number.isFinite(waitedAt) && waitedAt >= Date.parse(startedAt) && waitedAt <= verificationStartedAt
+      ? (verificationStartedAt - waitedAt) / 1000 : null;
+  } catch { return null; }
 }
 
 export function completedGateTiming(scope, jobs, commit) {
@@ -106,7 +129,7 @@ export function completedGateTiming(scope, jobs, commit) {
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  return requireBudget(scope, gateTiming(scope, required, jobs));
+  return requireBudget(scope, gateTiming(scope, required, jobs, completedTransferSeconds(scope, jobs)));
 }
 
 export async function verifyCompletedCloud(scope, { env = process.env, readJobs = () => cloudApi({ env }).jobs(), outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
@@ -135,7 +158,7 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
 }
 
 // Partition zero publishes its own receipt before joining the other workers.
-export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, ...options } = {}) {
+export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, outputDirectory = ".agent-artifacts/verification/aggregate", ...options } = {}) {
   const api = cloudApi(options), deadline = now() + 20 * 60_000;
   const expected = gateJobNames(scope).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
   try {
@@ -144,13 +167,18 @@ export async function waitForGate(scope, { readJobs, pause = setTimeout, now = D
       if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
       if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
       if (now() >= deadline) throw new Error(`The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${required.some(job => QUEUED_STATUSES.includes(job.status)) ? "still queued for a runner" : required.some(job => job.status === "in_progress") ? "still running" : "missing"}.`);
-      if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) return;
+      if (required.length === expected.length && required.every(job => job.status === "completed" && job.conclusion === "success")) {
+        mkdirSync(outputDirectory, { recursive: true });
+        writeFileSync(`${outputDirectory}/${scope}-wait-finished.json`, JSON.stringify({ finishedAt: new Date(now()).toISOString() }) + "\n");
+        return;
+      }
       await pause(Math.min(GATE_POLL_MS[scope], deadline - now()));
     }
   } finally { api.log(`${scope} group wait`); }
 }
 
 export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded", { readJobs = () => cloudApi().jobs(), now = Date.now, env = process.env, outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
+  const verificationStartedAt = now();
   const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
   try {
     const records = [...globSync(`${directory}/**/result.json`)].map(path => JSON.parse(readFileSync(path, "utf8"))).filter(record => record.scope === scope);
@@ -165,7 +193,8 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), all));
+    const transferSeconds = pendingTransferSeconds(scope, outputDirectory, required.find(job => job.name === finalJob).started_at, verificationStartedAt);
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), all, transferSeconds));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;
