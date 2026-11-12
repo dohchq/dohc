@@ -142,8 +142,11 @@ export async function startAutomationReplicas(options: {
   const replicas = new Map<string, AutomationReplica & {
     close(): Promise<void>; pulledHead: number; reasons: readonly CopyReason[];
     busy(): boolean;
-    /** Runs once a step caught the copy up with the relay. */
-    caughtUp(): Promise<void>;
+    /**
+     * Replays the copy's unfinished phone writes once, after any step caught it up, whoever made the step.
+     * Answers whether it replayed now. Call it outside the sync lane.
+     */
+    caughtUp(): Promise<boolean>;
   }>();
   // Replicas an engine exit is closing, until their close settles. One that
   // failed stays for close() to report.
@@ -303,10 +306,9 @@ export async function startAutomationReplicas(options: {
   }
 
   // A pass's step of an open copy. A failure keeps its retry, after its phone writes were looked at.
-  async function stepOf(replica: AutomationReplica & {caughtUp(): Promise<void>}): Promise<void> {
+  async function stepOf(replica: AutomationReplica): Promise<void> {
     try {
-      if (await replica.step()) await replica.caughtUp();
-      else schedule();
+      if (!(await replica.step())) schedule();
     } catch (error) {
       if (!replica.signal.aborted) await inspectAfterFailure(replica.client, replica.workspace, replica.workspaceId, replica.incarnation, error);
       throw error;
@@ -395,14 +397,18 @@ export async function startAutomationReplicas(options: {
     let closing: Promise<void> | undefined;
     // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their stored
     // commands once, after a step caught the copy up: a target is judged by the relay's current state, not by
-    // what the folder held when it last closed. The pass's publication of the copy then pushes them.
+    // what the folder held when it last closed. Any step or sync can catch it up: open's, the pass's, publication's,
+    // or a request's. Open replays at once; otherwise the next pass does, outside the sync lane, which a request
+    // holding a write's lock may be waiting on, and before that pass's publication pushes.
+    let pulledCurrent = false;
     let replayed = false;
-    const caughtUp = async (): Promise<void> => {
-      if (replayed) return;
+    const caughtUp = async (): Promise<boolean> => {
+      if (replayed || !pulledCurrent) return false;
       replayed = true;
       await replayUnfinishedWrites({storage, copy: replica, nowMs,
         records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
         onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
+      return true;
     };
     // Pushes, then pulls, each for at most `rounds`, so a copy that always
     // has more to push still pulls. Answers whether it caught up.
@@ -427,6 +433,9 @@ export async function startAutomationReplicas(options: {
         busyRefusals.delete(row.workspaceId);
         if (pushMore || pullMore) return false;
         replica.pulledHead = Math.max(replica.pulledHead, head);
+        pulledCurrent = true;
+        // A sync that caught a registered copy up, such as a request's, asks for the pass that replays its writes.
+        if (!replayed && replicas.get(row.workspaceId) === replica) schedule();
         return true;
       });
       // Writes that landed while it ran, and that a pass skipped for it, get
@@ -719,8 +728,17 @@ export async function startAutomationReplicas(options: {
     }
     // A copy with unsent phone writes pushes them and checks what the relay
     // accepted, even when nothing new reached the relay.
+    // A replay makes the copy's publication due at once, so what it wrote pushes in this pass or the next.
+    const replay = async (replica: AutomationReplica & {caughtUp(): Promise<boolean>}): Promise<boolean> => {
+      const ran = await replica.caughtUp().catch((error: unknown) => { observe(() => options.onError?.(error, replica.workspaceId)); return false; });
+      const retry = publicationRetries.get(replica.workspaceId);
+      if (ran && retry) retry.at = performance.now();
+      return ran;
+    };
     for (const replica of [...replicas.values()]) {
       const {workspaceId} = replica;
+      // Whichever step or sync caught the copy up, its owed replay runs here, outside the sync lane, before publication pushes.
+      await replay(replica);
       if (!publishing.has(workspaceId) || !wanted.has(workspaceId)) {
         publicationRetries.delete(workspaceId);
         continue;
@@ -737,6 +755,8 @@ export async function startAutomationReplicas(options: {
       }
       if ((retry?.at ?? 0) > now) continue;
       await publish(replica);
+      // Publication's own step may have finished catching the copy up. What that replays pushes in the next pass.
+      if (await replay(replica)) schedule();
     }
     if (passFailure !== null) throw passFailure;
     return ok;

@@ -271,6 +271,9 @@ describe("the automation replicas", () => {
     // Where the copy's folder holds each file, by object, and where a pull puts them next.
     const filePaths = new Map<string, string>();
     let pulledPaths: Map<string, string> | null = null;
+    // Pull pages the relay holds for the copy beyond the one every pull answers, and the cursor each page moves to.
+    let pullPages = 0;
+    let pullCursor = 0;
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void; authToken?: string }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -315,7 +318,8 @@ describe("the automation replicas", () => {
             case "sync.applyPull":
               for (const [objectId, path] of pulledPaths ?? []) filePaths.set(objectId, path);
               pulledPaths = null;
-              return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+              if (pullPages > 0) pullPages -= 1;
+              return { result: { status: "complete", nextCursor: ++pullCursor, pendingCursor: { kind: "relay", token: "t" }, hasMore: pullPages > 0,
               fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
               changedPaths: [{ versionId: "main", path: "Tasks/automations.yaml", operation: "write", contentKind: "text" }] } };
             default:
@@ -335,6 +339,8 @@ describe("the automation replicas", () => {
       folderHandles, failFolderCloses: (count: number) => { failFolderCloses = count; }, chats, filePaths,
       /** The relay moved these files since the copy last pulled; its next pull brings them. */
       movedOnRelay: (paths: Map<string, string>) => { pulledPaths = paths; },
+      /** The relay holds this many more pull pages for the copy than one pull answers. */
+      backlog: (pages: number) => { pullPages = pages; },
       methods: () => sent.map((request) => request.method) };
   }
 
@@ -2747,6 +2753,65 @@ describe("the automation replicas", () => {
     const replayedAt = methods.indexOf("chats.threads.start");
     expect(methods.indexOf("sync.applyPull"), "replayed once the copy pulled").toBeLessThan(replayedAt);
     expect(methods.lastIndexOf("sync.push"), "and pushed after").toBeGreaterThan(replayedAt);
+  });
+
+  // A copy with an unwritten phone write, stopped, then restarted with `backlog` pull pages beyond one to catch up on.
+  // Each step pulls at most 4 rounds of 8 pages.
+  async function restartedBehind(backlog: number) {
+    const { storage, log } = await relay();
+    const engine = fakeEngine();
+    const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const first = await stepped(storage, wanted);
+    const opened = first.running.replica(WORKSPACE)!;
+    const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
+    const group = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning", type: "both" });
+    const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+    const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+    const write: WriteCommand = { kind: "start", lane: "chat", channelId: group.channelId, threadId: ids.threadId,
+      messageId: ids.messageId("post"), body: "Lunch?" };
+    storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+      binding: { workspaceId: WORKSPACE, operation: "send", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
+      replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+      command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+    await first.running.close();
+    // The relay moved on while the server was stopped.
+    log(1);
+    engine.backlog(backlog);
+    const before = engine.sent.length;
+    const restarted = await stepped(storage, wanted, { root: first.root });
+    const methods = () => engine.sent.slice(before).map((request) => request.method);
+    const replays = () => methods().filter((method) => method === "chats.threads.start").length;
+    return { engine, restarted, methods, replays };
+  }
+  const STEP_PAGES = 4 * 8;
+
+  it("replays once publication's own step finishes catching the copy up, then pushes", async () => {
+    // Open and the pass's pull each take a step's pages; publication's step takes the last.
+    const { restarted, methods, replays } = await restartedBehind(2 * STEP_PAGES + 1);
+    expect(methods().filter((method) => method === "sync.applyPull")).toHaveLength(2 * STEP_PAGES + 1);
+    expect(replays(), "replayed once caught up").toBe(1);
+    const replayedAt = methods().indexOf("chats.threads.start");
+    expect(replayedAt, "after the last pull").toBeGreaterThan(methods().lastIndexOf("sync.applyPull"));
+    await restarted.pass();
+    expect(methods().lastIndexOf("sync.push"), "then pushed").toBeGreaterThan(replayedAt);
+    expect(replays()).toBe(1);
+  });
+
+  it("replays once a phone visit's sync finishes catching the copy up, at the next pass, then pushes", async () => {
+    // Open, the pass's pull, and publication each take a step's pages, and leave some for the visit.
+    const { restarted, methods, replays } = await restartedBehind(3 * STEP_PAGES + 4);
+    expect(replays(), "not caught up yet").toBe(0);
+    await restarted.running.replica(WORKSPACE)!.sync();
+    expect(replays(), "never inside the visit's sync").toBe(0);
+    const caughtUpAt = methods().lastIndexOf("sync.applyPull");
+    // The sync asked for a pass, which replays before publication pushes.
+    await restarted.pass();
+    expect(replays()).toBe(1);
+    const replayedAt = methods().indexOf("chats.threads.start");
+    expect(replayedAt).toBeGreaterThan(caughtUpAt);
+    expect(methods().lastIndexOf("sync.push"), "then pushed").toBeGreaterThan(replayedAt);
+    await restarted.pass();
+    expect(replays(), "once").toBe(1);
   });
 
   it("doesn't replay a phone write into a thread whose file the relay made secret while the copy was stopped, and settles it as unsent", async () => {
