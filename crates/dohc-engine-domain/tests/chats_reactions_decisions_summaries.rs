@@ -2047,10 +2047,8 @@ fn local_journal(store: &EngineStore) -> Vec<JournalRow> {
                 "SELECT origin_id, origin_seq, op_kind FROM replication_log \
                  WHERE workspace_id = ?1 AND imported = 0 ORDER BY origin_id, origin_seq",
             )?;
-            let rows = stmt
-                .query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>();
-            rows
+            stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()
         })
         .expect("journal")
 }
