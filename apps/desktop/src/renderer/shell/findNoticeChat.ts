@@ -48,6 +48,20 @@ export async function findNoticeChat(
   return null;
 }
 
+/**
+ * Where a Group, DM, or agent chat opens as a whole, or null when this
+ * workspace has no such chat. A DM opens through its canonical record. A
+ * failed read throws.
+ */
+export async function findNoticeChannel(workspaceId: string, channelId: string): Promise<NoticeChatPlace | null> {
+  const { channels } = await bridge().listChatChannels({ workspaceId });
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  if (!channel) return null;
+  if (channel.kind !== "dm") return { open: "chats", nav: { level: "channel", channel } };
+  const dm = (await bridge().syncDms({ workspaceId })).dms.find((candidate) => candidate.channelId === channelId);
+  return dm ? { open: "chats", nav: { level: "dm", dm } } : null;
+}
+
 // A run's messages are the ones its records name. Without one, as when the
 // run stopped before it answered, there is nothing to land on.
 async function lastMessageOfRun(workspaceId: string, threadId: string, runId: string): Promise<string | undefined> {

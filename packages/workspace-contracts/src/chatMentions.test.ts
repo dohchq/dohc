@@ -4,7 +4,10 @@ import {
   applyMentionCompletion,
   codeCover,
   codeRanges,
+  extractChatFileReferences,
+  extractChatWorkReferenceTokens,
   findMentions,
+  formatChatWorkReferenceToken,
   matchMentionCandidates,
   scanMentionTokens,
   type MentionCandidate,
@@ -165,5 +168,20 @@ describe("code cover", () => {
       scanMentionTokens(body, { ignoreCode: true });
       expect(performance.now() - started).toBeLessThan(100);
     }
+  });
+});
+
+describe("work links", () => {
+  const ref = "A".repeat(42) + "_";
+  it("reads a work link as a work reference, never as a file", () => {
+    const body = `See ${formatChatWorkReferenceToken(ref)} and @[notes/plan.md]`;
+    expect(extractChatWorkReferenceTokens(body)).toEqual([{ reference: ref, start: 4, end: 4 + 51, text: `@[work:${ref}]` }]);
+    expect(extractChatFileReferences(body)).toEqual([{ path: "notes/plan.md" }]);
+  });
+
+  it("leaves a link that only looks like a work link to files, and skips code", () => {
+    const short = "@[work:abc]";
+    expect(extractChatWorkReferenceTokens(`${short} \`@[work:${ref}]\``)).toEqual([]);
+    expect(extractChatFileReferences(short)).toEqual([{ path: "work:abc" }]);
   });
 });

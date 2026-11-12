@@ -200,8 +200,35 @@ export interface ChatFileReferenceToken extends ChatFileReference {
 // at an opener is a lookup into arrays built in one backward pass, so its
 // time grows linearly with the body.
 export function extractChatFileReferenceTokens(body: string): ChatFileReferenceToken[] {
+  return scanChatLinks(body).files;
+}
+
+// A link to a work reference in a chat message: `@[work:REF]`. It names a
+// chat, thread, message, file, app, Collection or record by identity, so it
+// keeps working after a rename or a move.
+export interface ChatWorkReferenceToken {
+  reference: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
+const WORK_LINK = /^work:([A-Za-z0-9_-]{43})$/u;
+
+export function formatChatWorkReferenceToken(reference: string): string {
+  return `@[work:${reference}]`;
+}
+
+export function extractChatWorkReferenceTokens(body: string): ChatWorkReferenceToken[] {
+  return scanChatLinks(body).works;
+}
+
+// Both kinds of link in one pass, each in source order. A token that is a
+// work link is never also a file link.
+export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; works: ChatWorkReferenceToken[] } {
   const tokens: ChatFileReferenceToken[] = [];
-  if (!body.includes("@[")) return tokens;
+  const works: ChatWorkReferenceToken[] = [];
+  if (!body.includes("@[")) return { files: tokens, works };
   const length = body.length;
   // From each index: the next "]" or line break, the next "#", and the next "@[".
   const stopAt = new Int32Array(length + 1);
@@ -233,6 +260,12 @@ export function extractChatFileReferenceTokens(body: string): ChatFileReferenceT
       start = next;
       continue;
     }
+    const work = WORK_LINK.exec(body.slice(from, stop));
+    if (work) {
+      works.push({ reference: work[1]!, start, end, text: body.slice(start, end) });
+      start = next;
+      continue;
+    }
     const path = decodeReferenceComponent(body.slice(from, Math.min(hash, stop)));
     // Edge spaces are legal filename bytes and the insertion formatter emits
     // them literally, so trim only to reject an empty/whitespace-only value.
@@ -251,7 +284,7 @@ export function extractChatFileReferenceTokens(body: string): ChatFileReferenceT
     }
     start = next;
   }
-  return tokens;
+  return { files: tokens, works };
 }
 
 // Chat reads an @ name outside code and outside file links. A file link owns

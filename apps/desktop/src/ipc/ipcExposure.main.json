@@ -274,6 +274,7 @@
     "desktop:resolve-automation-controls",
     "desktop:resolve-chat-decision",
     "desktop:resolve-work-link",
+    "desktop:describe-work-references",
     "desktop:resolve-workspace-version-conflict",
     "desktop:restore-engine-moment-file",
     "desktop:restore-protected-copy",
@@ -428,6 +429,7 @@
     "desktop:links-edges": "active-workspace",
     "desktop:read-held-change": "active-workspace",
     "desktop:make-message-link": "active-workspace",
-    "desktop:resolve-work-link": "active-workspace"
+    "desktop:resolve-work-link": "active-workspace",
+    "desktop:describe-work-references": "active-workspace"
   }
 }

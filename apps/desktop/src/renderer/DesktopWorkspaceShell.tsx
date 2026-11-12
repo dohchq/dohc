@@ -32,6 +32,7 @@ import {
 import type {
   CaptureFileHold,
   ResolveAutomationControlsResult,
+  WorkReferenceOpen,
   ChatFileMentionRecord,
   ChatThreadRecord,
   DesktopUserSettingsResult,
@@ -158,6 +159,7 @@ import { useRequestSequence } from "./useRequestSequence";
 import { knownPersonalAgents, usePersonalAgents } from "./usePersonalAgents";
 import { setPersonalAgents } from "./workbench/chosenColors";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
+import { WorkReferences, useWorkReferenceLinks } from "./workbench/workReferences";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
   isCommandAvailable,
@@ -242,8 +244,8 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { lastOpenedOwnWorkspace, useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import { useKeptTyping } from "./shell/useKeptTyping";
-import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
-import { findNoticeChat } from "./shell/findNoticeChat";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, WORK_LINK_LOOKUP_FAILED_NOTE, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
+import { findNoticeChannel, findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "../notices/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
@@ -3393,6 +3395,17 @@ export function DesktopWorkspaceShell(props: {
     : handoffOutcome === "off" ? { shareId: handoffChats.shareId, outcome: "off", copy: chatsOffCopy(syncStatus) }
     : { shareId: handoffChats.shareId, outcome: handoffOutcome };
   const makeMessageLink = useMessageLinkMaker(props.workspace);
+  // A work link in a chat message opens what it names here, as a notice's
+  // Open does.
+  const openWorkReference = useCallback((target: WorkReferenceOpen) => {
+    setPendingOpen(target.to === "chat"
+      ? { to: "chat", thread: target.thread, ...(target.channel ? { channel: target.channel } : {}), ...(target.message ? { message: target.message } : {}) }
+      : target);
+  }, []);
+  const workReferenceLinks = useWorkReferenceLinks(workspaceId, {
+    open: openWorkReference,
+    failed: (error, retry) => reportShellError(WORK_LINK_LOOKUP_FAILED_NOTE, error, retry),
+  });
   // A work link clicked in a chat or a document opens its message here, or
   // in the workspace on this computer that holds it. A link none holds, or
   // one main could not look up, goes to the browser. Only the newest link
@@ -5742,6 +5755,16 @@ export function DesktopWorkspaceShell(props: {
           else openChatsNavInTab(place.nav);
           return null;
         }
+        case "chat-channel": {
+          const place = await findNoticeChannel(owner, target.channel);
+          if (signal.aborted || workspaceIdRef.current !== owner) return null;
+          if (place === null) return CHAT_NOT_FOUND_NOTE;
+          if (place.open === "chats") openChatsNavInTab(place.nav);
+          return null;
+        }
+        case "collection":
+          openCollectionTab(target.path);
+          return null;
         case "chats-invitation":
           openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
           return null;
@@ -5783,7 +5806,7 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [
-      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openCanonicalDmInTab, openCaptureRecovery, openChatsInvitation, openChatsNavInTab, openCloud,
+      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openCanonicalDmInTab, openCaptureRecovery, openChatsInvitation, openChatsNavInTab, openCloud, openCollectionTab,
       openFile, openFileChatInPanel, openHistoryView, openLiveDocuments, openSettings, openSharingDeclined, privacySettingsAction, showPathInExplorer, workspaceId,
     ],
   );
@@ -5805,11 +5828,16 @@ export function DesktopWorkspaceShell(props: {
     [openNoticeTarget, reportShellError, workspaceId],
   );
   // What a notice's Open asked of this workspace when it switched here, once
-  // the saved layout applied, so the layout cannot replace it.
+  // the saved layout applied, so the layout cannot replace it. A newer open
+  // cancels an older one still looking up its target.
+  const pendingOpenLookup = useRef<AbortController | null>(null);
   useEffect(() => {
     if (pendingOpen === null) return;
     setPendingOpen(null);
-    void openNoticeRowTarget(pendingOpen, new AbortController().signal).then((note) => {
+    pendingOpenLookup.current?.abort();
+    const lookup = new AbortController();
+    pendingOpenLookup.current = lookup;
+    void openNoticeRowTarget(pendingOpen, lookup.signal).then((note) => {
       if (note !== null) reportShellError(note, new Error(note), null);
     });
   }, [openNoticeRowTarget, pendingOpen, reportShellError]);
@@ -6541,6 +6569,7 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
     <MessageLinks.Provider value={makeMessageLink}>
+    <WorkReferences.Provider value={workReferenceLinks}>
     <ShellNoticeClear.Provider value={clearIdentity}>
     <div
       data-testid="workspace-shell"
@@ -8108,6 +8137,7 @@ export function DesktopWorkspaceShell(props: {
       {retainedCopiesDialog}
     </div>
     </ShellNoticeClear.Provider>
+    </WorkReferences.Provider>
     </MessageLinks.Provider>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>

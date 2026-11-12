@@ -213,6 +213,12 @@ function buildCliRequest(
         protocolVersion: common.protocolVersion,
         args: { cwd: common.cwd, actor: common.actor },
       };
+    case "link":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, target: command.target },
+      };
     case "threads":
       return {
         verb: command.verb,

@@ -94,6 +94,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
   dohc_chat_links: ["chat.read"],
+  dohc_link: ["work.reference.make"],
   dohc_links_edges: ["links.edges"],
   dohc_links_in: ["links.in"],
   dohc_links_resolve: ["links.resolve"],
@@ -2094,6 +2095,19 @@ export async function readChat(ctx: ToolContext, args: {
     return requestCli(ctx, "chat", { group, ...(before ? { before } : {}), ...(limit ? { limit } : {}) });
   }
   return { ok: false as const, reason: "Pass a threadId to read a thread, or a group to read its stream." };
+}
+
+// A link to put in a chat message, for exactly one of a chat, thread, message, or path.
+export async function makeLink(ctx: ToolContext, args: { group?: string; thread?: string; message?: string; path?: string }) {
+  const given = (["group", "thread", "message", "path"] as const).filter(kind => args[kind] !== undefined);
+  if (given.length !== 1) return { ok: false as const, reason: "Pass exactly one of group, thread, message, and path." };
+  const kind = given[0]!;
+  const value = args[kind]!;
+  const target = kind === "group" ? { kind, group: value }
+    : kind === "thread" ? { kind, thread: value }
+    : kind === "message" ? { kind, message: value }
+    : { kind, path: value };
+  return requestCli(ctx, "link", { target });
 }
 
 // --- groups (PR 12/15 slice, WS-E) ----------------------------------------

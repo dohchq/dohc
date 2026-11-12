@@ -492,6 +492,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         : stopped.keptEdits === "kept" ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
         : `Stopped live editing for ${lineSafe(stopped.path)}`;
     }
+    case "link":
+      return (result as CliResultByVerb["link"]).link;
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "groupCreate":

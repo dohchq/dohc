@@ -3,6 +3,9 @@ import * as Schema from "effect/Schema";
 /** What a caller asks to reference. A version-scoped target without `versionId` uses the active version. */
 export type WorkTargetInput =
   | { kind: "message"; messageId: string }
+  // A Group, DM or agent chat.
+  | { kind: "chat"; channelId: string }
+  | { kind: "thread"; threadId: string }
   | ({ kind: "file" | "app"; versionId?: string } & ({ objectId: string } | { path: string }))
   | { kind: "documentRecord"; versionId?: string; recordId: string }
   | { kind: "documentCollection"; versionId?: string; path: string }
@@ -15,6 +18,8 @@ const SafeInt = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualT
 const Versioned = { versionId: NonEmpty, objectId: NonEmpty } as const;
 const Target = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("message"), messageId: NonEmpty, threadId: NonEmpty, channelId: Schema.optionalKey(Schema.NullOr(NonEmpty)) }),
+  Schema.Struct({ kind: Schema.Literal("chat"), channelId: NonEmpty }),
+  Schema.Struct({ kind: Schema.Literal("thread"), threadId: NonEmpty, channelId: Schema.optionalKey(Schema.NullOr(NonEmpty)) }),
   Schema.Struct({ kind: Schema.Literals(["file", "app", "documentCollection"]), ...Versioned }),
   Schema.Struct({ kind: Schema.Literal("documentRecord"), versionId: NonEmpty, recordId: NonEmpty }),
   Schema.Struct({ kind: Schema.Literal("transactionalCollection"), datasetId: NonEmpty, tableId: NonEmpty }),
@@ -29,6 +34,8 @@ const Resolution = Schema.Union([
     target: Target,
     state: Schema.Literals(["live", "deleted", "unchecked"]),
     path: Schema.optionalKey(NonEmpty),
+    // A chat's name, or a thread's title. Display only.
+    title: Schema.optionalKey(Schema.String),
     createdAtMs: SafeInt,
     registration: Schema.Literals(["pending", "registered"]),
   }),

@@ -65,21 +65,43 @@ function snapshotObject(storage: StorageContext, workspaceId: string, versionId:
     WHERE s.workspace_id=? AND s.version_id=? AND s.${field}=?`).get(workspaceId, versionId, value);
 }
 
+// A chat's wire id and kind, from the first create of its wire. A later
+// create, such as a share member's for the same wire, never names the chat.
+function chatCreate(storage: StorageContext, workspaceId: string, channelId: string): {wireId: string; kind: unknown} | null {
+  const first = (field: "channelId" | "wireId", value: string) => {
+    const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+      AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, value);
+    return row ? JSON.parse(String(row.payload_json)) as {channelId?: unknown; wireId?: unknown; kind?: unknown} : null;
+  };
+  const named = first("channelId", channelId);
+  if (!named) return null;
+  const wireId = typeof named.wireId === "string" ? named.wireId : channelId;
+  const created = first("wireId", wireId);
+  if (typeof named.wireId === "string" && created?.channelId !== channelId) return null;
+  return {wireId, kind: named.kind};
+}
+
 type Scope = {versionId: string | null; objectId: string | null; path: string | null; live: boolean};
 function scope(storage: StorageContext, workspaceId: string, target: WorkTarget, datasetAccess?: DatasetReferenceAccess): Scope | null {
-  if (target.kind === "message") {
-    const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.message.append'
-      AND json_extract(payload_json,'$.messageId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, target.messageId);
-    if (!row) return null;
-    const message = JSON.parse(String(row.payload_json)) as {threadId?: string};
-    if (message.threadId !== target.threadId) return null;
+  if (target.kind === "chat") {
+    return chatCreate(storage, workspaceId, target.channelId) ? {versionId: null, objectId: null, path: null, live: true} : null;
+  }
+  if (target.kind === "message" || target.kind === "thread") {
+    if (target.kind === "message") {
+      const row = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.message.append'
+        AND json_extract(payload_json,'$.messageId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, target.messageId);
+      if (!row) return null;
+      const message = JSON.parse(String(row.payload_json)) as {threadId?: string};
+      if (message.threadId !== target.threadId) return null;
+    }
     const wire = storage.findThreadCreateChannelWireId(workspaceId, target.threadId);
     // Engine channel ids are local. Only the admitted thread's wire id crosses the relay.
     if (wire === undefined) return null;
-    if (target.channelId !== null) {
+    const channelId = target.channelId ?? null;
+    if (channelId !== null) {
       const channel = storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
         AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`).get(workspaceId, wire);
-      if (!channel || JSON.parse(String(channel.payload_json)).channelId !== target.channelId) return null;
+      if (!channel || JSON.parse(String(channel.payload_json)).channelId !== channelId) return null;
     } else if (wire !== null) return null;
     return {versionId: null, objectId: null, path: null, live: true};
   }
@@ -128,11 +150,19 @@ function authorizations(storage: StorageContext, workspaceId: string, reader: Wo
 }
 
 function readable(storage: StorageContext, workspaceId: string, target: WorkTarget, current: Scope, grant: AuthorizedShareAction): boolean {
-  if (target.kind === "message") {
+  // A thread reads as its messages do.
+  if (target.kind === "message" || target.kind === "thread") {
     return filterOpForShare(grant.effectiveSelector, "chat.message.append", JSON.stringify({
-      messageId: target.messageId, threadId: target.threadId, body: "", authorKind: "human", authorId: "reference",
-      createdAtMs: 0,
+      messageId: target.kind === "message" ? target.messageId : "reference", threadId: target.threadId, body: "",
+      authorKind: "human", authorId: "reference", createdAtMs: 0,
     }), chat(storage, workspaceId)).allowed;
+  }
+  // A chat reads only through a share of that chat.
+  if (target.kind === "chat") {
+    const created = chatCreate(storage, workspaceId, target.channelId);
+    return !!created && filterOpForShare(grant.effectiveSelector, "chat.channel.create", JSON.stringify({
+      channelId: target.channelId, wireId: created.wireId, kind: created.kind, name: "", slug: "", createdAtMs: 0,
+    }), chat(storage, workspaceId), "chat").allowed;
   }
   if (target.kind === "transactionalCollection" || target.kind === "transactionalRecord") return current.live;
   const files = fileSideOf(grant.effectiveSelector);
@@ -191,7 +221,7 @@ export async function makeWorkReference(storage: StorageContext, input: {
       if (!row) throw notFound();
       target = {...target, objectId: String(row.object_id)};
     }
-    if (!owner && target.kind === "message") {
+    if (!owner && (target.kind === "message" || target.kind === "thread")) {
       const wire = storage.findThreadCreateChannelWireId(input.workspaceId, target.threadId);
       const channel = wire && storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
         AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`).get(input.workspaceId, wire);
@@ -232,15 +262,16 @@ function resolveIn(storage: StorageContext, input: Parameters<typeof resolveWork
     return {status: "found", reference: input.reference, target, workspaceId, createdAtMs: Number(row.created_at_ms)};
   }
   const grant = authorizations(storage, workspaceId, input.reader).find(grant => readable(storage, workspaceId, target, current, grant));
-  if (!grant) return unavailable;
+  // A chat's engine id is the owner's; a link reader holds only its wire id.
+  if (!grant || (target.kind === "chat" && input.reader.kind === "link")) return unavailable;
   const recipient: ReceivedRecipient = input.reader.kind === "user" ? ["user", input.reader.userId] : ["link", input.reader.grantId];
   const identity = createReceivedIdentity(input.identityKey), sourceHandle = identity.source(recipient, workspaceId);
   if (!sourceHandle) return unavailable;
   // Message, thread, and record ids match the share's other read paths.
   let projected = "objectId" in target ? {...target, objectId: identity.object(recipient, workspaceId, target.objectId)!} : target;
-  if (projected.kind === "message" && (input.reader.kind === "link" || fileSideOf(grant.effectiveSelector))) {
-    const {channelId: _channelId, ...message} = projected;
-    projected = message;
+  if ((projected.kind === "message" || projected.kind === "thread") && (input.reader.kind === "link" || fileSideOf(grant.effectiveSelector))) {
+    const {channelId: _channelId, ...chatTarget} = projected;
+    projected = chatTarget;
   }
   if (input.reader.kind === "link") input.reader.requireSession();
   if ("objectId" in target && "objectId" in projected) {

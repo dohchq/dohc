@@ -20,6 +20,7 @@ import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecov
 import { appViewOperations, engineStoreRefusalRecovery, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
 import { stoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
 import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
+import { workReferenceView } from "./workspaces/workReferenceViews";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
@@ -7715,6 +7716,12 @@ function registerIpcHandlers(): void {
     resolveWorkLink: async ({ workspaceId, url }) => {
       const link = parseWorkLinkUrl(url);
       return link ? await workLinks.resolve(link, workspaceId) : null;
+    },
+    describeWorkReferences: async ({ workspaceId, references }, { operation }) => {
+      const views = await withEngineAdapter(operation.workspace, async (adapter) => await Promise.all(references.map(async (reference) =>
+        workReferenceView(reference, await adapter.resolveWorkReference({ workspaceId, reference, signal: operation.signal })))));
+      if (views === null) throw new Error("The workspace engine is not running.");
+      return views;
     },
   });
 

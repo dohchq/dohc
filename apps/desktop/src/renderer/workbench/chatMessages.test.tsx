@@ -14,7 +14,7 @@ import {
   chatAuthorLabel,
   pinnedChatDay,
 } from "./chatMessages";
-import { extractChatFileReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
+import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
 
@@ -128,11 +128,11 @@ describe("chat authorship display", () => {
       <AgentSettingsProvider settings={settings}>{list}</AgentSettingsProvider>;
     const { rerender } = render(save(DEFAULT_USER_SETTINGS));
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
-    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    const scans = vi.mocked(scanChatLinks).mock.calls.length;
 
     // A save that hides a sidebar view is a new settings object.
     rerender(save({ ...DEFAULT_USER_SETTINGS, sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: ["graph"] } }));
-    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+    expect(vi.mocked(scanChatLinks).mock.calls.length).toBe(scans);
 
     rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
@@ -697,10 +697,10 @@ describe("ChatMessageList memo boundary", () => {
       );
     }
     render(<Host />);
-    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    const scans = vi.mocked(scanChatLinks).mock.calls.length;
     expect(scans).toBeGreaterThan(0);
     fireEvent.click(screen.getByTestId("bump"));
-    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+    expect(vi.mocked(scanChatLinks).mock.calls.length).toBe(scans);
   });
 });
 
