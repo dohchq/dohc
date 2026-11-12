@@ -183,6 +183,8 @@ export function createNamedRecipientChat(options: {
           followWorkspace = share.workspaceId;
         }
         const authority = requireShareAction(shareId, actor.userId, "read");
+        // One channel per share. A workspace share's Groups are not followed
+        // from the browser here yet, so it has no chat side and is refused.
         const chat = chatSideOf(authority.effectiveSelector);
         if (!chat || authority.share.workspaceId !== share.workspaceId) throw notFound();
         const recheck = () => {

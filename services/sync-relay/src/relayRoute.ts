@@ -30,6 +30,7 @@ import type {CollectionWriteRoute, OwnerCollectionWriteRoute} from "./collection
 import {parsePersonalAgentRoute, type PersonalAgentRoute} from "./personalAgents";
 import {parseShareId, parseString, parseWorkspaceId, relayPathSegments} from "./requestInputs";
 import {notFound} from "./errors";
+import {parseWorkspaceMemberRoute, type WorkspaceMemberRoute} from "./workspaceMemberRoutes";
 import {MAX_ORIGIN_ID_CHARS} from "./wireLimits";
 import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bound";
 
@@ -82,7 +83,8 @@ export type SyncRelayRoute =
   | OwnerCollectionWriteRoute
   | WorkspaceProposalRoute
   | { route: "presence"; workspaceId: string }
-  | { route: "share-presence"; shareId: string };
+  | { route: "share-presence"; shareId: string }
+  | WorkspaceMemberRoute;
 
 export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   const parts = relayPathSegments(new URL(request.url).pathname);
@@ -186,6 +188,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   if (parts[1] === "account") return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
+  // "/sync/members/join*" is read before any workspace id. No workspace route ends in "join".
+  const memberRoute = parseWorkspaceMemberRoute(parts);
+  if (memberRoute) return memberRoute;
   // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
   if (parts[1] === "notices") {
     if (parts.length === 2) return { route: "notices" };

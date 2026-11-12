@@ -22,6 +22,14 @@ import { RELAY_ERRORS } from "./errors";
 import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
+import {
+  workspaceFileReach,
+  workspaceGroupReach,
+  workspaceGroupReachable,
+  type StoredWorkspaceShareSelector,
+  type WorkspaceShareSelector,
+} from "./workspaceReach";
+export type { StoredWorkspaceShareSelector, WorkspaceShareSelector };
 
 // PR 18 share grants: the server-side filter that decides which replicated
 // ops (and which blobs) a share RECIPIENT may see. This module is the
@@ -58,6 +66,8 @@ export interface StoredShareSelector {
 
 export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
+  // A workspace member's file reach (`workspaceFileReach`). Never stored.
+  wholeWorkspace?: true;
 }
 
 // MU-C4 shared channels: a bidirectional chat grant. Unlike the
@@ -93,20 +103,30 @@ export interface GroupShareSelector extends StoredGroupShareSelector {
   access: ChatShareAccess;
 }
 
-export type AnyShareSelector = ShareSelector | ChatChannelShareSelector | GroupShareSelector;
+export type AnyShareSelector =
+  | ShareSelector
+  | ChatChannelShareSelector
+  | GroupShareSelector
+  | WorkspaceShareSelector;
 export type StoredAnyShareSelector =
   | StoredShareSelector
   | StoredChatChannelShareSelector
-  | StoredGroupShareSelector;
+  | StoredGroupShareSelector
+  | StoredWorkspaceShareSelector;
 
 export function effectiveShareSelector(
   selector: StoredAnyShareSelector,
   access: unknown,
 ): AnyShareSelector | null {
   if ("kind" in selector) {
+    if (selector.kind === "workspace") return isShareAccessValue(access) ? { ...selector, access } : null;
     return isChatShareAccessValue(access) ? { ...selector, access } : null;
   }
   return isShareAccessValue(access) ? { ...selector, access } : null;
+}
+
+export function isWorkspaceSelector(selector: AnyShareSelector): selector is WorkspaceShareSelector {
+  return "kind" in selector && (selector as { kind?: unknown }).kind === "workspace";
 }
 
 export function isGroupSelector(selector: AnyShareSelector): selector is GroupShareSelector {
@@ -146,20 +166,35 @@ const GROUP_LINK_ACCESS_LEVELS: readonly ChatShareAccess[] = ["read-only", "read
 export function linkAccessLevels(selector: StoredAnyShareSelector | null): readonly string[] {
   if (!selector) return [];
   if (!("kind" in selector)) return SHARE_ACCESS_VALUES;
+  // A workspace share reaches people in the workspace, never a share link.
   return selector.kind === "group" ? GROUP_LINK_ACCESS_LEVELS : [];
 }
 
-// A selector with a file side: a path grant, or a group's folder.
+// A selector with a file side: a path grant, a group's folder, or the
+// whole workspace.
 export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   if (isGroupSelector(selector)) return fileHalfOfGroup(selector);
+  if (isWorkspaceSelector(selector)) return workspaceFileReach(selector);
   return isChatChannelSelector(selector) ? null : selector;
 }
 
-// A selector with a chat side: a chat grant, or a group's
-// channel.
+// A selector with ONE chat side: a chat grant, or a group's channel. A
+// workspace share reaches many Groups; `chatSideFor` answers for one.
 export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector | null {
   if (isGroupSelector(selector)) return chatHalfOfGroup(selector);
   return isChatChannelSelector(selector) ? selector : null;
+}
+
+// The chat side for one named channel: the selector's own channel, or, for a
+// workspace share, the channel when it is a Group the share reaches.
+export function chatSideFor(
+  selector: AnyShareSelector,
+  channelWireId: string,
+  chat: Pick<ChatShareThreadResolver, "channelKind"> | undefined,
+): ChatChannelShareSelector | null {
+  if (isWorkspaceSelector(selector)) return workspaceGroupReach(selector, channelWireId, chat);
+  const side = chatSideOf(selector);
+  return side && side.channelWireId === channelWireId ? side : null;
 }
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
@@ -212,10 +247,18 @@ export function isChatChannelSelector(
 export function isLiveEditShareSelector(
   selector: AnyShareSelector,
 ): selector is ShareSelector {
+  // A workspace share does not open live documents yet: a live binding names
+  // its paths, and the workspace share names none.
   if ("kind" in selector) return false;
   return selector.access === "edit"
     && selector.versionId === null
     && selector.paths.length > 0;
+}
+
+// A file side that names files: its paths, or the whole workspace. A version
+// share names none.
+export function namesFiles(selector: ShareSelector): boolean {
+  return selector.paths.length > 0 || selector.wholeWorkspace === true;
 }
 
 export type GroupSelectorValidation =
@@ -542,6 +585,9 @@ export function parseStoredAnyShareSelectorJson(
       );
       return validation.ok ? validation.selector : null;
     }
+    if ((parsed as { kind?: unknown }).kind === "workspace") {
+      return Object.keys(parsed).length === 1 ? { kind: "workspace" } : null;
+    }
     if ((parsed as { kind?: unknown }).kind === "group") {
       if ((parsed as { access?: unknown }).access !== undefined) return null;
       if ((parsed as { versionId?: unknown }).versionId !== null) return null;
@@ -639,6 +685,22 @@ export function presenceTopicAllowedForShare(
     } else if (chat.channelKind(topic) === "agent") {
       return false;
     }
+  }
+  // A workspace share answers a Group's topic through the Group, a thread
+  // topic through its Group or the file it binds to, and a path through its
+  // file reach.
+  if (isWorkspaceSelector(selector)) {
+    if (!chat) return false;
+    const files = workspaceFileReach(selector);
+    const threadId = parseChatThreadTopic(topic);
+    if (threadId !== null) {
+      const channel = chat.threadChannelWireId(threadId);
+      if (typeof channel === "string") return workspaceGroupReachable(channel, chat);
+      if (channel !== null) return false;
+      const path = resolvedThreadPath(chat, chat.threadFileBinding(threadId));
+      return path !== null && pathVisibleThroughShare(files, path);
+    }
+    return workspaceGroupReachable(topic, chat) || pathVisibleThroughShare(files, topic);
   }
   // A group answers for both of its halves: a chat topic through its
   // channel, a path topic through its folder.
@@ -1014,13 +1076,13 @@ function filterFileChatOpForPathShare(
 ): ShareOpDecision {
   // No resolver wired = no way to resolve a thread to a file = nothing served.
   if (!chat) return { allowed: false };
-  // Chat follows PATHS, and only paths. A selector with no paths is
-  // a VERSION share: it grants one frozen version's files, and
+  // Chat follows PATHS, or the whole workspace. Any other selector with no
+  // paths is a VERSION share: it grants one frozen version's files, and
   // `pathVisibleThroughShare` reads its empty path list as "every tracked
   // path" — which for chat would serve the live discussion about every file on
   // main, including files created long after the version and never in it. A
   // version share is a snapshot; the conversation is not in it.
-  if (selector.paths.length === 0) return { allowed: false };
+  if (!namesFiles(selector)) return { allowed: false };
   const record = asRecord(payload);
   if (!record) return { allowed: false };
   const threadId = collectString(record.threadId);
@@ -1067,6 +1129,35 @@ function filterFileChatOpForPathShare(
   };
 }
 
+// Which side of a workspace share a chat op belongs to: a Group the share
+// reaches, a file's Comments ("files"), or neither (null). The channel comes
+// from the owner's log by the earliest binding, except for the creates that
+// are the binding; the channel branch then checks those against the log.
+function workspaceChatSide(
+  selector: WorkspaceShareSelector,
+  opKind: string,
+  payload: unknown,
+  chat: ChatShareThreadResolver | undefined,
+): ChatChannelShareSelector | "files" | null {
+  if (!chat) return null;
+  const record = asRecord(payload);
+  if (!record) return null;
+  let channelWireId: unknown;
+  if (opKind === "chat.channel.create") {
+    channelWireId = record.wireId;
+  } else if (opKind === "chat.thread.create") {
+    if (record.channelWireId === undefined) return "files";
+    channelWireId = record.channelWireId;
+  } else {
+    const threadId = collectString(record.threadId);
+    if (!threadId) return null;
+    channelWireId = chat.threadChannelWireId(threadId);
+    // An authoritative create with no channel binds a file's thread.
+    if (channelWireId === null) return "files";
+  }
+  return workspaceGroupReach(selector, channelWireId, chat);
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
@@ -1088,6 +1179,17 @@ export function filterOpForShare(
   if (!parsed) return { allowed: false };
   const { payload, referencedPaths } = parsed;
 
+  if (isWorkspaceSelector(selector)) {
+    const files = workspaceFileReach(selector);
+    if (!opKind.startsWith("chat.")) return filterOpForShare(files, opKind, payloadJson, chat);
+    const side = workspaceChatSide(selector, opKind, payload, chat);
+    if (side === "files") return filterFileChatOpForPathShare(files, opKind, payload, chat);
+    if (!side) return { allowed: false };
+    // A Group's folder path is served only when the share reaches that folder.
+    const folderPath = asRecord(payload)?.folderPath;
+    const servesFolder = typeof folderPath === "string" && visibleSharePath(files, folderPath) === folderPath;
+    return filterChatOpForChannelShare(side, opKind, payload, chat, servesFolder);
+  }
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     // The group's channel carries its chat; its folder carries its files.
@@ -1287,6 +1389,13 @@ export function filterOpForShareAppend(
   if (opKind === "chat.decision.set" && !decisionPollFieldsValid(payload)) {
     return { allowed: false };
   }
+  if (isWorkspaceSelector(selector)) {
+    // Only the owner and admins create Groups, and not through this lane.
+    if (opKind === "chat.channel.create") return { allowed: false };
+    const side = workspaceChatSide(selector, opKind, payload, chat);
+    if (side === "files") return filterFileChatOpForPathShare(workspaceFileReach(selector), opKind, payload, chat);
+    return side ? filterChatOpForChannelShare(side, opKind, payload, chat) : { allowed: false };
+  }
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat);
@@ -1344,12 +1453,13 @@ export function filterProposedChangeForShare(
 ): ProposedChangeDecision {
   // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
+  if (isWorkspaceSelector(selector)) return filterProposedChangeForShare(workspaceFileReach(selector), raw, chat);
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     return filterProposedChangeForShare(fileHalfOfGroup(selector), raw, chat);
   }
-  // Changes follow PATHS. A version share names none, so it proposes nothing.
-  if (selector.paths.length === 0) return { allowed: false };
+  // Changes follow named files. A version share names none, so it proposes nothing.
+  if (!namesFiles(selector)) return { allowed: false };
   const record = asRecord(raw);
   if (!record) return { allowed: false };
 
@@ -1489,7 +1599,8 @@ export function collectionEditSelector(
   if (isGroupSelector(selector)) {
     return groupChannelIsOrdinary(selector, chat) ? collectionEditSelector(fileHalfOfGroup(selector), chat) : null;
   }
-  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) return null;
+  if (isWorkspaceSelector(selector)) return collectionEditSelector(workspaceFileReach(selector), chat);
+  if (selector.access !== "edit" || selector.versionId !== null || !namesFiles(selector)) return null;
   return selector;
 }
 

@@ -1,4 +1,5 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { getWorkspaceMembershipByShare } from "./workspaceMembers";
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { automationFailureBodyForPermission, isSwitchedOffBody } from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
@@ -406,6 +407,15 @@ function shareNoticeSender(full: string, email: string | null): string {
 function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): ((senderLabel: string) => string) | null {
   const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!selector) return null;
+  if ("kind" in selector && selector.kind === "workspace") {
+    // "Ana added you to Community". A share without its membership names nothing.
+    const name = getWorkspaceMembershipByShare(storage, share.shareId)?.workspaceName;
+    if (name === undefined) return null;
+    return (senderLabel) => {
+      const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} added you to `].length;
+      return `${senderLabel} added you to ${cutText(name, room)}`;
+    };
+  }
   if (!("paths" in selector)) {
     const kind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
     if (kind === "dm") return senderLabel => `${senderLabel} sent you a message request`;

@@ -6,6 +6,8 @@ import {
   isChatChannelSelector,
   isGroupSelector,
   isLiveEditShareSelector,
+  isWorkspaceSelector,
+  namesFiles,
   parseStoredAnyShareSelectorJson,
   type AnyShareSelector,
   type GroupShareSelector,
@@ -30,6 +32,7 @@ export type ShareAction =
   | "list-own-proposals"
   | "withdraw-proposal";
 
+// A storage without the member check holds no workspace grant: it refuses them.
 type ShareAuthorizationStorage = Pick<
   SyncRelayStorage,
   | "findChannelCreateKind"
@@ -37,7 +40,7 @@ type ShareAuthorizationStorage = Pick<
   | "getShareGrant"
   | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
->;
+> & Partial<Pick<SyncRelayStorage, "workspaceMemberGrantIsCurrent">>;
 
 export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
   ok: true;
@@ -100,7 +103,9 @@ export function selectorTargetsBlockedChannel(
   workspaceId: string,
   selector: StoredAnyShareSelector,
 ): boolean {
-  if (!("kind" in selector)) return false;
+  // A workspace share names no channel. Its Groups are checked one by one
+  // (`workspaceGroupReachable`).
+  if (!("kind" in selector) || selector.kind === "workspace") return false;
   const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
   // A group is a grant on an ordinary channel and its folder. Whatever the
   // channel later resolves as, anything else authorizes nothing: a direct
@@ -182,7 +187,8 @@ export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & { action: "read" | "live-edit" | "direct-write" },
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
-  const files = result.ok ? fileSideOf(result.effectiveSelector) : null;
+  // A link never holds a workspace share.
+  const files = result.ok && !isWorkspaceSelector(result.effectiveSelector) ? fileSideOf(result.effectiveSelector) : null;
   if (!result.ok || !files) return { ok: false, reason: "gauntlet" };
   return { ...result, effectiveSelector: files };
 }
@@ -225,6 +231,13 @@ function validateCurrentShareGrant(
   const { share, grant } = current;
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!storedSelector) return { ok: false, reason: "gauntlet" };
+  // A workspace share is held only by people in the workspace, each through
+  // an independent grant on an active member entry.
+  if ("kind" in storedSelector && storedSelector.kind === "workspace" &&
+      (grant.principalKind !== "user" || grant.parentGrantId !== null ||
+       storage.workspaceMemberGrantIsCurrent?.(share.shareId, grant.grantId) !== true)) {
+    return { ok: false, reason: "gauntlet" };
+  }
 
   if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector)) {
     return { ok: false, reason: "gauntlet" };
@@ -246,16 +259,18 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
       if (authorized.grant.parentGrantId !== null) return false;
       const chat = chatSideOf(authorized.effectiveSelector);
       if (chat) return chat.access === "read-write";
+      // A workspace share posts in its Groups and comments on its files at
+      // Comment or Edit; the filter decides which Groups and files.
       const files = fileSideOf(authorized.effectiveSelector);
       return (
         files !== null &&
-        files.paths.length > 0 &&
+        namesFiles(files) &&
         (files.access === "comment" || files.access === "edit")
       );
     }
     case "propose": {
       const files = fileSideOf(authorized.effectiveSelector);
-      return files !== null && files.paths.length > 0 && files.access === "edit";
+      return files !== null && namesFiles(files) && files.access === "edit";
     }
     // Writing a Collection's own files straight into the owner's workspace
     // (ADR 0013), for an Edit share link. A named recipient keeps the
@@ -272,6 +287,7 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
 }
 
 function effectiveAccessRank(selector: AnyShareSelector): number {
+  if (isWorkspaceSelector(selector)) return shareAccessRank(selector.access);
   if ("kind" in selector) {
     return selector.access === "read-write" ? 1 : 0;
   }

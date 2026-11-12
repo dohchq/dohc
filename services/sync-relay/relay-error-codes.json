@@ -63,5 +63,11 @@
   { "code": "stale", "status": 409 },
   { "code": "stream_identity_mismatch", "status": 409 },
   { "code": "too_many_paths", "status": 400 },
-  { "code": "unknown_chat_op", "status": 403 }
+  { "code": "unknown_chat_op", "status": 403 },
+  { "code": "member_exists", "status": 409 },
+  { "code": "member_removed", "status": 409 },
+  { "code": "members_forbidden", "status": 403 },
+  { "code": "workspace_full", "status": 409 },
+  { "code": "workspace_name_required", "status": 400 },
+  { "code": "workspace_share_managed", "status": 409 }
 ]

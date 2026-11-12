@@ -43,6 +43,7 @@ import {
 import { initializeLinkCreationSchema } from "./linkCreationSchema";
 import { initializeAgentConnectionSchema } from "./agentConnections";
 import { initializePersonalAgentActivity, initializePersonalAgentSchema, initializeWorkspaceDisplayName } from "./personalAgents";
+import { initializeWorkspaceMemberSchema } from "./workspaceMembers";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1353,6 +1354,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializePersonalAgentSchema(db);
     initializeWorkspaceDisplayName(db);
     initializePersonalAgentActivity(db);
+    initializeWorkspaceMemberSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
