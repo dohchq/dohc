@@ -128,6 +128,8 @@ function buildCliRequest(
         ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "shareDisconnect":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId, connectionId: command.connectionId } };
+    case "members":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "accountDeletePreview":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
     case "accountDelete":

@@ -628,6 +628,24 @@ describe("the actions Settings offers on a share", () => {
     expect(bridgeMock.mountShare).toHaveBeenCalledWith({ workspaceId: "workspace-a", shareCode: "code-1" });
   });
 
+  it("shows a workspace the account joined by its name and role, with Open not yet available", async () => {
+    answerWith({ received: answer("received", { rows: [
+      received({ shareId: "member", subjectName: "Community", selector: { kind: "workspace", role: "member" }, access: "comment" }),
+      received({ shareId: "admin", grantId: "admin", subjectName: "Garden club", selector: { kind: "workspace", role: "admin" }, access: "comment" }),
+    ] }) });
+    render(<View />);
+    const [member, admin] = await screen.findAllByTestId("sharing-received-row");
+    expect(within(member!).getByText("Community")).toBeTruthy();
+    expect(within(member!).getByTestId("sharing-row-who").textContent).toBe("Member · Sam lets members comment");
+    expect(within(admin!).getByTestId("sharing-row-who").textContent).toBe("Admin · Sam owns this workspace");
+    const open = within(await openMenu(member!)).getByRole("menuitem", { name: /Open/ });
+    expect(open.getAttribute("aria-disabled")).toBe("true");
+    expect(open.textContent).toContain("This version of dohc cannot open a workspace you joined.");
+    await userEvent.click(open);
+    expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
   it("reports a share that could not be added, with Try again", async () => {
     answerWith({ received: answer("received", { rows: [received()] }) });
     bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: false, removed: { message: "Sam stopped sharing this." } });

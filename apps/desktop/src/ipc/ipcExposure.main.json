@@ -375,7 +375,8 @@
     "desktop:workspace-path-open-failed",
     "desktop:write-collection-automations",
     "desktop:write-workspace-asset",
-    "desktop:write-workspace-text"
+    "desktop:write-workspace-text",
+    "desktop:workspace-members"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",

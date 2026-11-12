@@ -1,6 +1,6 @@
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
-import { File, FileDiff, FolderInput, Layers, Link, MessageSquare, TriangleAlert } from "lucide-react";
+import { File, FileDiff, FolderInput, Layers, Link, MessageSquare, TriangleAlert, Users } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import type { ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -109,6 +109,7 @@ function subjectOf(row: AccessShareRow): Subject {
   const subject = shareSubject(row);
   const glyph = subject.kind === "damaged" ? <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
     : subject.kind === "chat" ? <MessageSquare size={15} aria-hidden className={GLYPH_CLASS} />
+    : subject.kind === "workspace" ? <Users size={15} aria-hidden className={GLYPH_CLASS} />
     : subject.kind === "version" ? <Layers size={15} aria-hidden className={GLYPH_CLASS} />
     : subject.path ? <KindGlyph kind={fileKindForPath(subject.path)} size={15} className="text-subtle" />
     : <File size={15} aria-hidden className={GLYPH_CLASS} />;
@@ -505,6 +506,7 @@ function ReceivedRow(props: {
   const parts = shareSenderParts(row?.sharerName, row?.granterEmail ?? mount?.granterEmail);
   const sender = parts.displayName ?? parts.full;
   const files = row !== null && row.selector !== null && row.selector.kind === undefined;
+  const membership = row?.selector?.kind === "workspace" ? row.selector : null;
   // A mounted share shows its pinned level: the pin is what its pulls enforce.
   const access = mount ? (mount.damaged ? null : mount.access) : row?.access;
   const active = row?.status === "active";
@@ -516,10 +518,19 @@ function ReceivedRow(props: {
       ]
     : files && active
       ? [{ label: "Add to workspace", onSelect: () => actions.mount(shareId), disabled: props.busy }]
-      : [];
+      : membership && active
+        ? [{ label: "Open", onSelect: () => undefined, disabled: true, description: "This version of dohc cannot open a workspace you joined." }]
+        : [];
   const word: Word | null = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
   // The level only while the share is live and dohc knows it; else the sender alone.
-  const who: Who = access && !word
+  // A membership says the role first: "Member · Ice lets members comment".
+  const who: Who = membership && !word
+    ? membership.role === "admin"
+      ? { text: `Admin · ${sender} owns this workspace`, title: `Admin · ${parts.full} owns this workspace` }
+      : access
+        ? { text: `Member · ${sender} lets members ${verbOf(access)}`, title: `Member · ${parts.full} lets members ${verbOf(access)}` }
+        : { text: `Member · from ${sender}`, title: `Member · from ${parts.full}` }
+    : access && !word
     ? { text: `${sender} lets you ${verbOf(access)}`, title: `${parts.full} lets you ${verbOf(access)}` }
     : fromWho(sender, parts.full);
   const where = mount ? `In this workspace as shared-with-me/${mount.label}` : null;

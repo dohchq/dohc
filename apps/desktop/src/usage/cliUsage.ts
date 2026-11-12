@@ -3,6 +3,7 @@ import {
   type CliRequest, type CliResultByVerb,
 } from "@dohc/cli/protocol";
 import { DATASET_CAPABILITIES } from "@dohc/cli/dataset";
+import { MEMBERS_CAPABILITIES } from "@dohc/cli/members";
 import { CAPABILITIES, type CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
 import { RENDERER_USAGE_COVERAGE } from "./rendererUsage";
@@ -38,6 +39,7 @@ export function cliUsageInvocation(request: CliRequest, result: CliResultByVerb[
   const id = request.verb === "dataset" ? DATASET_CAPABILITIES[request.args.request.action]
     : request.verb === "appPublication" ? APP_PUBLICATION_CAPABILITIES[request.args.request.action]
     : request.verb === "ownerAppResponses" ? APP_RESPONSE_CAPABILITIES[request.args.request.action]
+    : request.verb === "members" ? MEMBERS_CAPABILITIES[request.args.request.action]
     : CLI_CAPABILITIES[request.verb][0];
   if (!covered.has(id)) return null;
   if (request.door === "mcp" && !mcpCovered.has(id)) return null;

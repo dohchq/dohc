@@ -12,7 +12,7 @@ import { createRequestLog } from "@dohc/service-http";
 export const SHARE_WEB_REQUEST_LOG = createRequestLog("share-web", [
   ACCOUNT_DELETION_PATH, "app", "/api/apps/launch", "/api/apps/summary", "/api/mcp", ...MCP_ROUTE_PATTERNS, "/api/apps",
   "/api/live/link-document", "/api/live/link-ticket", "/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents",
-  "/api/named-chat/*", "/api/push/*", "/api/account/*", "/s", "/s/", "/s/assets/*", "/s/*", "/l", "/l/*",
+  "/api/named-chat/*", "/api/push/*", "/api/account/*", "/api/members/join-preview", "/api/members/join", "/join", "/s", "/s/", "/s/assets/*", "/s/*", "/l", "/l/*",
   "/api/exchange", "/api/handoff", COLLECTION_WRITES_PATH, "/api/view/chat/channels", "/api/view/chat/messages",
   "/api/view/discussion", "/api/view/discussion/activity", "/api/view/meta", "/api/view/current", "/api/view/log", "/api/view/blob/:sha256",
 ]);

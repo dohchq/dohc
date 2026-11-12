@@ -24,6 +24,8 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_again",
   "dohc_delete_retained_copies",
   "dohc_publish_app",
+  // Members belong to the original workspace and its owner account.
+  "dohc_members",
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_duplicate_file",
@@ -655,6 +657,19 @@ it("routes owner publication with a bearer warning and a stable link operation i
   expect(result.structuredContent).toEqual(facts);
   expect(result.content).toHaveLength(1);
   expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
+});
+
+it("routes the owner's Members actions with no workspace id, and refuses leave before the desktop", async () => {
+  const view = { status: "refused" };
+  const request = vi.fn(async (_request: { verb: string; args: unknown }) => view);
+  const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request });
+  const result = await client.callTool({ name: "dohc_members", arguments: { request: { action: "role", person: "ana@example.com", role: "admin" } } });
+  expect(result.structuredContent).toEqual(view);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "members", args: { cwd: "/workspace", actor: "agent", request: { action: "role", person: "ana@example.com", role: "admin" } } }));
+  for (const bad of [{ action: "leave" }, { action: "list", workspaceId: "w" }, { action: "invite", email: "nobody" }]) {
+    expect(await client.callTool({ name: "dohc_members", arguments: { request: bad } })).toMatchObject({ isError: true });
+  }
+  expect(request).toHaveBeenCalledTimes(1);
 });
 
 it("names the run it works for on every chat write, over a run the caller names", async () => {

@@ -74,6 +74,19 @@ it("retains received Group validity and excludes secrets from the recipient's ow
   expect(answer.rows[0]).toMatchObject({ recipientUserId: "recipient", via: "received" });
   expect(JSON.stringify(answer)).not.toMatch(/secret|bearer|credential|Invitation|shareCode/);
 });
+it("lists a received workspace membership for the account without matching it to this workspace's paths", () => {
+  const member = (patch: object) => ({ ...grant("member"), createdAtMs: 1, genericChatWritable: false, subjectName: "Community",
+    selector: { kind: "workspace", role: "member" }, access: "comment", ...patch });
+  const inventory = parseReceivedInventory({ received: [member({})], removed: [] })!;
+  const query = createAccessQuery(), base = { ...input(), observation: { inventory, checkedAtMs: 100, freshness: "fresh" as const },
+    recipientUserId: "recipient", ref: null, coverage: "received-account" as const };
+  expect(query.answer(base).rows).toMatchObject([{ shareId: "member", subjectName: "Community", access: "comment",
+    selector: { kind: "workspace", role: "member" } }]);
+  expect(query.answer({ ...base, ref }).rows).toEqual([]);
+  // An owner never receives their own workspace, and a membership has the three levels.
+  expect(parseReceivedInventory({ received: [member({ selector: { kind: "workspace", role: "owner" } })], removed: [] })).toBeNull();
+  expect(parseReceivedInventory({ received: [member({ access: "read-write" })], removed: [] })).toBeNull();
+});
 it("treats received Groups with missing file-scope facts as damaged copies", () => {
   expect(parseReceivedInventory({ received: [{ ...grant("g"), createdAtMs: 1, genericChatWritable: false,
     selector: { kind: "group", channelWireId: "group", paths: ["Notes"], versionId: null }, access: "read-only" }], removed: [] })).toBeNull();
