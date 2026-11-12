@@ -3,7 +3,7 @@ import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/wo
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { cutText } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
-import { ChatsLiveAdapter, type JsonValue } from "@dohc/workspace-engine-client";
+import { ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {
   answerDecision, answerWithReply, checkedContent, engineTrim, postToGroup, reactToMessage, replyInThread, sendToStream,
@@ -134,20 +134,38 @@ const groupMissing = (groupId: string) => new TargetMissing(new OperationError(`
 const messageMissing = (messageId: string) => new TargetMissing(new OperationError(`no such message in this thread: ${messageId}`).message);
 const mismatched = () => new Error("The write's command doesn't match its record.");
 
-// The engine answered, and will answer again, that the request didn't happen.
-function answeredNo(error: unknown): boolean {
-  return error instanceof EngineRequestError && error.wireError?.retry === "no";
+// The engine's own answer, as the adapters raise it (a DaemonRefusalError) or as its client does.
+function engineAnswer(error: unknown): { code: string; message: string } | null {
+  if (error instanceof DaemonRefusalError) return { code: error.wireCode, message: error.message };
+  if (error instanceof EngineRequestError && error.wireError !== undefined) return { code: error.wireError.code, message: error.wireError.message };
+  return null;
 }
 
-// A stage the engine refused, so it didn't commit. A reused key means an earlier attempt did.
+// The engine's answer for a message it doesn't hold (chats.rs, require_message_row). Any other failure says nothing of it.
+function messageNotFound(error: unknown): boolean {
+  const answer = engineAnswer(error);
+  return answer?.code === "INVALID_PARAMS" && answer.message === "message-not-found";
+}
+
+// The engine refused the request's content, which it checks before writing. A reused key means an earlier attempt
+// wrote, and an internal failure can follow a write that committed, so neither counts.
 function refusedByEngine(error: unknown): boolean {
-  return answeredNo(error) && (error as EngineRequestError).wireError?.message !== "idempotency-key-reuse-mismatch";
+  const answer = engineAnswer(error);
+  return answer?.code === "INVALID_PARAMS" && answer.message !== "idempotency-key-reuse-mismatch";
 }
 
 const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
+// The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
+const HIDDEN_IN_NAMES = /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+
+// The name as the engine stores it, so the published row can be compared with it exactly.
+function authorName(name: string | null): string {
+  return cutText(name?.replace(HIDDEN_IN_NAMES, "").trim() || "Unnamed", 40);
+}
+
 function authorOf(writer: PhoneWriter, workspaceId: string): AuthorSnapshot {
-  const displayName = cutText(writer.displayName?.trim() || "Unnamed", 40);
+  const displayName = authorName(writer.displayName);
   let actorKey: string | null;
   try {
     actorKey = serializeActorKey(deriveLocalActor({
@@ -167,13 +185,21 @@ const follow = (threadId: string, author: AuthorSnapshot): ExpectedRecord => ({
 });
 
 // What a person's message makes: the thread's structure the first time this
-// copy writes in it, the message, the follow, and an open question or poll.
-function messageRecords(threadId: string, messageId: string, author: AuthorSnapshot, content: ChatMessageContent): ExpectedRecord[] {
-  const asks = content.needsDecision === true || (content.options?.length ?? 0) > 0;
-  const question: ExpectedRecord[] = asks ? [{ kind: "chat.decision.set", fields: { threadId, messageId, state: "open" } }] : [];
+// copy writes in it, the message, the follow, and an open question or poll
+// with its choices as the engine trims them. The engine names a parent only
+// once it exported the parent, so a named one must be the write's own.
+function messageRecords(threadId: string, messageId: string, author: AuthorSnapshot, content: ChatMessageContent,
+  parentMessageId?: string): ExpectedRecord[] {
+  const options = (content.options ?? []).map(engineTrim);
+  const question: ExpectedRecord[] = content.needsDecision === true || options.length > 0
+    ? [{ kind: "chat.decision.set", fields: { threadId, messageId, state: "open", ...(options.length > 0 ? { options } : {}) },
+      ...(options.length > 0 ? {} : { absent: ["options"] }) }]
+    : [];
   return [
     { kind: "chat.thread.create", fields: { threadId }, optional: true },
-    { kind: "chat.message.append", fields: { messageId, threadId, authorKind: "human", authorUserId: author.accountId, body: content.body } },
+    { kind: "chat.message.append", fields: {
+      messageId, threadId, authorKind: "human", authorDisplayName: author.displayName, authorUserId: author.accountId, body: content.body,
+    }, ...(parentMessageId === undefined ? { absent: ["parentMessageId"] } : { whenPresent: { parentMessageId } }) },
     follow(threadId, author),
     ...question,
   ];
@@ -185,18 +211,19 @@ export function publicationStages(write: WriteCommand, author: AuthorSnapshot, k
     case "start":
       return [{ key: key("post"), role: "post", engineThread: write.threadId, records: messageRecords(write.threadId, write.messageId, author, write) }];
     case "reply":
-      return [{ key: key("reply"), role: "reply", records: messageRecords(write.threadId, write.messageId, author, write) }];
+      return [{ key: key("reply"), role: "reply", records: messageRecords(write.threadId, write.messageId, author, write, write.parentMessageId) }];
     case "answer":
       return [
-        { key: key("reply"), role: "reply", records: messageRecords(write.threadId, write.messageId, author, write) },
+        { key: key("reply"), role: "reply", records: messageRecords(write.threadId, write.messageId, author, write, write.parentMessageId) },
         { key: key("decision"), role: "decision", records: [{ kind: "chat.decision.set", fields: {
           threadId: write.threadId, messageId: write.questionId, state: "resolved", resolvedByMessageId: write.messageId,
-        } }] },
+          ...(write.chosenOption === undefined ? {} : { chosenOption: write.chosenOption }),
+        }, ...(write.chosenOption === undefined ? { absent: ["chosenOption"] } : {}) }] },
       ];
     case "react": {
       const records: ExpectedRecord[] = [{ kind: "chat.reaction.set", fields: {
         threadId: write.threadId, messageId: write.messageId, emoji: write.emoji.trim().normalize("NFC"),
-        authorId: author.accountId, state: write.state,
+        authorId: author.accountId, authorDisplayName: author.displayName, state: write.state,
       } }];
       if (write.state === "added") records.push(follow(write.threadId, author));
       return [{ key: key("reaction"), role: "reaction", records }];
@@ -285,7 +312,7 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
   const visible = async (threadId: string): Promise<ChatThread | undefined> =>
     (await chats.store.listThreads({ workspaceId })).find((each) => each.id === threadId);
   const rawMessage = (messageId: string) => adapter.getMessage({ workspaceId, messageId }).catch((error: unknown) => {
-    if (answeredNo(error)) return null;
+    if (messageNotFound(error)) return null;
     throw error;
   });
   return {
@@ -329,24 +356,36 @@ function advance(storage: SyncRelayStorage, record: OperationRecord, nowMs: numb
 }
 
 /**
- * Runs one engine stage of a recorded write. A stage the engine refused
- * didn't commit; when no stage of the write committed either, nothing of it
- * can ever publish, so the write is refused now instead of waiting.
+ * Runs one engine stage of a recorded write. An error doesn't say the stage
+ * didn't commit: an internal failure can follow a commit. Only the engine's
+ * refusal of the stage's content, with no receipt for the stage and no
+ * earlier stage of the write committed, proves nothing of it can publish, so
+ * the write is refused now. Otherwise its publication judges it.
  */
-async function runStage<T>(storage: SyncRelayStorage, record: OperationRecord, progress: { committed: boolean }, nowMs: () => number,
+async function runStage<T>(context: WriteContext, record: OperationRecord, progress: { committed: boolean }, key: string,
   run: () => Promise<T>): Promise<T> {
   try {
     const result = await run();
     progress.committed = true;
     return result;
   } catch (error) {
-    if (!progress.committed && refusedByEngine(error)) {
-      storage.advanceAccountOperation({
+    if (!progress.committed && refusedByEngine(error) && await receiptAbsent(context, key)) {
+      context.storage.advanceAccountOperation({
         accountId: record.accountId, operationId: record.operationId, stage: "refused",
-        result: { threadId: null, reason: COULD_NOT_SEND }, nowMs: nowMs(),
+        result: { threadId: null, reason: COULD_NOT_SEND }, nowMs: context.nowMs(),
       });
     }
     throw error;
+  }
+}
+
+// Whether the engine holds no receipt for the stage. A read that fails proves nothing.
+async function receiptAbsent(context: WriteContext, key: string): Promise<boolean> {
+  try {
+    const [stage] = (await receiptReader(context.copy, context.copy.workspace, context.signal)([key])).stages;
+    return stage?.state === "absent";
+  } catch {
+    return false;
   }
 }
 
@@ -380,10 +419,11 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
   const { stored } = session;
   const { write } = stored;
 
-  async function stage<T>(run: () => Promise<T>): Promise<T> {
-    const row = (session.record ??= record());
+  // Access is checked, then the row made, then the stage started, with nothing awaited between them.
+  async function stage<T>(role: Role, run: () => Promise<T>): Promise<T> {
     await context.authorize();
-    return await runStage(storage, row, session, nowMs, run);
+    const row = (session.record ??= record());
+    return await runStage(context, row, session, stageKey(stored, role), run);
   }
   const progress = (change: { stage?: "reply-written" | "answer-written"; threadId?: string }) => {
     if (session.record !== null) advance(storage, session.record, nowMs(), change);
@@ -407,7 +447,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
       await context.authorize();
       await targets.channel(write.channelId, write.lane);
       await targets.unclaimed({ threadId: write.threadId, messageId: write.messageId });
-      const started = await stage(() => writeStart(adapter, workspaceId, stored, write));
+      const started = await stage("post", () => writeStart(adapter, workspaceId, stored, write));
       progress({ threadId: started.thread.id });
       return started;
     },
@@ -416,7 +456,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
       await context.authorize();
       await targets.thread(write.threadId);
       await targets.unclaimed({ messageId: write.messageId });
-      const message = await stage(() => writeReply(adapter, workspaceId, stored, write));
+      const message = await stage("reply", () => writeReply(adapter, workspaceId, stored, write));
       progress({ threadId: message.threadId });
       return message;
     },
@@ -435,7 +475,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
       let written: ChatMessage | null = null;
       return await use({
         reply: async () => {
-          const message = await stage(() => writeReply(adapter, workspaceId, stored, write));
+          const message = await stage("reply", () => writeReply(adapter, workspaceId, stored, write));
           written = message;
           progress({ stage: "reply-written", threadId: message.threadId });
           return message;
@@ -445,7 +485,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
           if (reply === null || reply.id !== write.messageId || reply.threadId !== write.threadId || resolve.messageId !== write.questionId) {
             throw mismatched();
           }
-          const decision = await stage(() => writeResolve(adapter, workspaceId, stored, write, { threadId: write.threadId, messageId: reply.id }));
+          const decision = await stage("decision", () => writeResolve(adapter, workspaceId, stored, write, { threadId: write.threadId, messageId: reply.id }));
           progress({ stage: "answer-written" });
           return decision;
         },
@@ -464,7 +504,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
       return await use({
         reply,
         resolve: async () => {
-          const decision = await stage(() => writeResolve(adapter, workspaceId, stored, write, { threadId: write.threadId, messageId: reply.id }));
+          const decision = await stage("decision", () => writeResolve(adapter, workspaceId, stored, write, { threadId: write.threadId, messageId: reply.id }));
           progress({ stage: "answer-written" });
           return decision;
         },
@@ -476,7 +516,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
       }
       await context.authorize();
       await targets.thread(write.threadId);
-      return await stage(() => writeReaction(adapter, workspaceId, stored, write));
+      return await stage("reaction", () => writeReaction(adapter, workspaceId, stored, write));
     },
   };
 }
@@ -559,27 +599,28 @@ async function replayStages(context: WriteContext, record: OperationRecord, stor
   const progress = { committed: present.size > 0 };
   const { write } = stored;
   const absent = (role: Role) => !present.has(stageKey(stored, role));
-  const stage = async <T>(run: () => Promise<T>): Promise<T> => {
-    await context.authorize();
+  // The thread is checked, then access, then the stage started, with nothing awaited between the last two.
+  const stage = async <T>(role: Role, run: () => Promise<T>): Promise<T> => {
     if (write.kind !== "start") await targets.thread(write.threadId);
-    return await runStage(storage, record, progress, nowMs, run);
+    await context.authorize();
+    return await runStage(context, record, progress, stageKey(stored, role), run);
   };
   switch (write.kind) {
     case "start":
       if (absent("post")) {
-        const started = await stage(() => writeStart(adapter, workspaceId, stored, write));
+        const started = await stage("post", () => writeStart(adapter, workspaceId, stored, write));
         advance(storage, record, nowMs(), { threadId: started.thread.id });
       }
       return;
     case "reply":
       if (absent("reply")) {
-        const message = await stage(() => writeReply(adapter, workspaceId, stored, write));
+        const message = await stage("reply", () => writeReply(adapter, workspaceId, stored, write));
         advance(storage, record, nowMs(), { threadId: message.threadId });
       }
       return;
     case "answer":
       if (absent("reply")) {
-        const message = await stage(() => writeReply(adapter, workspaceId, stored, write));
+        const message = await stage("reply", () => writeReply(adapter, workspaceId, stored, write));
         advance(storage, record, nowMs(), { stage: "reply-written", threadId: message.threadId });
       }
       if (absent("decision")) {
@@ -593,7 +634,7 @@ async function replayStages(context: WriteContext, record: OperationRecord, stor
       }
       return;
     case "react":
-      if (absent("reaction")) await stage(() => writeReaction(adapter, workspaceId, stored, write));
+      if (absent("reaction")) await stage("reaction", () => writeReaction(adapter, workspaceId, stored, write));
       return;
   }
 }
@@ -664,8 +705,9 @@ export interface PhoneWriteInput {
  * pending, or refused from its row, or a missing target as reads answer it.
  * A retry with the same operation ID and arguments answers from the row and
  * replays only the stages its receipts lack; other arguments, or a row long
- * settled, are refused and write nothing. Access is checked before the row,
- * before each engine stage, and before the answer. Throws the route's
+ * settled, are refused and write nothing. A settled write answers from its
+ * row without touching the copy. Access is checked before the row, before
+ * each engine stage, and before the answer. Throws the route's
  * not-found when access ends, and a bad request for a message the shared
  * rules refuse.
  */
@@ -682,19 +724,34 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
     await input.authorize();
     return answer;
   };
+  const messageIdOf = (record: OperationRecord) => {
+    const stored = storedWrite(record.command);
+    return stored === null || stored.write.kind === "react" ? undefined : stored.write.messageId;
+  };
   return await withOperationLock(writer.accountId, operationId, async () => {
     await input.authorize();
-    await copy.sync(signal);
-    await input.authorize();
+    // A known answer needs nothing of the copy: another write under this ID, one settled long ago, or a settled one.
     const found = storage.lookupAccountOperation({ accountId: writer.accountId, operationId, binding });
     if (found.kind === "mismatch") return await answered(refused(COULD_NOT_SEND));
     if (found.kind === "too-old") return await answered(refused(TOO_OLD));
+    if (found.kind === "found" && (found.record.stage === "saved" || found.record.stage === "refused")) {
+      return await answered(phoneAnswer({ state: found.record.stage === "saved" ? "saved" : "refused", record: found.record }, messageIdOf(found.record)));
+    }
+    let synced = true;
+    try {
+      await copy.sync(signal);
+    } catch (error) {
+      if (error instanceof RelayError || signal?.aborted) throw error;
+      // Nothing is written yet, so the write wasn't sent; a recorded one's publication answers.
+      if (found.kind === "absent") return await answered(refusalBeforeRecord(error, signal));
+      synced = false;
+    }
+    await input.authorize();
     let record: OperationRecord;
     if (found.kind === "found") {
       record = found.record;
       const stored = storedWrite(record.command);
-      const unfinished = record.stage !== "saved" && record.stage !== "refused";
-      if (stored !== null && unfinished && record.incarnation === copy.incarnation) {
+      if (synced && stored !== null && record.incarnation === copy.incarnation) {
         try {
           await replayStages(context, record, stored);
         } catch (error) {
@@ -745,8 +802,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       ...(signal ? { signal } : {}), ...(input.deadlineMs === undefined ? {} : { deadlineMs: input.deadlineMs }),
       nowMs, ...(input.pause ? { pause: input.pause } : {}),
     });
-    const stored = storedWrite(record.command);
-    return await answered(phoneAnswer(published, stored === null || stored.write.kind === "react" ? undefined : stored.write.messageId));
+    return await answered(phoneAnswer(published, messageIdOf(record)));
   });
 }
 

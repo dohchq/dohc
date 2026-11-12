@@ -524,6 +524,57 @@ describe("what a phone chat write must publish", () => {
     expect(await publishOperation({ storage, copy: copy(receipts).replica, record: write, ...clock() })).toMatchObject({ state: "saved" });
   });
 
+  // Publishes a write whose stages' receipts list the given rows, and answers its state.
+  async function published(write: WriteCommand, rows: Array<[kind: string, payload: JsonValue]>, receipts: Array<[role: string, originSeqs: number[]]>,
+    threadId = THREAD) {
+    const { storage, accepted } = await relay();
+    const written = recordWrite(storage, write);
+    rows.forEach(([kind, payload], index) => accepted(index + 1, kind, payload));
+    const engine = copy(new Map(receipts.map(([role, originSeqs]) => [keyOf(role), at(keyOf(role), threadId, originSeqs)])));
+    return (await publishOperation({ storage, copy: engine.replica, record: written, deadlineMs: 1_000, ...clock() })).state;
+  }
+
+  it("compares only a reused conversation's thread references with the thread the engine used, never a body that names the proposal", async () => {
+    const write: WriteCommand = { kind: "start", lane: "chat", channelId: "channel-1", threadId: "thread-proposed", messageId: "message-1",
+      body: "thread-proposed" };
+    expect(await published(write, [["chat.message.append", message("thread-running", "thread-proposed")],
+      ["chat.follow.set", { ...followPayload, targetId: "thread-running" }]], [["post", [1, 2]]], "thread-running")).toBe("saved");
+    expect(await published(write, [["chat.message.append", message("thread-running", "thread-running")]], [["post", [1]]], "thread-running"),
+      "the body as the engine's thread").toBe("pending");
+  });
+
+  it("keeps a write pending while a published field differs from its command: the name, a poll's choices, the choice, or the parent", async () => {
+    const reply: WriteCommand = { kind: "reply", threadId: THREAD, messageId: "message-1", body: "Lunch?" };
+    expect(await published(reply, [["chat.message.append", { ...message(THREAD), authorDisplayName: "Someone" }]], [["reply", [1]]]), "the name")
+      .toBe("pending");
+
+    const poll: WriteCommand = { ...reply, options: [" Noon ", "One"] };
+    const open = (options: string[]) => ({ threadId: THREAD, messageId: "message-1", state: "open", options, atMs: 1 });
+    expect(await published(poll, [["chat.message.append", message(THREAD)], ["chat.decision.set", open(["Noon", "One"])]], [["reply", [1, 2]]]),
+      "the choices as the engine trims them").toBe("saved");
+    expect(await published(poll, [["chat.message.append", message(THREAD)], ["chat.decision.set", open(["Noon", "Two"])]], [["reply", [1, 2]]]),
+      "other choices").toBe("pending");
+
+    const answer = (chosenOption?: string): WriteCommand => ({ kind: "answer", threadId: THREAD, messageId: "reply-1", body: "Yes",
+      questionId: "question", ...(chosenOption === undefined ? {} : { chosenOption }) });
+    const resolved = (chosenOption?: string) => ({ ...decisionPayload(), ...(chosenOption === undefined ? {} : { chosenOption }) });
+    const answered = async (write: WriteCommand, chosen?: string) => await published(write,
+      [["chat.message.append", messagePayload()], ["chat.decision.set", resolved(chosen)]], [["reply", [1]], ["decision", [2]]]);
+    expect(await answered(answer("Alfama"), "Alfama"), "the choice").toBe("saved");
+    expect(await answered(answer("Alfama"), "Baixa"), "another choice").toBe("pending");
+    expect(await answered(answer(), "Baixa"), "a choice where none was made").toBe("pending");
+
+    const under = (parentMessageId?: string): WriteCommand => ({ ...reply, ...(parentMessageId === undefined ? {} : { parentMessageId }) });
+    const withParent = (parentMessageId: string) => ({ ...message(THREAD), parentMessageId });
+    expect(await published(under("parent-1"), [["chat.message.append", withParent("parent-1")]], [["reply", [1]]]), "its parent").toBe("saved");
+    expect(await published(under("parent-1"), [["chat.message.append", message(THREAD)]], [["reply", [1]]]),
+      "a parent the engine hadn't exported").toBe("saved");
+    expect(await published(under("parent-1"), [["chat.message.append", withParent("parent-2")]], [["reply", [1]]]), "another parent")
+      .toBe("pending");
+    expect(await published(under(), [["chat.message.append", withParent("parent-2")]], [["reply", [1]]]), "a parent it didn't name")
+      .toBe("pending");
+  });
+
   it("saves a reaction with or without the follow a first reaction adds", async () => {
     for (const follows of [false, true]) {
       const { storage, accepted } = await relay();

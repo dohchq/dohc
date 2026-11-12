@@ -2700,31 +2700,39 @@ describe("the automation replicas", () => {
     expect(storage.listAutomationWorkspaces()[0]?.reasons, "saved, it keeps the copy no more").toEqual(["account"]);
   });
 
-  it("replays a phone write's stage that never committed from its stored command when its copy opens, before the copy pushes", async () => {
+  it("replays a phone write's stage that never committed from its stored command when the server restarts, before the copy pushes", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
-    // The copy's first open gets the engine's first handle.
-    const chats = new ChatsLiveAdapter(engine.chats, "handle-1", { workspaceId: WORKSPACE });
+    const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const first = await stepped(storage, wanted);
+    const opened = first.running.replica(WORKSPACE)!;
+    // The copy's chats live under its handle, which the restarted engine gives it again.
+    const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
     const group = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning", type: "both" });
     const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
     const author = { accountId: "owner", displayName: "Owner", actorKey: null };
     const write: WriteCommand = { kind: "start", lane: "chat", channelId: group.channelId, threadId: ids.threadId,
       messageId: ids.messageId("post"), body: "Lunch?" };
-    // A crash after the row and before the engine's stage: the row is all there is.
+    // A crash after the row and before the engine's stage, on the copy that is open: the row is all there is.
     const claim = storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
-      binding: { workspaceId: WORKSPACE, operation: "send", args: { operationId: "unsent" } }, incarnation: 1,
+      binding: { workspaceId: WORKSPACE, operation: "send", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
       replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
       command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
     expect(claim.kind).toBe("recorded");
+    await first.running.close();
 
-    await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]));
-    const started = engine.sent.find((request) => request.method === "chats.threads.start");
-    expect(started, "the stored command's stage").toMatchObject({ workspace: "handle-1", idempotencyKey: ids.key("post"), params: {
+    const before = engine.sent.length;
+    const restarted = await stepped(storage, wanted, { root: first.root });
+    expect(restarted.running.replica(WORKSPACE)).toMatchObject({ incarnation: opened.incarnation, workspace: opened.workspace });
+    const after = engine.sent.slice(before);
+    const started = after.find((request) => request.method === "chats.threads.start");
+    expect(started, "the stored command's stage").toMatchObject({ workspace: opened.workspace, idempotencyKey: ids.key("post"), params: {
       channelId: group.channelId, lane: "chat", messageId: ids.messageId("post"), body: "Lunch?",
       authorKind: "human", authorDisplayName: "Owner", authorUserId: "owner", stageReceipt: true,
     } });
-    const methods = engine.methods();
-    expect(methods.indexOf("chats.threads.start"), "replayed before the copy pushes").toBeLessThan(methods.indexOf("sync.push"));
+    const methods = after.map((request) => request.method);
+    expect(methods.indexOf("sync.push"), "the restarted copy pushes").toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf("chats.threads.start"), "replayed before it pushes").toBeLessThan(methods.indexOf("sync.push"));
   });
 
   it("refuses a copy's phone writes once its oldest stayed unknown thirty days past its active time, and opens the next visit a fresh copy", async () => {
@@ -2751,6 +2759,39 @@ describe("the automation replicas", () => {
     expect(existsSync(kept), "the settled folder went").toBe(false);
     expect(running.replica(WORKSPACE), "the visit has a fresh copy").toMatchObject({ incarnation: 1 });
     expect(storage.listUnfinishedOperationCopies()).toEqual([]);
+  });
+
+  it("waits for its retry, while the copy syncs, before closing a copy again whose overdue writes couldn't settle", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const clock = { ms: 0 };
+    const errors: unknown[] = [];
+    const { running, pass } = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]),
+      { clock, onError: (error) => errors.push(error) });
+    phoneWrite(storage, "stuck");
+    clock.ms = OPERATION_ACTIVE_MS + OPERATION_STALLED_KEEP_MS;
+    engine.receipts(new Error("the engine is busy"));
+    const closes = () => count(engine, "workspace.close");
+
+    await pass(WORKSPACE);
+    expect(errors).toContainEqual(new Error("the engine is busy"));
+    expect(outcome(raw, "stuck")[0], "nothing settled").not.toBe("refused");
+    const reopened = running.replica(WORKSPACE);
+    expect(reopened, "the copy opened again and synced").toBeDefined();
+    const closed = closes();
+
+    // Its sync goes on succeeding, and the copy stays open until the retry is due.
+    await pass(WORKSPACE);
+    await pass();
+    expect(closes()).toBe(closed);
+    expect(running.replica(WORKSPACE)).toBe(reopened);
+
+    engine.receipts(new Map());
+    clock.ms += 60_000;
+    await pass();
+    expect(outcome(raw, "stuck")).toEqual(["refused", "pending", { threadId: null, reason: "Couldn't send" }]);
+    expect(running.replica(WORKSPACE), "a fresh copy").toBeDefined();
+    expect(running.replica(WORKSPACE)).not.toBe(reopened);
   });
 
   it("stalls a copy's phone writes once their receipts keep failing to read, and keeps the copy", async () => {

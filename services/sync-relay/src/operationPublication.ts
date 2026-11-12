@@ -64,8 +64,9 @@ export type PublicationStage = {
   records: ExpectedRecord[];
   /**
    * The thread a stage proposed when the engine may write to a running
-   * conversation instead. Each expected field equal to it is compared with
-   * the thread the stage's receipt names.
+   * conversation instead. Its records' thread references, `threadId` and a
+   * follow's `targetId`, are compared with the thread the stage's receipt
+   * names when they equal it. No other field is.
    */
   engineThread?: string;
 };
@@ -74,6 +75,10 @@ export type ExpectedRecord = {
   kind: string;
   /** Payload fields the accepted row holds, exactly. */
   fields: { [field: string]: JsonValue };
+  /** Fields the row holds only sometimes, such as a parent the engine exports only once it exported the parent; when held, exactly. */
+  whenPresent?: { [field: string]: JsonValue };
+  /** Fields the row must not hold, such as a choice for a question that had none. */
+  absent?: string[];
   /** A record the stage may not add, such as the follow a person's first message adds. */
   optional?: boolean;
 };
@@ -113,9 +118,18 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
     for (const item of records as unknown[]) {
       const record = asRecord(item);
       const kind = record?.kind, fields = asRecord(record?.fields), optional = record?.optional;
+      const whenPresent = record?.whenPresent === undefined ? undefined : asRecord(record.whenPresent), absent = record?.absent;
       if (typeof kind !== "string" || fields === null || (optional !== undefined && typeof optional !== "boolean")) return null;
+      if (whenPresent === null || (absent !== undefined && !(Array.isArray(absent) && (absent as unknown[]).every((field) => typeof field === "string")))) {
+        return null;
+      }
       // Parsed from the stored JSON, so every field is JSON.
-      expected.push({ kind, fields: fields as { [field: string]: JsonValue }, ...(optional === true ? { optional } : {}) });
+      expected.push({
+        kind, fields: fields as { [field: string]: JsonValue },
+        ...(whenPresent === undefined ? {} : { whenPresent: whenPresent as { [field: string]: JsonValue } }),
+        ...(absent === undefined ? {} : { absent: absent as string[] }),
+        ...(optional === true ? { optional } : {}),
+      });
     }
     decoded.push({ key, role, records: expected, ...(engineThread === undefined ? {} : { engineThread }) });
   }
@@ -170,16 +184,18 @@ export function judgeOperation(
   return { stage: "saved", messagePublished, result: { threadId } };
 }
 
-// The records a stage must have made, with the thread its receipt names
-// wherever the stage proposed one the engine could replace.
+// The records a stage must have made, with the thread its receipt names in
+// each thread reference to the thread it proposed. Literal content, such as a
+// body that happens to equal the proposal, stays as it is.
 function expectedRecords(stage: PublicationStage, threadId: string): readonly ExpectedRecord[] {
   const proposed = stage.engineThread;
   if (proposed === undefined || proposed === threadId) return stage.records;
-  return stage.records.map((record) => ({
-    ...record,
-    fields: Object.fromEntries(Object.entries(record.fields)
-      .map(([field, value]): [string, JsonValue] => [field, value === proposed ? threadId : value])),
-  }));
+  return stage.records.map((record) => {
+    const fields = { ...record.fields };
+    if (fields.threadId === proposed) fields.threadId = threadId;
+    if (record.kind === "chat.follow.set" && fields.targetId === proposed) fields.targetId = threadId;
+    return { ...record, fields };
+  });
 }
 
 // Whether the relay accepted every record a stage's coordinates name, each
@@ -213,7 +229,7 @@ function accepts(
     }
     if (row.relayAdmission === "refused" || row.opKind === REFUSED_OP_KIND) return "refused";
     const expected = row.relayAdmission === undefined
-      ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record.fields))
+      ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record))
       : undefined;
     if (expected === undefined) unresolved = true;
     else matched.add(expected);
@@ -229,10 +245,13 @@ function parseObject(json: string): Record<string, unknown> | null {
   }
 }
 
-function holds(payloadJson: string, fields: { readonly [field: string]: JsonValue }): boolean {
+function holds(payloadJson: string, expected: ExpectedRecord): boolean {
   const payload = parseObject(payloadJson);
-  return payload !== null && Object.entries(fields).every(([field, value]) =>
-    Object.hasOwn(payload, field) && stableJsonStringify(payload[field]) === stableJsonStringify(value));
+  const same = (field: string, value: JsonValue) => stableJsonStringify(payload?.[field]) === stableJsonStringify(value);
+  return payload !== null &&
+    Object.entries(expected.fields).every(([field, value]) => Object.hasOwn(payload, field) && same(field, value)) &&
+    Object.entries(expected.whenPresent ?? {}).every(([field, value]) => !Object.hasOwn(payload, field) || same(field, value)) &&
+    (expected.absent ?? []).every((field) => !Object.hasOwn(payload, field));
 }
 
 /**

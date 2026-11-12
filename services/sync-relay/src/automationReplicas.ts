@@ -90,6 +90,9 @@ const PUBLICATION_RETRY_MAX_MS = 5 * 60_000;
 const PUBLICATION_STALLED_RETRY_MS = 30 * 60_000;
 // A copy whose receipts can't be read this many times in a row stalls its writes.
 const PUBLICATION_QUERY_FAILURES = 5;
+// A copy whose overdue phone writes couldn't settle tries again this long after, doubling up to the most.
+const SETTLEMENT_RETRY_FIRST_MS = 60_000;
+const SETTLEMENT_RETRY_MAX_MS = 60 * 60_000;
 
 /**
  * Keeps one engine replica per workspace whose automations this server runs
@@ -163,6 +166,9 @@ export async function startAutomationReplicas(options: {
   // When each copy with unsent phone writes tries next, on the same clock,
   // the wait before it, and how many reads of its receipts failed in a row.
   const publicationRetries = new Map<string, { at: number; delay: number; failures: number }>();
+  // When each copy whose overdue phone writes couldn't settle tries again, on nowMs's clock, and the wait before it.
+  // Only a settlement that succeeds clears it; a sync that succeeds doesn't.
+  const settlementRetries = new Map<string, { at: number; delay: number }>();
 
   const folderOf = (workspaceId: string) => replicaFolder(options.root, options.namespace, workspaceId);
   // The workspace ids whose folders the last sweep kept.
@@ -529,10 +535,22 @@ export async function startAutomationReplicas(options: {
     // the copy closes and the folder settles, so nothing in it publishes again, and its unfinished writes are
     // refused. The marked folder then goes, as retirement or the next open removes a settled one, and a later
     // visit gets a fresh copy.
-    for (const workspaceId of overdueCopies()) {
+    // One whose settlement failed waits for its retry before its copy closes again.
+    const overdue = new Set(overdueCopies());
+    for (const workspaceId of [...settlementRetries.keys()]) if (!overdue.has(workspaceId)) settlementRetries.delete(workspaceId);
+    for (const workspaceId of overdue) {
+      const retry = settlementRetries.get(workspaceId);
+      if (retry !== undefined && retry.at > nowMs()) continue;
       ok = await each(workspaceId, async () => {
-        await replicas.get(workspaceId)?.close();
-        await settleWorkspace(workspaceId, COULD_NOT_SEND);
+        try {
+          await replicas.get(workspaceId)?.close();
+          await settleWorkspace(workspaceId, COULD_NOT_SEND);
+          settlementRetries.delete(workspaceId);
+        } catch (error) {
+          const delay = retry === undefined ? SETTLEMENT_RETRY_FIRST_MS : Math.min(retry.delay * 2, SETTLEMENT_RETRY_MAX_MS);
+          settlementRetries.set(workspaceId, {at: nowMs() + delay, delay});
+          throw error;
+        }
       }) && ok;
     }
     // A copy keeps the phone's unsent writes' reason exactly while they may still publish from it.
@@ -741,8 +759,11 @@ export async function startAutomationReplicas(options: {
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
     }
     // So is the end of the time a copy's oldest unfinished phone write may stay unknown.
+    // One whose settlement failed waits for its retry instead.
     for (const {workspaceId, activeUntilMs} of storage.unfinishedOperationActiveEnds()) {
-      if (!failedSyncs.has(workspaceId)) next = Math.min(next, activeUntilMs + OPERATION_STALLED_KEEP_MS);
+      const retry = settlementRetries.get(workspaceId);
+      if (retry !== undefined) next = Math.min(next, retry.at);
+      else if (!failedSyncs.has(workspaceId)) next = Math.min(next, activeUntilMs + OPERATION_STALLED_KEEP_MS);
     }
     let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
     // A copy's next attempt to publish the phone's writes is a deadline of its own.

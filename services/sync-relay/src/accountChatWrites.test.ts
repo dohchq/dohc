@@ -32,6 +32,8 @@ class TestEngine implements EngineTransport {
   readonly chats = new ChatsLoopbackEngine();
   readonly files = new VersionedLoopbackEngine();
   readonly failing = new Map<string, Error>();
+  /** Errors a method answers with after its write committed, as an engine whose answer failed after the commit. */
+  readonly failAfter = new Map<string, Error>();
   /** Each chat write that reached the engine, in order. */
   readonly writes: Request[] = [];
   readonly receipts = new Map<string, Receipt>();
@@ -65,6 +67,8 @@ class TestEngine implements EngineTransport {
     if (write && asRecord(request.params)?.stageReceipt === true && typeof request.idempotencyKey === "string") {
       await this.receive(request, request.idempotencyKey);
     }
+    const after = this.failAfter.get(request.method);
+    if (after) throw after;
     return response;
   }
 
@@ -98,9 +102,13 @@ class TestEngine implements EngineTransport {
       const threadId = String(params.threadId);
       const decision = (await read.listThreadDecisions(WORKSPACE, threadId)).find((each) => each.messageId === params.messageId);
       const winner = decision?.resolvedByMessageId ?? "";
+      const chosen = decision?.chosenOption;
       this.receipts.set(key, winner === params.resolvedByMessageId
-        ? { threadId, outcome: "written", rows: [row("chat.decision.set",
-          { threadId, messageId: String(params.messageId), state: "resolved", resolvedByMessageId: winner, atMs: 2 })] }
+        ? { threadId, outcome: "written", rows: [row("chat.decision.set", {
+          threadId, messageId: String(params.messageId), state: "resolved", resolvedByMessageId: winner,
+          ...(decision?.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+          ...(chosen === undefined ? {} : { chosenOption: chosen }), atMs: 2,
+        })] }
         : { threadId, outcome: "lost", winnerMessageId: winner, rows: [] });
       return;
     }
@@ -108,7 +116,7 @@ class TestEngine implements EngineTransport {
       const threadId = String(params.threadId);
       this.receipts.set(key, { threadId, outcome: "written", rows: [row("chat.reaction.set", {
         threadId, messageId: String(params.messageId), emoji: String(params.emoji), authorId: String(asRecord(params.author)?.authorId),
-        state: String(params.state), atMs: 3,
+        authorKind: "human", authorDisplayName: String(asRecord(params.author)?.displayName), state: String(params.state), atMs: 3,
       })] });
       return;
     }
@@ -116,9 +124,14 @@ class TestEngine implements EngineTransport {
     const rows = [row("chat.message.append", {
       messageId: message.id, threadId: message.threadId, authorKind: message.author.kind, authorDisplayName: message.author.displayName,
       authorUserId: message.authorUserId ?? null, body: message.body, createdAtMs: message.createdAtMs,
+      ...(message.parentMessageId === undefined ? {} : { parentMessageId: message.parentMessageId }),
     })];
-    if (params.needsDecision === true || Array.isArray(params.options)) {
-      rows.push(row("chat.decision.set", { threadId: message.threadId, messageId: message.id, state: "open", atMs: 1 }));
+    // The open question, with its choices as the engine stores them.
+    const options = (await read.listThreadDecisions(WORKSPACE, message.threadId)).find((each) => each.messageId === message.id)?.options ?? [];
+    if (params.needsDecision === true || options.length > 0) {
+      rows.push(row("chat.decision.set", {
+        threadId: message.threadId, messageId: message.id, state: "open", ...(options.length > 0 ? { options: [...options] } : {}), atMs: 1,
+      }));
     }
     this.receipts.set(key, { threadId: message.threadId, outcome: "written", rows });
   }
@@ -144,11 +157,15 @@ async function fixture() {
     }
   };
   let requestId = 0;
+  let syncError: Error | null = null;
   const lifetime = new AbortController();
   const copy: AutomationReplica = {
     workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: 1, reasons: ["account"], startedAtMs: 1, pulledHead: 0,
     root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: WORKSPACE, signal: lifetime.signal,
-    nextRequestId: () => ++requestId, withRecordWork: (work) => work(), sync: async () => undefined,
+    nextRequestId: () => ++requestId, withRecordWork: (work) => work(),
+    sync: async () => {
+      if (syncError !== null) throw syncError;
+    },
     step: async () => {
       if (relay !== "hold") engine.push(pushed);
       return true;
@@ -165,7 +182,11 @@ async function fixture() {
   const rows = () => Number(raw.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()?.n);
   const operation = (operationId: string) => raw.prepare(
     "SELECT stage, message_state, result_json, command_json FROM sync_relay_account_operations WHERE operation_id = ?").get(operationId);
-  return { storage, raw, engine, copy, chats, run, rows, operation, authorize, relay: (mode: typeof relay) => { relay = mode; } };
+  return {
+    storage, raw, engine, copy, chats, run, rows, operation, authorize,
+    relay: (mode: typeof relay) => { relay = mode; },
+    failSync: (error: Error | null) => { syncError = error; },
+  };
 }
 
 const human = { kind: "human" as const, displayName: "Ana" };
@@ -381,6 +402,62 @@ describe("a phone's chat write through the server's copy", () => {
     await replay();
     expect(f.engine.writes, "a stage with a receipt doesn't replay").toHaveLength(1);
     expect(errors).toEqual([]);
+  });
+
+  it("saves a write whose stage committed though the engine then answered with an error", async () => {
+    for (const failure of [
+      new EngineRequestError(1, { code: "INTERNAL", message: "persist-failed", retry: "no" }, CHATS_METHOD.threadStart),
+      new EngineRequestError(1, { code: "INVALID_PARAMS", message: "invalid-input", retry: "no" }, CHATS_METHOD.threadStart),
+    ]) {
+      const f = await fixture();
+      const { planning } = await seed(f.chats);
+      f.engine.failAfter.set(CHATS_METHOD.threadStart, failure);
+      const ids = phoneWriteIds(OWNER, WORKSPACE, "op-committed");
+      expect(await f.run({ operation: "post", args: { operationId: "op-committed", groupId: planning.channelId, body: "Where?" } }), failure.message)
+        .toEqual({ ok: true, state: "saved", threadId: ids.threadId, messageId: ids.messageId("post") });
+      expect(f.operation("op-committed")).toMatchObject({ stage: "saved", message_state: "published" });
+    }
+  });
+
+  it("keeps a write pending, not refused, when the engine fails a stage with an error that isn't a refusal of its content", async () => {
+    const f = await fixture();
+    await seed(f.chats);
+    f.engine.failing.set(CHATS_METHOD.messageSend, new EngineRequestError(1, { code: "INTERNAL", message: "persist-failed", retry: "no" },
+      CHATS_METHOD.messageSend));
+    expect(await f.run(reply("op-internal", "thread-stay"))).toMatchObject({ ok: true, state: "pending" });
+    expect(f.operation("op-internal")).toMatchObject({ stage: "publishing" });
+  });
+
+  it("answers a failed message read as not sent, not as a missing message, when finding a target and when checking a new ID", async () => {
+    const f = await fixture();
+    const { planning } = await seed(f.chats);
+    f.engine.failing.set(CHATS_METHOD.messageGet, new EngineRequestError(1, { code: "INTERNAL", message: "state-corrupt", retry: "no" },
+      CHATS_METHOD.messageGet));
+    const notSent = { ok: false, refusal: "refused", reason: "Couldn't send" };
+    expect(await f.run(react("op-react", "message-stay")), "a reacted message").toEqual(notSent);
+    expect(await f.run({ operation: "post", args: { operationId: "op-post", groupId: planning.channelId, body: "Hi" } }), "a new message's ID")
+      .toEqual(notSent);
+    expect(f.rows()).toBe(0);
+    expect(f.engine.writes).toEqual([]);
+  });
+
+  it("answers a settled write, another write under its ID, and one long settled without its copy, and refuses a new one whose copy won't sync", async () => {
+    const f = await fixture();
+    const { planning } = await seed(f.chats);
+    const post: PhoneWrite = { operation: "post", args: { operationId: "op-known", groupId: planning.channelId, body: "Where?" } };
+    const saved = await f.run(post);
+    expect(saved).toMatchObject({ ok: true, state: "saved" });
+    f.failSync(new Error("The relay at https://relay.internal refused the push."));
+    expect(await f.run(post), "a settled write").toEqual(saved);
+    expect(await f.run({ ...post, args: { ...post.args, body: "Other" } }), "other arguments")
+      .toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+    f.storage.tombstoneSettledAccountOperations(OPERATION_KEEP_SETTLED_MS + 60_000);
+    expect(await f.run(post), "a tombstone").toEqual({ ok: false, refusal: "refused", reason: "too old" });
+    const unsynced = await f.run(reply("op-new", "thread-stay"));
+    expect(unsynced, "a new write").toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+    expect(JSON.stringify(unsynced)).not.toContain("relay.internal");
+    expect(f.engine.writes).toHaveLength(1);
+    expect(f.operation("op-new")).toBeUndefined();
   });
 
   it("refuses a message the shared rules refuse, and an operation ID outside its bounds, as bad requests, writing nothing", async () => {
