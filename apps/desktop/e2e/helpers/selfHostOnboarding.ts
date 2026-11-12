@@ -21,7 +21,7 @@ import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-we
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
-import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
+import { momentTextsForPath, readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -79,6 +79,8 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       hostedAgentEvidence: (workspaceId: string, path: string, agentId: string) =>
         hostedAgentEvidence(directory, workspaceId, path, agentId),
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
+      // The texts the service host settled for one path, in every store it keeps.
+      liveHostTexts: (path: string) => liveHostTexts(directory, path),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -557,6 +559,12 @@ function settlementEvidence(directory: string) {
        FROM sync_relay_log s WHERE s.op_kind='live.audit.settlement' ORDER BY s.relay_seq`,
     ).all().map((row) => ({ terminalCursor: Number(row.cursor), momentPublished: Number(row.moment) === 1 }))),
   };
+}
+
+function liveHostTexts(directory: string, path: string): string[] {
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  return readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .flatMap((entry) => momentTextsForPath(join(hostRoot, entry.name), path));
 }
 
 // How far the server's live work on one document has gone: the relay's

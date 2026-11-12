@@ -1381,11 +1381,13 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   return {attemptsBeforeResume: before, reports: proof.reports};
 }), 120000);
 
-// Deleting the last Edit share retires a document without a Stop. Its owner's
-// edits made afterwards wait for no session host, and nothing hosts it again
-// until the owner's desktop opens it. That open enrolls it again, and a
-// successor holds the edits.
-it("hosts a document retired without a Stop only once its owner's desktop opens it, as a successor that holds the edits made meanwhile", () => withSelfHostProof("self-host-owner-open", async proof => {
+// The relay side of an owner open. Deleting the last Edit share retires a
+// document without a Stop. An edit its owner makes afterwards reaches the
+// relay but no session host, and nothing hosts it again until an owner open
+// reaches the route. That open enrolls it again, and a successor holds the
+// edit. The desktop side, with the edit queued on the owner's computer, is the
+// `@live-owner-open` e2e.
+it("keeps a document retired without a Stop parked until an owner open reaches the route, which enrolls it as owner demand and starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-owner-open", async proof => {
   const saved = proof.activation()!;
   expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
   await vi.waitFor(() => {

@@ -52,6 +52,42 @@ function canonicalPath(value: string, directory: boolean): string {
 
 /** The service host id the self-hosted live host provisions for the relay's history. */
 export const selfHostedLiveHostId = (namespace: string) => `self-host-${namespace}`;
+const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
+const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
+  storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
+
+/**
+ * A host reconciliation's selection from one page of enrollments: the
+ * documents it hosts, those that departed but may remain in their workspace's
+ * hosted replica, and departed ones under an obsolete identity, whose old
+ * store is fenced, so they have none to leave. A document is hosted while an
+ * active Edit grant covers it at its enrolled path, or an open or Resume asked
+ * for it, and its owner has not paused or stopped it. `moved` holds moved
+ * documents whose replica let them go.
+ */
+export function selectHostedDocuments(storage: SyncRelayStorage, cursor: ServiceHostEnrollmentCursor | undefined, moved: Set<string>) {
+  // Whether the enrollment names its workspace's current owner and identity.
+  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
+  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A Resume before its activation retires leaves it departing until a successor can follow.
+  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
+    storage.serviceActivationRetirement(row) !== null;
+  const page = storage.listUndrainedServiceHostEnrollments(cursor);
+  const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
+  for (const row of page.documents) {
+    const holds = storage.serviceHostEnrollmentCovered(row);
+    // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+    // opens here, before any update lets the document go, so the host retires its activation.
+    if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
+    if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
+    else if (matching(row)) (atPath(storage, row) ? targets : away).push(row);
+  }
+  // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
+  const still = new Set(away.map(movedKey));
+  for (const key of moved) if (!still.has(key)) moved.delete(key);
+  departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
+  return {targets, departing, obsolete, nextCursor: page.nextCursor};
+}
 
 /** Owns the sole service daemon; account requests can select documents, never native paths or credentials. */
 export async function startSelfHostedLiveHost(options: {
@@ -78,41 +114,14 @@ export async function startSelfHostedLiveHost(options: {
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
-  // Whether the enrollment names its workspace's current owner and identity.
-  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
-  // A Resume before its activation retires leaves it departing until a successor can follow.
-  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
-    storage.serviceActivationRetirement(row) !== null;
   const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
-  const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
-  const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
   // Moved documents whose replica let them go. Nothing releases one: its
   // enrollment stays, so it is hosted again once it returns to its path.
   const moved = new Set<string>();
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
-  // Hosted documents, and those that departed but may remain in their workspace's hosted replica.
-  // A document is hosted while an active Edit grant covers it at its enrolled path, or an open or Resume
-  // asked for it, and its owner has not paused or stopped it. A departed document under an obsolete identity has none to leave: its old store is fenced.
-  const select = () => {
-    const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
-    const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
-    for (const row of page.documents) {
-      const holds = covered(row);
-      // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
-      // opens here, before any update lets the document go, so the host retires its activation.
-      if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
-      if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
-      else if (matching(row)) (atPath(row) ? targets : away).push(row);
-    }
-    // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
-    const still = new Set(away.map(movedKey));
-    for (const key of moved) if (!still.has(key)) moved.delete(key);
-    departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
-    return {targets, departing, obsolete, nextCursor: page.nextCursor};
-  };
+  const select = () => selectHostedDocuments(storage, retiredCursor, moved);
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
     rows.map(({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}))));
   // A store keeps its parked documents' activations, so only account deletion removes one.
@@ -130,7 +139,7 @@ export async function startSelfHostedLiveHost(options: {
       if (storeDiverged(row)) return {code: "host-diverged", sessionHost: "running without this document (server copy diverged)"};
       if (row.ownerStop === "pause") return {code: "host-paused", sessionHost: "running without this document (paused)"};
       if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
-      if (!atPath(row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
+      if (!atPath(storage, row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
     }
     // Another failure, such as in discovery, leaves the daemon waiting for the next pass to start it.
     if (!current) return startFailed

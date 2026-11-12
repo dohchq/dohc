@@ -1,11 +1,13 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { HELD_OPEN_MAX_PER_AGENT, HELD_OPEN_MAX_WAITERS, SERVICE_HOST_MAX_WORKSPACES } from "./liveHostingLimits";
 import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
-import type { SyncRelayStorage } from "./storage";
+import { selectHostedDocuments } from "./selfHostedLiveHost";
+import { discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 
-// Run with DOHC_LIVE_HOST_MEASURE=1. Each case prints one line.
+// Run with DOHC_LIVE_HOST_MEASURE=1. Each measurement prints one line.
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -20,58 +22,61 @@ function summary(samples: number[]): string {
   return `median=${sorted[10]!.toFixed(3)} p95=${sorted[19]!.toFixed(3)} samples=${SAMPLES}`;
 }
 
-// The relay reads a host reconciliation makes to select what it hosts: the
-// enrollments, then each one's cover, retirement, owner, identity and path.
-function selectionReads(storage: SyncRelayStorage): number {
-  let targets = 0;
-  for (const row of storage.listUndrainedServiceHostEnrollments().documents) {
-    const departs = row.retired || !storage.serviceHostEnrollmentCovered(row) || row.ownerStop !== null || storage.serviceActivationRetirement(row) !== null;
-    const matching = storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-    if (!departs && matching && storage.objectIdAtPathInVersion({ workspaceId: row.workspaceId, versionId: "main", path: row.path }) === row.objectId) targets++;
-  }
-  return targets;
-}
-
-it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")("measures a host reconciliation's selection with 16 workspaces while one agent opens and edits", async () => {
-  const f = await fixture();
+// A host reconciliation reads the relay through two production calls: one
+// page of discovery when the relay was written since its last scan, then the
+// selection. Left out: the 100 ms the host waits to gather changes, the
+// membership update to the native daemon with the store folders it makes, and
+// the running daemon's answers for each document (blocked, retained, drained).
+it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")("measures a host reconciliation's relay reads with 16 attached workspaces while the owner opens and edits live", async () => {
+  const f = registered();
+  cleanup.push(() => { f.close(); cleanupLiveDeliveryFixtures(); });
+  const workspaceId = "workspace", ownerUserId = "owner", path = f.input.evidence.currentPath;
+  f.storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch", streamIdentity: "stream" });
+  f.storage.ensureOwnedLiveDocument({ intent: "share", workspaceId, ownerUserId, shareId: "share", path, nowMs: 10, guard() {} });
   // Fifteen more workspaces of four documents each, hosted at their owner's demand.
   const others = SERVICE_HOST_MAX_WORKSPACES - 1;
-  for (let workspace = 0; workspace < others; workspace++) {
-    const workspaceId = `measure-workspace-${workspace}`;
-    f.raw.prepare(`INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity,epoch_log_floor)
-      VALUES (?,'owner-1',0,'epoch','stream',0)`).run(workspaceId);
-    for (let document = 0; document < 4; document++) {
-      const objectId = `measure-object-${document}`, path = `docs/${document}.md`;
-      f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(workspaceId, path, "b".repeat(64));
-      f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-        VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
-      f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
-        created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes) VALUES (?,?,?,'owner-1',NULL,'epoch','stream',1,1,1,1,1,64)`).run(workspaceId, objectId, path);
+  f.write(db => {
+    for (let workspace = 0; workspace < others; workspace++) {
+      const other = `measure-workspace-${workspace}`;
+      db.prepare(`INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity,epoch_log_floor)
+        VALUES (?,?,0,'epoch','stream',0)`).run(other, ownerUserId);
+      for (let document = 0; document < 4; document++) {
+        const objectId = `measure-object-${document}`, documentPath = `docs/${document}.md`;
+        db.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(other, documentPath, "b".repeat(64));
+        db.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+          VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(other, objectId, `moment-${objectId}`, documentPath, "b".repeat(64));
+        db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+          created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,NULL,'epoch','stream',1,1,1,1,1,64)`).run(other, objectId, documentPath, ownerUserId);
+      }
     }
-  }
-  f.ready();
-  const agent = f.agent("measure");
-  expect((await agent.open()).status).toBe(200);
-  const documents = f.storage.listUndrainedServiceHostEnrollments().documents.length;
-  const idle: number[] = [], busy: number[] = [], opens: number[] = [];
+  });
+  const select = () => selectHostedDocuments(f.storage, undefined, new Set());
+  const documents = others * 4 + 1;
+  expect(select().targets).toHaveLength(documents);
+  expect(new Set(select().targets.map(row => row.workspaceId)).size).toBe(SERVICE_HOST_MAX_WORKSPACES);
+  const idle: number[] = [], written: number[] = [], opens: number[] = [], commits: number[] = [];
   for (let sample = 0; sample < SAMPLES; sample++) {
     let start = performance.now();
-    selectionReads(f.storage);
+    expect(select().targets).toHaveLength(documents);
     idle.push(performance.now() - start);
-    // The agent opens docs/a.md again and edits it, which renews its demand.
+    // The owner opens the document again, and the relay admits a live edit of theirs through the journal.
     start = performance.now();
-    const response = await agent.open();
-    f.storage.renewPersonalSessionDemand({ workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 3_000 + sample });
+    f.storage.ensureOwnedLiveDocument({ intent: "owner-open", workspaceId, ownerUserId, path, nowMs: 3_000 + sample, guard() {} });
     opens.push(performance.now() - start);
-    expect(response.status).toBe(200);
+    const edit = f.capture(f.update("counter", String(sample)), `measure-${sample}`);
     start = performance.now();
-    selectionReads(f.storage);
-    busy.push(performance.now() - start);
+    expect(f.storage.commitLiveUpdateJournal(edit).result.kind).toBe("accepted");
+    commits.push(performance.now() - start);
+    start = performance.now();
+    expect(discoverServiceHostDocuments(f.storage)).toBeNull();
+    expect(select().targets).toHaveLength(documents);
+    written.push(performance.now() - start);
   }
-  const workspaces = others + 1;
-  console.log(`RECONCILE_SELECT_MS workspaces=${workspaces} documents=${documents} agent=idle ${summary(idle)}`);
-  console.log(`RECONCILE_SELECT_MS workspaces=${workspaces} documents=${documents} agent=after-open-and-edit ${summary(busy)}`);
-  console.log(`PERSONAL_OPEN_MS workspaces=${workspaces} documents=${documents} answer=ready ${summary(opens)}`);
+  const workspaces = SERVICE_HOST_MAX_WORKSPACES;
+  console.log(`RECONCILE_RELAY_MS workspaces=${workspaces} documents=${documents} since-scan=no-writes reads=selection ${summary(idle)}`);
+  console.log(`RECONCILE_RELAY_MS workspaces=${workspaces} documents=${documents} since-scan=owner-open-and-live-edit reads=discovery+selection ${summary(written)}`);
+  console.log(`OWNER_OPEN_MS workspaces=${workspaces} documents=${documents} ${summary(opens)}`);
+  console.log(`OWNER_LIVE_COMMIT_MS workspaces=${workspaces} documents=${documents} ${summary(commits)}`);
 }, 600_000);
 
 for (const count of [1, 48]) it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(`measures one evaluation of the relay's held opens, waiting on ${count} documents`, async () => {

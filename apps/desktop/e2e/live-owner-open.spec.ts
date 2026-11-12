@@ -5,7 +5,7 @@ import type {DohcDesktopBridge} from "../src/ipc/bridgeContract";
 import {activityPin, editorTabTestId, settingsNavPin} from "../src/testPins";
 import {assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp} from "./helpers/desktopApp";
 import {waitForCliEndpoint} from "./helpers/dohcCli";
-import {ownerEnrollment} from "./helpers/engineDb";
+import {ownerEnrollment, ownerOutboxDeclarations} from "./helpers/engineDb";
 import {approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa} from "./helpers/selfHostOnboarding";
 import {createTempWorkspace, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles} from "./helpers/workspace";
 
@@ -13,7 +13,7 @@ test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1"
 
 const PATH = "notes/plan.md";
 const ANCHOR = "The owner writes here.";
-const TYPED = "Typed once the server hosts it again.";
+const TYPED = "Typed while the server hosts it nowhere.";
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 
 async function openNote(page: Page): Promise<void> {
@@ -31,7 +31,7 @@ async function closeNote(page: Page): Promise<void> {
   await expect(tab).toHaveCount(0);
 }
 
-test("@live-owner-open the owner opening a document the server stopped hosting hosts it again, and their typing reaches it", async ({browser}, info) => {
+test("@live-owner-open an owner edit queued while the server hosts the note nowhere reaches its new live copy once the owner opens it", async ({browser}, info) => {
   test.setTimeout(600_000);
   const signal = AbortSignal.timeout(info.timeout - 10_000);
   const ownerTemp = await createTempWorkspace();
@@ -42,6 +42,9 @@ test("@live-owner-open the owner opening a document the server stopped hosting h
   let bodyFailure: {error: unknown} | undefined;
   const ownerAccount = {email: `owner-${randomUUID()}@example.test`, password: `Owner-${randomUUID()}`, name: "Owner"};
   const recipientAccount = {email: `recipient-${randomUUID()}@example.test`, password: `Recipient-${randomUUID()}`};
+  // While set, the server answers the desktop's owner opens with 503, so an
+  // edit stays queued until the owner opens the note.
+  let holdOwnerOpens = false;
   const accountPage = async () => {
     const context = await browser.newContext();
     contexts.push(context);
@@ -49,7 +52,8 @@ test("@live-owner-open the owner opening a document the server stopped hosting h
     return context.newPage();
   };
   try {
-    stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, {live: true, signal});
+    stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, {live: true, signal,
+      refuse: (method, path) => holdOwnerOpens && method === "POST" && /^\/sync\/[^/]+\/live-host$/u.test(path)});
     trust = trustFixtureCa(stack.ca!.ca);
     const ownerApproval = await accountPage();
     // Sharing needs a known address. This account never opens its share.
@@ -80,14 +84,21 @@ test("@live-owner-open the owner opening a document the server stopped hosting h
         (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.listOwnerLiveDocuments({workspaceId}), workspace.workspaceId);
       return listed.documents.some(row => row.path === PATH && row.status === "ready");
     };
+    // The owner's queued changes the server has not accepted, or why the store can't say.
+    const unaccepted = () => {
+      const outbox = ownerOutboxDeclarations(ownerTemp.rootPath);
+      return outbox === null || "error" in outbox ? outbox : outbox.pending;
+    };
 
-    const share = await test.step("the owner opens the note and shares it for Edit, so the server hosts it", async () => {
-      // Opening the note first gives enrollment its owner lineage.
-      await openNote(page);
-      await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", {timeout: 60_000});
+    // The share comes first, so the owner's first open finds no owner binding
+    // and asks for no hosting: only the share keeps the note hosted.
+    const share = await test.step("the owner shares the note for Edit, then opens it, so the server hosts it", async () => {
       const created = await page.evaluate(({workspaceId, recipientEmail, path}) =>
         (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.createRelayShare({workspaceId, recipientEmail, paths: [path], access: "edit"}),
       {workspaceId: workspace.workspaceId, recipientEmail: recipientAccount.email, path: PATH});
+      // The first open gives the enrolled note its owner lineage.
+      await openNote(page);
+      await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", {timeout: 60_000});
       await expect.poll(async () => {
         const expected = stack!.ownerLiveBinding(workspace.workspaceId, PATH);
         const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
@@ -97,28 +108,36 @@ test("@live-owner-open the owner opening a document the server stopped hosting h
     });
 
     await test.step("stopping the note's only share retires it without a Stop, and the list stops naming it live", async () => {
-      await closeNote(page);
       await page.evaluate(shareId =>
         (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.revokeRelayShare({shareId}), share.shareId);
       await expect.poll(hosted, {timeout: 120_000, intervals: [1_000]}).toBe(false);
     });
 
-    await test.step("the owner opens the note, and the server hosts it again", async () => {
-      await openNote(page);
-      await expect.poll(hosted, {timeout: 120_000, intervals: [1_000]}).toBe(true);
-    });
-
-    await test.step("the owner's typing reaches the server's live copy", async () => {
-      const before = stack!.livePublication(workspace.workspaceId, PATH).acceptedHead;
+    const queued = await test.step("the owner types in the open note, and the edit waits on this computer", async () => {
+      holdOwnerOpens = true;
+      const acceptedHead = stack!.livePublication(workspace.workspaceId, PATH).acceptedHead;
       await editor(page).getByText(ANCHOR).click();
       await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
       await page.keyboard.type(` ${TYPED}`);
       await expect(editor(page)).toContainText(TYPED);
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "pending-share", {timeout: 60_000});
+      await expect.poll(unaccepted, {timeout: 60_000, intervals: [500]}).toBeGreaterThan(0);
+      expect(stack!.livePublication(workspace.workspaceId, PATH).acceptedHead).toBe(acceptedHead);
+      expect(stack!.liveHostTexts(PATH).some(text => text.includes(TYPED))).toBe(false);
+      return {acceptedHead};
+    });
+
+    await test.step("the owner opens the note, and the queued edit reaches the server's new live copy", async () => {
+      await closeNote(page);
+      await openNote(page);
+      holdOwnerOpens = false;
+      await expect.poll(hosted, {timeout: 120_000, intervals: [1_000]}).toBe(true);
       await expect.poll(() => stack!.livePublication(workspace.workspaceId, PATH).acceptedHead, {timeout: 120_000, intervals: [1_000]})
-        .toBeGreaterThan(before);
-      const head = stack!.livePublication(workspace.workspaceId, PATH).acceptedHead;
-      await expect.poll(() => Math.max(0, ...stack!.livePublication(workspace.workspaceId, PATH).hosts.map(host => host.settledThrough)),
-        {timeout: 120_000, intervals: [1_000]}).toBeGreaterThanOrEqual(head);
+        .toBeGreaterThan(queued.acceptedHead);
+      await expect.poll(() => stack!.liveHostTexts(PATH).some(text => text.includes(`${ANCHOR} ${TYPED}`)),
+        {timeout: 120_000, intervals: [1_000]}).toBe(true);
+      // The server accepted the queued edit, so this computer holds none for it.
+      await expect.poll(unaccepted, {timeout: 120_000, intervals: [1_000]}).toBe(0);
       await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute("data-state", "pending-share");
     });
     expect(owner.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
