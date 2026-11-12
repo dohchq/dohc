@@ -6548,11 +6548,9 @@ it.each([
   expect(o.native.entries).toEqual([]);
 });
 
-// Proves: a kept row that still says retrying does not hold Stop back once
-// the engine's queue holds nothing and no Try again.
 // Proves: Stop for a note that never went live finishes at once on a server
 // that hasn't hosted any note since it started, so it hasn't registered as
-// the host. Nothing is prepared and the relay's own Stop runs.
+// the host. Stop goes straight to the step that records it, with nothing prepared.
 it("stops a note that never went live on a server that hasn't hosted a note yet", async () => {
   const o = await emptyServiceHost();
   const fence = vi.fn((prepared?: ServiceHostRetirementPreparation) => prepared ?? "stopped");
@@ -6560,6 +6558,8 @@ it("stops a note that never went live on a server that hasn't hosted a note yet"
   expect(fence).toHaveBeenCalledExactlyOnceWith();
 });
 
+// Proves: a kept row that still says retrying does not hold Stop back once
+// the engine's queue holds nothing and no Try again.
 it("stops a document whose kept row still says retrying once its native queue is empty", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
