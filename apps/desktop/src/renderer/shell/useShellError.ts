@@ -9,7 +9,7 @@ import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
-import type { ErrorDetailField } from "./copyDetails";
+import { TextNotSavedError, type ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
@@ -377,7 +377,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         ["Record ID", partial.retry.recordId],
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : [])];
+      ] : error instanceof TextNotSavedError ? [["You typed", error.typed, error.typed.length]]
+        : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : [])];
       // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
       push({
         ...(title ? { title } : {}),

@@ -37,6 +37,7 @@ import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
+import { TextNotSavedError } from "./shell/copyDetails";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { CollectionFrame, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { FieldsDialog } from "./collections/FieldsDialog";
@@ -616,9 +617,9 @@ export function CollectionPage({
       leftWith.current.enqueueCellChange({ recordId: record.id, recordPath: record.path, field, value });
       return;
     }
-    // The text comes last, so a long one is all a cut takes.
+    // The text comes last, so a long one is all a cut takes from the message. Copy details has all of it.
     const message = `dohc did not save what you typed in the ${field} field of ${recordLabel(record)}. ${refusal} You typed: ${text}`;
-    leftWith.current.onError(message, new Error(message));
+    leftWith.current.onError(message, new TextNotSavedError(message, text));
   }, [workspaceId]);
   const saveLeftCell = useCallback((draft: TableAbandonedDraft) => {
     const record = knownRecords.current.get(draft.recordId);

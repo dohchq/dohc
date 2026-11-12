@@ -8,7 +8,7 @@ import { SHELL_ERROR_MAX_CHARS, useShellError } from "./useShellError";
 import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
-import { errorDetails } from "./copyDetails";
+import { errorDetails, TextNotSavedError } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 import { CollectionMoveUnfinishedError, ipcWireError } from "../../ipc/errorWords";
 import { sharedViewRefusal, sharedViewRefusalWords } from "../../testing/sharedViewRefusal.fixture";
@@ -950,6 +950,17 @@ describe("useShellError", () => {
   });
 });
 
+
+it("keeps all of the text a person typed in Copy details when its notice's message is cut", () => {
+  const { result } = renderHook(() => useShellError("ws-a", vi.fn()));
+  const typed = "word ".repeat(300).trim();
+  const message = `dohc did not save what you typed in the notes field of Plan. Your access to this share ended. You typed: ${typed}`;
+  act(() => result.current.reportShellError(message, new TextNotSavedError(message, typed), null));
+  const [row] = result.current.shellErrors;
+  expect(row!.message.length).toBeLessThanOrEqual(SHELL_ERROR_MAX_CHARS);
+  expect(row!.details).toEqual([["You typed", typed, typed.length]]);
+  expect(errorDetails(row!.details!)).toContain(typed);
+});
 
 it("reports unavailable recovery without replacing unrelated Notices and clears it when recovery returns", () => {
   const openFolder = vi.fn();

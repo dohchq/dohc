@@ -12,6 +12,7 @@ import { beginCollectionWriteOperation, CollectionFieldWriteHost, resetCollectio
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { deferred } from "../testing/deferred";
+import { TextNotSavedError } from "./shell/copyDetails";
 
 // A document Collection's record, open in the panel beside its view. The
 // page, the panel, the fields and the write queue are real. The record's
@@ -863,7 +864,8 @@ describe("text left in an editor that goes away with no press", () => {
     typeInto(cellInput(), "12x");
     closePage(view);
     const words = "dohc did not save what you typed in the estimate field of Plan. Enter a value estimate can take. You typed: 12x";
-    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, expect.any(TextNotSavedError));
+    expect((onError.mock.calls[0]![1] as TextNotSavedError).typed).toBe(words.slice(words.indexOf("You typed: ") + "You typed: ".length));
     expect(enqueued.changes).toEqual([]);
   });
 
@@ -876,7 +878,8 @@ describe("text left in an editor that goes away with no press", () => {
     // The owner ends the share under the open editor, which goes with the right to edit.
     view.rerender(page({ onError, readOnly: true, accessEnded: true }));
     const words = `dohc did not save what you typed in the ${field(editor)} field of Plan. Your access to this share ended. You typed: Half typed`;
-    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, expect.any(TextNotSavedError));
+    expect((onError.mock.calls[0]![1] as TextNotSavedError).typed).toBe(words.slice(words.indexOf("You typed: ") + "You typed: ".length));
     // The page closing later has nothing more to report.
     closePage(view);
     expect(onError).toHaveBeenCalledOnce();
@@ -895,7 +898,8 @@ describe("text left in an editor that goes away with no press", () => {
     closePage(view);
     operation.release();
     const words = "dohc did not save what you typed in the notes field of Plan. Editing was paused while dohc changed files in this workspace. Type it again. You typed: Half typed";
-    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, expect.any(TextNotSavedError));
+    expect((onError.mock.calls[0]![1] as TextNotSavedError).typed).toBe(words.slice(words.indexOf("You typed: ") + "You typed: ".length));
     expect(enqueued.changes).toEqual([]);
   });
 });
