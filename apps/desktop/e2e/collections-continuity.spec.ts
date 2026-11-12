@@ -88,7 +88,7 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
   }
 });
 
-test("a cell edit saves while its record is open in another editor group", async () => {
+test("a field edit saves while its record is open in another editor group", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -112,14 +112,16 @@ test("a cell edit saves while its record is open in another editor group", async
     const record = group(1).getByTestId("collection-record-panel");
     await expect(record.getByRole("heading", { name: "Launch plan", level: 2 })).toBeVisible();
 
-    await group(1).getByRole("grid").getByRole("checkbox").click();
+    // A split group is narrow, so the panel lies over the table. The field is set in the panel, which writes as the table's cell does.
+    await record.getByRole("checkbox").click();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
     await expect(page.getByTestId("collection-write-failures")).toHaveCount(0);
     await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
-    // The panel's field follows the table's cell.
-    await expect(record.getByRole("checkbox")).toBeChecked();
+    // The table's cell follows the panel's field.
+    await record.getByRole("button", { name: "Close record" }).click();
+    await expect(group(1).getByRole("grid").getByRole("checkbox")).toBeChecked();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
