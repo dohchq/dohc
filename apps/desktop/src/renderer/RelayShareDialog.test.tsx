@@ -62,9 +62,6 @@ type ReadableLink = {
   lastUsedAtMs: number | null;
   url: string | null;
   urlIssuedAtMs: number | null;
-  // The copy the relay keeps for the link's owner; null for a link made
-  // before it kept one. Absent reads as null.
-  url?: string | null;
   dependents: LinkDependent[];
   selector: { paths: string[]; versionId: string | null };
   access: "view" | "comment" | "edit";

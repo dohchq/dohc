@@ -1923,7 +1923,7 @@ export function useRelayShareLinkPane(props: {
     const canReset = !damaged && (row.access !== "edit" || (availableLinkAccess.includes("edit") && row.selector?.versionId === null));
     // A link made or reset in this dialog is the one to send now; every
     // other active link shows the copy the relay keeps for its owner.
-    const url = !active || damaged ? null : minted?.grantId === row.grantId ? minted.url : row.url ?? null;
+    const url = !active || damaged ? null : minted?.grantId === row.grantId ? minted.url : row.url;
     const used = row.lastUsedAtMs === null ? "Not used yet" : `Used ${shortTimestamp.format(row.lastUsedAtMs)}`;
     const issued = row.urlIssuedAtMs !== null && row.urlIssuedAtMs > row.createdAtMs
       ? ` · Link reset ${shortDate.format(row.urlIssuedAtMs)}`
