@@ -249,6 +249,39 @@ describe("adding a view", () => {
     expect(popover.getByRole<HTMLButtonElement>("button", { name: "Create view" }).disabled).toBe(false);
   });
 
+  it("stays open when + or a tab is pressed while the view saves, and shows the failure", async () => {
+    const user = userEvent.setup();
+    const saving = deferred<string | null>();
+    const views = savedViews({ create: vi.fn(() => saving.promise) });
+    render(<Frame views={views} />);
+    await user.click(addView());
+    await user.click(screen.getByRole("button", { name: "Create view" }));
+    await user.click(addView());
+    expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
+    await user.click(tab("By status"));
+    expect(tab("By status").getAttribute("aria-pressed")).toBe("true");
+    const popover = within(screen.getByRole("dialog", { name: "Add a view" }));
+    saving.resolve("This collection changed while you were editing. Try again.");
+    await waitFor(() => expect(popover.getByRole("alert").textContent).toBe("This collection changed while you were editing. Try again."));
+    expect(views.create).toHaveBeenCalledOnce();
+    // With the answer in, + closes the popover again.
+    await user.click(addView());
+    expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull();
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("keeps the popover and the typed name on an Escape that belongs to a composition ($isComposing, $keyCode)", async (composing) => {
+    const user = userEvent.setup();
+    render(<Frame views={savedViews()} />);
+    await user.click(addView());
+    const name = within(screen.getByRole("dialog", { name: "Add a view" })).getByLabelText<HTMLInputElement>("Name");
+    await user.clear(name);
+    await user.type(name, "にほん");
+    fireEvent.keyDown(name, { key: "Escape", ...composing });
+    expect(within(screen.getByRole("dialog", { name: "Add a view" })).getByLabelText<HTMLInputElement>("Name").value).toBe("にほん");
+    fireEvent.keyDown(name, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull();
+  });
+
   it("closes on Escape and on a press outside, and creates nothing", async () => {
     const user = userEvent.setup();
     const views = savedViews();
@@ -288,6 +321,81 @@ describe("a tab's menu", () => {
     expect(views.rename).toHaveBeenCalledExactlyOnceWith("all", "Everything");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(tab("All tasks")));
+  });
+
+  it("keeps the rename popover when a tab or + is pressed while the name saves, and shows the failure", async () => {
+    const user = userEvent.setup();
+    const saving = deferred<string | null>();
+    const views = savedViews({ rename: vi.fn(() => saving.promise) });
+    render(<Frame views={views} />);
+    await user.click(screen.getByRole("button", { name: "View actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const name = within(screen.getByRole("dialog", { name: "Rename All tasks" })).getByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "Everything{Enter}");
+    await user.click(tab("By status"));
+    expect(screen.getByRole("dialog", { name: "Rename All tasks" })).toBeTruthy();
+    await user.click(addView());
+    expect(screen.getByRole("dialog", { name: "Rename All tasks" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull();
+    saving.resolve("This collection changed while you were editing. Try again.");
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Rename All tasks" })).getByRole("alert").textContent)
+      .toBe("This collection changed while you were editing. Try again."));
+    expect(views.rename).toHaveBeenCalledExactlyOnceWith("all", "Everything");
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("keeps the rename popover and the typed name on an Escape that belongs to a composition ($isComposing, $keyCode)", async (composing) => {
+    const user = userEvent.setup();
+    render(<Frame views={savedViews()} />);
+    await user.click(screen.getByRole("button", { name: "View actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const name = within(screen.getByRole("dialog", { name: "Rename All tasks" })).getByLabelText<HTMLInputElement>("Name");
+    await user.clear(name);
+    await user.type(name, "すべて");
+    fireEvent.keyDown(name, { key: "Escape", ...composing });
+    expect(within(screen.getByRole("dialog", { name: "Rename All tasks" })).getByLabelText<HTMLInputElement>("Name").value).toBe("すべて");
+    fireEvent.keyDown(name, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("puts focus on the open view's tab once a deleted tab is gone", async () => {
+    const user = userEvent.setup();
+    // A page that deletes the view after its write, and opens the first view when the open one goes.
+    function Deleting() {
+      const [tabs, setTabs] = useState(TABS);
+      const [active, setActive] = useState("schedule");
+      const remove = (id: string) => void Promise.resolve().then(() => {
+        setTabs((current) => current.filter((entry) => entry.id !== id));
+        setActive((current) => (current === id ? "all" : current));
+      });
+      return (
+        <CollectionFrame name="Launch tracker" tabs={tabs} activeTabId={active} onSelectTab={setActive} views={savedViews({ confirmDelete: false, remove })} menuLabel="Collection actions" menu={MENU}>
+          <p>Records</p>
+        </CollectionFrame>
+      );
+    }
+    render(<Deleting />);
+    // The open tab is the last one, so its button goes with it.
+    await user.click(screen.getByRole("button", { name: "View actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(within(screen.getByTestId("collection-view-switcher")).queryByRole("button", { name: "Schedule" })).toBeNull());
+    expect(tab("All tasks").getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(tab("All tasks"));
+  });
+
+  it("puts focus on the open view's tab when a tab that was not open is deleted", async () => {
+    const user = userEvent.setup();
+    // The next tab takes the deleted tab's place, and must not keep its focus.
+    function Deleting() {
+      const [tabs, setTabs] = useState(TABS);
+      const remove = (id: string) => void Promise.resolve().then(() => setTabs((current) => current.filter((entry) => entry.id !== id)));
+      return <Frame tabs={tabs} views={savedViews({ confirmDelete: false, remove })} />;
+    }
+    render(<Deleting />);
+    fireEvent.contextMenu(tab("By status"));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(within(screen.getByTestId("collection-view-switcher")).queryByRole("button", { name: "By status" })).toBeNull());
+    expect(document.activeElement).toBe(tab("All tasks"));
   });
 
   it("saves nothing when the name did not change", async () => {
@@ -400,6 +508,87 @@ describe("the open view's field", () => {
   it("is left out when the view has no field to choose", () => {
     render(<Frame viewField={{ label: "Calendar date", prefix: "Date", value: undefined, options: [], onChange: vi.fn() }} />);
     expect(screen.queryByRole("button", { name: /Date/ })).toBeNull();
+  });
+});
+
+describe("tabs the page holds, or takes away, while something is open", () => {
+  const GROUP = { label: "Group board by", prefix: "Group by", value: STATUS.id, options: [STATUS, OWNER] };
+
+  it.each([
+    { held: "the tabs", props: (onChange: (id: string) => void) => ({ tabsDisabled: true, viewField: { ...GROUP, onChange } }) },
+    { held: "the field", props: (onChange: (id: string) => void) => ({ viewField: { ...GROUP, onChange, disabled: true } }) },
+  ])("closes the open view's field menu when the page holds $held, and changes nothing", async ({ props }) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const page = render(<Frame viewField={{ ...GROUP, onChange }} />);
+    await user.click(screen.getByRole("button", { name: "Group by Status" }));
+    const owner = screen.getByRole("menuitemradio", { name: "Owner" });
+    page.rerender(<Frame {...props(onChange)} />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    // A row that was on screen as the page held the control picks nothing.
+    fireEvent.click(owner);
+    expect(onChange).not.toHaveBeenCalled();
+    // Nothing opens again by itself once the page lets go.
+    page.rerender(<Frame viewField={{ ...GROUP, onChange }} />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Group by Status" }).disabled).toBe(false);
+  });
+
+  it("closes the + and Rename popovers when the page holds the tabs", async () => {
+    const user = userEvent.setup();
+    const views = savedViews();
+    const page = render(<Frame views={views} />);
+    await user.click(addView());
+    page.rerender(<Frame views={views} tabsDisabled />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    page.rerender(<Frame views={views} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "View actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    expect(screen.getByRole("dialog", { name: "Rename All tasks" })).toBeTruthy();
+    page.rerender(<Frame views={views} tabsDisabled />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    page.rerender(<Frame views={views} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(views.create).not.toHaveBeenCalled();
+    expect(views.rename).not.toHaveBeenCalled();
+  });
+
+  it("keeps a popover whose view is saving while the page holds the tabs, for its answer", async () => {
+    const user = userEvent.setup();
+    const saving = deferred<string | null>();
+    const views = savedViews({ create: vi.fn(() => saving.promise) });
+    const page = render(<Frame views={views} />);
+    await user.click(addView());
+    await user.click(screen.getByRole("button", { name: "Create view" }));
+    page.rerender(<Frame views={views} tabsDisabled />);
+    expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
+    saving.resolve("dohc could not save this view. The saved views changed elsewhere. Try again.");
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Add a view" })).getByRole("alert").textContent)
+      .toBe("dohc could not save this view. The saved views changed elsewhere. Try again."));
+  });
+
+  it("closes a tab's menu and the popovers when the person can no longer save views", async () => {
+    const user = userEvent.setup();
+    const views = savedViews();
+    const page = render(<Frame views={views} />);
+    fireEvent.contextMenu(tab("Schedule"));
+    expect(screen.getByRole("menu", { name: "View actions" })).toBeTruthy();
+    page.rerender(<Frame />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    page.rerender(<Frame views={views} />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    await user.click(addView());
+    page.rerender(<Frame />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Saving views again does not bring the popover back.
+    page.rerender(<Frame views={views} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "View actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    page.rerender(<Frame />);
+    page.rerender(<Frame views={views} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 

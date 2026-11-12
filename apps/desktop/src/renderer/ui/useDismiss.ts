@@ -1,6 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 
 import { useFocusReturn } from "./focusReturn";
+import { isComposingKey } from "./keys";
 
 // The window's drag regions take presses before the page sees them. While
 // any menu is open, the root carries data-menu-open and styles.css turns the
@@ -80,7 +81,8 @@ export function listenForDismiss(options: {
     if (next instanceof Node && !inside(next)) onClose("focus");
   }
   function onKeyDown(event: KeyboardEvent) {
-    if (event.key !== "Escape") return;
+    // An IME's Escape closes its candidate list, and what was typed stays.
+    if (event.key !== "Escape" || isComposingKey(event)) return;
     event.preventDefault();
     onClose("escape");
   }

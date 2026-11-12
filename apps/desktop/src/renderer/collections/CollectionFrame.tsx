@@ -266,17 +266,22 @@ function ActionsMenu({ label, sections }: { label: string; sections: readonly Co
 
 function ViewFieldControl({ field, disabled }: { field: CollectionFrameViewField; disabled: boolean }) {
   const [open, setOpen] = useState(false);
+  const held = disabled || field.disabled === true;
+  // A control that is held closes its menu.
+  useEffect(() => {
+    if (held) setOpen(false);
+  }, [held]);
   const chosen = field.options.find((option) => option.id === field.value)?.name ?? "Choose a field";
   return (
     <Menu
       label={field.label}
-      open={open}
+      open={open && !held}
       onOpenChange={setOpen}
       width={192}
       items={field.options.map((option) => ({ id: option.id, label: option.name, checked: option.id === field.value, onSelect: () => field.onChange(option.id) }))}
       trigger={(trigger) => (
         // The two parts read as one name. The tooltip says what the choice is for.
-        <GhostButton {...trigger} aria-label={`${field.prefix} ${chosen}`} title={field.label} disabled={disabled || field.disabled} className="shrink-0">
+        <GhostButton {...trigger} aria-label={`${field.prefix} ${chosen}`} title={field.label} disabled={held} className="shrink-0">
           <span className="text-subtle">{field.prefix}</span>
           <span className="max-w-32 truncate">{chosen}</span>
           <ChevronDown size={12} strokeWidth={1.9} aria-hidden />
@@ -304,18 +309,23 @@ function ViewTabs(props: {
   const [menu, setMenu] = useState<TabMenu | null>(null);
   // Delete asks a second time in the menu. Closing the menu takes the question back.
   const [armed, setArmed] = useState(false);
-  // A popover whose change is being saved stays until the answer comes.
+  // A popover whose change is being saved stays until the answer comes, whatever is pressed, and no other opens.
   const [held, setHeld] = useState(false);
   const closeMenu = () => {
     setMenu(null);
     setArmed(false);
   };
-  // Controls that are held close what they opened.
+  // Controls that are held, or that this person no longer has, close what they opened.
+  const gone = !views;
   useEffect(() => {
-    if (!disabled) return;
+    if (!disabled && !gone) return;
     setMenu(null);
     setArmed(false);
-  }, [disabled]);
+    // A popover whose change is being saved stays for its answer.
+    if (held && !gone) return;
+    setAdding(false);
+    setRenaming(null);
+  }, [disabled, gone]);
   const names = tabs.map((tab) => tab.name);
   const renamed = renaming === null ? undefined : tabs.find((tab) => tab.id === renaming);
   useEffect(() => {
@@ -323,6 +333,16 @@ function ViewTabs(props: {
   }, [renaming, renamed]);
   // One tab stop for the strip: the open view's tab. The arrow keys move between tabs.
   const stop = tabs.some((tab) => tab.id === activeId) ? activeId : tabs[0]?.id;
+  // The tab a delete was picked on. Once it is gone, focus goes to the open view's tab.
+  const deleted = useRef<string | null>(null);
+  useEffect(() => {
+    const id = deleted.current;
+    if (id === null || disabled || tabs.some((tab) => tab.id === id)) return;
+    deleted.current = null;
+    // Focus the person has since moved out of the tabs stays where they put it.
+    const focused = document.activeElement;
+    if (focused === document.body || [...tabButtons.current.values()].some((button) => button === focused)) tabButtons.current.get(stop ?? "")?.focus();
+  });
 
   // A pick closes the menu and puts focus on the tab, so what the pick opens returns focus there.
   const picked = (tab: CollectionFrameTab) => {
@@ -334,8 +354,9 @@ function ViewTabs(props: {
     const items: MenuItem[] = [{
       id: "rename", label: "Rename", icon: <Pencil size={14} strokeWidth={1.9} aria-hidden />,
       onSelect: () => {
-        renameAnchor.current = tabButtons.current.get(tab.id) ?? null;
         picked(tab);
+        if (held) return;
+        renameAnchor.current = tabButtons.current.get(tab.id) ?? null;
         setAdding(false);
         setRenaming(tab.id);
       },
@@ -347,6 +368,7 @@ function ViewTabs(props: {
       onSelect: () => {
         if (views.confirmDelete && !armed) { setArmed(true); return; }
         picked(tab);
+        deleted.current = tab.id;
         views.remove(tab.id);
       },
     });
@@ -399,7 +421,7 @@ function ViewTabs(props: {
                 tabIndex={tab.id === stop ? 0 : -1}
                 disabled={disabled}
                 onClick={() => {
-                  setRenaming(null);
+                  if (!held) setRenaming(null);
                   props.onSelect(tab.id);
                 }}
                 onContextMenu={(event) => {
@@ -443,6 +465,7 @@ function ViewTabs(props: {
           disabled={disabled}
           className="shrink-0"
           onClick={() => {
+            if (held) return;
             setRenaming(null);
             setAdding((open) => !open);
           }}
