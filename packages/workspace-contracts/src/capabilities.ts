@@ -73,6 +73,9 @@ function capability(
   };
 }
 
+const MEMBERS_MCP_REASON =
+  "The owner's tools do what the Members page does; admins use the app. Shared profiles omit this tool; the relay decides every action for the signed-in owner account.";
+
 const LISTED_CAPABILITIES = {
   // withDeclarations adds the IPC rows and MCP tools of the operations declared with these.
   "links.edges": capability("Read a bounded page of file links.", { ipc: [], mcp: {} }),
@@ -355,6 +358,47 @@ const LISTED_CAPABILITIES = {
   "share.live.restore": capability("Restore an owner's live document.", { ipc: ["ownerRestore"] }),
   "share.skips.dismiss": capability("Acknowledge skipped changes in a received share.", {
     ipc: ["dismissShareSkips"],
+  }),
+  "members.list": capability(
+    "List a workspace's people, invites, removed accounts, member level, and invite link.",
+    { ipc: ["workspaceMembers"], mcp: { owner: ["dohc_members"] }, mcpReason: MEMBERS_MCP_REASON },
+  ),
+  "members.invite": capability("Invite someone to a workspace by email.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.level.set": capability(
+    "Set what every member can do in a workspace: View, Comment, or Edit.",
+    { ipc: ["workspaceMembers"], mcp: { owner: ["dohc_members"] }, mcpReason: MEMBERS_MCP_REASON },
+  ),
+  "members.role.set": capability("Make a member an admin, or an admin a member.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.remove": capability("Remove a person or an invite from a workspace.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.readmit": capability("Let a removed account back into a workspace.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.link.change": capability("Turn a workspace's invite link on or off, or reset it.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.end": capability("End membership of a workspace for everyone.", {
+    ipc: ["workspaceMembers"],
+    mcp: { owner: ["dohc_members"] },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.leave": capability("Leave a workspace you are a member or an admin of.", {
+    ipc: ["workspaceMembers"],
   }),
   "share.copy.read": capability(
     "Read one owned grant's share code and named-account invite link.",

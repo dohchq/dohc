@@ -279,6 +279,8 @@ import {
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
+import { createWorkspaceMembersActions } from "./ipc/workspaceMembersActions";
+import { memberOperations } from "./ipc/memberOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -6843,6 +6845,11 @@ const shareLinkAgentsForCli = createShareLinkAgentActions<RegistryEntry>({
   relayJson: relayShareJsonWithCredentials,
   relayShareErrorCopy,
 });
+// The Members page, and the owner's CLI and MCP, through one set of actions.
+const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessionCredentials>({
+  remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
+  relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init),
+});
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even
 // one another window signed in with while deletion ran, and keeps another
@@ -6910,6 +6917,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
+  workspaceMembers,
   beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
     keptEdits: (workspaceId) => desktopEngine.ownerLiveQuarantines(workspaceId),
@@ -8784,6 +8792,9 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, shareCopyOperations, {
     getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
+  });
+  registerOperations(operationBoundary, memberOperations, {
+    workspaceMembers: ({ request }, { operation }) => workspaceMembers(operation, request),
   });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),

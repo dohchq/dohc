@@ -274,6 +274,12 @@ function buildCliRequest(
           connectionId: command.connectionId,
         },
       };
+    case "members":
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, request: command.request },
+      };
     case "accountDeletePreview":
       return {
         verb: command.verb,

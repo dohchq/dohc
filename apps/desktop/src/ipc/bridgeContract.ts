@@ -19,6 +19,7 @@ export {
   RelayShareLinkAgent,
 } from "@dohc/workspace-contracts/share-link-agents";
 import { accessOperations } from "./accessOperations";
+import { memberOperations } from "./memberOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
@@ -9172,6 +9173,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
+    OperationBridge<typeof memberOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof historyOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
