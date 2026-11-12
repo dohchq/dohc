@@ -5279,7 +5279,8 @@ const ownerPendingShare = createOwnerPendingShare({
       return listOwnerPendingSharePaths(client, session.workspace, active);
     });
   }),
-  onChange: workspaceId => notifyRenderer({ workspaceId }),
+  // A note newly waiting may need the server to host it, so a pass asks now.
+  onChange: workspaceId => { notifyRenderer({ workspaceId }); desktopEngine.retryOwnerDelivery(workspaceId); },
 });
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({

@@ -98,7 +98,7 @@ export async function personalRouteFixture(defer: (close: () => Promise<void> | 
 
   /** A personal agent of the workspace's owner, signed in at `level`, as its sign-in commits it. */
   function agent(name: string, level: "view" | "comment" | "edit" = "edit") {
-    const agentId = `p-${createHash("sha256").update(name).digest("hex").slice(0, 26)}`;
+    const agentId = `p-${[...createHash("sha256").update(name).digest()].slice(0, 26).map(byte => "abcdefghijklmnopqrstuvwxyz234567"[byte % 32]).join("")}`;
     const connectionId = `connection-${name}`;
     const token = createHash("sha256").update(`token-${name}`).digest("base64url");
     const check = agentAccessCheck(token, RESOURCE, LINK_KEY)!;
