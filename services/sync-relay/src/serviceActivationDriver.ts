@@ -43,7 +43,7 @@ const movedKey=(target:ServiceActivationTarget,objectId:string)=>JSON.stringify(
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
 export function parseServiceActivationConfig(value:unknown){
   if(value===undefined)return undefined;
-  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
+  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxActivationHistoryEntries","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
   if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
   const targets=row.targets.map(parseServiceActivationTarget);
   if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
@@ -52,6 +52,7 @@ export function parseServiceActivationConfig(value:unknown){
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
   return Object.freeze({targets:Object.freeze(targets),validateActivation:liveValidation.ordinaryActivation(validation),
     validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
+    maxActivationHistoryEntries:positive(row.maxActivationHistoryEntries),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
@@ -690,7 +691,7 @@ export class ServiceActivationDriver {
         try{
           await this.#store.prepare({capture,host:o.host,registeredAtMs:Date.now(),guard:check,signal,
             validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
-              maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
+              maxHistoryEntries:c.maxActivationHistoryEntries,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
           const tooLarge=error instanceof ServiceActivationTooLarge,overBudget=error instanceof ServiceActivationHistoryOverBudget;
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge && !overBudget)throw error;
