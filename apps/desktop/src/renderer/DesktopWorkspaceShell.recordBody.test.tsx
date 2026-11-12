@@ -3,23 +3,28 @@ import "./DesktopWorkspaceShell.testSupport";
 import { useState } from "react";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { WorkspaceUiState } from "../ipc/bridgeContract";
 import type { CollectionPageProps } from "./CollectionPage";
 import { deferred } from "../testing/deferred";
 import { editorTabTestId } from "../testPins";
 import { collectionTabPath } from "./workbench/workbenchState";
-import { STORED_STATE, enterMarkdownSource, holdHistory, makeBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
+import { SHARE_VIEW, STORED_STATE, enterMarkdownSource, holdHistory, makeBridge, makeShareBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
 // The shell, its file view and the file's editor are real. The Collection's
 // page stands aside: it shows what the shell kept for its record panel, draws
 // the body the shell gives it for one record's file, and asks the shell to
 // save that body before the record leaves the panel, as the page does.
+// The file of the record the stand-in page shows open.
+const shown = vi.hoisted(() => ({ path: "a.md" }));
+beforeEach(() => {
+  shown.path = "a.md";
+});
 vi.mock("./CollectionPage", () => ({
   CollectionPage: (props: CollectionPageProps) => {
     const [open, setOpen] = useState(true);
     const [asked, setAsked] = useState(false);
-    const body = open ? props.renderRecordBody?.("a.md") : null;
+    const body = open ? props.renderRecordBody?.(shown.path) : null;
     // A body the page then asks the shell for and does not draw, as a render React throws away would.
     if (asked) props.renderRecordBody?.("b.md");
     return (
@@ -91,6 +96,28 @@ it("draws a record's body as the file's own document, without the title and the 
   fireEvent.click(screen.getAllByTestId("tree-row").find((row) => row.dataset.path === "a.md")!);
   expect(await screen.findByTestId("page-identity")).toBeTruthy();
   expect(screen.queryByTestId("collection-page")).toBeNull();
+});
+
+it.each([
+  { place: "a share opened with View access", share: true, folder: "tasks" },
+  { place: "a share received under shared-with-me", share: false, folder: "shared-with-me/sam/tasks" },
+])("offers no edit in the body of a record in $place", async ({ share, folder }) => {
+  shown.path = `${folder}/a.md`;
+  const tab = collectionTabPath(folder);
+  const bridge = holdHistory(share ? makeShareBridge(Promise.resolve(storedStateWithTabs([tab]))) : makeBridge(Promise.resolve(storedStateWithTabs([tab]))));
+  bridge.listWorkspaceFiles.mockResolvedValue({
+    visibility: { status: "ready", rules: [] },
+    files: [{ path: shown.path, kind: "file" }, { path: `${folder}/collection.yaml`, kind: "file" }],
+    folders: folder.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/")),
+  });
+  renderShell(bridge, share ? SHARE_VIEW : undefined);
+  await within(await screen.findByRole("complementary", { name: "Record a" })).findByTestId("view-markdown");
+  // The body is the file's own view, which is read-only by the file's rule: its toggle to the editor is off, and nothing in it takes typing.
+  const edit = await within(record()).findByTestId("markdown-edit-toggle");
+  await waitFor(() => expect(within(record()).queryByTestId("markdown-open-state")).toBeNull());
+  expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
+  expect(record().querySelector('[contenteditable="true"]')).toBeNull();
+  expect(within(record()).queryByRole("textbox")).toBeNull();
 });
 
 it("marks the Collection's tab unsaved for text typed in the body, saves it before the record leaves the panel, and keeps the record when it cannot be saved", async () => {
