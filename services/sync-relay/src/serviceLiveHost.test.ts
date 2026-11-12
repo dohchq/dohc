@@ -7108,10 +7108,12 @@ it.each(["running without this workspace", "running without this document"] as c
 // Each workspace has one enrolled document, so the relay holds a hosted scope for it, unless `unscoped`.
 // `notes` gives the first workspace that many activation targets, eight to a pass as in the live profile. Their
 // activation is replaced: each visit sends the engine the two waiting-edit reads a ready note's does and ends done.
+// A visit also drains the edit `waiting` holds for its note, into `drained`, as a real activation drains its owner's queue.
 // `intervals` are the pause between passes and the longest one while the host is idle.
 async function readyHostedHost(workspaceIds: readonly string[], {unscoped = false, notes = 0, intervals = {pollIntervalMs: 1, idlePollIntervalMs: 1}} = {}) {
   const f = await fixture();
   const targets = Array.from({length: notes}, (_, index) => ({workspaceId: workspaceIds[0]!, path: `docs/note-${index}.md`}));
+  const visited: string[] = [], waiting = new Set<string>(), drained: string[] = [];
   await configureActivation(f, {targets, ...intervals, ...(notes ? {maxDocumentsPerPass: 8} : {})});
   if (notes) {
     const activate = vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(async function (this: ServiceActivationDriver, target) {
@@ -7120,6 +7122,8 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
         await o.client.sendRequest({id: o.nextRequestId(), workspace: `handle-${target.workspaceId}`, deadlineMs: o.deadlineMs,
           method: "liveApplication.ownerState", params: {workspaceId: target.workspaceId, registrationId: 1}});
       }
+      visited.push(target.path);
+      if (waiting.delete(target.path)) drained.push(target.path);
       return {kind: "done", document: {workspaceId: target.workspaceId, mainVersionId: "main", objectId: target.path, lineageClaimId: "a".repeat(64)}} as
         Awaited<ReturnType<ServiceActivationDriver["activate"]>>;
     });
@@ -7216,7 +7220,7 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
     }
     return counts;
   };
-  return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull, sent};
+  return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull, sent, visited, waiting, drained};
 }
 
 // Issue #1967: a ready workspace pulled its hosted replica on every 250 ms pass, with nothing new on the relay.
@@ -7838,7 +7842,8 @@ type Paced = ReturnType<typeof pacedPasses>;
 // Issue #1967: a host ran a pass every 250 ms for as long as it ran, whether or not the last one found anything.
 // Measures: the passes and engine requests of one simulated minute for one, five and twenty ready, quiet notes,
 // at an idle interval equal to the poll interval, as before, and at the live profile's two seconds.
-// Proves: an idle host's pause grows to its idle interval, and the recovery probe still pulls every 30 s.
+// Proves: an idle host's pause grows until a rotation through its notes takes its idle interval, and the recovery
+// probe still pulls every 30 s. Twenty notes take three passes, so their pause stops at a third of the interval.
 it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes, 2_000]]))(
   "runs %i idle notes for a minute at an idle interval of %i ms", async (notes, idlePollIntervalMs) => {
     const paced = pacedPasses(250, idlePollIntervalMs);
@@ -7847,7 +7852,8 @@ it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes,
     cleanup.push(() => host.close());
     await vi.waitFor(() => h.caughtUp("workspace"));
     for (let pass = 0; pass < 8; pass++) await paced.step(h.f);
-    await paced.until(h.f, () => paced.resting() === idlePollIntervalMs);
+    const longest = Math.max(250, Math.floor(idlePollIntervalMs / Math.ceil(notes / 8)));
+    await paced.until(h.f, () => paced.resting() === longest);
     const before = h.sent(), pulls = host.hostedPulls("workspace").total;
     const passes = await paced.over(h.f, 60_000);
     const requests: Record<string, number> = {};
@@ -7861,11 +7867,35 @@ it.each([1, 5, 20].flatMap((notes): [number, number][] => [[notes, 250], [notes,
     expect(host.hostedPulls("workspace").reasons.probe).toBeGreaterThanOrEqual(2);
     if (idlePollIntervalMs === 250) expect(passes).toBe(240);
     else {
-      // No pause is longer than the idle interval, and a probe that brings nothing leaves the pause as it is.
-      expect(passes).toBeGreaterThanOrEqual(30);
-      expect(passes).toBeLessThanOrEqual(32);
+      // No pause is longer than a rotation's share of the idle interval, and a probe that brings nothing leaves the
+      // pause as it is: 30 passes for up to eight notes, and about 90 for twenty.
+      expect(passes).toBeGreaterThanOrEqual(Math.floor(60_000 / longest));
+      expect(passes).toBeLessThanOrEqual(Math.floor(60_000 / longest) + 2);
     }
   });
+
+// A pass visits eight awake notes, so twenty-four take three passes. With every pause at the idle interval, a note
+// was visited once in three of them.
+// Proves: an idle host visits every awake note within its idle interval. An edit queued for the note the host
+// visited last, which no notice, nudge or wake announces, is drained within that interval.
+it("drains an edit no signal announced within the idle interval on an idle host of twenty-four notes", async () => {
+  const paced = pacedPasses(), h = await readyHostedHost(["workspace"], {notes: 24, intervals: {pollIntervalMs: paced.poll, idlePollIntervalMs: paced.ceiling}});
+  const host = await startServiceLiveHost({...h.f, ...paced.timers});
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  // Long enough for the pause to stop growing.
+  for (let pass = 0; pass < 12; pass++) await paced.step(h.f);
+  const pause = paced.resting()!;
+  await paced.step(h.f);
+  expect(paced.resting()).toBe(pause);
+  // The first note of the pass that just ended waits a whole rotation for its next visit.
+  const note = h.visited.at(-8)!, queued = paced.clock.nowMs();
+  h.waiting.add(note);
+  await paced.until(h.f, () => h.drained.includes(note));
+  expect(h.drained).toEqual([note]);
+  console.info(`Idle host, 24 notes: pause ${pause} ms, an unannounced edit drained after ${paced.clock.nowMs() - queued} ms`);
+  expect(paced.clock.nowMs() - queued).toBeLessThanOrEqual(paced.ceiling);
+});
 
 // Proves: a relay write asks for a pass no sooner than one poll interval after the last one, so a host whose own
 // passes write cannot run them back to back, and at once when that long has gone by. A burst of writes runs one pass.
@@ -8017,10 +8047,11 @@ it("stops a note on an idle host at once, with the fixed pass held back", async 
   expect(held()).toBe(true);
 });
 
-// Proves: revoking a note's share through the relay ends its live session on an idle host at once. The write's
-// notice reaches the supervisor, whose membership update wakes the passes that retire the note's activation.
-// Neither the host's fixed pass nor the supervisor's periodic reconciliation runs.
-it("ends a note's live session on an idle host at once when the relay revokes its share", async () => {
+// Proves: once the relay revokes a note's share, it refuses an edit prepared before, and an idle host retires the
+// note's activation at once. The write's notice reaches the supervisor, whose membership update wakes the passes
+// that retire it. Neither the host's fixed pass nor the supervisor's periodic reconciliation runs. No editor
+// session is open here.
+it("refuses an edit and retires a note's activation on an idle host at once when the relay revokes its share", async () => {
   const {o, held} = await idleNote({supervised: true});
   vi.spyOn(console, "error").mockImplementation(() => {});
   const sent = o.ownerCalls().length, late = o.prepareEdit("after");
@@ -8035,15 +8066,15 @@ it("ends a note's live session on an idle host at once when the relay revokes it
 // The relay's storage writing with no write notice, as another process on the same database does.
 const unannounced = (o: Enrolled) => Object.assign(Object.create(o.f.storage) as typeof o.f.storage,
   {tx: <T>(run: () => T) => (o.f.storage as StorageContext).replicaViewTx(run)});
-// Proves: a Pause, a Stop or a revocation that reaches the relay database with no notice, as from another process,
-// ends the note's live session on an idle host at its next fixed pass, within one idle interval. The relay refuses
-// an edit prepared before it at once, on the request path.
+// Proves: after a Pause, a Stop or a revocation that reaches the relay database with no notice, as from another
+// process, an idle host retires the note's activation at its next fixed pass, within one idle interval. The relay
+// refuses an edit prepared before it, on the request path. No editor session is open here.
 const unannouncedChanges: [string, (storage: Enrolled["f"]["storage"], o: Enrolled) => void][] = [
   ["Pause", (storage, o) => {storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 30, guard() {}});}],
   ["Stop", (storage, o) => {preparedStop(storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 30, guard() {}});}],
   ["revocation", storage => {expect(storage.revokeShare("share", 30)).toBe(true);}],
 ];
-it.each(unannouncedChanges)("ends a note's live session within one idle interval of a %s no notice announced", async (_change, write) => {
+it.each(unannouncedChanges)("retires a note's activation within one idle interval of a %s no notice announced, and refuses an edit", async (_change, write) => {
   const {paced, o, passes, idle} = await idleNote();
   vi.spyOn(console, "error").mockImplementation(() => {});
   const sent = o.ownerCalls().length, late = o.prepareEdit("after");

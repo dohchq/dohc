@@ -384,8 +384,8 @@ export async function startServiceLiveHost(options: {
   const touch = (key: string) => {idle.set(key, {due: idleClock.nowMs() + config.activation!.idleUnloadMs, generation: ++generation}); armIdle();};
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
-  // Engine requests numbered so far, and how many of those sent were ones an idle pass sends.
-  let requestId = 0, idleRequests = 0;
+  // Engine requests the host numbered so far, requests sent through its client, and how many of those were ones an idle pass sends.
+  let requestId = 0, sentRequests = 0, idleRequests = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
     return ++requestId;
@@ -507,8 +507,11 @@ export async function startServiceLiveHost(options: {
     const queued = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
       maxRetainedInputBytes: config.client.aggregateBytes,
       deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
-    // Counts the requests an idle pass sends. Every request takes a number, so a pass sent only those when both counts moved alike.
+    // Counts each request sent through the client, and those an idle pass sends. A request the host numbers takes one of
+    // its numbers whichever client method sends it. One a caller numbers itself, as the automation ledger's are, takes
+    // none and is counted here alone. A pass sent only idle requests when all three counts moved alike.
     const sendRequest: EngineClient["sendRequest"] = (request, ...rest) => {
+      sentRequests++;
       if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
       return queued.sendRequest(request, ...rest);
     };
@@ -1683,7 +1686,7 @@ export async function startServiceLiveHost(options: {
           activation!.unfinished)return false;
         for(const [workspaceId,attached] of attachments){
           if(!attached.hosted.checked || attached.hosted.diverged || !attached.hosted.pushedAll || !activation!.workspaceReady(workspaceId))return false;
-          if(attached.last===undefined || !hostedReplicaQuiet(pullDuties(workspaceId,attached)) || attached.seen===undefined ||
+          if(!hostedReplicaQuiet(pullDuties(workspaceId,attached)) || attached.seen===undefined ||
             attached.overlapped || attached.check || now()>=attached.probeAt)return false;
         }
         return true;
@@ -1691,16 +1694,19 @@ export async function startServiceLiveHost(options: {
       // How long the next pause lasts, and how many passes in a row were idle. A pass is idle when no step failed,
       // no idle sweep ran, it sent the engine nothing but what an idle pass sends, nothing asked for a pass since
       // the last one ended, and nothing is left to do. Once idle passes have visited every document, each pause
-      // lasts twice the one before, up to idlePollIntervalMs, and ends by the next recovery probe. Any other pass
-      // puts it back to pollIntervalMs. No pause is shorter than that.
+      // lasts twice the one before, and ends by the next recovery probe. A pass visits maxDocumentsPerPass awake
+      // documents, so the longest pause is idlePollIntervalMs divided by the passes that visit them all: an idle
+      // host then visits each within idlePollIntervalMs, apart from the passes' own time. Any other pass puts the
+      // pause back to pollIntervalMs. No pause is shorter than that.
       let rest=config.activation.pollIntervalMs,doubled=rest,idlePasses=0;
       const judge=(clean:boolean)=>{
         const bounds=config.activation!,idle=clean && !stirred && settled();
         stirred=false;
         idlePasses=idle?idlePasses+1:0;
         const awake=activation!.targets.filter(target=>!activation!.dormant(target)).length;
-        if(idlePasses<Math.max(1,Math.ceil(awake/bounds.maxDocumentsPerPass))){rest=doubled=bounds.pollIntervalMs;return idle;}
-        doubled=Math.min(Math.max(bounds.pollIntervalMs,bounds.idlePollIntervalMs),doubled*2);
+        const rotation=Math.max(1,Math.ceil(awake/bounds.maxDocumentsPerPass));
+        if(idlePasses<rotation){rest=doubled=bounds.pollIntervalMs;return idle;}
+        doubled=Math.min(Math.max(bounds.pollIntervalMs,Math.floor(bounds.idlePollIntervalMs/rotation)),doubled*2);
         let probe=Infinity;
         for(const attached of attachments.values())probe=Math.min(probe,attached.probeAt);
         rest=Math.max(bounds.pollIntervalMs,Math.min(doubled,probe-now()));
@@ -1740,12 +1746,12 @@ export async function startServiceLiveHost(options: {
           // Native passes retain ownership until their actual work settles.
           // A sweep runs only once an idle deadline is due. Its timer, armed after each pass, wakes the pass that runs it.
           yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {
-            const numbered = requestId, counted = idleRequests;
+            const numbered = requestId, sent = sentRequests, counted = idleRequests;
             const failed = await pass();
             const due = nextIdleDue(), sweeping = due !== undefined && due <= idleClock.nowMs();
             if (sweeping) await sweep();
             armIdle(); checkProgress();
-            idle = judge(!failed && !sweeping && requestId - numbered === idleRequests - counted);
+            idle = judge(!failed && !sweeping && requestId - numbered === idleRequests - counted && sentRequests - sent === idleRequests - counted);
           })));
           options.onPass?.(idle);
           yield* pause;

@@ -57,7 +57,9 @@ export function parseServiceActivationConfig(value:unknown){
     maxActivationHistoryEntries:positive(row.maxActivationHistoryEntries),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),
-    // The longest pause between passes while the host is idle. At or below pollIntervalMs, every pause lasts pollIntervalMs.
+    // An idle host visits every awake document at least this often, apart from the passes' own time. A pass visits
+    // maxDocumentsPerPass of them, so its longest pause is this divided by the passes that visit them all, and never
+    // less than pollIntervalMs.
     idlePollIntervalMs:positive(row.idlePollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
