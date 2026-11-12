@@ -1580,9 +1580,11 @@ export async function startServiceLiveHost(options: {
        */
       async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
         callerSignal?: AbortSignal): Promise<T | "waiting"> {
-        check();
+        available();
         const candidate = storage.retirableServiceActivation(document), attached = checked(document.workspaceId), driver = activation;
+        // Nothing to retire needs no registration: a host that hasn't hosted a note yet has none.
         if (!candidate) return fence();
+        check();
         if (!attached || hostedKey(document) === undefined || !driver) {
           return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence);
         }
