@@ -159,8 +159,8 @@ _Avoid_: status message, task card
 ### Members
 
 **Member**:
-A person who belongs to a workspace someone else owns and reaches all of it at the member level, except where an access rule says otherwise. A member has a server account. Planned, not built yet.
-_Avoid_: guest, collaborator, teammate
+A person with the Member workspace role in a workspace someone else owns. A member reaches the whole workspace at the member level, except where an access rule says otherwise, and has a server account. Planned, not built yet.
+_Avoid_: guest, collaborator, teammate, Group member
 
 **Workspace role**:
 A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins; admins manage members and access rules and moderate. Planned, not built yet.
@@ -171,8 +171,12 @@ The one share access level, View, Comment, or Edit, that a workspace gives all i
 _Avoid_: member permission, default access
 
 **Access rule**:
-A list of workspace roles and people, each with a share access level, on one folder or Group. It replaces the member level for that item and what it contains; a member it does not cover cannot see the item. It never limits the owner or admins. Planned, not built yet.
+A list of the Member role and people, each with a share access level, on one folder or Group. It replaces the member level for that item and what it contains; a member it does not cover cannot see the item. It never limits the owner or admins. Planned, not built yet.
 _Avoid_: permission, ACL, private folder, private channel
+
+**Invite link**:
+A URL that lets anyone who signs in with a server account join a workspace as a member. The owner or an admin can turn it off or reset it. Planned, not built yet.
+_Avoid_: share link (that grants one share without an account), share code
 
 ### Sharing
 
