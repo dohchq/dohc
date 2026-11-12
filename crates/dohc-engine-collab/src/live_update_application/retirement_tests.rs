@@ -1947,6 +1947,7 @@ fn a_restore_waits_while_its_activation_retires() {
             coordinate,
             40,
             &NoFaults,
+            |_, _| Ok(()),
         )
     };
     let mut f = Fixture::new();
@@ -2016,6 +2017,7 @@ fn restore_fence(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceR
         coordinate,
         40,
         &NoFaults,
+        |_, _| Ok(()),
     )
 }
 

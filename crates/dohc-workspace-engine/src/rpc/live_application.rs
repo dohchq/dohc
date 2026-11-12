@@ -3746,16 +3746,19 @@ mod tests {
                 .is_ok()
         );
         assert!(lock(&service.sessions).contains_key("ydoc-unload-document"));
+        // An update the owner holds for its service host waits for its feed's
+        // end, not for this session, so the unload proceeds and keeps it.
         deferred(
-            "DELETE FROM ydoc_deferred_updates WHERE object_id='document';",
+            "UPDATE ydoc_deferred_updates SET deferred_while_bound=1 WHERE object_id='document';",
             &mut store,
         );
-        drop(store);
         let unloaded = service
             .call(context(), unload_request(&workspace, "document"))
             .await
             .unwrap();
         assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+        drop(store);
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

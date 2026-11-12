@@ -1619,14 +1619,16 @@ fn applied_after_in(
 }
 
 /// A copy of the accepted state would miss an accepted update that still
-/// waits on a missing dependency, so none may wait on the document.
+/// waits on a missing dependency, so none may wait on the document. What
+/// the owner holds for its service host is never applied, so it is no such
+/// update.
 fn require_no_deferred_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<(), OwnerOutboxError> {
     let waiting: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND deferred_while_bound=0)",
             params![binding.workspace_id, binding.main_version_id, binding.object_id],
             |row| row.get(0),
         )

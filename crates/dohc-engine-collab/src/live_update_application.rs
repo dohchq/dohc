@@ -1440,12 +1440,14 @@ macro_rules! frozen_at_refused_seed {
     };
 }
 
-/// `?3` counts deferred updates. A refused queue waits for its owner, not for
-/// delivery, unless the owner's Try again granted its head an attempt.
+/// `?3` counts deferred updates, except one the owner holds for its service
+/// host: its echo check reads only stored rows, so unloading loses nothing it
+/// needs. A refused queue waits for its owner, not for delivery, unless the
+/// owner's Try again granted its head an attempt.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL AND cancelled_json IS NULL),
-    (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
+    (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2 AND deferred_while_bound=0))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0
                 AND (state<>'quarantined' OR retry_delivery_id IS NOT NULL))";

@@ -317,6 +317,7 @@ fn cancel_owner_restore(f: &mut Fixture, activation: &str) {
             coordinate.clone(),
             301,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let cancelled = cancel_restore_fence(

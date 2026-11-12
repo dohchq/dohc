@@ -2700,11 +2700,36 @@ fn restore_owner() -> RestoreOwner {
 }
 
 fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> RestoreOwner {
+    let mut owner = unbound_restore_owner_from(original, initial_text, path);
+    let observed = owner.observed.clone();
+    let checkpoint = owner.checkpoint.clone();
+    owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::owner_outbox::draft::install_observed_binding_in_tx(
+                tx,
+                "ws",
+                &observed,
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    owner
+}
+
+/// `restore_owner`'s note and the binding it would install, not installed.
+fn unbound_restore_owner() -> RestoreOwner {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    unbound_restore_owner_from(&original, fixture["markdown"].as_str().unwrap(), "owner.md")
+}
+
+fn unbound_restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> RestoreOwner {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
-    use dohc_engine_collab::owner_outbox::{
-        OwnerOutboxLimits,
-        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
-    };
+    use dohc_engine_collab::owner_outbox::{OwnerOutboxLimits, draft::ObservedOwnerBinding};
     let (scratch, mut store) = test_store();
     crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
     let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
@@ -2758,11 +2783,6 @@ fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> Restor
             max_pending_age_ms: 60_000,
         },
     };
-    store
-        .write_with(&NoFaults, |tx| {
-            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
-        })
-        .unwrap();
     RestoreOwner {
         _scratch: scratch,
         store,
@@ -9194,3 +9214,5 @@ mod owner_retirement;
 
 #[path = "moment_apply_tests/drained_admission.rs"]
 mod drained_admission;
+#[path = "moment_apply_tests/held_host_update.rs"]
+mod held_host_update;

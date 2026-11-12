@@ -235,9 +235,9 @@ impl ActorHandle {
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
+                    dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
-                    }).map(|row|vec![row])
+                    })).map(|row|vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
             });
@@ -298,21 +298,25 @@ impl ActorHandle {
                 &input.binding.object_id,
             )?;
             cache.remove(&key);
-            Ok(
-                match store.write_with(&NoFaults, |tx| {
-                    dohc_engine_collab::owner_outbox::enrollment::enroll_in_tx(
-                        tx,
-                        &workspace_id,
-                        &input,
-                        &limits,
-                        now_ms,
-                    )
-                }) {
-                    Ok(TxnOutcome::Committed(result)) => Ok(result),
-                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
-                    Err(error) => Err(error),
-                },
-            )
+            let result = match store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::owner_outbox::enrollment::enroll_in_tx(
+                    tx,
+                    &workspace_id,
+                    &input,
+                    &limits,
+                    now_ms,
+                )
+            }) {
+                Ok(TxnOutcome::Committed(result)) => Ok(result),
+                Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                Err(error) => Err(error),
+            };
+            // A recovery or a later restore generation moves the accepted
+            // checkpoint too.
+            if result.is_ok() {
+                decide_owner_holds_after_commit(store, cache, &key);
+            }
+            Ok(result)
         })
         .await
     }
@@ -597,6 +601,7 @@ impl ActorHandle {
             };
             if result.is_ok() {
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
+                decide_owner_holds_after_commit(store, cache, &key);
             }
             Ok(result)
         })
@@ -1675,6 +1680,30 @@ fn scene_asset_records(
                 })
         })
         .collect()
+}
+
+/// A committed change to the owner's accepted checkpoint can end a hold on the
+/// service host's update of the note. A failure keeps the holds for the next
+/// frame or pull pass.
+fn decide_owner_holds_after_commit(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+) {
+    if let Err(error) =
+        dohc_engine_sync::decide_owner_holds_after_commit(store, cache, key, &NoFaults)
+    {
+        eprintln!("engine: held service host updates kept: {error}");
+    }
+}
+
+/// Ending an owner's binding decides the service host's updates it held; a
+/// store fault stays one, and anything else is the outbox's corrupt state.
+pub(super) fn owner_hold_error(error: dohc_engine_sync::SyncError) -> OwnerOutboxError {
+    match error {
+        dohc_engine_sync::SyncError::Storage(storage) => OwnerOutboxError::Storage(storage),
+        _ => OwnerOutboxError::Corrupt,
+    }
 }
 
 fn map_scene_asset_validation_error(error: dohc_engine_sync::SyncError) -> RuntimeError {
