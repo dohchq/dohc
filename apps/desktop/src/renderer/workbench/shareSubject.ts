@@ -2,7 +2,7 @@ import type { AccessShareRow } from "@dohc/workspace-contracts/access";
 import { shareSubjectFallback } from "@dohc/security-contract/share-labels";
 import { basenameOf } from "../path";
 
-export type ShareSubjectKind = "missing" | "damaged" | "chat" | "version" | "path";
+export type ShareSubjectKind = "missing" | "damaged" | "chat" | "workspace" | "version" | "path";
 
 // What a share covers, in words: its name, the folder it sits in, and the
 // whole of it for a title. The Sharing view draws it; Settings search finds it.
@@ -16,6 +16,10 @@ export function shareSubject(row: AccessShareRow): {
     const damaged = row.status === "damaged";
     const name = row.subjectName ?? (damaged ? "Unreadable share" : "Ended share");
     return { kind: damaged ? "damaged" : "missing", name, folder: null, title: name, path: null };
+  }
+  if (selector.kind === "workspace") {
+    const name = row.subjectName ?? "Workspace";
+    return { kind: "workspace", name, folder: null, title: name, path: null };
   }
   if (selector.kind === "chat" || selector.kind === "group") {
     const name = row.subjectName ?? shareSubjectFallback(selector);

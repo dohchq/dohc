@@ -55,7 +55,8 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
   }
   for (const row of rows) {
     const selector = row.selector;
-    if (!selector || row.status !== "active") continue;
+    // A membership covers another workspace, never a path or chat of this one.
+    if (!selector || row.status !== "active" || selector.kind === "workspace") continue;
     if (selector.kind === "chat" || selector.kind === "group") add(chats, selector.channelWireId, row);
     if (selector.kind === "chat" || selector.kind === "group" && row.fileScope !== "served") continue;
     if (selector.paths.length === 0) add(whole, version(selector.versionId), row);
@@ -73,7 +74,7 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
       const collect = (bucket: readonly AccessShareRow[] | undefined) => {
         for (const row of bucket ?? []) {
           const selector = row.selector;
-          if (selector && selector.kind !== "chat" && visibleSharePath(selector, input.path) !== null) found.set(key(row), row);
+          if (selector && selector.kind !== "chat" && selector.kind !== "workspace" && visibleSharePath(selector, input.path) !== null) found.set(key(row), row);
         }
       };
       collect(whole.get(version(input.versionId)));

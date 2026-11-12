@@ -11,6 +11,7 @@ const Selector = z.union([
     .refine(value => value.paths.length > 0 || value.versionId !== null),
   z.object({ kind: z.literal("group"), channelWireId: Id, paths: Paths.min(1), versionId: z.null() }),
   z.object({ kind: z.literal("chat"), channelWireId: Id }),
+  z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]) }),
 ]);
 const Base = {
   shareId: Id, grantId: Id, granterUserId: Id,
@@ -23,7 +24,7 @@ const Base = {
 };
 const Row = z.union([
   z.object({ ...Base, selector: Selector, access: z.enum(["view", "comment", "edit", "read-only", "read-write"]), damaged: z.never().optional() })
-    .refine(row => row.selector.kind === undefined
+    .refine(row => row.selector.kind === undefined || row.selector.kind === "workspace"
       ? ["view", "comment", "edit"].includes(row.access)
       : ["read-only", "read-write"].includes(row.access))
     .refine(row => row.selector.kind !== "group" || row.fileScope !== undefined),

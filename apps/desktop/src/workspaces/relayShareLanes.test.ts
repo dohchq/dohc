@@ -56,6 +56,17 @@ describe("relay share lanes", () => {
     expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);
   });
 
+  // The Members page lists and ends a membership; Sharing never does.
+  it("leaves a workspace membership out of both lanes", () => {
+    const membership = (shareId: string) => ({ ...pathRow(shareId), selector: { kind: "workspace", role: "member" }, access: "comment" });
+    const lanes = pathShareLanes({
+      granted: [pathRow("s-path"), membership("s-member")],
+      received: [pathRow("r-path"), membership("r-member")],
+    });
+    expect(lanes.granted.map((row) => row.shareId)).toEqual(["s-path"]);
+    expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);
+  });
+
   // A group is one grant: its folder is not a second path share for
   // Settings to list and end on its own.
   it("sends a group grant to the chat manager too", () => {

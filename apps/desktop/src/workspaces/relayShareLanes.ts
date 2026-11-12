@@ -15,6 +15,9 @@
 // both lanes. A damaged row stays in granted whatever kind it claims, and is
 // dropped from received, where an invitation whose grant cannot be read
 // offers the recipient nothing to accept.
+//
+// A workspace membership belongs to the Members page, which ends it, and
+// leaves both lanes too.
 
 type ShareRow = Record<string, unknown>;
 
@@ -24,15 +27,21 @@ export function isReadableChatChannelRow(row: ShareRow): boolean {
   return kind === "chat" || kind === "group";
 }
 
+/** A membership of a whole workspace. The Members page manages it, not Sharing. */
+function isMembershipRow(row: ShareRow): boolean {
+  return (row.selector as { kind?: unknown } | null | undefined)?.kind === "workspace";
+}
+
 export function pathShareLanes(listing: {
   granted?: ShareRow[];
   received?: ShareRow[];
 }): { granted: ShareRow[]; received: ShareRow[] } {
   return {
-    granted: (listing.granted ?? []).filter((row) => !isReadableChatChannelRow(row)),
+    granted: (listing.granted ?? []).filter((row) => !isReadableChatChannelRow(row) && !isMembershipRow(row)),
     received: (listing.received ?? []).filter(
       (row) =>
         !isReadableChatChannelRow(row) &&
+        !isMembershipRow(row) &&
         row.selectorKind !== "chat" &&
         row.selectorKind !== "group",
     ),
