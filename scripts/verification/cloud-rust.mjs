@@ -9,7 +9,7 @@ import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../to
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 
 export const RUST_SHARDS = 20;
-export const RUST_READER_SHARD = 7;
+export const RUST_READER_SHARD = 1;
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 export const RUST_ARCHIVE_PROOFS = ["test fixtures"];
 export const RUST_TEST_PROOFS = ["reader tests"];
