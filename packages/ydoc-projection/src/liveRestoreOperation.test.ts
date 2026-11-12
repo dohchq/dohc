@@ -334,7 +334,7 @@ it("revokes a link, credential, and exact dependent set atomically with the oper
     f.write(db => {
       db.exec("UPDATE sync_relay_share_grants SET principal_kind='link',principal_user_id=NULL WHERE grant_id='grant'");
       db.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('dependent','share','user','reader',NULL,'edit',2,'active',0,NULL,'grant')");
-      db.exec("INSERT INTO sync_relay_link_credentials VALUES('credential','grant','secret-hash',4,0,NULL)");
+      db.exec("INSERT INTO sync_relay_link_credentials(credential_id,grant_id,secret_hash,generation,minted_at_ms,retired_at_ms) VALUES('credential','grant','secret-hash',4,0,NULL)");
     });
     const intent = { ...f.intent, expectedDependentGrantIds: ["dependent"] };
     const before = f.rows();
