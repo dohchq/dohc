@@ -6,20 +6,24 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
-import { LayoutList, PanelsTopLeft, SlidersHorizontal, Zap } from "lucide-react";
+import { History, LayoutList, PanelsTopLeft, SlidersHorizontal, Zap } from "lucide-react";
 import {
   BoardView,
   CalendarView,
   createCollectionStore,
   recordLabel,
+  RecordProperties,
   TableView,
   useCollectionStore,
   type CollectionCellChange,
   type CollectionOptionCreate,
 } from "@dohc/collection-views";
 import type {
+  CollectionQueryCursor,
   CollectionQueryParams,
+  CollectionQueryResult,
   CollectionRecord,
   CollectionSchema,
   CollectionValue,
@@ -60,6 +64,9 @@ import type { Automation } from "./collections/automationSentence";
 import { RecordButton } from "./collections/RecordButton";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
+import { RecordPanel, type RecordPanelCommand } from "./collections/RecordPanel";
+import { useRecordPanel, type RecordPanelHost } from "./collections/useRecordPanel";
+import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 
 // The collection surface behind a tab://collection/<path> tab uses the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -73,7 +80,58 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 // queries and mount them all. Exported for CollectionPage.test.tsx.
 export const DRAIN_RECORD_LIMIT = 1000;
 
-export interface CollectionPageProps {
+// A record open in the panel that is not among the records the page holds is
+// looked for by its id, a query at a time, in the Collection's own order: the
+// engine reads no record by its id. The search stops at the record, at the
+// last record, or once it has read this many. Exported for CollectionPage.recordPanel.test.tsx.
+export const FIND_RECORD_PAGE = 500;
+export const FIND_RECORD_LIMIT = 5000;
+const RECORD_GONE = "This record is no longer in this Collection.";
+const RECORD_NOT_FOUND = "dohc could not find this record in the first 5,000 records. Close it, then open it from its view.";
+const RECORD_NOT_READ = "dohc could not read this record. Close it, then open it again.";
+
+/** What a search for the open record found: the record and the page of records it is on, or why there is none. */
+type FoundRecord = { record: CollectionRecord; cursor: CollectionQueryCursor | undefined } | { record: null; problem: string };
+
+async function findRecord(
+  read: (params: CollectionQueryParams) => Promise<CollectionQueryResult>,
+  collectionPath: string,
+  recordId: string,
+  // The page the record was on when it was last found, which is read first.
+  hint: CollectionQueryCursor | undefined,
+): Promise<FoundRecord> {
+  const page = (cursor: CollectionQueryCursor | undefined) =>
+    read({ collectionPath, resolveRelations: true, limit: FIND_RECORD_PAGE, ...(cursor ? { cursor } : {}) });
+  if (hint) {
+    const record = (await page(hint)).records.find((entry) => entry.id === recordId);
+    if (record) return { record, cursor: hint };
+  }
+  let cursor: CollectionQueryCursor | undefined;
+  for (let seen = 0; seen < FIND_RECORD_LIMIT; seen += FIND_RECORD_PAGE) {
+    const result = await page(cursor);
+    const record = result.records.find((entry) => entry.id === recordId);
+    if (record) return { record, cursor };
+    if (result.nextCursor === null) return { record: null, problem: RECORD_GONE };
+    cursor = result.nextCursor;
+  }
+  return { record: null, problem: RECORD_NOT_FOUND };
+}
+
+/**
+ * The field a record's name is a value of, as `recordLabel` reads it: its
+ * `title`, then its `name`, where that holds text. Null for a record named
+ * by its file.
+ */
+function labelField(record: CollectionRecord): string | null {
+  for (const preferred of ["title", "name"]) {
+    const matches = record.values.filter((entry) => entry.field.toLowerCase() === preferred);
+    const entry = matches.find((candidate) => candidate.field === preferred) ?? matches.sort((a, b) => (a.field < b.field ? -1 : 1))[0];
+    if (entry && typeof entry.value === "string" && entry.value.trim().length > 0) return entry.field;
+  }
+  return null;
+}
+
+export interface CollectionPageProps extends RecordPanelHost {
   readOnly?: boolean;
   accessEnded?: boolean;
   writeRefusal?: string;
@@ -92,9 +150,19 @@ export interface CollectionPageProps {
     collectionPath: string,
     created?: (record: { path: string; recordId: string }) => void,
   ) => void;
-  // The md file IS the record: opening one goes through the shell's normal
-  // file tab machinery, which composes PropertiesPanel and the live editor.
+  // The md file IS the record. A record opens in the panel beside its view;
+  // this opens its file in a tab, as the panel's Open as page does.
   onOpenRecord: (recordPath: string) => void;
+  // Draws a record's page body under its fields in the panel, by the
+  // record's file. The shell owns the file's editor, so the body is the
+  // document a file tab shows. Absent, the panel shows the fields alone.
+  renderRecordBody?: (recordPath: string) => ReactNode;
+  // Runs `then` once the body's unsaved text is saved, as closing a file
+  // tab does: before the record leaves the panel, and before its file opens
+  // in a tab. A save that fails keeps the record open, and `then` never runs.
+  settleRecordBody?: (then: () => void) => void;
+  // Opens a record's History. Absent where a record has none.
+  onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   // Opens any workspace file in a tab, such as automations.yaml.
   onOpenFile: (path: string) => void;
   // Opens the setting where the owner chooses which computer runs schedules.
@@ -122,12 +190,19 @@ export function CollectionPage({
   onActiveViewChange,
   onNewRecord,
   onOpenRecord,
+  renderRecordBody,
+  settleRecordBody,
+  onOpenRecordHistory,
   onOpenFile,
   onOpenScheduleSettings,
   onError,
   onNotice,
   automationFocus,
   onAutomationFocused,
+  initialOpenRecord,
+  onOpenRecordChange,
+  initialRecordPanelWidth,
+  onRecordPanelWidthChange,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -271,10 +346,35 @@ export function CollectionPage({
   // A button nothing uses opens the builder with its trigger filled in.
   const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(null);
   const panelStarts = useRef(0);
+  // Rises each time the ⚡ panel is asked to close, so a draft with changes asks first.
+  const [closeAsk, setCloseAsk] = useState(0);
+  // What runs once the ⚡ panel has closed at the record panel's asking.
+  const afterAutomationsClose = useRef<(() => void) | null>(null);
+  // The open record's panel: which record it shows, by its id, where focus goes, and what the shell keeps with the tab.
+  const recordPanel = useRecordPanel({
+    initialOpenRecord, onOpenRecordChange, initialRecordPanelWidth, onRecordPanelWidthChange,
+    settle: settleRecordBody,
+    automations: {
+      open: automationsOpen,
+      // The ⚡ panel may hold a draft, so it is asked to close, and the record opens once it has.
+      close: (then) => {
+        afterAutomationsClose.current = then;
+        setCloseAsk((ask) => ask + 1);
+      },
+    },
+  });
+  const openRecordId = recordPanel.openKey;
+  // What takes the open record's body off the page waits until what the body holds is saved.
+  const afterBodySaved = (then: () => void) => {
+    if (recordPanel.openKeyRef.current !== null && settleRecordBody) settleRecordBody(then);
+    else then();
+  };
+  // The ⚡ panel takes the record panel's place.
+  const showAutomations = () => afterBodySaved(() => setAutomationsOpen(true));
   useEffect(() => {
     if (!automationFocus) return;
     setPanelFocus(automationFocus);
-    setAutomationsOpen(true);
+    showAutomations();
     onAutomationFocused();
   }, [automationFocus?.seq]);
   // With the panel closed, only a change to automations.yaml re-reads them;
@@ -290,13 +390,13 @@ export function CollectionPage({
     if (automationsOpen) void reloadAutomations();
   }, [automationsOpen]);
   // Closing forgets a notice's ask, so the next open shows the list.
-  // The header's button asks the panel to close, so a draft with changes
-  // asks first; `seq` rises with each ask.
-  const [closeAsk, setCloseAsk] = useState(0);
   const closeAutomations = useCallback(() => {
     setAutomationsOpen(false);
     setPanelFocus(null);
     setPanelStart(null);
+    const then = afterAutomationsClose.current;
+    afterAutomationsClose.current = null;
+    then?.();
   }, []);
 
   // Invalidation: refresh when a settled batch touches this collection's
@@ -432,10 +532,44 @@ export function CollectionPage({
     },
     [onNewRecord, collectionPath, groupBy, enqueueCellChange],
   );
-  const openRecord = useCallback(
-    (record: CollectionRecord) => onOpenRecord(record.path),
-    [onOpenRecord],
-  );
+  // Stable, so opening or closing a record builds no column of the table again.
+  const openInPanel = useRef(recordPanel.open);
+  openInPanel.current = recordPanel.open;
+  const openRecord = useCallback((record: CollectionRecord) => openInPanel.current(record.id), []);
+
+  // The open record, as the page holds it: among the view's records, or as a search by its id found it.
+  const [sought, setSought] = useState<({ id: string } & FoundRecord) | null>(null);
+  const heldRecord = openRecordId === null ? undefined
+    : state.records.find((record) => record.id === openRecordId)
+      ?? state.groups?.flatMap((group) => group.records).find((record) => record.id === openRecordId);
+  const found = sought !== null && sought.id === openRecordId ? sought : null;
+  // The record as last seen, which the panel shows while a refresh that left it out looks for it again.
+  const lastRecord = useRef<CollectionRecord | null>(null);
+  if (heldRecord ?? found?.record) lastRecord.current = heldRecord ?? found?.record ?? null;
+  else if (lastRecord.current?.id !== openRecordId || found !== null) lastRecord.current = null;
+  const shownRecord = lastRecord.current;
+  const recordProblem = heldRecord === undefined && found !== null && found.record === null ? found.problem : undefined;
+  const held = heldRecord !== undefined;
+  useEffect(() => {
+    if (openRecordId === null || state.status !== "ready") return;
+    // A record the view holds needs no search, and what an earlier search found is older than the view's.
+    if (held) return setSought(null);
+    let stale = false;
+    const hint = sought !== null && sought.id === openRecordId && sought.record !== null ? sought.cursor : undefined;
+    findRecord(executor, collectionPath, openRecordId, hint).then(
+      (result) => {
+        if (!stale) setSought({ id: openRecordId, ...result });
+      },
+      () => {
+        // A record the panel already shows keeps its last values: the next refresh looks again.
+        if (!stale && lastRecord.current === null) setSought({ id: openRecordId, record: null, problem: RECORD_NOT_READ });
+      },
+    );
+    return () => {
+      stale = true;
+    };
+    // Each refresh of the view's records looks again, so a record outside them shows its changes.
+  }, [openRecordId, held, state.status, state.records, state.groups, executor, collectionPath]);
   const recordDrafts = [...new Map([...state.records, ...(state.groups?.flatMap(group => group.records) ?? [])]
     .filter(record => record.creationDelivery === "pending" || record.creationDelivery === "offline" || record.creationDelivery === "refused").map(record => [record.path, record])).values()];
   const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
@@ -691,6 +825,9 @@ export function CollectionPage({
       onStarted={() => setPanelStart(null)}
       closeAsk={closeAsk}
       onClose={closeAutomations}
+      onStayed={() => {
+        afterAutomationsClose.current = null;
+      }}
       onOpenFile={onOpenFile}
       onOpenScheduleSettings={onOpenScheduleSettings}
       onOpenFields={() => setFieldsOpen(true)}
@@ -718,7 +855,7 @@ export function CollectionPage({
         setFieldsOpen(false);
         panelStarts.current += 1;
         setPanelStart({ automation: buttonAutomation(field, null, []), seq: panelStarts.current });
-        setAutomationsOpen(true);
+        showAutomations();
       }}
       onClose={() => setFieldsOpen(false)}
     />
@@ -731,7 +868,7 @@ export function CollectionPage({
   const dateFields = schema.fields.filter((field) => field.type === "date");
   const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
-  const toggleAutomations = () => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true));
+  const toggleAutomations = () => (automationsOpen ? setCloseAsk((ask) => ask + 1) : showAutomations());
   // Every record the page holds, in rows or in a board's columns. More can load while a cursor remains.
   const loaded = new Set([...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])].map((record) => record.path)).size;
   const more = state.nextCursor !== null;
@@ -748,9 +885,73 @@ export function CollectionPage({
     confirmDelete: true,
   };
 
+  // The open record, in the panel: its name as the table calls it, a row for each field of the Collection with
+  // the table's own editors, and its page body. The ⚡ panel has the place while it is open.
+  const recordPanelNode = (() => {
+    if (openRecordId === null || automationsOpen) return null;
+    const record = shownRecord;
+    // The name opens for typing only where it is a text field's value, which the page writes as the table's cell does.
+    const nameFieldName = record === null ? null : labelField(record);
+    const nameField = schema.fields.find((field) => field.name === nameFieldName && field.type === "text");
+    const stored = nameField && record?.values.find((entry) => entry.field === nameField.name)?.value;
+    const commands: RecordPanelCommand[] = record !== null && onOpenRecordHistory
+      ? [{
+          id: "history",
+          label: "History",
+          icon: <History size={14} strokeWidth={1.9} aria-hidden />,
+          onSelect: () => onOpenRecordHistory({ collectionPath, recordId: record.id, recordName: recordLabel(record) }),
+        }]
+      : [];
+    return (
+      <RecordPanel
+        key={openRecordId}
+        panelRef={recordPanel.element}
+        collectionName={name}
+        name={record === null ? "" : recordLabel(record)}
+        nameText={typeof stored === "string" ? stored : undefined}
+        nameField={nameField?.name}
+        nameLabel={nameField?.name}
+        canRename={nameField !== undefined && onCellChange !== undefined && !readOnly}
+        onNameChange={nameField && record ? (value) => {
+          enqueueCellChange({ recordId: record.id, recordPath: record.path, field: nameField.name, value: value || null });
+        } : undefined}
+        onOpenAsPage={record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))}
+        commands={commands}
+        loading={record === null && recordProblem === undefined}
+        unavailable={recordProblem}
+        width={recordPanel.width}
+        onWidthChange={recordPanel.setWidth}
+        onClose={() => recordPanel.close("opener")}
+        properties={record === null ? undefined : (
+          <RecordProperties
+            schema={schema}
+            record={record}
+            visibleFields={null}
+            omitFields={nameField ? [nameField.name] : undefined}
+            onCellChange={readOnly ? undefined : enqueueCellChange}
+            editingDisabled={readOnly || writesPaused}
+            acknowledgedWriteId={acknowledgedWriteId}
+            subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+            onCreateOption={readOnly ? undefined : createOption}
+            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            people={people}
+            personLabel={personLabel}
+            onOpenLink={openCellLink}
+            relationExecutor={executor}
+            fieldMarks={tableFieldMarks}
+            renderButton={readOnly ? undefined : renderButton}
+          />
+        )}
+        body={record === null ? undefined : renderRecordBody?.(record.path)}
+      />
+    );
+  })();
+
   return (
     <CollectionFrame
       name={name}
+      // An editor, a picker and a menu each take their own Escape. The next one closes the open record.
+      onKeyDown={recordPanel.onPageKeyDown}
       count={`${loaded}${more ? "+" : ""} ${loaded === 1 && !more ? "record" : "records"}`}
       status={state.status === "error" ? (
         <>
@@ -791,7 +992,7 @@ export function CollectionPage({
           { id: "customize", label: "Customize…", icon: <SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />, onSelect: () => setCustomizing(true) },
         ] },
       ]}
-      panel={automationsPanel}
+      panel={recordPanelNode ?? automationsPanel}
     >
       {drainCapped ? (
         <div
@@ -818,6 +1019,7 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
             onNewRecord={readOnly || writesPaused ? undefined : newRecordInGroup}
             onOptionColorChange={readOnly ? undefined : changeGroupColor}
             personLabel={personLabel}
@@ -830,6 +1032,7 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
           />
         ) : kind === "calendar" ? (
           <CalendarNeedsDateField onAddDateField={readOnly ? undefined : () => setFieldsOpen("date")} />
@@ -850,6 +1053,7 @@ export function CollectionPage({
             personLabel={personLabel}
             onOpenLink={openCellLink}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
             relationExecutor={executor}
             fieldMarks={tableFieldMarks}
             renderButton={readOnly ? undefined : renderButton}

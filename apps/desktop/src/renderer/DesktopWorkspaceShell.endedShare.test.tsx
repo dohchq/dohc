@@ -552,8 +552,11 @@ describe("ended Edit Collection shares", () => {
       act(() => bridge.emitWorkspaceActivity({ paths: ["tasks/retained.md"] }));
       await waitFor(() => expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(reads));
       expect(screen.getByText("Retained task")).toBeTruthy();
+      // The record opens in the panel, with no edit there: its name is text, and its body is the file's own read-only view.
       fireEvent.click(screen.getByRole("button", { name: "Open Retained task" }));
-      const edit = await screen.findByTestId("markdown-edit-toggle");
+      const record = await screen.findByRole("complementary", { name: "Retained task" });
+      expect(within(within(record).getByRole("heading", { name: "Retained task" })).queryByRole("button")).toBeNull();
+      const edit = await within(record).findByTestId("markdown-edit-toggle");
       await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
       expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
       act(() => bridge.emitMenuCommand("command-palette"));

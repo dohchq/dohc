@@ -219,7 +219,7 @@ import {
 } from "./ui/controls";
 import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
-import { EditorGroupFrame } from "./workbench/tabRowActions";
+import { EditorGroupFrame, OwnActionsRow } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
@@ -774,6 +774,10 @@ export function DesktopWorkspaceShell(props: {
     beginDraftOperation,
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
+  // The record whose body each group's Collection tab draws in its record panel. That body's
+  // editor is registered under the Collection's tab, so an open of the record's own file in
+  // another group finds it here, and saves its text first as it does a file tab's.
+  const recordBodies = useRef(new Map<string, { tab: WorkbenchTab; path: string }>());
   const collectionLineage = useCollectionWriteLineage(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
@@ -2987,18 +2991,18 @@ export function DesktopWorkspaceShell(props: {
       const targetAlreadyOwnsPath = targetGroup?.tabs.some(
         (tab) => tab.path === path,
       );
-      const needsFlush =
-        !targetAlreadyOwnsPath &&
-        hasDrafts(
-          (groupId, tab) => groupId !== targetGroupId && tab.path === path,
-        );
+      // Another group's editor of this file: the file's tab there, or a record's body.
+      const editsElsewhere = (groupId: string, tab: WorkbenchTab) => {
+        if (groupId === targetGroupId) return false;
+        const body = recordBodies.current.get(groupId);
+        return tab.path === path || (body?.tab === tab && body.path === path);
+      };
+      const needsFlush = !targetAlreadyOwnsPath && hasDrafts(editsElsewhere);
       if (!needsFlush) {
         commitOpen();
         return;
       }
-      void flushStableDrafts(
-        (groupId, tab) => groupId !== targetGroupId && tab.path === path,
-      )
+      void flushStableDrafts(editsElsewhere)
         .then(commitOpen)
         .catch((error) => {
           if (!isCurrentRequest()) return;
@@ -6783,6 +6787,74 @@ export function DesktopWorkspaceShell(props: {
                 searchScrollTarget.path === tabPath
                   ? searchScrollTarget
                   : undefined;
+              // One file's view with the shell's wiring: in the group's file tab, or, for
+              // `recordBody`, as the page body of the record a Collection tab shows in its
+              // panel. The body registers its save state and draft flush under the Collection
+              // tab, which mounts no editor of its own, so closing that tab, an Explorer
+              // operation and a version switch wait for its text as they do for a file tab's.
+              const fileInspector = (
+                path: string,
+                callbacks: NonNullable<typeof editorCallbacks>,
+                onEditorReady?: Parameters<NewPageFile>[0],
+                recordBody = false,
+              ) => (
+              <FileInspector
+                key={path}
+                onEditorReady={onEditorReady}
+                workspaceId={workspaceId}
+                path={path}
+                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
+                // History growth, version switches, and share-mount pulls all
+                // re-read the open file (every counter only ever increases).
+                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
+                // G2-C-3: the engine editor re-binds to the new version's Y.Doc
+                // lineage only on an active-version change — versionEpoch alone,
+                // not history growth (which must not churn the live session).
+                engineVersionKey={versionEpoch}
+                onOpenPath={openPathWithHeading}
+                drawingCollaboration={chatCollaboration}
+                // A search or heading jump opens the file's tab, never a record's body.
+                scrollTarget={recordBody ? undefined : groupScrollTarget}
+                headingTarget={
+                  !recordBody &&
+                  headingTarget?.groupId === editorGroup.id &&
+                  headingTarget.path === path
+                    ? headingTarget.target
+                    : undefined
+                }
+                onScrollConsumed={consumeSearchScrollTarget}
+                onSaveStateChange={callbacks.onSaveStateChange}
+                // A document in an Edit share view that turns read-only may
+                // mean the owner ended access. The refresh asks the relay, and
+                // only the relay says so.
+                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
+                surfaceKey={recordBody ? undefined : editorGroup.id}
+                onSurfaceReady={recordBody ? undefined : onRestoredFileSurfaceReady}
+                registerDraftFlush={callbacks.registerDraftFlush}
+                registerSourceToggle={callbacks.registerSourceToggle}
+                // A record's body takes focus only when a person puts it there.
+                autoFocus={!recordBody && wb.activeEditorGroup === editorGroup.id}
+                knownMarkdownFiles={markdownWikilinkFiles}
+                appFolder={appEntries.get(path) ?? null}
+                onRunApp={openAppTab}
+                onButtonError={documentReports.onError}
+                onButtonNotice={documentReports.onNotice}
+                onClosePath={closePathTabs}
+                onOpenRecordHistory={recordHistory.open}
+                accessEnded={shareViewEnded}
+                captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === path) ?? false}
+                onRetryHeldCapture={retryHeldCapture}
+                readOnly={
+                  (!!shareView && !shareViewWritable) ||
+                  isMountedSharePath(path)
+                }
+                receivedShare={!!shareView || isMountedSharePath(path)}
+                {...(shareView || isMountedSharePath(path)
+                  ? {}
+                  : { onSharePath })}
+                recordBody={recordBody}
+              />
+              );
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
@@ -7098,6 +7170,26 @@ export function DesktopWorkspaceShell(props: {
                     }
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
+                    // The record a tab shows open stays with the tab, by the record's id.
+                    initialOpenRecord={tabPath === null ? null : wb.openRecords[tabPath] ?? null}
+                    onOpenRecordChange={(record) => {
+                      if (tabPath !== null) mutateWb((state) => setCollectionOpenRecord(state, tabPath, record));
+                    }}
+                    initialRecordPanelWidth={wb.recordPanelWidth}
+                    onRecordPanelWidthChange={(width) => mutateWb((state) => setRecordPanelWidth(state, width))}
+                    renderRecordBody={tab && editorCallbacks ? (path) => {
+                      recordBodies.current.set(editorGroup.id, { tab, path });
+                      return <OwnActionsRow>{fileInspector(path, editorCallbacks, undefined, true)}</OwnActionsRow>;
+                    } : undefined}
+                    // What a record's body holds unsaved is saved before the record leaves the panel, as before a file tab closes.
+                    settleRecordBody={tab ? (then) => commitAfterTabFlush(
+                      editorGroup.id,
+                      tab,
+                      "dohc could not save this record's page. The record stays open.",
+                      then,
+                    ) : undefined}
+                    // A file under shared-with-me is no record of this workspace's Collections, so it has no History.
+                    onOpenRecordHistory={isMountedSharePath(groupCollectionPath) ? undefined : recordHistory.open}
                     onOpenFile={(path) => openFile(path)}
                     onOpenScheduleSettings={() => openSettings("advanced")}
                     onError={collectionReports.onError}
@@ -7151,58 +7243,7 @@ export function DesktopWorkspaceShell(props: {
                   // tab closes, so the switch from page to file keeps it.
                   const born = tabPath ? bornPages.get(tabPath) : undefined;
                   const fileView: NewPageFile = (onEditorReady) => tabPath && tab && editorCallbacks ? (
-              <FileInspector
-                key={tabPath}
-                onEditorReady={onEditorReady}
-                workspaceId={workspaceId}
-                path={tabPath}
-                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
-                // History growth, version switches, and share-mount pulls all
-                // re-read the open file (every counter only ever increases).
-                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
-                // G2-C-3: the engine editor re-binds to the new version's Y.Doc
-                // lineage only on an active-version change — versionEpoch alone,
-                // not history growth (which must not churn the live session).
-                engineVersionKey={versionEpoch}
-                onOpenPath={openPathWithHeading}
-                drawingCollaboration={chatCollaboration}
-                scrollTarget={groupScrollTarget}
-                headingTarget={
-                  headingTarget?.groupId === editorGroup.id &&
-                  headingTarget.path === tabPath
-                    ? headingTarget.target
-                    : undefined
-                }
-                onScrollConsumed={consumeSearchScrollTarget}
-                onSaveStateChange={editorCallbacks.onSaveStateChange}
-                // A document in an Edit share view that turns read-only may
-                // mean the owner ended access. The refresh asks the relay, and
-                // only the relay says so.
-                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
-                surfaceKey={editorGroup.id}
-                onSurfaceReady={onRestoredFileSurfaceReady}
-                registerDraftFlush={editorCallbacks.registerDraftFlush}
-                registerSourceToggle={editorCallbacks.registerSourceToggle}
-                autoFocus={wb.activeEditorGroup === editorGroup.id}
-                knownMarkdownFiles={markdownWikilinkFiles}
-                appFolder={appEntries.get(tabPath) ?? null}
-                onRunApp={openAppTab}
-                onButtonError={documentReports.onError}
-                onButtonNotice={documentReports.onNotice}
-                onClosePath={closePathTabs}
-                onOpenRecordHistory={recordHistory.open}
-                accessEnded={shareViewEnded}
-                captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === tabPath) ?? false}
-                onRetryHeldCapture={retryHeldCapture}
-                readOnly={
-                  (!!shareView && !shareViewWritable) ||
-                  isMountedSharePath(tabPath)
-                }
-                receivedShare={!!shareView || isMountedSharePath(tabPath)}
-                {...(shareView || isMountedSharePath(tabPath)
-                  ? {}
-                  : { onSharePath })}
-              />
+              fileInspector(tabPath, editorCallbacks, onEditorReady)
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}

@@ -428,6 +428,7 @@ describe("CollectionPage", () => {
     act(() => api.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Socks.md"] }));
     await waitFor(() => expect(screen.queryByTestId("collection-record-drafts")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Open Socks" }));
+    fireEvent.click(within(screen.getByRole("complementary", { name: "Socks" })).getByRole("button", { name: "Open as page" }));
     expect(onOpenRecord).toHaveBeenCalledWith("tasks/Socks.md");
     expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
   });
@@ -2067,16 +2068,19 @@ function localToday(): string {
 }
 
 describe("record click-through", () => {
-  it("opens the record's file from a table row", async () => {
+  // A record opens in the panel beside its view (CollectionPage.recordPanel.test.tsx). Its file opens from there.
+  it("opens the record's file from a table row's record", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     const onOpenRecord = vi.fn();
     renderPage(bridge, undefined, onOpenRecord);
 
     fireEvent.click(await screen.findByRole("button", { name: "Open Plan" }));
+    expect(onOpenRecord).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
-  it("opens the record's file from a board card", async () => {
+  it("opens the record's file from a board card's record", async () => {
     const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
       groups: [{ value: "Todo", records: [selectRecord()] }],
     });
@@ -2084,6 +2088,8 @@ describe("record click-through", () => {
     renderPage(bridge, undefined, onOpenRecord);
 
     fireEvent.click(await screen.findByRole("listitem", { name: "Plan" }));
+    expect(onOpenRecord).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
@@ -2169,7 +2175,7 @@ describe("record click-through", () => {
     );
   });
 
-  it("opens the record's file from a calendar event", async () => {
+  it("opens the record's file from a calendar entry's record", async () => {
     const dated: CollectionRecord = {
       id: "rec-1",
       path: "tasks/Plan.md",
@@ -2194,6 +2200,8 @@ describe("record click-through", () => {
     renderPage(bridge, undefined, onOpenRecord);
 
     fireEvent.click(await screen.findByText("Plan"));
+    expect(onOpenRecord).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 });
