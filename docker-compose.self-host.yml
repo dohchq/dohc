@@ -182,10 +182,10 @@ services:
     restart: unless-stopped
     environment:
       DOHC_PUBLIC_HOST: ${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST}
+    # The relay reaches itself through this gateway before it reports ready, so the gateway never waits for a healthy relay.
     depends_on:
       workspace-api: {condition: service_healthy}
-      sync-relay: {condition: service_healthy}
-      share-web: {condition: service_healthy}
+      sync-relay: {condition: service_started}
     ports: ['80:80', '443:443', '443:443/udp']
     volumes:
       - ./tools/self-host/Caddyfile:/etc/caddy/Caddyfile:ro
