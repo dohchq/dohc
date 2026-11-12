@@ -295,6 +295,16 @@
     ],
     "heldNoteChange": [
       "document.held.change"
+    ],
+    "members": [
+      "members.list",
+      "members.invite",
+      "members.level.set",
+      "members.role.set",
+      "members.remove",
+      "members.readmit",
+      "members.link.change",
+      "members.end"
     ]
   },
   "public": {
@@ -409,6 +419,15 @@
     "chat links": "chat.read",
     "notices list": "notice.list",
     "document held-change": "document.held.change",
-    "dataset cancelInvoke": "dataset.operation.cancel"
+    "dataset cancelInvoke": "dataset.operation.cancel",
+    "members list": "members.list",
+    "members invite": "members.invite",
+    "members remove": "members.remove",
+    "members level": "members.level.set",
+    "members admin": "members.role.set",
+    "members member": "members.role.set",
+    "members let-back-in": "members.readmit",
+    "members link": "members.link.change",
+    "members end": "members.end"
   }
 }

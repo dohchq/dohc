@@ -412,6 +412,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
     disconnect(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentDisconnectInput): Promise<import("@dohc/workspace-contracts/share-link-agents").DisconnectRelayShareLinkAgentResult>;
   };
+  members?(request: import("@dohc/cli/members").OwnerMembersRequest): Promise<import("@dohc/cli/members").MembersResult>;
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -2141,7 +2142,7 @@ const RECEIVED_SHARE_RULES: { [Verb in CliVerb]: ReceivedShareRule | ((request: 
   automationButtons: "anywhere",
   dataset: request => DATASET_PATH_FIELDS.some(field => field in request.args.request) ? "anywhere" : "owner",
   appPublication: request => "appRoot" in request.args.request ? "anywhere" : "owner",
-  stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", keptCopies: "owner", saveKeptCopy: "owner",
+  stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", members: "owner", keptCopies: "owner", saveKeptCopy: "owner",
   retainedCopies: "owner", deleteRetainedCopies: "owner", ownerAppResponses: "owner",
   groupCreate: "chat", post: "chat", reply: "chat", nothingToReport: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
   link: "chat",
@@ -2408,6 +2409,9 @@ async function dispatchWorkspace(
     case "shareDisconnect":
       if (context.readOnly || !context.shareLinkAgents) throw new CliCommandError("Open the owning workspace to disconnect a link's agent.");
       return context.shareLinkAgents.disconnect({ shareId: request.args.shareId, grantId: request.args.grantId, connectionId: request.args.connectionId });
+    case "members":
+      if (context.readOnly || !context.members) throw new CliCommandError("Members requires the original workspace and its signed-in owner account.");
+      return context.members(request.args.request);
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();

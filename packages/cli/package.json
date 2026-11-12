@@ -12,6 +12,7 @@
     "./dataset": "./src/dataset.ts",
     "./app-responses": "./src/appResponses.ts",
     "./app-publication": "./src/appPublication.ts",
+    "./members": "./src/members.ts",
     ".": "./src/index.ts",
     "./args": "./src/args.ts",
     "./help": "./src/help.ts",

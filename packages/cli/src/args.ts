@@ -6,6 +6,7 @@ import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
+import { OwnerMembersRequest } from "./members";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -33,6 +34,7 @@ type CliCommandBody =
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "shareAgents"; shareId: string; grantId: string; cursor?: string }
   | { verb: "shareDisconnect"; shareId: string; grantId: string; connectionId: string }
+  | { verb: "members"; request: OwnerMembersRequest }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
@@ -241,6 +243,18 @@ function streamPosition(value: string): CliStreamPosition {
 
 function noExtraArgs(tokens: readonly string[], verb: string): void {
   if (tokens.length > 0) fail(`${verb} does not accept '${tokens[0]}'`);
+}
+
+function membersRequest(value: unknown): OwnerMembersRequest {
+  const parsed = OwnerMembersRequest.safeParse(value);
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid members request.");
+  return parsed.data;
+}
+
+function personRequest(input: VerbInput, action: "remove" | "letBackIn" | "role", label: string, role?: "admin" | "member"): CliCommandBody {
+  const [person, ...extra] = input.operands; noExtraArgs(extra, label);
+  if (!person) return fail("Provide a member id or an email.");
+  return { verb: "members", request: membersRequest(role ? { action, person, role } : { action, person }) };
 }
 
 function lastValue(input: VerbInput, flag: string): string | undefined {
@@ -1548,6 +1562,70 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
           const [shareId, grantId, connectionId, ...extra] = input.operands; noExtraArgs(extra, "share disconnect");
           if (!shareId || !grantId || !connectionId) return fail("Provide a share id, grant id, and connection id.");
           return { verb: "shareDisconnect", shareId, grantId, connectionId };
+        },
+      },
+    },
+  },
+  members: {
+    summary: "List, invite, and remove the workspace's members, set what they can do, and manage the invite link.",
+    notes: ["Requires the original workspace and its signed-in owner account. Admins use the Members page in the app.",
+      "A person is a member id from dohc members list, or the email of an invite or a person."],
+    verbs: {
+      list: {
+        capabilityId: "members.list", summary: "List people, invites, removed accounts, the member level, and the invite link.", operands: "",
+        parse: input => { noExtraArgs(input.operands, "members list"); return { verb: "members", request: { action: "list" } }; },
+      },
+      invite: {
+        capabilityId: "members.invite", summary: "Invite someone by email. They join when they sign in with that email.", operands: "<email>",
+        parse: input => {
+          const [email, ...extra] = input.operands; noExtraArgs(extra, "members invite");
+          if (!email) return fail("Provide an email address.");
+          return { verb: "members", request: membersRequest({ action: "invite", email }) };
+        },
+      },
+      remove: {
+        capabilityId: "members.remove", summary: "Remove a person or cancel an invite. Copies already on their computer stay.", operands: "<person>",
+        parse: input => personRequest(input, "remove", "members remove"),
+      },
+      level: {
+        capabilityId: "members.level.set", summary: "Set what every member can do: view, comment, or edit. Admins and the owner always edit.", operands: "<view|comment|edit>",
+        parse: input => {
+          const [level, ...extra] = input.operands; noExtraArgs(extra, "members level");
+          if (level !== "view" && level !== "comment" && level !== "edit") return fail("Choose view, comment, or edit.");
+          return { verb: "members", request: { action: "level", level } };
+        },
+      },
+      admin: {
+        capabilityId: "members.role.set", summary: "Make a member an admin. Admins invite, remove members, and manage the invite link.", operands: "<person>",
+        parse: input => personRequest(input, "role", "members admin", "admin"),
+      },
+      member: {
+        capabilityId: "members.role.set", summary: "Make an admin a member again.", operands: "<person>",
+        parse: input => personRequest(input, "role", "members member", "member"),
+      },
+      "let-back-in": {
+        capabilityId: "members.readmit", summary: "Let a removed account back in as a member.", operands: "<person>",
+        parse: input => personRequest(input, "letBackIn", "members let-back-in"),
+      },
+      link: {
+        capabilityId: "members.link.change", summary: "Show the invite link, turn it on or off, or reset it.", operands: "<show|on|off|reset>",
+        notes: ["Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working."],
+        parse: input => {
+          const [change, ...extra] = input.operands; noExtraArgs(extra, "members link");
+          if (change === "show") return { verb: "members", request: { action: "list" } };
+          if (change === "on") return { verb: "members", request: { action: "link", change: "turn-on" } };
+          if (change === "off") return { verb: "members", request: { action: "link", change: "turn-off" } };
+          if (change === "reset") return { verb: "members", request: { action: "link", change: "reset" } };
+          return fail("Choose show, on, off, or reset.");
+        },
+      },
+      end: {
+        capabilityId: "members.end", summary: "End membership for everyone. Members lose access; copies already on their computers stay.", operands: "",
+        flags: [{ name: "--everyone", text: "Required. Confirms that every member and admin loses access." }],
+        parse: input => {
+          noExtraArgs(input.operands, "members end");
+          if (!input.flags.has("--everyone")) return fail("Ending membership removes everyone. Run dohc members end --everyone to confirm.");
+          return { verb: "members", request: { action: "end" } };
         },
       },
     },

@@ -80,6 +80,16 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
+### `dohc_members`
+
+Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email; remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
+
+Members belong to the original workspace and its owner. Shared profiles do not offer this tool.
+
+- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" }`. Required.
+
+Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } } | { status: "refused" } | { status: "done" }`.
+
 ### `dohc_dataset`
 
 Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
@@ -1048,6 +1058,106 @@ Disconnect one agent from a share link.
 Find the connection id with dohc share agents.
 
 With `--json`, prints `{ schemaVersion, connectionId }`.
+
+### `dohc members`
+
+List, invite, and remove the workspace's members, set what they can do, and manage the invite link.
+
+Requires the original workspace and its signed-in owner account. Admins use the Members page in the app. A person is a member id from dohc members list, or the email of an invite or a person.
+
+#### `dohc members list`
+
+```sh
+dohc members list [options]
+```
+
+List people, invites, removed accounts, the member level, and the invite link.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members invite`
+
+```sh
+dohc members invite <email> [options]
+```
+
+Invite someone by email. They join when they sign in with that email.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members remove`
+
+```sh
+dohc members remove <person> [options]
+```
+
+Remove a person or cancel an invite. Copies already on their computer stay.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members level`
+
+```sh
+dohc members level <view|comment|edit> [options]
+```
+
+Set what every member can do: view, comment, or edit. Admins and the owner always edit.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members admin`
+
+```sh
+dohc members admin <person> [options]
+```
+
+Make a member an admin. Admins invite, remove members, and manage the invite link.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members member`
+
+```sh
+dohc members member <person> [options]
+```
+
+Make an admin a member again.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members let-back-in`
+
+```sh
+dohc members let-back-in <person> [options]
+```
+
+Let a removed account back in as a member.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members link`
+
+```sh
+dohc members link <show|on|off|reset> [options]
+```
+
+Show the invite link, turn it on or off, or reset it.
+
+Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members end`
+
+```sh
+dohc members end [options]
+```
+
+End membership for everyone. Members lose access; copies already on their computers stay.
+
+- `--everyone`: Required. Confirms that every member and admin loses access.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
 
 ### `dohc document`
 
