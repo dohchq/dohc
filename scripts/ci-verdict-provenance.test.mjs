@@ -641,7 +641,12 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   assert.equal(checkout.with.ref, "${{ github.sha }}");
   assert.equal(checkout.with["fetch-depth"], 0);
   assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
-  assert.equal(filter.with.base, "${{ github.event.pull_request.base.sha }}");
+  const base = jobs.changes.steps.find(step => step.id === "merge-base");
+  assert.equal(base.if, "github.event_name == 'pull_request'");
+  assert.ok(base.run.includes("git rev-parse --verify HEAD^2"));
+  assert.ok(base.run.includes('echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"'));
+  assert.equal(filter.with.base, "${{ steps.merge-base.outputs.sha }}");
+  assert.ok(jobs.changes.steps.indexOf(base) < jobs.changes.steps.indexOf(filter));
   for (const name of ["javascript", "rust"]) {
     const download = jobs[name].steps.find(step => step.with?.pattern);
     assert.equal(download.with.pattern, `verification-${name === "javascript" ? "js" : "rust"}-*-\${{ github.run_attempt }}`);
@@ -650,6 +655,17 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
     assert.equal(upload.with.path, `.agent-artifacts/verification/aggregate/${name === "javascript" ? "js" : "rust"}-result.json`);
+  }
+});
+
+test("cloud JavaScript jobs do not inherit the event's base SHA", () => {
+  const {jobs, env} = load(workflow);
+  assert.equal(env.PR_BASE_SHA, undefined);
+  for (const [name, job] of Object.entries(jobs)) {
+    if (!job.steps.some(step => /cloud\.mjs (?:worker|prepare)\b/u.test(step.run ?? ""))) continue;
+    assert.equal(job.env?.PR_BASE_SHA, undefined, name);
+    assert.ok(!JSON.stringify(job).includes("github.event.pull_request.base.sha"), name);
+    assert.ok(job.steps.every(step => step.env?.PR_BASE_SHA === undefined), name);
   }
 });
 

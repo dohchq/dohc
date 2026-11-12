@@ -64,14 +64,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve the tested merge base
+        if: github.event_name == 'pull_request'
+        id: merge-base
+        run: |
+          git rev-parse --verify HEAD^2 >/dev/null || { echo '::error::Pull request selection requires HEAD to be a merge commit with both parents available.'; exit 1; }
+          echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         if: github.event_name == 'pull_request'
         id: filter
         with:
-          # Use the checked-out merge commit, just like the canonical verifier.
+          # Compare the tested merge with its first parent, like the cloud workers.
           # Local Git also avoids the PR files API's 3,000-file limit.
           token: ""
-          base: ${{ github.event.pull_request.base.sha }}
+          base: ${{ steps.merge-base.outputs.sha }}
           filters: |
             # .cargo/ holds audit.toml, where advisory ignores would hide;
             # .gitignore decides what the gate's own tree-provenance readings
@@ -225,7 +232,6 @@ jobs:
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -448,7 +454,6 @@ jobs:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -484,7 +489,6 @@ jobs:
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

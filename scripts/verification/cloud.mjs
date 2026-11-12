@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
-import { changedFiles, desktopProofCommand, passedSpecTitles, postgres, readSelfHostDeliveryProof } from "./verify.mjs";
+import { desktopProofCommand, passedSpecTitles, postgres, readSelfHostDeliveryProof } from "./verify.mjs";
 import { selectsRepositoryTests } from "./selection.mjs";
 import { JS_SHARDS, assertTaskCoverage, javascriptGroups, javascriptTasks, partitionJavascript } from "./shards.mjs";
 import { runBounded } from "./js-tests.mjs";
@@ -12,12 +12,21 @@ import { waitForPreparation } from "./wait-preparation.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 import { nodeTestFailures, playwrightFailures, playwrightFlaky, readLog, reportFlaky } from "./flaky.mjs";
 import { startTiming, timed } from "./timing.mjs";
+import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 
 export { JS_SHARDS };
 const output = resolve(repoRoot, ".agent-artifacts/verification/cloud", process.argv[2] ?? "unknown", process.argv[3] ?? "0");
 
+export function cloudChangedFiles(env = process.env, root = repoRoot) {
+  if (env.GITHUB_EVENT_NAME !== "pull_request") return null;
+  if (git(["rev-list", "--parents", "-n", "1", "HEAD"], root).split(/\s+/u).length < 3) {
+    throw new Error("Pull request selection requires HEAD to be a merge commit with both parents available (checkout fetch-depth: 2).");
+  }
+  return readGit(["diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD"], root).split("\0").filter(Boolean);
+}
+
 export async function cloudPlan() {
-  const changed = process.env.PR_BASE_SHA ? changedFiles(process.env.PR_BASE_SHA) : null;
+  const changed = cloudChangedFiles();
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   const repositoryTests = changed && !selectsRepositoryTests(changed, workflow) ? "test:repo:tree" : "test:repo";
   return javascriptTasks({ changed, repositoryTests });
