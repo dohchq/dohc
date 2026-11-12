@@ -2927,6 +2927,57 @@ describe("the automation replicas", () => {
     }
   });
 
+  it("stops a replay, owed, when a sync starts while it reads, and sends nothing until a pass after the sync", async () => {
+    for (const moved of [true, false]) {
+      const { storage } = await relay();
+      const engine = fakeEngine();
+      const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+      const first = await stepped(storage, wanted);
+      const opened = first.running.replica(WORKSPACE)!;
+      const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
+      engine.filePaths.set("object-plan", "docs/plan.md");
+      const onPage = await chats.createThread({ workspaceId: WORKSPACE, title: "Plan", linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" } });
+      const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+      const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+      const write: WriteCommand = { kind: "reply", threadId: onPage.id, messageId: ids.messageId("reply"), body: "Ship it" };
+      storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+        binding: { workspaceId: WORKSPACE, operation: "reply", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
+        replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+        command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+      await first.running.close();
+      // The restarted copy catches up, but its receipts can't be read, so the replay stays owed.
+      engine.receipts(new Error("the engine is busy"));
+      const restarted = await stepped(storage, wanted, { root: first.root, onError: () => undefined });
+      const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
+
+      // The next pass's replay starts while the copy is current, and waits on its receipt read.
+      let readReached!: () => void, releaseRead!: () => void;
+      const reading = new Promise<void>((resolve) => { readReached = resolve; });
+      const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+      engine.receipts(async () => {
+        readReached();
+        await readHeld;
+        return new Map();
+      });
+      const passing = restarted.pass();
+      await reading;
+      // Meanwhile the relay may move the page to a secret path, and a visit's sync starts and waits before it pulls.
+      if (moved) engine.movedOnRelay(new Map([["object-plan", ".env"]]));
+      const gate = engine.holdPulls();
+      const syncing = restarted.running.replica(WORKSPACE)!.sync();
+      await gate.reached;
+      releaseRead();
+      await passing;
+      expect(sends(), `moved: ${moved}; the replay stopped`).toBe(0);
+
+      // Still owed: a pass after the sync replays, into a thread still visible.
+      gate.release();
+      await syncing;
+      await restarted.pass();
+      expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+    }
+  });
+
   it("doesn't replay a phone write into a thread whose file the relay made secret while the copy was stopped, and settles it as unsent", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();

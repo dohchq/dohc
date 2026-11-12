@@ -396,7 +396,24 @@ interface WriteContext {
   authorize(): Promise<void>;
   nowMs(): number;
   signal?: AbortSignal;
+  /**
+   * Whether the copy is still as current as when a replay began. Called with nothing awaited between it and the
+   * stage it guards.
+   */
+  current?(): boolean;
 }
+
+/** A replay stopped because the copy started syncing, or fell behind the relay, while it ran. */
+class CopyBehind extends Error {
+  constructor() {
+    super("The copy changed while its phone writes replayed.");
+    this.name = "CopyBehind";
+  }
+}
+
+const stillCurrent = (context: WriteContext) => {
+  if (context.current !== undefined && !context.current()) throw new CopyBehind();
+};
 
 interface Session {
   readonly stored: StoredWrite;
@@ -422,6 +439,7 @@ function serverWriteHost(context: WriteContext, targets: Targets, session: Sessi
   // Access is checked, then the row made, then the stage started, with nothing awaited between them.
   async function stage<T>(role: Role, run: () => Promise<T>): Promise<T> {
     await context.authorize();
+    stillCurrent(context);
     const row = (session.record ??= record());
     return await runStage(context, row, session, stageKey(stored, role), run);
   }
@@ -603,6 +621,7 @@ async function replayStages(context: WriteContext, record: OperationRecord, stor
   const stage = async <T>(role: Role, run: () => Promise<T>): Promise<T> => {
     if (write.kind !== "start") await targets.thread(write.threadId);
     await context.authorize();
+    stillCurrent(context);
     return await runStage(context, record, progress, stageKey(stored, role), run);
   };
   switch (write.kind) {
@@ -832,6 +851,8 @@ export async function replayUnfinishedWrites(input: {
   records: readonly OperationRecord[];
   nowMs(): number;
   onError(error: unknown): void;
+  /** Whether the copy is still as current as when the replay began. A copy that isn't stops the replay, owed. */
+  current?(): boolean;
 }): Promise<boolean> {
   const { storage, copy } = input;
   const unfinished = (record: OperationRecord) => storage.listUnfinishedAccountOperations({ workspaceId: copy.workspaceId, incarnation: copy.incarnation })
@@ -854,9 +875,12 @@ export async function replayUnfinishedWrites(input: {
         const authorize = async () => {
           if (!mayPublish(storage, record)) throw notFound();
         };
-        await replayStages({ storage, copy, authorize, nowMs: input.nowMs, signal: copy.signal }, record, stored);
+        await replayStages({ storage, copy, authorize, nowMs: input.nowMs, signal: copy.signal,
+          ...(input.current ? { current: input.current } : {}) }, record, stored);
       });
     } catch (error) {
+      // The copy moved on: the next pass replays against what it pulls.
+      if (error instanceof CopyBehind) return false;
       if (error instanceof RelayError || error instanceof TargetMissing || copy.signal.aborted) continue;
       input.onError(error);
       // A stage the engine refused left the write refused, which is done with; anything else stays owed.

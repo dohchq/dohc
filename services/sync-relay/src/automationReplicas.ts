@@ -403,6 +403,8 @@ export async function startAutomationReplicas(options: {
     // holding a write's lock may be waiting on, and before that pass's publication pushes.
     let pulledCurrent = false;
     let replayAsked = false;
+    // Every sync or step adds one as it starts, so a replay can tell one started while it ran.
+    let syncGeneration = 0;
     let replayed = false;
     const caughtUp = async (): Promise<"idle" | "replayed" | "owed"> => {
       if (replayed) return "idle";
@@ -412,8 +414,11 @@ export async function startAutomationReplicas(options: {
         replayAsked = false;
         return "idle";
       }
-      // Only a replay that finished is done; one that failed stays owed for a later pass.
-      replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs,
+      // Only a replay that finished is done; one that failed stays owed for a later pass. Just before each stage, the
+      // copy must be as current as now: no sync started since, none running, and nothing new at the relay.
+      const generation = syncGeneration;
+      const current = () => generation === syncGeneration && running === 0 && logHead(row.workspaceId) <= replica.pulledHead;
+      replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs, current,
         records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
         onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
       return replayed ? "replayed" : "owed";
@@ -423,6 +428,7 @@ export async function startAutomationReplicas(options: {
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
       running += 1;
+      syncGeneration += 1;
       // Until this sync finishes caught up, the copy may be behind what the relay holds now.
       pulledCurrent = false;
       const run = syncChain.then(async () => {
