@@ -639,10 +639,16 @@ export function CollectionPage({
         };
       },
       save,
-      onValueDropped: (field, value) => {
-        const why = dropRefusal.current() ?? "The field changed, or this view no longer shows it.";
-        const message = `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${text(value)}`;
-        rowHost.current.onError(message, new TextNotSavedError(message, text(value)));
+      // What the row held and did not save goes to a notice, whose details hold all of it. Nothing is created.
+      onUnsaved: (row) => {
+        const typed = [...Object.entries(row.values).map(([field, value]) => `${field}: ${text(value)}`), ...(row.text ? [`${row.text.field}: ${row.text.text}`] : [])].join(", ");
+        const field = Object.keys(row.values)[0] ?? "";
+        const why = dropRefusal.current() ?? (row.why === "field" ? "The field changed, or this view no longer shows it." : `Enter a value ${row.text?.field ?? "the field"} can take.`);
+        const message = row.why === "field"
+          ? `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${typed}`
+          : `dohc did not create a record in ${rowHost.current.collectionName}. ${why} You typed: ${typed}`;
+        rowHost.current.onError(message, new TextNotSavedError(message, typed));
+        return row.why === "field" ? `The ${field} field changed, so its value left this row. A notice has what you typed.` : undefined;
       },
     };
   }, [collectionPath, store]);

@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollectionSchema, CollectionValue } from "@dohc/workspace-contracts";
-import { TableView, type TableNewRecord, type TableNewRecordStatus, type TableViewProps } from "./TableView";
+import { TableView, type TableNewRecord, type TableNewRecordStatus, type TableUnsavedRow, type TableViewProps } from "./TableView";
 import { indexedValue, makeRecord, makeSchema } from "../testSupport";
 
 // The virtualizer measures its scroll element, which jsdom reports as 0, so
@@ -40,7 +40,8 @@ type Save = { values: Record<string, CollectionValue>; report: (status: TableNew
 function host(extra: Partial<TableNewRecord> = {}) {
   const saves: Save[] = [];
   let start: (() => void) | null = null;
-  const dropped = vi.fn();
+  const unsaved = vi.fn<(row: TableUnsavedRow) => string | void>();
+  const outOfView = vi.fn();
   const newRecord: TableNewRecord = {
     save: (values, report) => {
       saves.push({ values: { ...values }, report });
@@ -51,14 +52,15 @@ function host(extra: Partial<TableNewRecord> = {}) {
         start = null;
       };
     },
-    onValueDropped: dropped,
+    onUnsaved: unsaved,
+    onOutOfView: outOfView,
     ...extra,
   };
-  return { newRecord, saves, dropped, start: () => act(() => start?.()) };
+  return { newRecord, saves, unsaved, outOfView, start: () => act(() => start?.()) };
 }
 
-function setup(props: Partial<TableViewProps> = {}) {
-  const made = host();
+function setup(props: Partial<TableViewProps> = {}, extra: Partial<TableNewRecord> = {}) {
+  const made = host(extra);
   const onNewRecord = vi.fn();
   const onCellChange = vi.fn(() => 1);
   const all: TableViewProps = { schema, records: records(), onCellChange, onOpenRecord: vi.fn(), onNewRecord, newRecord: made.newRecord, ...props };
@@ -154,8 +156,8 @@ describe("a new record's row", () => {
     key("ArrowRight");
     expect(selected()).toBe(cells()[3]);
 
-    // A select opens its picker, and the pick stays in the row.
-    key("Enter");
+    // A select opens its picker with F2, and the pick stays in the row.
+    key("F2");
     fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"));
     expect(cells()[3]!.textContent).toBe("doing");
 
@@ -305,8 +307,8 @@ describe("a new record's row", () => {
     expect(saves).toHaveLength(1);
 
     // Tab on the row's last cell reaches Try again, then Discard.
-    press(cells()[3]!);
-    fireEvent.keyDown(document.querySelector("[data-cell-editor] input, [data-cell-editor] [tabindex]") ?? grid(), { key: "Escape" });
+    press(cells()[2]!);
+    key("ArrowRight");
     key("Tab");
     const again = within(note).getByRole("button", { name: "Try again" });
     expect(document.activeElement).toBe(again);
@@ -352,6 +354,8 @@ describe("a new record's row", () => {
     fireEvent.click(within(note).getByRole("button", { name: "Try again" }));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(saves).toHaveLength(1);
+    // The retry answers that the save is still in doubt, and Discard gives it up through the host.
+    act(() => void saves[0]!.report({ state: "unconfirmed", reason: "dohc could not confirm the new record.", retry, discard }));
     fireEvent.click(screen.getByRole("button", { name: "Discard new record" }));
     expect(discard).toHaveBeenCalledTimes(1);
     expect(newRows()).toHaveLength(0);
@@ -422,14 +426,14 @@ describe("a new record's row", () => {
   });
 
   it("gives the host a value whose field went away, and keeps the rest", () => {
-    const { again, dropped } = setup();
+    const { again, unsaved } = setup();
     press(addRow());
     type("Milk", "Tab");
     key("5");
     type("5", "Tab");
 
     again({ schema: makeSchema([FIELDS[0]!, FIELDS[2]!, { name: "status", type: "select", options: ["todo"] }]) });
-    expect(dropped.mock.calls).toEqual([["estimate", 5]]);
+    expect(unsaved.mock.calls).toEqual([[{ values: { estimate: 5 }, why: "field" }]]);
     expect(cells().map((cell) => cell.textContent)).toEqual(["Milk", "", ""]);
   });
 
@@ -504,9 +508,8 @@ describe("a new record's row", () => {
     expect(saves[0]!.report({ state: "refused", reason: "No." })).toBe(false);
   });
 
-  it("finishes a save that stopped part way when the row goes, and sends nothing the host still has", async () => {
+  it("sends nothing the host still has when the row goes, and tells the host a row in doubt went", async () => {
     const { saves, again, unmount } = setup();
-    const retry = vi.fn();
     press(addRow());
     type("Milk", "Enter");
     // The host has the row: closing the table sends it nothing more.
@@ -516,17 +519,224 @@ describe("a new record's row", () => {
     unmount();
 
     const next = setup();
+    const retry = vi.fn(), discard = vi.fn(), released = vi.fn();
     press(addRow());
     type("Bread", "Enter");
-    // What finishes the save may answer at once. The row is gone by then, so the host reports that answer.
-    retry.mockImplementation(() => expect(next.saves[0]!.report({ state: "refused", reason: "No." })).toBe(false));
-    act(() => void next.saves[0]!.report({ state: "refused", reason: "dohc could not finish this record.", retry }));
-    // The host finishes what it started: the row takes no typing.
-    press(cells()[0]!);
-    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    act(() => void next.saves[0]!.report({ state: "unconfirmed", reason: "dohc could not finish this record.", retry, discard, released }));
     next.unmount();
     await Promise.resolve();
-    expect(retry).toHaveBeenCalledTimes(1);
+    // Closing starts no request: not a save, and not the host's retry. The host keeps what it must elsewhere.
+    expect(released).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(discard).not.toHaveBeenCalled();
     expect(next.saves).toHaveLength(1);
+  });
+
+  it("runs the host's retry of a save in doubt once, as one request, and offers nothing that starts another until it answers", async () => {
+    const { saves, unmount } = setup();
+    const retry = vi.fn(), discard = vi.fn();
+    press(addRow());
+    type("Milk", "Enter");
+    const doubt = { state: "unconfirmed" as const, reason: "dohc could not finish this record.", retry, discard };
+    act(() => void saves[0]!.report(doubt));
+    fireEvent.click(within(screen.getByRole("note")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    // The retry is out: the row shows as saving, with no Try again, no Discard, and no typing.
+    expect(newRow().querySelector("[data-new-record-status='pending']")).not.toBeNull();
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Discard new record" })).toBeNull();
+    press(cells()[0]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    key("Enter");
+    press(document.body);
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(saves).toHaveLength(1);
+    // Still in doubt once it answers so: Try again is back, and the row still takes no typing.
+    act(() => void saves[0]!.report(doubt));
+    expect(within(screen.getByRole("note")).getByRole("button", { name: "Try again" })).toBeDefined();
+    unmount();
+    await Promise.resolve();
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(saves).toHaveLength(1);
+  });
+
+  it("never takes typing again once a save is in doubt, whatever the host says of it while no request is out", () => {
+    const { saves } = setup();
+    const discard = vi.fn();
+    press(addRow());
+    type("Milk", "Enter");
+    // A save in doubt with no retry offers Discard only.
+    act(() => void saves[0]!.report({ state: "unconfirmed", reason: "The rules changed before dohc confirmed this record.", discard }));
+    const note = screen.getByRole("note");
+    expect(within(note).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(note).getByRole("button", { name: "Discard" })).toBeDefined();
+    // Only a request that is out can end as one that did not run.
+    act(() => void saves[0]!.report({ state: "refused", reason: "No." }));
+    expect(screen.getByRole("note").getAttribute("data-new-record-status")).toBe("unconfirmed");
+    press(cells()[0]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    key("Enter");
+    press(document.body);
+    expect(saves).toHaveLength(1);
+    // The host keeps what the row held elsewhere: the row goes, saves nothing, and starts no other row.
+    act(() => void saves[0]!.report({ state: "dropped" }));
+    expect(newRows()).toHaveLength(0);
+    expect(saves).toHaveLength(1);
+    expect(discard).not.toHaveBeenCalled();
+  });
+
+  it("never creates again once the host says the record is made, and shows as saving until the host says it is saved", async () => {
+    const { saves, unmount } = setup();
+    press(addRow());
+    type("Milk", "Enter");
+    act(() => void saves[0]!.report({ state: "made" }));
+    expect(newRow().querySelector("[data-new-record-status='pending']")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Discard new record" })).toBeNull();
+    // Nothing the host says later puts the row back where it can send.
+    act(() => void saves[0]!.report({ state: "refused", reason: "No." }));
+    act(() => void saves[0]!.report({ state: "unconfirmed", reason: "Lost.", retry: vi.fn(), discard: vi.fn() }));
+    expect(screen.queryByRole("note")).toBeNull();
+    press(cells()[0]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    key("Enter");
+    press(document.body);
+    unmount();
+    await Promise.resolve();
+    expect(saves).toHaveLength(1);
+  });
+
+  it("creates nothing when the table closes over text its field cannot take, and hands the host all the row held", async () => {
+    const { saves, unsaved, unmount } = setup();
+    press(addRow());
+    type("Milk", "Tab");
+    key("a");
+    fireEvent.change(editorInput(), { target: { value: "abc" } });
+    unmount();
+    await Promise.resolve();
+    expect(saves).toHaveLength(0);
+    expect(unsaved.mock.calls).toEqual([[{ values: { title: "Milk" }, text: { field: "estimate", text: "abc" }, why: "closed" }]]);
+  });
+
+  it("hands the host text its field cannot take when that is all the row holds", async () => {
+    const { saves, unsaved, again } = setup();
+    press(addRow());
+    fireEvent.keyDown(editorInput(), { key: "Tab" });
+    key("a");
+    fireEvent.change(editorInput(), { target: { value: "abc" } });
+    // The host stops taking new records, as when a share's access ends.
+    again({ newRecord: undefined, onNewRecord: undefined });
+    await Promise.resolve();
+    expect(saves).toHaveLength(0);
+    expect(unsaved.mock.calls).toEqual([[{ values: {}, text: { field: "estimate", text: "abc" }, why: "closed" }]]);
+  });
+
+  it("saves the row on Enter with no editor open: a checkbox is not ticked, and a picker is not opened again", () => {
+    const { saves } = setup();
+    press(addRow());
+    type("Milk", "Tab");
+    // On the checkbox, Space ticks it, and Enter saves the row.
+    key("ArrowRight");
+    key(" ");
+    key(" ");
+    key("Enter");
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk", done: false }]);
+    expect(within(cells()[2]!).getByRole<HTMLInputElement>("checkbox").checked).toBe(false);
+    act(() => void saves[0]!.report({ state: "saved" }));
+
+    // On a select, F2 opens the picker. Once an option is picked, Enter saves the row.
+    type("Bread", "Tab");
+    key("ArrowRight");
+    key("ArrowRight");
+    key("F2");
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"));
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    key("Enter");
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk", done: false }, { title: "Bread", status: "doing" }]);
+    key("Enter");
+    expect(saves).toHaveLength(2);
+  });
+
+  it("tells the host when the saved record's row is not among the rows on screen", () => {
+    const many = records(Array.from({ length: 60 }, (_, index) => String(index)));
+    const { saves, outOfView, again } = setup({ records: many });
+    press(addRow());
+    type("Milk", "Enter");
+    act(() => void saves[0]!.report({ state: "saved", recordId: "rec-top" }));
+    // The view's order puts the record first: its row is on screen, so nothing is said.
+    again({ records: [makeRecord("rec-top", [indexedValue("title", "Milk")]), ...many] });
+    expect(outOfView).not.toHaveBeenCalled();
+
+    type("Bread", "Enter");
+    act(() => void saves[1]!.report({ state: "saved", recordId: "rec-far" }));
+    expect(outOfView).not.toHaveBeenCalled();
+    // The record is loaded, far below the rows on screen.
+    again({ records: [makeRecord("rec-top", [indexedValue("title", "Milk")]), ...many, makeRecord("rec-far", [indexedValue("title", "Bread")])] });
+    expect(outOfView).toHaveBeenCalledTimes(1);
+
+    type("Jam", "Enter");
+    act(() => void saves[2]!.report({ state: "saved", recordId: "rec-elsewhere" }));
+    // The records the host gives next do not hold it, as on another page of them.
+    again({ records: [...many] });
+    expect(outOfView).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts with each field's default, sends what the cells show, and counts untouched defaults as nothing typed", () => {
+    const { saves } = setup({}, { defaults: { status: "todo", done: true } });
+    press(addRow());
+    // The defaults show as values of the row.
+    expect(cells()[3]!.textContent).toBe("todo");
+    expect(within(cells()[2]!).getByRole<HTMLInputElement>("checkbox").checked).toBe(true);
+    // A row that holds only its defaults is nothing typed: it goes, and makes no record.
+    fireEvent.keyDown(editorInput(), { key: "Escape" });
+    key("Escape");
+    expect(newRows()).toHaveLength(0);
+    expect(saves).toHaveLength(0);
+
+    // What is sent is what the cells show, defaults included.
+    press(addRow());
+    type("Milk", "Enter");
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk", status: "todo", done: true }]);
+    act(() => void saves[0]!.report({ state: "saved" }));
+
+    // A cleared default is sent as an explicit empty value, and an unticked one as unticked.
+    type("Bread", "Tab");
+    key("ArrowRight");
+    key(" ");
+    key("ArrowRight");
+    key("Delete");
+    expect(cells()[3]!.textContent).toBe("");
+    key("Enter");
+    expect(saves[1]!.values).toEqual({ title: "Bread", status: null, done: false });
+    act(() => void saves[1]!.report({ state: "saved" }));
+
+    // Clearing a default is something typed: leaving the row saves it.
+    fireEvent.keyDown(editorInput(), { key: "Escape" });
+    key("ArrowRight");
+    key("ArrowRight");
+    key("ArrowRight");
+    key("Delete");
+    press(document.body);
+    expect(saves[2]!.values).toEqual({ status: null, done: true });
+  });
+
+  it("gives back a value whose field stops taking one, says so on the row, and keeps the rest", () => {
+    const first = host();
+    const view = render(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={first.newRecord} />);
+    press(addRow());
+    type("Milk", "Tab");
+    key("5");
+    type("5", "Tab");
+    // The host builds its contract again: a new record no longer takes an estimate, though the table still shows the column.
+    const next = host({ canEdit: (field) => field.name !== "estimate" });
+    next.unsaved.mockReturnValue("A new record no longer takes estimate. dohc kept 5 in a notice.");
+    view.rerender(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={next.newRecord} />);
+    expect(next.unsaved.mock.calls).toEqual([[{ values: { estimate: 5 }, why: "field" }]]);
+    expect(cells().map((cell) => cell.textContent)).toEqual(["Milk", "", "", ""]);
+    expect(screen.getByRole("note").textContent).toContain("A new record no longer takes estimate. dohc kept 5 in a notice.");
+    // The save goes without it, once: nothing was dropped in silence.
+    press(cells()[0]!);
+    fireEvent.keyDown(editorInput(), { key: "Enter" });
+    expect(next.saves.map((save) => save.values)).toEqual([{ title: "Milk" }]);
   });
 });

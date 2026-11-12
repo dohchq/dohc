@@ -261,6 +261,8 @@ interface Live {
   creatable: ReadonlySet<string>;
   /** Gives a field of the new record in the panel a value. */
   changeDraft(fieldId: string, value: AppBackendJson): void;
+  /** What people call the table. */
+  tableName: string;
   scope: CollectionResourceScope;
   offline: boolean;
   read: DatasetOperation;
@@ -890,11 +892,16 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       canEdit: field => takes.has(field.name),
       bind: start => { startRow.current = start; return () => { if (startRow.current === start) startRow.current = null; }; },
       save: (values, report) => saveRow.current(values, report),
-      // A value typed under a field that then changed or went is kept in a notice, with all of it in its details.
-      onValueDropped: (fieldId, value) => {
-        const text = display(jsonValue(value));
-        const message = `dohc did not save what you typed in the ${knownFields.current.get(fieldId)?.name ?? "removed"} field of the new record. The field changed, or this table no longer shows it. You typed: ${text}`;
-        live.current?.onError(message, new TextNotSavedError(message, text), null);
+      // What the row held and did not save is kept in a notice, with all of it in its details. Nothing is created.
+      onUnsaved: row => {
+        const named = (fieldId: string) => knownFields.current.get(fieldId)?.name ?? "removed";
+        const typed = [...Object.entries(row.values).map(([fieldId, value]) => `${named(fieldId)}: ${display(jsonValue(value))}`), ...(row.text ? [`${named(row.text.field)}: ${row.text.text}`] : [])].join(", ");
+        const field = named(Object.keys(row.values)[0] ?? "");
+        const message = row.why === "field"
+          ? `dohc did not save what you typed in the ${field} field of the new record. The field changed, or a new record no longer takes it. You typed: ${typed}`
+          : `dohc did not create a record in ${live.current?.tableName ?? "this Collection"}. Enter a value ${named(row.text?.field ?? "")} can take. You typed: ${typed}`;
+        live.current?.onError(message, new TextNotSavedError(message, typed), null);
+        return row.why === "field" ? `${field} changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.` : undefined;
       },
     };
   }, [creatableKey]);
@@ -961,7 +968,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (openKey !== null && details !== null && !rows.has(openKey)) liveRows.set(openKey, details);
   if (editor) liveRows.set(NEW_RECORD, { id: NEW_RECORD, version: 0, values: Object.fromEntries(form.map(entry => [entry.field.fieldId, entry.value])) });
   live.current = { rows: liveRows, openRecord: openPanel, fields, editable: new Set(editableIds), editOperation, held: disabled || editor !== null, query, load, openCreate, scope, offline, read,
-    creatable: new Set(creatableIds), changeDraft, resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
+    creatable: new Set(creatableIds), changeDraft, tableName: table.name, resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
   // The table's new row shows its own change while a table shows that takes one. Without it, the page's list does.
   const rowHosted = !visual && page !== null && canCreate === true && !needsPanel;
   if (!rowHosted) rowSave.current = null;

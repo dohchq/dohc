@@ -30,6 +30,7 @@ export {
   type TableHostCell,
   type TableNewRecord,
   type TableNewRecordStatus,
+  type TableUnsavedRow,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";
