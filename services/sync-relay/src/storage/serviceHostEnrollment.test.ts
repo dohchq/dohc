@@ -1,10 +1,12 @@
 import {createHash} from "node:crypto";
-import {afterEach, expect, it} from "vitest";
+import {afterEach, expect, it, vi} from "vitest";
 import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
-import {LATEST_RESTORE, LiveHostingRefusal, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
-  serviceHostOwnerRetains, type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
+import {liveEditors} from "../liveEditors";
+import {RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS} from "../liveHostingLimits";
+import {LATEST_RESTORE, LiveHostingRefusal, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_DOCUMENTS, SERVICE_HOST_MAX_WORKSPACES,
+  ServiceHostRetirementConflict, serviceHostOwnerRetains, type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "./accountDeletion";
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./liveJournalHistory";
@@ -1222,4 +1224,190 @@ it("renews demand when a personal session closes, but not for a paused, stopped 
   expect(renew(70)).toBe(false);
   expect(read()).toMatchObject({ownerStop: "retire", demandAtMs: 60});
   expect(f.storage.renewPersonalSessionDemand({workspaceId: scope.workspaceId, objectId: "another-object", nowMs: 80})).toBe(false);
+});
+
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+// What a reclaim leaves: retired without a Stop and with no demand, so the next open of any intent enrolls it again.
+const reclaimed = {enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null};
+/**
+ * The fixture's note, which only demand recorded at 10 keeps: the owner's
+ * open when `owner`, otherwise an agent's session. Its only Edit grant ended.
+ */
+async function demandedOnly(owner = false) {
+  const f = await fixture(); f.enroll();
+  if (owner) ownerOpen(f, 10);
+  else expect(f.storage.renewPersonalSessionDemand({workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 10})).toBe(true);
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 10}).ok).toBe(true);
+  const read = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
+  expect(read()).toMatchObject({enabled: true, retired: false, ownerDemand: owner, demandAtMs: 10});
+  // A live connection to the note, counted as every live route counts one, until the returned release runs.
+  const connect = () => liveEditors(f.storage).acquire(binding);
+  return {...f, read, connect, sweep: (nowMs: number) => f.storage.reclaimIdleLiveDocuments(nowMs)};
+}
+/** An agent's edit of the fixture's note, admitted at `receivedAtMs`. */
+function admit(f: Fixture, receivedAtMs: number) {
+  f.raw.prepare(`INSERT INTO sync_relay_live_update_journal(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,
+    selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,accepting_host_epoch,received_at_ms,update_bytes,
+    relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,canonical_version,first_seen_deletes_json)
+    VALUES (?,?,?,'main',?,?,?,'["docs/a.md"]',7,'link','agent-1',?,4,1,?,x'01',?,1,?,1,2,'[]')`)
+    .run(`edit-${receivedAtMs}`, "c".repeat(64), scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.currentPath, scope.grantId,
+      receivedAtMs, key.namespace, "d".repeat(64));
+}
+/** A hosted note at notes/<objectId>.md that no share covers, kept by demand recorded at `demandAtMs`: the owner's when `owner`, otherwise an agent's. */
+function demandOnly(f: Fixture, objectId: string, demandAtMs: number, owner = false) {
+  f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+    created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes) VALUES (?,?,?,'owner-1',NULL,'epoch','stream',1,1,1,?,?,64)`)
+    .run(scope.workspaceId, objectId, `notes/${objectId}.md`, Number(owner), demandAtMs);
+}
+/** Fills the host to its 64 documents in 16 workspaces with documents an Edit share covers, so none of them is idle. */
+function fill(f: Fixture) {
+  const unretired = () => Number(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0`).get()!.count);
+  for (let i = 0; unretired() < SERVICE_HOST_MAX_DOCUMENTS; i++) {
+    const workspaceId = `workspace-${2 + i % (SERVICE_HOST_MAX_WORKSPACES - 1)}`, path = `docs/${i}.md`, shareId = `fill-${i}`;
+    f.seed(workspaceId, `fill-${i}`, path, shareId);
+    f.enroll({workspaceId, path, shareId});
+  }
+}
+/** Every enrollment row as stored. */
+const stored = (f: Fixture) => f.raw.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY workspace_id,object_id`).all();
+/** The documents retired so far. */
+const retiredObjects = (f: Fixture) =>
+  f.raw.prepare(`SELECT object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=1 ORDER BY object_id`).all().map(row => row.object_id);
+
+// Proves: the sweep reclaims a note only agents' demand keeps once nothing
+// used it for the retention period, and writes nothing before. An open live
+// connection keeps it past the period; once it closes, the same sweep
+// reclaims it. The row stays.
+it("reclaims an agent-only note idle past retention, and keeps it while a live connection is open", async () => {
+  const f = await demandedOnly(), past = 10 + RECLAIM_RETENTION_MS + 1, before = stored(f);
+  // Idle for exactly the retention period is not past it.
+  expect(f.sweep(past - 1)).toEqual([]);
+  const release = f.connect();
+  expect(f.sweep(past)).toEqual([]);
+  expect(stored(f)).toEqual(before);
+  release();
+  expect(f.sweep(past)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
+  expect(f.read()).toMatchObject(reclaimed);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+  expect(f.sweep(past + 1)).toEqual([]);
+  expect(stored(f)).toHaveLength(before.length);
+});
+
+// Proves: an edit admitted within the retention period keeps an agent-only
+// note, and the sweep reclaims it once that edit is past the period too.
+it("keeps an agent-only note edited within retention, and reclaims it once the edit is past retention", async () => {
+  const f = await demandedOnly(), past = 10 + RECLAIM_RETENTION_MS + 1;
+  admit(f, 11);
+  const before = stored(f);
+  expect(f.sweep(past)).toEqual([]);
+  expect(stored(f)).toEqual(before);
+  expect(f.sweep(past + 1)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
+});
+
+// Proves: the owner's desktop syncing an open note in the background renews
+// nothing, so at capacity a share reclaims the note once it is idle past the
+// minimum hold. An agent's edit within the hold renews it: the note is kept,
+// and the share is refused without a write.
+it.each([["only synced", false], ["edited within the hold", true]] as const)(
+  "renews a note's hold for an edit, not for the owner's background syncs (%s)", async (_case, edited) => {
+    const f = await demandedOnly(true), at = 10 + RECLAIM_MIN_HOLD_MS + 1;
+    fill(f);
+    // Each background sync connects and closes.
+    for (let sync = 0; sync < 3; sync++) f.connect()();
+    if (edited) admit(f, at - 1);
+    f.seed("workspace-2", "new-object", "docs/new.md", "new-share");
+    const share = () => f.enroll({workspaceId: "workspace-2", path: "docs/new.md", shareId: "new-share", nowMs: at});
+    if (edited) {
+      const before = stored(f);
+      expect(share).toThrow("capacity");
+      expect(stored(f)).toEqual(before);
+    } else {
+      expect(share()).toMatchObject({objectId: "new-object", enabled: true, retired: false});
+      expect(f.read()).toMatchObject(reclaimed);
+    }
+  });
+
+// Proves: at the host's 64 documents, a share in a new path and the owner's
+// open each reclaim one document idle past the minimum hold, and fit: one only
+// agents keep first, then the least recently used. While every document is
+// covered, connected or within the hold, both are refused and write nothing.
+it("reclaims an idle agent-only document first, then the least recently used, for a share or the owner's open at capacity", async () => {
+  const f = await fixture(); f.enroll();
+  retireWithoutStop(f);
+  demandOnly(f, "agent-a", 5);
+  demandOnly(f, "owner-a", 1, true);
+  demandOnly(f, "agent-b", 3);
+  fill(f);
+  for (const name of ["new-a", "new-b"]) f.seed("workspace-2", name, `docs/${name}.md`, name);
+  const share = (name: string, nowMs: number) => f.enroll({workspaceId: "workspace-2", path: `docs/${name}.md`, shareId: name, nowMs});
+  const before = stored(f);
+  expect(() => share("new-a", 1 + RECLAIM_MIN_HOLD_MS)).toThrow("capacity");
+  const at = 5 + RECLAIM_MIN_HOLD_MS + 1;
+  const releases = ["agent-a", "owner-a", "agent-b"].map(objectId => liveEditors(f.storage).acquire({workspaceId: scope.workspaceId, objectId}));
+  expect(() => share("new-a", at)).toThrow("capacity");
+  expect(refusal(() => ownerOpen(f, at))).toBe("live_host_full");
+  expect(stored(f)).toEqual(before);
+  for (const release of releases) release();
+  expect(share("new-a", at)).toMatchObject({enabled: true, retired: false});
+  expect(retiredObjects(f)).toEqual(["agent-b", binding.objectId]);
+  expect(ownerOpen(f, at)).toMatchObject({enabled: true, retired: false, ownerDemand: true, demandAtMs: at});
+  expect(retiredObjects(f)).toEqual(["agent-a", "agent-b"]);
+  // With no agent-only document left, the least recently used goes, though its owner opened it.
+  expect(share("new-b", at)).toMatchObject({enabled: true, retired: false});
+  expect(retiredObjects(f)).toEqual(["agent-a", "agent-b", "owner-a"]);
+});
+
+// Proves: the owner's next open of a reclaimed note enrolls it again, not
+// paused, and their demand keeps it hosted.
+it("enrolls a reclaimed note again, not paused, when its owner opens it", async () => {
+  const f = await demandedOnly(true), past = 10 + RECLAIM_RETENTION_MS + 1;
+  expect(f.sweep(past)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
+  expect(ownerOpen(f, past)).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, demandAtMs: past});
+  expect(f.storage.serviceHostEnrollmentCovered(f.read())).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+});
+
+// Proves: reclaim leaves a note its owner paused or stopped as they left it,
+// however long it sits, and their open still hears `paused`.
+it.each(["Pause", "Stop"] as const)("never reclaims a note after its owner's %s, and their open still hears paused", async action => {
+  const f = await demandedOnly(true);
+  if (action === "Pause") f.pause(); else f.stop();
+  const before = f.read();
+  expect(before).toMatchObject({enabled: false, ownerStop: action === "Pause" ? "pause" : "retire", demandAtMs: 10});
+  expect(f.sweep(10 + 10 * RECLAIM_RETENTION_MS)).toEqual([]);
+  expect(refusal(() => ownerOpen(f, 40))).toBe("paused");
+  expect(f.read()).toEqual(before);
+});
+
+// Proves: a note the owner's restore kept live is never reclaimed, though
+// only demand otherwise keeps it. Once the restore keeps nothing, the same
+// note is reclaimed and its activation's retirement opens.
+it("never reclaims a note the owner's restore kept live, and reclaims it once the restore keeps nothing", async () => {
+  const f = await kept(), past = 10 + RECLAIM_RETENTION_MS + 1;
+  expect(f.storage.renewPersonalSessionDemand({workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 10})).toBe(true);
+  expect(f.storage.reclaimIdleLiveDocuments(past)).toEqual([]);
+  expect(f.enrolled()).toMatchObject({enabled: true, retired: false, demandAtMs: 10});
+  expect(f.retirement()).toBeNull();
+  f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')");
+  expect(f.storage.reclaimIdleLiveDocuments(past)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
+  expect(f.retirement()).toMatchObject({activationId: f.restore.activationId, requestedAtMs: past});
+});
+
+// Proves: a reclaim and the owner's open of the same note leave it hosted
+// whichever commits first. The open enrolls a note the reclaim retired again;
+// a reclaim that finds the open's demand when it reads the row again leaves
+// the note as it is.
+it.each(["the reclaim", "the open"] as const)("hosts a note when its reclaim and its owner's open race and %s commits first", async first => {
+  const f = await demandedOnly(true), past = 10 + RECLAIM_RETENTION_MS + 1, context = f.storage as StorageContext;
+  if (first === "the reclaim") {
+    expect(f.sweep(past)).toMatchObject([reclaimed]);
+    expect(ownerOpen(f, past)).toMatchObject({enabled: true, retired: false});
+  } else {
+    // The open commits after the sweep found the note idle, before the reclaim's own transaction.
+    const tx = context.tx.bind(context);
+    vi.spyOn(context, "tx").mockImplementationOnce((run => {ownerOpen(f, past); return tx(run);}) as typeof context.tx);
+    expect(f.sweep(past)).toEqual([]);
+  }
+  expect(f.read()).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, demandAtMs: past});
+  expect(serviceHostDocumentEnabled(context, binding)).toBe(true);
 });

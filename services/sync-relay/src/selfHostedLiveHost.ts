@@ -21,6 +21,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
 import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
+import {RECLAIM_SWEEP_MS} from "./liveHostingLimits";
 
 type WorkspaceIdentity = {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null};
 // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
@@ -168,6 +169,12 @@ export async function startSelfHostedLiveHost(options: {
   const refused = new Set<string>();
   function schedule() {
     if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
+  }
+  // Reclaims the documents idle past retention. Its writes schedule a reconciliation, which drains them. After a failure, the next sweep tries again.
+  function sweep() {
+    if (signal.aborted) return;
+    try {storage.reclaimIdleLiveDocuments(Date.now());}
+    catch (error) {if (!signal.aborted) options.onError?.(error);}
   }
   async function stopCurrent() {
     const previous = current; current = undefined;
@@ -333,6 +340,8 @@ export async function startSelfHostedLiveHost(options: {
       }),
     );
     yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    // Once at start, then once a minute.
+    yield* Effect.forkScoped(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))));
     schedule();
     while (true) {
       yield* Queue.take(changes);
