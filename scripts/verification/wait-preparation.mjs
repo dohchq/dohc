@@ -36,15 +36,20 @@ export async function waitForPreparation(scope, { env = process.env, request = f
           const artifact = matching[0];
           let downloadDeadline = Math.min(deadline, now() + 30_000), attempts = 0, transferStartedAt;
           if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0) throw new Error("The prepared artifact has no valid identity.");
-          let sawUnavailable = false;
-          const unavailable = cause => new Error(sawUnavailable
+          let sawUnavailable = false, lastRequestError;
+          const unavailable = (cause = lastRequestError) => new Error(sawUnavailable
             ? `Preparation artifact ${name} was listed but never became downloadable within its 30-second retry cap.`
             : `Preparation artifact ${name} download timed out waiting for a response within its 30-second retry cap.`, { cause });
           for (;;) {
             if (now() >= downloadDeadline) throw unavailable();
             let response;
             try { response = await api.download(artifact.id, downloadDeadline - now(), deadline - now()); }
-            catch (error) { if (now() >= downloadDeadline) throw unavailable(error); throw error; }
+            catch (error) {
+              lastRequestError = error;
+              if (now() >= downloadDeadline) throw unavailable(error);
+              await pause(Math.min(2_000, downloadDeadline - now()));
+              continue;
+            }
             if (![404, 429].includes(response.status) && (response.status < 500 || response.status >= 600)) {
               if (!response.ok || !response.body) {
                 await response.body?.cancel();
@@ -58,7 +63,7 @@ export async function waitForPreparation(scope, { env = process.env, request = f
                   const seconds = (now() - transferStartedAt) / 1000;
                   if (attempts < 2 && now() < deadline && (["AbortError", "TimeoutError", "TypeError"].includes(cause.name) || cause.code === "ERR_STREAM_PREMATURE_CLOSE")) {
                     console.log(`Retrying preparation artifact ${name} body transfer after ${seconds}s: ${cause.message}`);
-                    downloadDeadline = Math.min(deadline, now() + 30_000); sawUnavailable = false;
+                    downloadDeadline = Math.min(deadline, now() + 30_000); sawUnavailable = false; lastRequestError = undefined;
                     continue;
                   }
                   throw new Error(`Preparation artifact ${name} (${artifact.id}) body transfer failed after ${seconds}s (${attempts} attempt${attempts === 1 ? "" : "s"}).`, { cause });

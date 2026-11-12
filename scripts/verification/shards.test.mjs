@@ -621,8 +621,35 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
     }
   });
 
+  test(`${scope} artifact request errors retry within the readiness cap and preserve the last cause`, async () => {
+    for (const persistent of [false, true]) {
+      let clock = 0, downloads = 0;
+      const causes = [];
+      const waiting = waitForPreparation(scope, { env: apiEnv, now: () => clock,
+        pause: async ms => { assert.equal(ms, 2_000); clock += ms; },
+        request: async url => {
+          if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
+          if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+          downloads++;
+          if (!persistent && downloads === 2) return apiResponse("archive");
+          const cause = new TypeError("fetch failed");
+          causes.push(cause);
+          throw cause;
+        },
+      });
+      if (persistent) await assert.rejects(waiting, error => {
+        assert.equal(error.message, `Preparation artifact ${artifact}-2 download timed out waiting for a response within its 30-second retry cap.`);
+        assert.equal(error.cause, causes.at(-1));
+        return true;
+      });
+      else assert.equal((await waiting).artifact.id, 42);
+      assert.equal(downloads, persistent ? 15 : 2);
+      assert.equal(clock, persistent ? 30_000 : 2_000);
+    }
+  });
+
   test(`${scope} download caps preserve the cause and distinguish stalls from observed 404s`, async () => {
-    for (const saw404 of [false, true]) for (const capped of [false, true]) {
+    for (const saw404 of [false, true]) {
       let clock = 0, downloads = 0;
       const cause = new Error("download connection stalled");
       await assert.rejects(waitForPreparation(scope, { env: apiEnv, now: () => clock, pause: async ms => { clock += ms; },
@@ -630,15 +657,14 @@ for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascri
           if (url.includes("/jobs?")) return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
           if (url.includes("/artifacts?")) return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
           if (++downloads === 1 && saw404) return apiResponse(null, 404);
-          clock = capped ? 30_000 : 3_000;
+          clock = 30_000;
           throw cause;
         },
       }), error => {
-        if (!capped) assert.equal(error, cause, "errors before the cap are not wrapped or retried");
-        else {
-          assert.equal(error.cause, cause);
-          assert.match(error.message, saw404 ? /listed but never became downloadable.*30/u : /download timed out waiting for a response.*30/u);
-        }
+        assert.equal(error.cause, cause);
+        assert.equal(error.message, saw404
+          ? `Preparation artifact ${artifact}-2 was listed but never became downloadable within its 30-second retry cap.`
+          : `Preparation artifact ${artifact}-2 download timed out waiting for a response within its 30-second retry cap.`);
         return true;
       });
       assert.equal(downloads, saw404 ? 2 : 1);
