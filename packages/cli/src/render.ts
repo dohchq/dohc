@@ -420,7 +420,7 @@ const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const
 
 // The Members page as lines: who is in the workspace, then invites and
 // removed accounts, each with the id the other verbs take.
-export function renderMembers(result: CliResultByVerb["members"]): string {
+function renderMembers(result: CliResultByVerb["members"]): string {
   if (result.status === "refused")
     throw new DohcCliError("Your server does not list Members for this workspace and account.");
   if (result.status === "done")
@@ -453,7 +453,13 @@ export function renderMembers(result: CliResultByVerb["members"]): string {
         ]),
     "",
     ...active.map(row),
-    ...(invited.length ? ["", "Invites (dohc sends no email; each joins when they sign in with that address)", ...invited.map(row)] : []),
+    ...(invited.length
+      ? [
+          "",
+          "Invites (dohc sends no email; each joins when they sign in with that address)",
+          ...invited.map(row),
+        ]
+      : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
   ].join("\n");
 }
