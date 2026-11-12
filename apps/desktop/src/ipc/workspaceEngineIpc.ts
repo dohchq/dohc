@@ -596,12 +596,18 @@ export function createWorkspaceEngineIpc<
       retrySecretKey: async (input, { event }) => {
         return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
           assertWritableWorkspace(operation.workspace);
-          const status = await withEngineAdapter(operation.workspace, async adapter => {
-            await adapter.reconcileCapture();
-            return await adapter.watcherStatus();
+          const result = await withEngineAdapter(operation.workspace, async adapter => {
+            const capture = await adapter.reconcileCapture();
+            return { capture, status: await adapter.watcherStatus() };
           });
-          if (!status) throw new Error("The workspace engine is not running.");
+          if (!result?.status) throw new Error("The workspace engine is not running.");
+          const { capture, status } = result;
           notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+          // Until a pass settles, a restarted engine has not tried the key, so
+          // a missing reason does not mean it works.
+          if (!capture.settled || !capture.running || capture.degraded) {
+            throw new Error("dohc is still checking this workspace's files.");
+          }
           if (status.secretKeyUnavailable) throw new Error("dohc still cannot use the workspace secret key.");
         });
       },
