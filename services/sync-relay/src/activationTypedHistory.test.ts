@@ -49,8 +49,11 @@ it("a long typed note activates in under a second without stalling the relay, ho
     const note = await typedRelayNote(keystrokes);
     await foldAhead(note);
     const {outcome, elapsedMs, stallMs} = await activate(note);
-    expect(outcome, `${keystrokes} keystrokes`).toEqual({document: note.document, replayed: false, completed: false});
-    expect(elapsedMs, `${keystrokes} keystrokes: activation time`).toBeLessThan(ACTIVATION_MS);
-    expect(stallMs, `${keystrokes} keystrokes: longest event-loop stall`).toBeLessThanOrEqual(EVENT_LOOP_STALL_MS);
+    // Every size reports all three, so one missed bar still shows the figures for the rest.
+    console.log(`[typed-activation] ${keystrokes} keystrokes: ${outcome instanceof Error ? `refused (${outcome.message})` : "activated"}, ` +
+      `${Math.round(elapsedMs)} ms, longest event-loop stall ${Math.round(stallMs)} ms`);
+    expect.soft(outcome, `${keystrokes} keystrokes`).toEqual({document: note.document, replayed: false, completed: false});
+    expect.soft(elapsedMs, `${keystrokes} keystrokes: activation time`).toBeLessThan(ACTIVATION_MS);
+    expect.soft(stallMs, `${keystrokes} keystrokes: longest event-loop stall`).toBeLessThanOrEqual(EVENT_LOOP_STALL_MS);
   }
 });
