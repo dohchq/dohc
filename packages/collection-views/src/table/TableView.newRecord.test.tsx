@@ -639,7 +639,7 @@ describe("a new record's row", () => {
     key(" ");
     key(" ");
     key("Enter");
-    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk", done: false }]);
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk" }]);
     expect(within(cells()[2]!).getByRole<HTMLInputElement>("checkbox").checked).toBe(false);
     act(() => void saves[0]!.report({ state: "saved" }));
 
@@ -652,7 +652,7 @@ describe("a new record's row", () => {
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
     key("Enter");
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
-    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk", done: false }, { title: "Bread", status: "doing" }]);
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk" }, { title: "Bread", status: "doing" }]);
     key("Enter");
     expect(saves).toHaveLength(2);
   });
@@ -679,6 +679,103 @@ describe("a new record's row", () => {
     // The records the host gives next do not hold it, as on another page of them.
     again({ records: [...many] });
     expect(outOfView).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes a report only from the save attempt that is out: an earlier attempt's answer changes nothing", () => {
+    const { saves } = setup();
+    press(addRow());
+    type("Milk", "Enter");
+    act(() => void saves[0]!.report({ state: "refused", reason: "No." }));
+    // Try again is a new request, with its own report.
+    fireEvent.click(within(screen.getByRole("note")).getByRole("button", { name: "Try again" }));
+    expect(saves).toHaveLength(2);
+    // The first attempt answers again. It is not the request that is out, so the row does not take it.
+    let taken = true;
+    act(() => {
+      taken = saves[0]!.report({ state: "refused", reason: "No, again." });
+    });
+    expect(taken).toBe(false);
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(newRow().querySelector("[data-new-record-status='pending']")).not.toBeNull();
+    // The second request is still the one out: nothing starts a third.
+    key("Enter");
+    press(cells()[0]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    press(document.body);
+    expect(saves).toHaveLength(2);
+    // Nor does the first attempt's late success end the row the second attempt holds.
+    act(() => void saves[0]!.report({ state: "saved" }));
+    expect(newRows()).toHaveLength(1);
+    // The attempt that is out still answers, and a retry the host makes of it reports to the same attempt.
+    const retry = vi.fn(), discard = vi.fn();
+    act(() => void saves[1]!.report({ state: "unconfirmed", reason: "Lost.", retry, discard }));
+    fireEvent.click(within(screen.getByRole("note")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    act(() => void saves[1]!.report({ state: "saved" }));
+    expect(newRows()).toHaveLength(0);
+    expect(saves).toHaveLength(2);
+  });
+
+  it("counts a field the person typed in as typed, whatever value it holds: text that equals the default makes a record", () => {
+    const { saves } = setup({}, { defaults: { title: "Draft", status: "todo" } });
+    press(addRow());
+    // A press outside the table, on something that takes focus from an open editor.
+    const pressOutside = () => {
+      const outside = document.body.appendChild(document.createElement("button"));
+      press(outside);
+      outside.remove();
+    };
+    // The editor opens on the default. Leaving it untouched is nothing typed.
+    expect(editorInput().value).toBe("Draft");
+    pressOutside();
+    expect(newRows()).toHaveLength(0);
+    expect(saves).toHaveLength(0);
+
+    // The person types the title, and it comes to the same text as the default. That is their title.
+    press(addRow());
+    fireEvent.change(editorInput(), { target: { value: "Draf" } });
+    fireEvent.change(editorInput(), { target: { value: "Draft" } });
+    fireEvent.keyDown(editorInput(), { key: "Tab" });
+    press(document.body);
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Draft", status: "todo" }]);
+    act(() => void saves[0]!.report({ state: "saved" }));
+
+    // A default the person cleared and then chose again was set by them too.
+    press(addRow());
+    fireEvent.keyDown(editorInput(), { key: "Escape" });
+    key("ArrowRight");
+    key("ArrowRight");
+    key("ArrowRight");
+    key("Delete");
+    key("F2");
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("todo"));
+    expect(cells()[3]!.textContent).toBe("todo");
+    press(document.body);
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Draft", status: "todo" }, { title: "Draft", status: "todo" }]);
+  });
+
+  it("gives back a value whose field stopped taking one while the save was out, once the row takes typing again", () => {
+    const first = host();
+    const view = render(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={first.newRecord} />);
+    press(addRow());
+    type("Milk", "Tab");
+    key("5");
+    type("5", "Enter");
+    // While the host has the row, a new record stops taking an estimate. The row holds what was sent.
+    const next = host({ canEdit: (field) => field.name !== "estimate" });
+    next.unsaved.mockReturnValue("A new record no longer takes estimate. dohc kept 5 in a notice.");
+    view.rerender(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={next.newRecord} />);
+    expect(next.unsaved).not.toHaveBeenCalled();
+    expect(cells()[1]!.textContent).toBe("5");
+    // The host says the request did not run, so the row takes typing again, and gives the value back then.
+    act(() => void first.saves[0]!.report({ state: "refused", reason: "No." }));
+    expect(next.unsaved.mock.calls).toEqual([[{ values: { estimate: 5 }, why: "field" }]]);
+    expect(cells().map((cell) => cell.textContent)).toEqual(["Milk", "", "", ""]);
+    expect(screen.getByRole("note").textContent).toContain("A new record no longer takes estimate. dohc kept 5 in a notice.");
+    // The next save holds no value the host does not take.
+    press(cells()[0]!);
+    fireEvent.keyDown(editorInput(), { key: "Enter" });
+    expect(next.saves.map((save) => save.values)).toEqual([{ title: "Milk" }]);
   });
 
   it("starts with each field's default, sends what the cells show, and counts untouched defaults as nothing typed", () => {

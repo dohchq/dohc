@@ -392,7 +392,11 @@ const NEW_RECORD_ROW = "\u0000new-record";
 const blank = (value: CollectionValue | undefined) =>
   value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
 
-/** A value in the new row, with the kind of field it was given under. `touched`: the person gave it. Otherwise it is a default the row started with. */
+/**
+ * A value in the new row, with the kind of field it was given under.
+ * `touched`: the person typed in the field or set it, whatever value that
+ * left. Otherwise the value is a default the row started with.
+ */
 interface NewRowCell {
   value: CollectionValue;
   type: FieldDefinition["type"];
@@ -424,16 +428,18 @@ const NEW_ROW: Readonly<Record<NewRowPhase, { type: boolean; save: boolean; retr
 /** What the row says under it or on a cell: the host's words, or the words the host gave for a value the row gave back. */
 type NewRowNote = Extract<TableNewRecordStatus, { state: "invalid" | "refused" | "unconfirmed" }> | { state: "said"; reason: string };
 
-/** The one new row. `id` rises with each row, so an answer for an earlier row changes nothing. */
+/**
+ * The one new row. `id` rises with each row, and `attempt` with each fresh
+ * save of it, so an answer for an earlier row, or for an earlier save of
+ * this one, changes nothing. The host's retry of a request is the same
+ * attempt.
+ */
 interface NewRowState {
   id: number;
+  attempt: number;
   phase: NewRowPhase;
   note: NewRowNote | null;
 }
-
-/** A checkbox left unticked and a cell left empty are the same nothing. */
-const rest = (value: CollectionValue | undefined) => (blank(value) || value === false ? null : value);
-const differs = (a: CollectionValue | undefined, b: CollectionValue | undefined) => JSON.stringify(rest(a)) !== JSON.stringify(rest(b));
 
 /**
  * The new row's values, its state, and what it says. Each cell reads its own
@@ -449,10 +455,7 @@ function createNewRow() {
     for (const listener of [...listeners]) listener();
   };
   const may = (trigger: keyof (typeof NEW_ROW)["typing"]) => row !== null && NEW_ROW[row.phase][trigger];
-  const typedIn = (name: string) => {
-    const cell = cells.get(name);
-    return cell !== undefined && cell.touched && differs(cell.value, defaults[name]);
-  };
+  const typedIn = (name: string) => cells.get(name)?.touched === true;
   /** The cells that hold no typing start from the defaults, in the fields that still take one. */
   const start = (next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) => {
     for (const [name, cell] of [...cells]) if (!cell.touched) cells.delete(name);
@@ -479,15 +482,15 @@ function createNewRow() {
     row: () => row,
     may,
     value: (field: string) => cells.get(field)?.value,
-    /** Whether the person gave this field a value that is not its default. */
+    /** Whether the person typed in this field or set it, whatever value it holds. */
     typedIn,
-    /** Whether the row holds anything the person gave it. Defaults left as they are, and an unticked checkbox, are nothing. */
+    /** Whether the person touched any field. A row of defaults left as they are is nothing typed. */
     typed: () => [...cells.keys()].some(typedIn),
     /** What the cells show, by field: typed values, defaults, and an explicit empty value where a default was cleared. */
     values: (): Record<string, CollectionValue> => Object.fromEntries([...cells].map(([field, cell]) => [field, cell.value])),
     open(next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) {
       cells.clear();
-      row = { id: ++made, phase: "typing", note: null };
+      row = { id: ++made, attempt: 0, phase: "typing", note: null };
       this.enter = false;
       this.changed = false;
       this.unparsed = null;
@@ -506,13 +509,22 @@ function createNewRow() {
       start(next, fields);
       tell();
     },
-    set(field: FieldDefinition, value: CollectionValue) {
+    /**
+     * Gives a field a value. `typed`: the person typed it or set it. An
+     * editor that closes over a value nobody typed in, as the one a new row
+     * opens on, passes false, and its value is taken only where it differs.
+     */
+    set(field: FieldDefinition, value: CollectionValue, typed = true) {
       if (!row || !may("type")) return;
-      const before = cells.get(field.name)?.value;
-      // A cleared default stays in the row as an explicit empty value. A cell with no default just empties.
-      if (blank(value) && defaults[field.name] === undefined) cells.delete(field.name);
-      else cells.set(field.name, { value: blank(value) ? null : value, type: field.type, touched: true });
-      if (differs(before, value)) this.changed = true;
+      const cell = cells.get(field.name);
+      const next = blank(value) ? null : value;
+      const same = JSON.stringify(cell?.value ?? null) === JSON.stringify(next);
+      if (!typed && same) return;
+      // A cleared default stays in the row as an explicit empty value. A field with no default that holds nothing
+      // again, as an emptied cell or an unticked box, is a field left alone.
+      if ((next === null || next === false) && defaults[field.name] === undefined) cells.delete(field.name);
+      else cells.set(field.name, { value: next, type: field.type, touched: true });
+      if (!same) this.changed = true;
       // The cell no longer holds what stopped the save, and the row has said what it had to.
       if ((row.note?.state === "invalid" && row.note.field === field.name) || row.note?.state === "said") row = { ...row, note: null };
       tell();
@@ -529,7 +541,7 @@ function createNewRow() {
     /** A save starts: one request goes out. False where the row's state lets none start. */
     begin(): boolean {
       if (!row || !may("save")) return false;
-      row = { ...row, phase: "sending", note: null };
+      row = { ...row, attempt: row.attempt + 1, phase: "sending", note: null };
       this.changed = false;
       tell();
       return true;
@@ -1017,6 +1029,8 @@ export function TableView({
   const discardControl = useRef<HTMLButtonElement | null>(null);
   // Every edit of the new row shows in it at once, so a picker never replays one.
   const newRowEdits = useRef(0);
+  // The person typed in the open editor. One that closes untouched, as the editor a new row opens on, sets nothing.
+  const typedInEditor = useRef(false);
   // The last press, while it is down: on the host's New record, in the new row, or neither.
   const press = useRef<"starts" | "row" | null>(null);
   // The press that left the new row found a value that stops its save, so its click selects nothing.
@@ -1100,13 +1114,15 @@ export function TableView({
   /** Sends the new row to the host. Answers whether a value stopped the save, so the row keeps the cursor. */
   const sendNewRow = (enter: boolean): "kept" | "sent" | "invalid" => {
     const host = contract.current;
-    const sent = newRow.row();
-    if (!host || !sent || !newRow.begin()) return "kept";
+    if (!host || !newRow.begin()) return "kept";
+    const sent = newRow.row()!;
     let outcome: "sent" | "invalid" = "sent";
     newRow.enter = enter;
-    // The answer is for this row: a row that went, with its table or by Discard, takes none.
+    // The answer is for this save of this row. A row that went, with its table or by Discard, takes none, and
+    // neither does a row that has started another save: its earlier request is no longer the one that is out.
     host.save(newRow.values(), (status) => {
-      if (!mounted.current || newRow.row()?.id !== sent.id) return false;
+      const now = newRow.row();
+      if (!mounted.current || now?.id !== sent.id || now.attempt !== sent.attempt) return false;
       if (status.state === "saved" || status.state === "dropped") {
         // Enter starts the next row while the cursor is still on this one.
         const next = status.state === "saved" && newRow.enter && selectedNow.current?.recordId === NEW_RECORD_ROW && scrollRef.current?.contains(document.activeElement) === true;
@@ -1225,6 +1241,8 @@ export function TableView({
       left = Math.min(left, Math.max(grid.scrollLeft, room));
     }
     cancelled.current = false;
+    // A character that opened the edit was typed.
+    typedInEditor.current = typed !== undefined;
     setEditing({ recordId, field: field.name, typed, left });
   };
 
@@ -1267,7 +1285,9 @@ export function TableView({
 
   // A row the person may still type in follows what a new record takes. Its defaults follow the host's. A typed
   // value whose field left the table, became another kind of field, or takes no value now goes back to the host
-  // to keep, and the row says so. A row the host has holds what was sent.
+  // to keep, and the row says so. A row the host has holds what was sent, and gives such a value back when it
+  // takes typing again.
+  const draftPhase = hasDraft ? draft.phase : null;
   useEffect(() => {
     if (!newRecord || !newRow.may("type")) return;
     newRow.rebase(newRecord.defaults ?? {}, fields.filter(typesNew));
@@ -1282,7 +1302,7 @@ export function TableView({
       const said = newRecord.onUnsaved({ values: { [name]: cell.value }, why: "field" });
       if (typeof said === "string") newRow.say(said);
     }
-  }, [fields, newRecord, newRow]);
+  }, [fields, newRecord, newRow, draftPhase]);
   // The row goes with nothing left to show it. What its state lets happen is decided where every trigger's is:
   // a row never sent is saved, or where an editor held text its field cannot take, handed whole to the host and
   // not created. A row the host has, or one in doubt, starts no request.
@@ -1805,6 +1825,9 @@ export function TableView({
                 ref={editorRef}
                 data-cell-editor=""
                 disabled={editingDisabled}
+                onChangeCapture={() => {
+                  typedInEditor.current = true;
+                }}
                 onBlurCapture={(event) => {
                   if (editingDisabled) event.stopPropagation();
                 }}
@@ -1830,7 +1853,7 @@ export function TableView({
                   acknowledgedWriteId={newRowEdits.current}
                   indexed={shownValue(editingField.name, undefined, blank(newRow.value(editingField.name)) ? undefined : { state: "pending", value: newRow.value(editingField.name)! })}
                   emit={(value) => {
-                    newRow.set(editingField, value);
+                    newRow.set(editingField, value, typedInEditor.current);
                     return ++newRowEdits.current;
                   }}
                   close={closeEditor}
