@@ -768,6 +768,20 @@ describe("a document record's panel", () => {
     act(() => waiting.pop()!());
     expect(sides()).toEqual(["Automations"]);
   });
+
+  it("opens no file for Open as page once the Collection's tab closed while the body was being saved", async () => {
+    const waiting: Array<() => void> = [];
+    const onOpenRecord = vi.fn();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")]), { settleRecordBody: (then) => { waiting.push(then); }, onOpenRecord });
+    await screen.findByRole("button", { name: "Open Plan" });
+    open("Plan");
+    fireEvent.click(within(panel()).getByRole("button", { name: "Open as page" }));
+    expect(waiting).toHaveLength(1);
+    // The tab closes before the save ends. The save then ends, and the page that asked is gone.
+    closePage(view);
+    act(() => waiting.shift()!());
+    expect(onOpenRecord).not.toHaveBeenCalled();
+  });
 });
 
 describe("text left in an editor that goes away with no press", () => {

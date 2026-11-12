@@ -374,10 +374,7 @@ export function CollectionPage({
   });
   const openRecordId = recordPanel.openKey;
   // What takes the open record's body off the page waits until what the body holds is saved.
-  const afterBodySaved = (then: () => void) => {
-    if (recordPanel.openKeyRef.current !== null && settleRecordBody) settleRecordBody(then);
-    else then();
-  };
+  const afterBodySaved = recordPanel.afterSettled;
   // The ⚡ panel takes the record panel's place.
   const showAutomations = () => afterBodySaved(() => setAutomationsOpen(true));
   useEffect(() => {

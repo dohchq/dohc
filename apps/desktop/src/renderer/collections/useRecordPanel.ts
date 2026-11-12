@@ -55,6 +55,15 @@ export function useRecordPanel(options: RecordPanelOptions) {
     return () => { alive.current = false; };
   }, []);
   const settle = (then: () => void) => (latest.current.settle ? latest.current.settle(then) : then());
+  /**
+   * Runs `then` once what the open record holds unsaved is saved, as before something else takes the record's
+   * place. With no record open it runs at once. It never runs once the page has closed.
+   */
+  function afterSettled(then: () => void): void {
+    const run = () => { if (alive.current) then(); };
+    if (openKeyRef.current !== null) settle(run);
+    else run();
+  }
 
   /**
    * Opens a record in the panel, in place of the record it shows. Focus moves
@@ -147,6 +156,7 @@ export function useRecordPanel(options: RecordPanelOptions) {
     },
     open,
     close,
+    afterSettled,
     automationsOpen,
     onPageKeyDown,
   };
