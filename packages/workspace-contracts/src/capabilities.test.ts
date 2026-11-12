@@ -12,8 +12,9 @@ describe("capability ids", () => {
   });
 
   it("accounts for every issued id as current or retired", () => {
-    // Append new ids to this ledger. Never delete an issued id.
+    // Insert new ids in sorted order. Never delete an issued id.
     const current = Object.keys(CAPABILITIES);
+    expect(issuedIds).toEqual([...issuedIds].sort());
     expect(new Set(issuedIds).size).toBe(issuedIds.length);
     for (const id of issuedIds) {
       expect(id).toMatch(CAPABILITY_ID_PATTERN);
