@@ -34,6 +34,7 @@ import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
 import {catchUpOwnerDocuments, listedOwnerDeliveryPaths, readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
 import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
+import {listOwnerBoundPaths} from "./ownerPendingShare";
 import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, readServerKeptEditsQueue, retryOwnerLiveQuarantine, sameGeneration, ServerKeptEditsConflict,
   type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
 import type {JsonValue} from "@dohc/workspace-engine-client";
@@ -69,8 +70,15 @@ export interface ServerOwnerDelivery {
       {action: "copied"; outboxId: string; generation: number; checkpointDigest: string | null}, signal: AbortSignal): Promise<unknown>;
     /** A later page of the edits the server keeps, after the cursor the previous page named. */
     keptEditsPage(after: number, signal: AbortSignal): Promise<unknown>;
+    /**
+     * The owner's open of a document this computer holds an owner binding for
+     * and the server does not list as ready. `refused` when only the owner can
+     * change the server's answer.
+     */
+    open(path: string, signal: AbortSignal): Promise<"hosted" | "refused">;
   } | null>;
 }
+type ServerOwnerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
 /**
  * Whether this workspace has no ordinary sync configured: Stop sync saved a
  * pause, or the folder was attached again as local work. Sign-out, a lost
@@ -133,6 +141,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   // The server accepted or refused a document's edits, so the notes waiting for it changed.
   notifyOwnerDraftsChanged?(workspaceId: string): void;
+  // The shared notes whose edits wait on this computer for the server, as last read.
+  ownerPendingPaths?(workspaceId: string): readonly string[];
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
@@ -188,6 +198,19 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // The ready documents from each workspace's last complete live-host list, for the move guard.
   const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
+  // The owner's open. Each workspace's documents its last list named live or
+  // starting; those its owner opened here since, which a pass asks the server
+  // to host; and those whose open the server refused. No pass asks for a
+  // refused one again until its owner opens it, or a list names it live after
+  // a Resume. These outlive a pass and a restart of delivery.
+  const hostedOwnerPaths = new Map<string, Set<string>>();
+  const ownerOpened = new Map<string, Set<string>>();
+  const ownerOpenRefused = new Map<string, Set<string>>();
+  const pathsOf = (paths: Map<string, Set<string>>, workspaceId: string) => {
+    let set = paths.get(workspaceId);
+    if (!set) paths.set(workspaceId, set = new Set());
+    return set;
+  };
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -338,6 +361,38 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         generation === ownerDeliveryGeneration && !isQuitting() && !ownerWorkspaceCloses) {
         const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, source = rustEngineSessionSource;
         const profile = serverOwnerConfig;
+        // At most one owner open per pass, of a document this computer holds an
+        // owner binding for and the list names neither live nor starting: first
+        // one its owner opened, then one whose edits wait here. The next pass
+        // reads the list it changed.
+        const ownerOpenTurn = async (workspaceId: string, workspace: RegistryEntry, session: ServerOwnerSession,
+          rows: readonly {path: string; status: string}[], signal: AbortSignal, check: () => void) => {
+          const current = server.workspaceIds();
+          for (const paths of [hostedOwnerPaths, ownerOpened, ownerOpenRefused]) for (const id of paths.keys()) if (!current.includes(id)) paths.delete(id);
+          const hosted = new Set(rows.filter(row => row.status === "ready" || row.status === "preparing").map(row => row.path));
+          hostedOwnerPaths.set(workspaceId, hosted);
+          const refused = pathsOf(ownerOpenRefused, workspaceId), opened = pathsOf(ownerOpened, workspaceId);
+          for (const path of refused) if (hosted.has(path)) refused.delete(path);
+          for (const path of opened) if (hosted.has(path) || refused.has(path)) opened.delete(path);
+          let path: string | undefined;
+          if (opened.size) {
+            const candidates = new Set(opened);
+            const bound = await sessions.run(workspace, async binding => {
+              const client = daemon.currentClient();
+              if (!(client instanceof EngineClient)) throw new Error("Owner open requires the desktop daemon client.");
+              return listOwnerBoundPaths(client, binding.workspace, candidates, signal);
+            });
+            check();
+            for (const candidate of candidates) if (!bound.has(candidate)) opened.delete(candidate);
+            path = [...candidates].find(candidate => bound.has(candidate));
+          }
+          path ??= (dependencies.ownerPendingPaths?.(workspaceId) ?? []).find(candidate => !hosted.has(candidate) && !refused.has(candidate));
+          if (path === undefined) return;
+          const answer = await session.open(path, signal);
+          check();
+          opened.delete(path);
+          if (answer === "refused") refused.add(path);
+        };
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
           onError: error => console.error("[desktop] server owner delivery failed:", error),
           runPass: async (workspaceId, index, lifetime) => {
@@ -386,7 +441,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
               liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
-              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
+              const {documents: rows, diverged} = response as {documents: {path: string; status: string; reason?: unknown}[]; diverged?: unknown};
+              try {await ownerOpenTurn(workspaceId, operation.workspace, session, rows, signal, check);}
+              catch (error) {check(); console.error("[desktop] owner live open failed:", error);}
               const preparing = rows.some(row => row.status === "preparing");
               // The server reports a diverged copy even after its owner stopped every document.
               const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
@@ -874,6 +931,21 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     retryOwnerDelivery(workspaceId: string): void {
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
+    },
+    /**
+     * The owner opened `path` in an editor here. Unless the last list named
+     * it live or starting, the next pass asks the server to host it, and a
+     * refusal before is no longer an answer.
+     */
+    ownerOpenedLiveDocument(workspaceId: string, path: string): void {
+      if (!dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) || hostedOwnerPaths.get(workspaceId)?.has(path)) return;
+      ownerOpenRefused.get(workspaceId)?.delete(path);
+      const opened = pathsOf(ownerOpened, workspaceId);
+      opened.delete(path);
+      opened.add(path);
+      // Only the latest opens wait; an editor opens one document at a time.
+      for (const oldest of opened) {if (opened.size <= 64) break; opened.delete(oldest);}
+      ownerDelivery?.retry?.(workspaceId);
     },
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;

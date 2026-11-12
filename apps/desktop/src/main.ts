@@ -5285,6 +5285,7 @@ const ownerPendingShare = createOwnerPendingShare({
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
   onLiveEditsPaused: (workspaceId, path) => desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
+  onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,
@@ -5471,6 +5472,7 @@ const desktopEngine = createDesktopEngine({
     fetch: (input, init) => relayShareFetch(input, init)}),
   notifyOwnerDeliveryChanged: workspaceId => {notifyRenderer({workspaceId}); ownerPendingShare.refresh(workspaceId);},
   notifyOwnerDraftsChanged: workspaceId => ownerPendingShare.refresh(workspaceId),
+  ownerPendingPaths: workspaceId => ownerPendingShare.paths(workspaceId),
   notifyOwnerLiveStopped: (workspaceId, objectId) => sendRendererActivity({workspaceId, liveDocumentStopped: objectId}),
   ownerDeliveryCredentials: () => cachedCredentials?.relayUrl ? {bearer: cachedCredentials.token, accountId: cachedCredentials.userId,
     relayUrl: cachedCredentials.relayUrl, signal: ownerDeliveryCredentialLifetime.signal} : null,

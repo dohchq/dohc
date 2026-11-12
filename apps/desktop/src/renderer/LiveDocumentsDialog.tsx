@@ -13,6 +13,8 @@ export type LiveDocumentRow = {
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
   reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget";
   canResume: boolean;
+  /** A retired row's: its owner's Pause or Stop retired it, not the server. */
+  stopped?: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
   quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreadable";
@@ -200,7 +202,8 @@ function statusLabel(row: LiveDocumentRow): string {
     case "paused":
       return "Paused";
     case "retired":
-      return "Stopped";
+      // The server released it, and opening it here makes it live again.
+      return row.stopped === false ? "Not live" : "Stopped";
     default:
       return "Unavailable";
   }

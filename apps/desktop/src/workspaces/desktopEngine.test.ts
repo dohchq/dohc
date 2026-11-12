@@ -190,9 +190,11 @@ beforeEach(() => {
 
 type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
 const unexpectedKeptEdits = async (): Promise<unknown> => {throw new Error("Unexpected kept edits request.");};
+const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {throw new Error("Unexpected owner open.");};
 /** A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`. */
 async function quarantinedOwner(documents: {path: string; objectId: string}[],
-  server: {kept?: () => unknown[]; keptCursor?: number; keptEdits?: ServerSession["keptEdits"]; keptEditsPage?: ServerSession["keptEditsPage"]} = {}) {
+  server: {kept?: () => unknown[]; keptCursor?: number; keptEdits?: ServerSession["keptEdits"]; keptEditsPage?: ServerSession["keptEditsPage"]; open?: ServerSession["open"];
+    assertCurrent?: () => void; onConnect?: () => void} = {}) {
   const f = fixture(), credentials = new AbortController();
   Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
   const rootPath = await createTestScratch("dohc-owner-quarantine-");
@@ -204,11 +206,14 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[],
       maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
     attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
   f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
-    connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-      retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
-      documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
-        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}})),
-        ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})})})};
+    connect: async () => {
+      server.onConnect?.();
+      return {bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent: server.assertCurrent ?? (() => {}),
+        retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits, open: server.open ?? unexpectedOpen,
+        documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
+          ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}})),
+          ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})})};
+    }};
   const workspace = () => f.authorities.withAuthority("owner", lease =>
     ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
   return {f, credentials, binding: bindingOf("notes/plan.md", "object"), workspace};
@@ -1049,7 +1054,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents})};
     ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -1081,7 +1086,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: []}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents})};
     // Main sends this uncoalesced, so the renderer's waiting notice for the document goes.
     const stopped = vi.fn((_workspaceId: string, _objectId: string) => {});
     f.dependencies.notifyOwnerLiveStopped = stopped;
@@ -1119,7 +1124,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen,
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -1165,7 +1170,7 @@ describe("server owner peer lifecycle", () => {
         attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
       f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
         connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
+          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen,
           documents: async () => ({ok: true, documents: rows()})})};
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.liveDocumentPaths("owner")).toBeDefined());
@@ -1234,7 +1239,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
     const refused = (recovery: "paused" | "retrying") => [{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
       outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}];
     quarantineMock.read.mockResolvedValue(refused("paused"));
@@ -2227,7 +2232,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, diverged, documents: rows})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents: async () => ({ok: true, diverged, documents: rows})})};
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
@@ -2311,7 +2316,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {
