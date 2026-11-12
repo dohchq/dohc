@@ -109,8 +109,9 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     expect(await editor.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThanOrEqual(360);
     await page.screenshot({path: testInfo.outputPath("named-editor-narrow.png"), fullPage: true});
     accept = false; await editor.click(); await page.keyboard.press("Control+End"); await page.keyboard.insertText(" Unsynced draft.");
-    await expect(page.getByLabel("Draft recovery")).toBeVisible();
+    await expect(page.getByRole("status")).toContainText("Saving changes…"); await expect(page.getByLabel("Draft recovery")).toHaveCount(0);
     refuseSession!(); await expect(editor).toHaveAttribute("contenteditable", "false");
+    await expect(page.getByLabel("Draft recovery")).toBeVisible();
     await expect(editor).toContainText("Unsynced draft.");
     await page.getByRole("button", {name: "Open current file", exact: true}).click();
     await expect(page.getByRole("dialog", {name: "Discard this draft?"})).toBeVisible();

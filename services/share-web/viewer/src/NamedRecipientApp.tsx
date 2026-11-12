@@ -2,7 +2,7 @@ import {useCallback, useEffect, useRef, useState} from "react";
 import {createNamedLiveBrowserTransport, type NamedLiveBrowserState, type NamedLiveSelection} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {fetchShareWeb} from "./apiVersion";
 import {accountUser, namedFiles, namedRequest, ShareAccessRemovedError, type NamedRecipientFiles} from "./namedRecipient";
-import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
+import {draftNeedsReview, NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
 import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
 
@@ -91,7 +91,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
         </nav>
         {selection ? <NamedDocumentEditor key={selection.session.doc.guid} session={selection.session} path={selection.path} onState={receiveState}/> :
           <section className="content"><p>Choose a Markdown file to open it.</p></section>}
-        {selection && (sessionState?.pendingUpdates || sessionState?.status === "quarantined") ? <aside className="comments-panel named-draft-recovery" aria-label="Draft recovery">
+        {selection && sessionState && draftNeedsReview(sessionState) ? <aside className="comments-panel named-draft-recovery" aria-label="Draft recovery">
           <h2>Review your draft</h2><p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
           <p>Copy the changes you want to keep from the editor. Open the current file, then paste and review them.</p>
           <button className="handoff-button secondary" onClick={() => open(selection.objectId, selection.path)}>Open current file</button>
