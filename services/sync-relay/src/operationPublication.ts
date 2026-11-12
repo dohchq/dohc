@@ -77,7 +77,7 @@ export type ReceiptReader = (stageKeys: readonly string[]) => Promise<OrdinaryPu
 
 type StageState = OrdinaryPublicationState["stages"][number];
 type Coordinate = Extract<StageState, { state: "present" }>["coordinates"][number];
-type PublicationStorage = Pick<SyncRelayStorage, "fetchLogCoordinate" | "advanceAccountOperation">;
+type PublicationStorage = Pick<SyncRelayStorage, "fetchAccountOperationLogRow" | "advanceAccountOperation">;
 /** What publication needs of an open copy. */
 export type PublicationCopy = Pick<AutomationReplica, "workspaceId" | "incarnation" | "client" | "workspace" | "signal" | "nextRequestId" | "step">;
 
@@ -111,13 +111,15 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
  * they list. The required stages come from the stored command, never from
  * the receipts found. A stage with no receipt, or a coordinate not yet
  * accepted, leaves the write pending; when `settling` names a reason, its
- * folder is going and nothing can publish from it again, so the write is
- * refused for that reason instead. A lost decision answers "already
- * answered", and a message whose own records were accepted is published
- * whatever the rest does.
+ * folder is closed and going, and nothing can publish from it again, so the
+ * write is refused for that reason instead. Settling looks at the relay's
+ * row for a coordinate the copy never saw pushed too, since a push whose
+ * answer was lost may still have reached the relay. A lost decision answers
+ * "already answered", and a message whose own records were accepted is
+ * published whatever the rest does.
  */
 export function judgeOperation(
-  storage: Pick<SyncRelayStorage, "fetchLogCoordinate">,
+  storage: Pick<SyncRelayStorage, "fetchAccountOperationLogRow">,
   record: OperationRecord,
   receipts: ReadonlyMap<string, StageState>,
   settling: RefusalReason | null,
@@ -138,7 +140,7 @@ export function judgeOperation(
     }
     // A stage that wrote nothing has nothing to publish.
     if (receipt.outcome === "no-op") continue;
-    const accepted = accepts(storage, record.workspaceId, receipt.coordinates, stage.records);
+    const accepted = accepts(storage, record, receipt.coordinates, stage.records, settling !== null);
     if (accepted === "refused") refused = true;
     else if (accepted === "unresolved") unresolved = true;
     else if (stage.role === "post" || stage.role === "reply") messagePublished = true;
@@ -154,25 +156,29 @@ export function judgeOperation(
 
 // Whether the relay accepted every record a stage's coordinates name, each
 // as the command expects it. A refusal at any coordinate is final. A row not
-// there yet, or one that isn't what the write made, stays unresolved.
+// there yet, one outside the log rows the write's own epoch and stream could
+// make, or one that isn't what the write made, stays unresolved.
 function accepts(
-  storage: Pick<SyncRelayStorage, "fetchLogCoordinate">,
-  workspaceId: string,
+  storage: Pick<SyncRelayStorage, "fetchAccountOperationLogRow">,
+  record: OperationRecord,
   coordinates: readonly Coordinate[],
   records: readonly ExpectedRecord[],
+  settling: boolean,
 ): "accepted" | "refused" | "unresolved" {
   const matched = new Set<ExpectedRecord>();
   let unresolved = false;
   for (const coordinate of coordinates) {
     if (coordinate.state === "refused") return "refused";
-    if (coordinate.state === "pending") {
+    if (coordinate.state === "pending" && !settling) {
       unresolved = true;
       continue;
     }
-    // The copy's engine pushes under its own origin, which only this
-    // incarnation's credential, made for the write's epoch and stream, could
-    // write at, so the row at the coordinate is the one this copy published.
-    const row = storage.fetchLogCoordinate({ workspaceId, originId: coordinate.originId, originSeq: coordinate.originSeq });
+    // The stored epoch and stream, never the copy's current ones.
+    const row = storage.fetchAccountOperationLogRow({
+      accountId: record.accountId, operationId: record.operationId, workspaceId: record.workspaceId,
+      replicationEpoch: record.replicationEpoch, streamIdentity: record.streamIdentity,
+      originId: coordinate.originId, originSeq: coordinate.originSeq,
+    });
     if (row === null) {
       unresolved = true;
       continue;
@@ -232,17 +238,28 @@ export function stallOperations(
   }
 }
 
-/** Reads receipts from a workspace open in a copy's engine, with the copy's own request IDs. */
+/** Writes past their active time stall. */
+export function stallExpired(
+  storage: Pick<SyncRelayStorage, "advanceAccountOperation">,
+  records: readonly OperationRecord[],
+  nowMs: number,
+): void {
+  stallOperations(storage, records.filter((record) => nowMs >= record.activeUntilMs), nowMs);
+}
+
+/**
+ * Reads receipts from a workspace open in a copy's engine, with the copy's
+ * own request IDs. `signal` ends a read still waiting for its answer.
+ */
 export function receiptReader(engine: Pick<AutomationReplica, "client" | "nextRequestId">, workspace: string, signal?: AbortSignal): ReceiptReader {
   const requester: Pick<WorkspaceDaemonRequester, "request"> = {
     request: async (method, params, options) => (await engine.client.sendRequest({
       id: engine.nextRequestId(), method, params,
       ...(options?.workspace === undefined ? {} : { workspace: options.workspace }),
       ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
-    }, undefined, undefined, options?.cancelSignal)).result,
+    }, signal)).result,
   };
-  return (stageKeys) => readOrdinaryPublicationState(requester, workspace, stageKeys,
-    { deadlineMs: RECEIPT_DEADLINE_MS, ...(signal === undefined ? {} : { cancelSignal: signal }) });
+  return (stageKeys) => readOrdinaryPublicationState(requester, workspace, stageKeys, { deadlineMs: RECEIPT_DEADLINE_MS });
 }
 
 // Every stage the records name, at most MAX_PUBLICATION_STAGE_KEYS a request.
@@ -261,11 +278,39 @@ function wholePushRejection(error: unknown): string | null {
 }
 
 /**
+ * Judges unfinished writes by their receipts and the relay's rows, whatever
+ * the sync before it did: a push can reach the relay in a step whose pull
+ * then fails. `syncError` is the sync's failure, if any: a whole-push relay
+ * rejection stalls the writes, and the operator hears of it. Answers each
+ * write's row afterwards, or null when the receipts couldn't be read, which
+ * stalls only the writes past their active time.
+ */
+export async function inspectOperations(
+  storage: PublicationStorage,
+  workspaceId: string,
+  read: ReceiptReader,
+  records: readonly OperationRecord[],
+  nowMs: () => number,
+  syncError?: unknown,
+): Promise<Array<OperationRecord | null> | null> {
+  const code = wholePushRejection(syncError);
+  if (code !== null) {
+    console.error(`[sync-relay] The relay refused a whole push from this server's copy of workspace "${workspaceId}" (${code}). Its phone writes are stalled.`);
+    stallOperations(storage, records, nowMs());
+  }
+  const receipts = await readStages(read, records).catch(() => null);
+  if (receipts === null) {
+    stallExpired(storage, records, nowMs());
+    return null;
+  }
+  return records.map((record) => recordVerdict(storage, record, judgeOperation(storage, record, receipts, null), nowMs()));
+}
+
+/**
  * One bounded attempt for unfinished writes on an open copy: one sync step,
  * queued behind any sync already running, then their receipts and the
- * relay's rows. Answers each write's row afterwards, or null when the
- * receipts couldn't be read, which leaves each write's stage as it was.
- * A whole-push relay rejection stalls the writes, and the operator hears of it.
+ * relay's rows, read whether or not the step succeeded. `signal` ends the
+ * attempt wherever it waits; the copy's own passes carry the sync on.
  */
 export async function publishOnce(
   storage: PublicationStorage,
@@ -274,24 +319,17 @@ export async function publishOnce(
   nowMs: () => number,
   signal?: AbortSignal,
 ): Promise<Array<OperationRecord | null> | null> {
+  let syncError: unknown;
   try {
     await copy.step(signal);
   } catch (error) {
     signal?.throwIfAborted();
     if (copy.signal.aborted) return null;
-    const code = wholePushRejection(error);
-    if (code !== null) {
-      console.error(`[sync-relay] The relay refused a whole push from this server's copy of workspace "${copy.workspaceId}" (${code}). Its phone writes are stalled.`);
-      stallOperations(storage, records, nowMs());
-    }
-    // Any other failure leaves what the relay holds to the receipts. The copy's own retry carries the sync on.
+    syncError = error;
   }
-  const receipts = await readStages(receiptReader(copy, copy.workspace, signal), records).catch(() => null);
-  if (receipts === null) {
-    signal?.throwIfAborted();
-    return null;
-  }
-  return records.map((record) => recordVerdict(storage, record, judgeOperation(storage, record, receipts, null), nowMs()));
+  const inspected = await inspectOperations(storage, copy.workspaceId, receiptReader(copy, copy.workspace, signal), records, nowMs, syncError);
+  signal?.throwIfAborted();
+  return inspected;
 }
 
 const answerOf = (record: OperationRecord | null): PublicationAnswer => ({
@@ -303,11 +341,13 @@ const answerOf = (record: OperationRecord | null): PublicationAnswer => ({
  * Drives one write's publication once its engine stages are written, from
  * outside the copy's sync lane: bounded sync steps, each queued on its own,
  * so the lane is free between them, until the relay accepted or refused
- * every record the receipts list, or `deadlineMs` passes. Then `authorize`
- * checks the caller again, and the answer comes from the record: saved,
- * refused, or pending, which the copy's passes carry on. A sync that
- * succeeds, or has more to do, is never taken as acceptance. Never call it
- * from a sync callback: it waits for the lane.
+ * every record the receipts list, or `deadlineMs` passes. The deadline ends
+ * this request's attempt wherever it waits, in the lane, in an engine
+ * request, or in a receipt read. Then `authorize` checks the caller again,
+ * and the answer comes from the record: saved, refused, or pending, which
+ * the copy's passes carry on. `signal` is the caller's: its abort rejects
+ * instead. A sync that succeeds, or has more to do, is never taken as
+ * acceptance. Never call it from a sync callback: it waits for the lane.
  */
 export async function publishOperation(input: {
   storage: PublicationStorage;
@@ -326,24 +366,38 @@ export async function publishOperation(input: {
   const pause = input.pause ?? ((ms: number, abort?: AbortSignal) => sleep(ms, undefined, abort === undefined ? {} : { signal: abort }));
   // A write made on an earlier incarnation settles when that incarnation's folder goes.
   if (input.record.workspaceId !== copy.workspaceId || input.record.incarnation !== copy.incarnation) return answerOf(input.record);
-  let record = storage.advanceAccountOperation({ accountId: input.record.accountId, operationId: input.record.operationId,
-    stage: "publishing", nowMs: nowMs() })?.record ?? null;
-  const deadline = nowMs() + (input.deadlineMs ?? PUBLICATION_DEADLINE_MS);
-  for (let wait = FIRST_POLL_MS; record !== null && record.stage !== "saved" && record.stage !== "refused"; wait = Math.min(wait * 2, MAX_POLL_MS)) {
-    const after = await publishOnce(storage, copy, [record], nowMs, signal);
-    if (after !== null) record = after[0] ?? null;
-    if (record === null || record.stage === "saved" || record.stage === "refused" || nowMs() + wait >= deadline) break;
-    await pause(wait, signal);
+  const { accountId, operationId } = input.record;
+  let record = storage.advanceAccountOperation({ accountId, operationId, stage: "publishing", nowMs: nowMs() })?.record ?? null;
+  const budgetMs = input.deadlineMs ?? PUBLICATION_DEADLINE_MS;
+  const deadline = nowMs() + budgetMs;
+  const expired = new AbortController();
+  const timer = setTimeout(() => expired.abort(new Error("The write's publication deadline passed.")), budgetMs);
+  timer.unref?.();
+  const attempt = signal === undefined ? expired.signal : AbortSignal.any([expired.signal, signal]);
+  try {
+    for (let wait = FIRST_POLL_MS; record !== null && record.stage !== "saved" && record.stage !== "refused"; wait = Math.min(wait * 2, MAX_POLL_MS)) {
+      const after = await publishOnce(storage, copy, [record], nowMs, attempt);
+      if (after !== null) record = after[0] ?? null;
+      if (record === null || record.stage === "saved" || record.stage === "refused" || nowMs() + wait >= deadline) break;
+      await pause(wait, attempt);
+    }
+  } catch (error) {
+    // Only the deadline ends the attempt with an answer; the caller's abort, or a failure, rejects.
+    if (signal?.aborted || !expired.signal.aborted) throw error;
+    record = storage.advanceAccountOperation({ accountId, operationId, nowMs: nowMs() })?.record ?? null;
+  } finally {
+    clearTimeout(timer);
   }
   await input.authorize?.();
   return answerOf(record);
 }
 
 /**
- * Settles writes whose folder is about to go: nothing can publish from it
- * again, so each ends saved or refused. Every receipt is read first. A read
- * that fails throws, and the caller keeps the folder and tries again. `read`
- * is null when the folder is already gone, which leaves no receipt.
+ * Settles writes whose folder is closed and about to go: nothing can
+ * publish from it again, so each ends saved or refused. Every receipt is
+ * read first. A read that fails throws, and the caller keeps the folder and
+ * tries again. `read` is null when the folder is already gone, which leaves
+ * no receipt.
  */
 export async function settleOperations(
   storage: PublicationStorage,

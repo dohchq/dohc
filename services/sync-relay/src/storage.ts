@@ -945,6 +945,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return operationRecordStorage.listUnfinishedOperationCopies(this);
   }
 
+  fetchAccountOperationLogRow(input: Parameters<typeof operationRecordStorage.operationLogRow>[1]) {
+    return operationRecordStorage.operationLogRow(this, input);
+  }
+
   publishingCopies() {
     return this.readTx(() => this.publishingCopiesInTransaction());
   }

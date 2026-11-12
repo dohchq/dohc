@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { stableJsonStringify } from "../canonicalJson";
 import type { StorageContext } from "./context";
-import type { SqliteDb } from "./types";
+import { rowToLogRow } from "./rows";
+import type { SqliteDb, SyncRelayLogRow } from "./types";
 
 export const ACCOUNT_OPERATIONS = "sync_relay_account_operations";
 const WORKSPACE_DELETED = "sync_relay_account_operations_workspace_deleted";
+const IDENTITY_ENDED = "sync_relay_account_operations_identity_ended";
 const MARKER = "account-operations-v1";
 
 // One row per phone write, keyed by the account and the phone's operation ID,
@@ -15,7 +17,10 @@ const MARKER = "account-operations-v1";
 // becomes a tombstone that keeps only its key, binding, and final stage, so
 // a retry of a forgotten write can still be told apart from a new one.
 // Deleting a workspace leaves its rows as tombstones at once, so the table
-// has no foreign key to the workspace.
+// has no foreign key to the workspace. `log_floor` and `log_ceiling` bound
+// the relay log rows the write's records can be: after the log's head when
+// it was recorded, and no later than the head when the workspace's identity
+// moved on from the one it was recorded under.
 const SCHEMA = {
   [ACCOUNT_OPERATIONS]: `CREATE TABLE sync_relay_account_operations (
   account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),
@@ -34,14 +39,17 @@ const SCHEMA = {
   created_at_ms INTEGER CHECK (created_at_ms IS NULL OR created_at_ms BETWEEN 0 AND 9007199254740991),
   updated_at_ms INTEGER CHECK (updated_at_ms IS NULL OR updated_at_ms BETWEEN created_at_ms AND 9007199254740991),
   settled_at_ms INTEGER CHECK (settled_at_ms IS NULL OR settled_at_ms BETWEEN created_at_ms AND 9007199254740991),
+  log_floor INTEGER CHECK (log_floor IS NULL OR log_floor BETWEEN 0 AND 9007199254740991),
+  log_ceiling INTEGER CHECK (log_ceiling IS NULL OR log_ceiling BETWEEN log_floor AND 9007199254740991),
   PRIMARY KEY (account_id, operation_id),
   CHECK (CASE WHEN command_json IS NULL
     THEN stage IN ('saved', 'refused') AND workspace_id IS NULL AND incarnation IS NULL AND replication_epoch IS NULL
       AND stream_identity IS NULL AND operation IS NULL AND message_state IS NULL AND result_json IS NULL
       AND active_until_ms IS NULL AND created_at_ms IS NULL AND updated_at_ms IS NULL AND settled_at_ms IS NULL
+      AND log_floor IS NULL AND log_ceiling IS NULL
     ELSE workspace_id IS NOT NULL AND incarnation IS NOT NULL AND replication_epoch IS NOT NULL
       AND stream_identity IS NOT NULL AND operation IS NOT NULL AND active_until_ms IS NOT NULL
-      AND created_at_ms IS NOT NULL AND updated_at_ms IS NOT NULL
+      AND created_at_ms IS NOT NULL AND updated_at_ms IS NOT NULL AND log_floor IS NOT NULL
       AND (stage IN ('saved', 'refused')) = (settled_at_ms IS NOT NULL) END)
 ) STRICT`,
   idx_sync_relay_account_operations_workspace: `CREATE INDEX idx_sync_relay_account_operations_workspace
@@ -53,19 +61,26 @@ const SCHEMA = {
   AFTER DELETE ON sync_relay_workspaces BEGIN
   UPDATE sync_relay_account_operations SET ${tombstone("CASE WHEN stage IN ('saved', 'refused') THEN stage ELSE 'refused' END")}
   WHERE workspace_id = OLD.workspace_id; END`,
+  // The relay log's head when a workspace's identity moves on ends the rows the old identity's writes can be.
+  [IDENTITY_ENDED]: `CREATE TRIGGER sync_relay_account_operations_identity_ended
+  AFTER UPDATE OF replication_epoch, stream_identity ON sync_relay_workspaces
+  WHEN OLD.replication_epoch IS NOT NEW.replication_epoch OR OLD.stream_identity IS NOT NEW.stream_identity BEGIN
+  UPDATE sync_relay_account_operations SET log_ceiling = (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = OLD.workspace_id)
+  WHERE workspace_id = OLD.workspace_id AND replication_epoch = OLD.replication_epoch AND stream_identity = OLD.stream_identity
+    AND command_json IS NOT NULL AND log_ceiling IS NULL; END`,
 } as const;
 
 function tombstone(stage: string): string {
   return `stage = ${stage}, workspace_id = NULL, incarnation = NULL, replication_epoch = NULL, stream_identity = NULL,
     operation = NULL, command_json = NULL, message_state = NULL, result_json = NULL, active_until_ms = NULL,
-    created_at_ms = NULL, updated_at_ms = NULL, settled_at_ms = NULL`;
+    created_at_ms = NULL, updated_at_ms = NULL, settled_at_ms = NULL, log_floor = NULL, log_ceiling = NULL`;
 }
 
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
 
 function assertSchema(db: SqliteDb): void {
-  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE (tbl_name = ? OR name = ?) AND sql IS NOT NULL ORDER BY name")
-    .all(ACCOUNT_OPERATIONS, WORKSPACE_DELETED);
+  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE (tbl_name = ? OR name IN (?, ?)) AND sql IS NOT NULL ORDER BY name")
+    .all(ACCOUNT_OPERATIONS, WORKSPACE_DELETED, IDENTITY_ENDED);
   const expected = Object.keys(SCHEMA).sort();
   const schema: Record<string, string> = SCHEMA;
   if (
@@ -235,14 +250,16 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
     const inserted = storage.db.prepare(
       `INSERT INTO sync_relay_account_operations (account_id, operation_id, binding_hash, stage, workspace_id, incarnation,
          replication_epoch, stream_identity, operation, command_json, message_state, result_json, active_until_ms,
-         created_at_ms, updated_at_ms, settled_at_ms)
-       SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL
+         created_at_ms, updated_at_ms, settled_at_ms, log_floor, log_ceiling)
+       SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL,
+         (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), NULL
        WHERE EXISTS (SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?)
        ON CONFLICT (account_id, operation_id) DO NOTHING`,
     ).run(
       input.accountId, input.operationId, hash, input.binding.workspaceId, input.incarnation, input.replicationEpoch,
       input.streamIdentity, input.binding.operation, JSON.stringify(input.command), input.writesMessage ? "pending" : null,
-      input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs, input.binding.workspaceId, input.accountId,
+      input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs, input.binding.workspaceId, input.binding.workspaceId,
+      input.accountId,
     );
     const row = readRow(storage, input.accountId, input.operationId);
     if (Number(inserted.changes) === 1) return { kind: "recorded", record: recordOf(row!) };
@@ -316,9 +333,10 @@ export function listUnfinishedOperationCopies(storage: StorageContext): Array<{ 
  * transaction. The caller also leaves out fenced accounts and deleted
  * workspaces, which SQL can't name.
  */
-export function publishingCopiesInTransaction(storage: StorageContext): Array<{ workspaceId: string; ownerUserId: string }> {
+export function publishingCopiesInTransaction(storage: StorageContext): PublishingCopy[] {
   return storage.db.prepare(
-    `SELECT o.workspace_id, o.account_id, MIN(o.created_at_ms) AS since FROM sync_relay_account_operations o
+    `SELECT o.workspace_id, o.account_id, MIN(o.created_at_ms) AS since, MAX(o.stage <> 'stalled') AS active
+     FROM sync_relay_account_operations o
      JOIN sync_relay_automation_workspaces a ON a.workspace_id = o.workspace_id AND a.incarnation = o.incarnation
        AND a.owner_user_id = o.account_id AND a.replication_epoch = o.replication_epoch AND a.stream_identity = o.stream_identity
      JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id AND w.owner_user_id = o.account_id
@@ -326,8 +344,44 @@ export function publishingCopiesInTransaction(storage: StorageContext): Array<{ 
      WHERE o.stage NOT IN ('saved', 'refused') AND o.command_json IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
          WHERE h.workspace_id = o.workspace_id AND h.owner_user_id = o.account_id)
-     GROUP BY o.workspace_id, o.account_id ORDER BY since, o.workspace_id`,
-  ).all().map(row => ({ workspaceId: String(row.workspace_id), ownerUserId: String(row.account_id) }));
+     GROUP BY o.workspace_id, o.account_id ORDER BY active DESC, since, o.workspace_id`,
+  ).all().map(row => ({ workspaceId: String(row.workspace_id), ownerUserId: String(row.account_id), active: Number(row.active) === 1 }));
+}
+
+/** A copy whose phone writes may still publish. `active` while one of them isn't stalled. */
+export interface PublishingCopy {
+  workspaceId: string;
+  ownerUserId: string;
+  active: boolean;
+}
+
+/**
+ * The relay's row at a write's coordinate, only if it lies in the relay log
+ * rows the write's own identity could have made: after the log's head when
+ * the write was recorded, and while the workspace still had the epoch and
+ * stream the write was recorded under. Null otherwise.
+ */
+export function operationLogRow(storage: StorageContext, input: {
+  accountId: string; operationId: string; workspaceId: string; replicationEpoch: string; streamIdentity: string;
+  originId: string; originSeq: number;
+}): SyncRelayLogRow | null {
+  return storage.readTx(() => {
+    const row = storage.db.prepare(
+      `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind, l.payload_json, l.recorded_at_ms, l.relay_seq,
+         l.admitted_author_snapshot_json, l.settlement_admission_json, l.relay_admission
+       FROM sync_relay_account_operations o
+       JOIN sync_relay_log l ON l.workspace_id = o.workspace_id AND l.origin_id = ? AND l.origin_seq = ?
+       JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id
+       WHERE o.account_id = ? AND o.operation_id = ? AND o.workspace_id = ? AND o.command_json IS NOT NULL
+         AND o.replication_epoch = ? AND o.stream_identity = ? AND l.relay_seq > o.log_floor
+         AND CASE WHEN o.log_ceiling IS NULL
+           THEN w.replication_epoch = o.replication_epoch AND w.stream_identity = o.stream_identity
+             AND l.relay_seq > COALESCE(w.epoch_log_floor, 0)
+           ELSE l.relay_seq <= o.log_ceiling END`,
+    ).get(input.originId, input.originSeq, input.accountId, input.operationId, input.workspaceId, input.replicationEpoch,
+      input.streamIdentity);
+    return row ? rowToLogRow(row) : null;
+  });
 }
 
 /** The copies that keep the `publication` reason now. Runs inside the caller's transaction. */

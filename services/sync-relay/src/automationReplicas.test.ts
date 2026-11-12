@@ -5,6 +5,7 @@ import type {StorageContext} from "./storage/context";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
@@ -2072,33 +2073,36 @@ describe("the automation replicas", () => {
   const publishing = (storage: SyncRelayStorage) => () =>
     new Map(storage.publishingCopies().map((copy): [string, readonly CopyReason[]] => [copy.workspaceId, ["publication"]]));
   const count = (engine: ReturnType<typeof fakeEngine>, method: string) => engine.methods().filter((sent) => sent === method).length;
+  // An account visit opens the copy, so its folder exists, as a write needs.
+  // Once the visit ends, only the copy's unsent writes keep it.
+  async function visitedThenPublishing(storage: SyncRelayStorage, clock: { ms: number }) {
+    let wanted = (): ReadonlyMap<string, readonly CopyReason[]> => new Map([[WORKSPACE, ["account"]]]);
+    const opened = await copies(storage, () => wanted(), clock);
+    expect(opened.replicas.replica(WORKSPACE)).toBeDefined();
+    return { ...opened, wantPublishing: () => { wanted = publishing(storage); } };
+  }
 
-  it("settles a retiring copy's phone writes before its folder goes, and keeps the folder while their receipts can't be read", async () => {
+  it("closes a retiring copy before reading its phone writes' receipts from the folder, and saves one whose push answer was lost", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
-    const errors: unknown[] = [];
     let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
-    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted: () => wanted, nowMs: () => 0, onError: (error) => errors.push(error) });
-    cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
-    await running.settled();
-    phoneWrite(storage, "sent");
+    const { replicas: running, root } = await copies(storage, () => wanted, { ms: 0 });
+    phoneWrite(storage, "lost");
     phoneWrite(storage, "unwritten");
-    accept(raw, "sent", 1);
+    // The relay holds the message, but the copy never heard its push answered.
+    accept(raw, "lost", 1);
+    engine.receipts(new Map([receipt("lost", 1, "pending")]));
+    running.reconcile(); await running.settled();
+    expect(outcome(raw, "lost")[0], "the copy waits to see its push").toBe("recorded");
     // "Show on phone" goes off, so the writes no longer keep the copy, and it retires.
     storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
-    engine.receipts(new Error("the engine is busy"));
+    const before = engine.sent.length;
     running.reconcile(); await running.settled();
-    expect(errors).toEqual([new Error("the engine is busy")]);
-    expect(folders(root), "the folder stays until its writes settle").toHaveLength(1);
-    expect(storage.listAutomationWorkspaces(), "and so does its row").toHaveLength(1);
-    expect([outcome(raw, "sent")[0], outcome(raw, "unwritten")[0]]).toEqual(["recorded", "recorded"]);
-
-    engine.receipts(new Map([receipt("sent", 1)]));
-    running.reconcile(); await running.settled();
-    expect([outcome(raw, "sent"), outcome(raw, "unwritten")]).toEqual([
+    const after = engine.sent.slice(before).map((request) => request.method);
+    expect(after.indexOf("workspace.close"), "closed before its receipts are read").toBeLessThan(after.indexOf("sync.ordinary.publicationState"));
+    expect(after.slice(after.indexOf("workspace.close") + 1)).not.toContain("sync.push");
+    expect([outcome(raw, "lost"), outcome(raw, "unwritten")]).toEqual([
       ["saved", "published", { threadId: "thread" }],
       // Its stage never committed, so it never published.
       ["refused", "pending", { threadId: null, reason: "Couldn't send" }],
@@ -2113,34 +2117,107 @@ describe("the automation replicas", () => {
     running.reconcile(); await running.settled();
     expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 1 });
     expect(count(engine, "sync.ordinary.publicationState")).toBe(reads);
-    expect(errors).toHaveLength(1);
   });
 
-  it("settles a deleted workspace's phone writes before its folder goes, and leaves a folder whose receipts can't be read", async () => {
+  it("keeps a retiring copy's folder while its receipts can't be read, and retries after its delay on its own", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage, raw } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["account"] });
+    phoneWrite(storage, "sent");
+    accept(raw, "sent", 1);
+    // A copy with no reason left, as "Show on phone" leaves it, retires at once.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const folder = join(root, createHash("sha256").update(JSON.stringify([namespace, WORKSPACE])).digest("hex"));
+    await mkdir(join(folder, "1", "workspace"), { recursive: true });
+    const engine = fakeEngine();
+    engine.receipts(new Error("the engine is busy"));
+    const errors: unknown[] = [];
+    const passes = passEnds();
+    let next = passes.next();
+    await start(storage, { root, onError: (error) => errors.push(error), onReconciled: passes.onReconciled, nowMs: () => 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    expect(errors).toEqual([new Error("the engine is busy")]);
+    expect(existsSync(folder), "the folder stays until its writes settle").toBe(true);
+    expect(storage.listAutomationWorkspaces(), "and so does its row").toHaveLength(1);
+    expect(outcome(raw, "sent")[0]).toBe("recorded");
+    expect(vi.getTimerCount(), "only its retry, and no deadline that wakes at once").toBe(1);
+
+    engine.receipts(new Map([receipt("sent", 1)]));
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await next;
+    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    expect(existsSync(folder)).toBe(false);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  it("fails an account's deletion while its copy's phone writes can't settle, and settles them before its retry removes the copy", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
     const errors: unknown[] = [];
-    let wanted = [WORKSPACE];
-    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
-    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted: () => wanted, nowMs: () => 0, onError: (error) => errors.push(error) });
-    cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
-    await running.settled();
-    engine.receipts(new Error("the engine is busy"));
+    const { replicas: running, root } = await replicas(storage, () => [WORKSPACE], { ms: 0 }, (error) => errors.push(error));
     phoneWrite(storage, "sent");
     accept(raw, "sent", 1);
-    wanted = [];
-    running.reconcile(); await running.settled();
-    await running.deleteWorkspaces([WORKSPACE]);
+    engine.receipts(new Error("the engine is busy"));
+    let settledAtRuntime: unknown[] | null = null;
+    const deletion = createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer", fenceKey: "fence", invalidate() {},
+      deleteRuntime: async () => running.deleteWorkspaces([WORKSPACE]),
+      afterPhase(phase) { if (phase === "runtime") settledAtRuntime = outcome(raw, "sent"); } });
+    await expect(deletion.purge("owner", "owner@example.test")).rejects.toThrow("the engine is busy");
     expect(running.replica(WORKSPACE)).toBeUndefined();
-    expect(folders(root), "kept for a later settlement").toHaveLength(1);
+    expect(folders(root), "its folder stays").toHaveLength(1);
+    expect(storage.listAutomationWorkspaces(), "and its row").toHaveLength(1);
     expect(outcome(raw, "sent")[0]).toBe("recorded");
-    expect(errors.at(-1)).toEqual(new Error("the engine is busy"));
+    expect(settledAtRuntime, "the deletion never got past its runtime phase").toBeNull();
 
     engine.receipts(new Map([receipt("sent", 1)]));
-    await running.deleteWorkspaces([WORKSPACE]);
-    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    await deletion.purge("owner", "owner@example.test");
+    expect(settledAtRuntime).toEqual(["saved", "published", { threadId: "thread" }]);
     expect(folders(root)).toEqual([]);
+    expect(raw.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()).toEqual({ n: 0 });
+  });
+
+  it("reads the phone's writes' receipts when a restarted copy's first sync fails, and stalls them on a whole-push rejection", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { replicas: first, root } = await replicas(storage, () => [WORKSPACE], { ms: 0 });
+    phoneWrite(storage, "sent");
+    phoneWrite(storage, "held");
+    await first.settled();
+    await first.close();
+    accept(raw, "sent", 1);
+    engine.receipts(new Map([receipt("sent", 1), receipt("held", 2, "pending")]));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanup.push(async () => { logged.mockRestore(); });
+    engine.failPush(new EngineRequestError(1, { code: "AUTHORSHIP_MISMATCH", message: "chat op author does not match", retry: "no" }));
+    const errors: unknown[] = [];
+    const restarted = await start(storage, { root, wanted: () => [WORKSPACE], nowMs: () => 0, onError: (error) => errors.push(error) });
+    await vi.waitFor(() => expect([outcome(raw, "sent")[0], outcome(raw, "held")[0]]).toEqual(["saved", "stalled"]), { timeout: WAIT_TIMEOUT_MS });
+    expect(restarted.replica(WORKSPACE), "the copy never opened").toBeUndefined();
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it("stalls the phone's writes past their active time on a copy whose background sync keeps failing", async () => {
+    const { storage, raw, log } = await relay();
+    const engine = fakeEngine();
+    const clock = { ms: 0 };
+    const errors: unknown[] = [];
+    const { replicas: running } = await replicas(storage, () => [WORKSPACE], clock, (error) => errors.push(error));
+    phoneWrite(storage, "sent");
+    engine.receipts(new Map([receipt("sent", 1, "pending")]));
+    running.reconcile(); await running.settled();
+    expect(outcome(raw, "sent")[0]).toBe("recorded");
+    // Every sync fails from now on, and the relay has something to pull.
+    engine.failPush(true);
+    clock.ms = OPERATION_ACTIVE_MS;
+    log(1);
+    running.reconcile();
+    await vi.waitFor(() => expect(outcome(raw, "sent")[0]).toBe("stalled"), { timeout: WAIT_TIMEOUT_MS });
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    expect(running.replica(WORKSPACE), "a stalled write still keeps its copy").toBeDefined();
   });
 
   it("refuses an earlier incarnation's unpublished phone writes before the new incarnation pushes anything", async () => {
@@ -2228,10 +2305,12 @@ describe("the automation replicas", () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
     const clock = { ms: 0 };
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["account"] });
+    const { replicas: running, wantPublishing } = await visitedThenPublishing(storage, clock);
+    // The visit's write stays to publish once the visit ends.
     phoneWrite(storage, "sent");
     engine.receipts(new Map([receipt("sent", 1, "pending")]));
-    const { replicas: running } = await copies(storage, publishing(storage), clock);
+    wantPublishing();
+    running.reconcile(); await running.settled();
     expect(running.replica(WORKSPACE)?.reasons).toEqual(["account", "publication"]);
     const reads = count(engine, "sync.ordinary.publicationState"), pushes = count(engine, "sync.push");
     expect(reads).toBeGreaterThan(0);
@@ -2256,10 +2335,10 @@ describe("the automation replicas", () => {
   it("stalls a copy's phone writes once their receipts keep failing to read, and keeps the copy", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["account"] });
+    const { replicas: running, wantPublishing } = await visitedThenPublishing(storage, { ms: 0 });
     phoneWrite(storage, "sent");
     engine.receipts(new Error("the engine is busy"));
-    const { replicas: running } = await copies(storage, publishing(storage), { ms: 0 });
+    wantPublishing();
     for (let attempt = 0; attempt < 10 && outcome(raw, "sent")[0] !== "stalled"; attempt++) {
       running.reconcile(WORKSPACE); await running.settled();
     }

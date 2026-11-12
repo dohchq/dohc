@@ -78,6 +78,7 @@ it("creates the operation table on an older relay once, and refuses an unmarked 
   };
   const older = inspectDatabase(path);
   older.exec(`DROP TRIGGER sync_relay_account_operations_workspace_deleted;
+    DROP TRIGGER sync_relay_account_operations_identity_ended;
     DROP TABLE sync_relay_account_operations;
     DELETE FROM sync_relay_migrations WHERE migration_id = '${MARKER}';`);
   older.close();

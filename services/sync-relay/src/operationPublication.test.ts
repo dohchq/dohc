@@ -70,7 +70,10 @@ async function relay() {
     `INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_admission)
      VALUES (?, ?, ?, 'relay.refused', ?, 1, 'refused')`,
   ).run(WORKSPACE, ORIGIN, originSeq, JSON.stringify({ opKind: "chat.message.append", payloadSha256: "0".repeat(64), reason: "too large" }));
-  return { storage, accepted, refused };
+  // The workspace's identity moves on, as after a restore.
+  const rotate = () => storage.rotateWorkspaceIdentity({ workspaceId: WORKSPACE, ownerUserId: OWNER, replicationEpoch: "epoch-2",
+    streamIdentity: "stream-2", rotatedAtMs: 2 });
+  return { storage, accepted, refused, rotate };
 }
 
 function record(storage: SyncRelayStorage, command: PublicationCommand = answer(), operationId = "operation-1", nowMs = 0): OperationRecord {
@@ -85,17 +88,27 @@ function record(storage: SyncRelayStorage, command: PublicationCommand = answer(
 const advance = (storage: SyncRelayStorage, stage: OperationStage, message?: "published") =>
   storage.advanceAccountOperation({ accountId: OWNER, operationId: "operation-1", stage, nowMs: 1, ...(message ? { message } : {}) })!.record;
 
+// Waits until `signal` aborts, then rejects with its reason, as a request held in the engine or the lane does.
+const heldUntil = (signal: AbortSignal | undefined) => new Promise<never>((_, reject) => {
+  if (signal === undefined) return;
+  if (signal.aborted) reject(signal.reason);
+  signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+});
+
 /** A copy whose engine answers receipts from `receipts`, by stage key; a key it doesn't hold answers absent. */
 function copy(receipts: Map<string, unknown>) {
   const sent: string[] = [];
   let steps = 0;
   let failStep: Error | null = null;
   let failReceipts = false;
+  let holdStep = false, holdReceipts = false;
+  const signals: Array<AbortSignal | undefined> = [];
   const client = {
-    sendRequest: async (request: Request) => {
+    sendRequest: async (request: Request, signal?: AbortSignal) => {
       sent.push(request.method);
       if (request.method !== "sync.ordinary.publicationState") throw new Error(`unexpected ${request.method}`);
       if (failReceipts) throw new Error("the engine is busy");
+      if (holdReceipts) { signals.push(signal); return await heldUntil(signal); }
       const { stageKeys } = request.params as { stageKeys: string[] };
       return { id: request.id, result: { stages: stageKeys.map((stageKey) => receipts.get(stageKey) ?? { stageKey, state: "absent" }) } };
     },
@@ -105,12 +118,19 @@ function copy(receipts: Map<string, unknown>) {
     workspaceId: WORKSPACE, incarnation: 1, workspace: "handle", signal: new AbortController().signal, nextRequestId: () => ++id,
     client: client as unknown as EngineClient,
     // A step that catches up never says what the relay accepted.
-    step: async () => { steps += 1; if (failStep) throw failStep; return true; },
+    step: async (signal) => {
+      steps += 1;
+      if (holdStep) { signals.push(signal); return await heldUntil(signal); }
+      if (failStep) throw failStep;
+      return true;
+    },
   };
   return {
-    replica, sent, steps: () => steps,
+    replica, sent, steps: () => steps, signals,
     failStep: (error: Error | null) => { failStep = error; },
     failReceipts: (fail: boolean) => { failReceipts = fail; },
+    /** Steps, or receipt reads, wait in the lane or the engine until their attempt ends. */
+    hold: (what: "step" | "receipts") => { if (what === "step") holdStep = true; else holdReceipts = true; },
   };
 }
 
@@ -243,13 +263,78 @@ describe("a phone write's publication", () => {
     expect(logged).toHaveBeenCalledOnce();
   });
 
-  it("leaves every write as it was when its receipts can't be read", async () => {
+  it("leaves every write as it was when its receipts can't be read, but stalls one past its active time", async () => {
     const { storage } = await relay();
     const write = record(storage);
     const engine = copy(new Map());
     engine.failReceipts(true);
-    expect(await publishOnce(storage, engine.replica, [write], () => OPERATION_ACTIVE_MS)).toBeNull();
+    expect(await publishOnce(storage, engine.replica, [write], () => 1)).toBeNull();
     expect(storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE })).toMatchObject([{ stage: "recorded" }]);
+    expect(await publishOnce(storage, engine.replica, [write], () => OPERATION_ACTIVE_MS)).toBeNull();
+    expect(storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE })).toMatchObject([{ stage: "stalled" }]);
+  });
+
+  it("reads the receipts after a step whose pull failed, and saves what its push published", async () => {
+    const { storage, accepted } = await relay();
+    const write = record(storage, { stages: [replyStage()] });
+    accepted(1, "chat.message.append", messagePayload());
+    const engine = copy(new Map([["reply-1:reply", written("reply-1:reply", [[1, "pushed"]])]]));
+    engine.failStep(new Error("the pull failed"));
+    expect(await publishOnce(storage, engine.replica, [write], () => 1)).toMatchObject([{ stage: "saved", messageState: "published" }]);
+  });
+
+  it("ends its attempt at the deadline while a step waits in the lane, and answers pending after the caller is checked", async () => {
+    const { storage } = await relay();
+    const write = record(storage, { stages: [replyStage()] });
+    const engine = copy(new Map());
+    engine.hold("step");
+    const authorize = vi.fn(async () => undefined);
+    const caller = new AbortController();
+    const answered = await publishOperation({ storage, copy: engine.replica, record: write, authorize, signal: caller.signal, deadlineMs: 50, nowMs: () => 1 });
+    expect(answered).toMatchObject({ state: "pending", record: { stage: "publishing" } });
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(engine.signals[0]?.aborted, "the step heard the deadline").toBe(true);
+    expect(caller.signal.aborted, "the deadline isn't the caller's").toBe(false);
+  });
+
+  it("ends its attempt at the deadline while a receipt read waits in the engine", async () => {
+    const { storage } = await relay();
+    const write = record(storage, { stages: [replyStage()] });
+    const engine = copy(new Map());
+    engine.hold("receipts");
+    const answered = await publishOperation({ storage, copy: engine.replica, record: write, deadlineMs: 50, nowMs: () => 1 });
+    expect(answered).toMatchObject({ state: "pending", record: { stage: "publishing" } });
+    expect(engine.signals[0]?.aborted).toBe(true);
+  });
+
+  it("rejects when its caller gives up, instead of answering", async () => {
+    const { storage } = await relay();
+    const write = record(storage, { stages: [replyStage()] });
+    const engine = copy(new Map());
+    engine.hold("step");
+    const caller = new AbortController();
+    const authorize = vi.fn(async () => undefined);
+    const answering = publishOperation({ storage, copy: engine.replica, record: write, authorize, signal: caller.signal });
+    caller.abort(new Error("the phone hung up"));
+    await expect(answering).rejects.toThrow("the phone hung up");
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it("counts only a row inside the log rows the write's own epoch and stream could make", async () => {
+    const { storage, accepted, rotate } = await relay();
+    // A matching row from before the write was recorded is not its own.
+    accepted(1, "chat.message.append", messagePayload());
+    const early = record(storage, { stages: [replyStage()] });
+    const receipts = new Map<string, unknown>([["reply-1:reply", written("reply-1:reply", [[1, "pushed"]])]]);
+    expect(await publishOnce(storage, copy(receipts).replica, [early], () => 1)).toMatchObject([{ stage: "recorded", messageState: "pending" }]);
+
+    // Nor is one the relay logged after the workspace's identity moved on.
+    const late = record(storage, { stages: [replyStage("reply-2")] }, "operation-2");
+    rotate();
+    accepted(2, "chat.message.append", messagePayload("reply-2"));
+    await settleOperations(storage, [late], reader(new Map([["reply-2:reply", written("reply-2:reply", [[2, "pushed"]])]])), WORKSPACE_CHANGED, 5);
+    expect(storage.advanceAccountOperation({ accountId: OWNER, operationId: "operation-2", nowMs: 6 })!.record)
+      .toMatchObject({ stage: "refused", messageState: "pending", result: { reason: WORKSPACE_CHANGED } });
   });
 
   it("finishes from the record after a crash at each step, without writing a stage again", async () => {
@@ -301,12 +386,12 @@ describe("settling a write whose folder goes", () => {
 
   it("saves a write the relay already holds, answers a lost decision, and refuses one with the reason it was given", async () => {
     const { storage, accepted } = await relay();
-    accepted(1, "chat.message.append", messagePayload());
-    accepted(2, "chat.decision.set", decisionPayload());
-    accepted(3, "chat.message.append", messagePayload("reply-2"));
     const done = record(storage, answer(), "done");
     const beaten = record(storage, answer("reply-2"), "beaten");
     const unpushed = record(storage, { stages: [replyStage("reply-3")] }, "unpushed");
+    accepted(1, "chat.message.append", messagePayload());
+    accepted(2, "chat.decision.set", decisionPayload());
+    accepted(3, "chat.message.append", messagePayload("reply-2"));
     const receipts = new Map<string, unknown>([
       ["reply-1:reply", written("reply-1:reply", [[1, "pushed"]])],
       ["reply-1:decision", written("reply-1:decision", [[2, "pushed"]])],
@@ -319,6 +404,17 @@ describe("settling a write whose folder goes", () => {
     expect(final("done")).toMatchObject({ stage: "saved", messageState: "published", result: { threadId: THREAD } });
     expect(final("beaten")).toMatchObject({ stage: "refused", messageState: "published", result: { reason: "already answered", winnerMessageId: "reply-1" } });
     expect(final("unpushed")).toMatchObject({ stage: "refused", messageState: "pending", result: { threadId: THREAD, reason: WORKSPACE_CHANGED } });
+  });
+
+  it("saves a write whose push reached the relay though its answer was lost, from a receipt still pending", async () => {
+    const { storage, accepted } = await relay();
+    const write = record(storage, { stages: [replyStage()] });
+    accepted(1, "chat.message.append", messagePayload());
+    const receipts = new Map([["reply-1:reply", written("reply-1:reply", [[1, "pending"]])]]);
+    // The driver waits for the copy to see its push.
+    expect(await publishOnce(storage, copy(receipts).replica, [write], () => 1)).toMatchObject([{ stage: "recorded" }]);
+    await settleOperations(storage, [write], reader(receipts), COULD_NOT_SEND, 5);
+    expect(advance(storage, "saved")).toMatchObject({ stage: "saved", messageState: "published", result: { threadId: THREAD } });
   });
 
   it("throws, and changes nothing, when the receipts can't be read; a folder already gone leaves none", async () => {
