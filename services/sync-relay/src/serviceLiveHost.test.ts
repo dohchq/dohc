@@ -5782,14 +5782,15 @@ it.each(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePending
     o.failDetach(new EngineRequestError(1, {code: "CONFLICT", message: "detach refused", retry: "no"} as never, "liveApplication.detachWorkspace"));
     await expect(update).rejects.toThrow("workspace operation failed");
   } else await update;
-  const first = `workspace operation failed (code INVALID_PARAMS, method ${method})`;
+  // Its message is a sentence, not a code word, so the line names it `unrecognized-message`, with the code and method.
+  const first = `unrecognized-message (code INVALID_PARAMS, method ${method})`;
   await vi.waitFor(() => expect(lines(first), JSON.stringify(log.mock.calls)).toBe(1), {timeout: 10_000});
   const seen = refused;
   await vi.waitFor(() => expect(refused).toBeGreaterThan(seen + 1), {timeout: 10_000});
   // A refused capture waits before it tries again, and a pass in between ends clean, so each try logs once.
   if (method !== "liveApplication.captureOwnerActivation") expect(lines(first)).toBe(1);
   code = "WORKSPACE_UNAVAILABLE";
-  await vi.waitFor(() => expect(lines(`workspace operation failed (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
+  await vi.waitFor(() => expect(lines(`unrecognized-message (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
 });
 
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {
