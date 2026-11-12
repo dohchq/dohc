@@ -1429,6 +1429,7 @@ codex mcp login dohc-share`);
 
     const group = await openOwnerComments(user, "share-1");
     const named = await within(group).findByTestId("share-independent-named-1");
+    expect(named.textContent).toContain("Can comment");
     await user.click(within(named).getByRole("button", { name: "End access" }));
     await user.click(
       within(within(group).getByTestId("owner-comments-confirmation")).getByRole("button", {
@@ -2848,6 +2849,66 @@ codex mcp login dohc-share`);
       access: "view",
       expectedDependentGrantIds: [],
     });
+  });
+
+  it("never shows an ended link's URL when the list fails to read again", async () => {
+    const kept = readableLink("kept-end", { shareId: "share-kept-end", access: "view", url: LINK_URL_A });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [kept] })
+      .mockRejectedValueOnce(new Error("The relay did not answer."));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const row = await screen.findByTestId("share-link-row-kept-end");
+    await chooseLinkOption(user, row, "End link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "End link" }),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
+  });
+
+  it("keeps a reset's URL when the list and a later Add link both fail", async () => {
+    const kept = readableLink("kept-swap", { shareId: "share-kept-swap", access: "view", url: LINK_URL_A });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [kept] })
+      .mockRejectedValue(new Error("The relay did not answer."));
+    bridgeMock.rotateRelayShareLink.mockResolvedValueOnce({ outcome: "rotated", url: LINK_URL_B });
+    bridgeMock.addRelayShareLink.mockRejectedValueOnce(new Error("dohc could not add the link."));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const row = await screen.findByTestId("share-link-row-kept-swap");
+    await chooseLinkOption(user, row, "Reset link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByTestId("share-link-url").textContent).toBe(LINK_URL_B);
+    await addLinkWith(user, screen.getByTestId("share-link-group-share-kept-swap"), "Can view");
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
+    });
+    expect(screen.getAllByTestId("share-link-url").map((url) => url.textContent)).toEqual([LINK_URL_B]);
   });
 
   it("stops copying a kept URL when a reset's answer and the next list are both lost", async () => {
@@ -5001,6 +5062,8 @@ codex mcp login dohc-share`);
     const dependentRow = await within(group).findByTestId(
       "share-dependent-dependent-1",
     );
+    // Each person shows what they can do, not only how they joined.
+    expect(dependentRow.textContent).toContain("Can comment · Joined through a link");
     await user.click(
       within(dependentRow).getByRole("button", { name: "Make independent" }),
     );

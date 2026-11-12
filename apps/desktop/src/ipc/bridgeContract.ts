@@ -4390,6 +4390,7 @@ export const RelayShareLinkIndependentGrant = z
     grantId: OPAQUE_ID,
     recipientUserId: z.string().min(1).max(256).nullable(),
     recipientEmail: EMAIL_STRING.nullable(),
+    access: SHARE_ACCESS,
   })
   .strict();
 export type RelayShareLinkIndependentGrant = z.infer<

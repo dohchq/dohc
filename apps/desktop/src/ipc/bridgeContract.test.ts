@@ -326,6 +326,7 @@ describe("owner relay share link IPC contract", () => {
           grantId: "independent-1",
           recipientUserId: "user-1",
           recipientEmail: "reader@example.test",
+          access: "comment",
         },
       ],
     });
@@ -339,6 +340,7 @@ describe("owner relay share link IPC contract", () => {
           grantId: "independent-1",
           recipientUserId: "user-1",
           recipientEmail: "reader@example.test",
+          access: "comment",
         },
       ],
       nextCursor: "next-page",

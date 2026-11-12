@@ -388,6 +388,11 @@ function linkAccessOf(access: string): LinkAccess | null {
   return access === "view" || access === "comment" || access === "edit" ? access : null;
 }
 
+function accessWords(access: string): string {
+  const known = linkAccessOf(access);
+  return known === null ? access : LINK_ACCESS_WORDS[known];
+}
+
 function LinkAccessChoice(props: {
   supported: readonly LinkAccess[];
   access: LinkAccess;
@@ -1747,16 +1752,20 @@ export function useRelayShareLinkPane(props: {
           current?.grantId === row.grantId ? null : current,
         );
       }
-      if (action.kind === "retune" &&
-          (result.outcome === "widened" || result.outcome === "narrowed")) {
-        setLinks((current) =>
-          current.map((currentRow) =>
-            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
-              ? { ...currentRow, access: action.access }
-              : currentRow,
-          ),
-        );
-      }
+      // The row takes the answer now, so a list that fails to read again
+      // never brings back a URL this change retired.
+      setLinks((current) =>
+        current.map((currentRow): RelayShareLinkRow => {
+          if (currentRow.shareId !== row.shareId || currentRow.grantId !== row.grantId) return currentRow;
+          if (result.outcome === "ended") {
+            return { ...currentRow, status: "revoked", revokedAtMs: currentRow.revokedAtMs ?? Date.now(), url: null };
+          }
+          const url = result.outcome === "rotated" || result.outcome === "widened" ? result.url : currentRow.url;
+          return action.kind === "retune" && currentRow.selector !== null
+            ? { ...currentRow, access: action.access, url }
+            : { ...currentRow, url };
+        }),
+      );
       setConfirmation(null);
       void refreshLinks(scopeGeneration);
     } catch (cause) {
@@ -2128,7 +2137,9 @@ export function useRelayShareLinkPane(props: {
                 <div className="flex min-h-8 items-center justify-between gap-3">
                   <span className="flex min-w-0 flex-col">
                     <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
-                    <span className="text-[12px] text-subtle">Joined through a link</span>
+                    <span className="text-[12px] text-subtle">
+                      {accessWords(dependent.access)} · Joined through a link
+                    </span>
                   </span>
                   <SecondaryButton
                     size="compact"
@@ -2165,8 +2176,9 @@ export function useRelayShareLinkPane(props: {
                 className="flex flex-col gap-1"
               >
                 <div className="flex min-h-8 items-center justify-between gap-3">
-                  <span className="min-w-0 break-all text-[13px] text-ink">
-                    {namedGrantName(grant)}
+                  <span className="flex min-w-0 flex-col">
+                    <span className="break-all text-[13px] text-ink">{namedGrantName(grant)}</span>
+                    <span className="text-[12px] text-subtle">{accessWords(grant.access)}</span>
                   </span>
                   <SecondaryButton
                     size="compact"
