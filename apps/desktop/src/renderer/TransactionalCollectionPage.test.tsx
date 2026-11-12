@@ -39,6 +39,17 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
   admitCollectionChanges(props.workspaceId);
   return { invoke, onError, onNotice, props, ...render(<TransactionalCollectionPage {...props} />) };
 }
+/** A command in the page's one actions menu, which this opens when it is closed. */
+function command(name: string | RegExp): HTMLElement {
+  if (!screen.queryByRole("menu", { name: "Manage Collection", hidden: true })) fireEvent.click(screen.getByRole("button", { name: "Manage Collection", hidden: true }));
+  return screen.getByRole("menuitem", { name, hidden: true });
+}
+/** The names of the commands the open actions menu lists under each section label. */
+const commandsBySection = () => within(screen.getByRole("menu", { name: "Manage Collection" })).getAllByRole("group").map(group =>
+  [document.getElementById(group.getAttribute("aria-labelledby")!)!.textContent, within(group).getAllByRole("menuitem").map(item => item.textContent)]);
+const viewTab = (name: string) => within(screen.getByTestId("collection-view-switcher")).getByRole<HTMLButtonElement>("button", { name });
+/** The tabs, without the open tab's menu button. */
+const viewTabs = () => within(screen.getByTestId("collection-view-switcher")).getAllByRole("button").filter(tab => tab.hasAttribute("aria-pressed"));
 type Invoke = { mock: { calls: Array<[TransactionalInvoke, ...unknown[]]> } };
 const sent = (invoke: Invoke, operationId: string) => invoke.mock.calls.map(([request]) => request).filter(request => request.operationId === operationId);
 
@@ -84,11 +95,11 @@ it("offers a calendar before the Collection has a date field, and asks for one",
   const onAddDateField = vi.fn();
   const { props, rerender } = setup({ onAddDateField });
   await screen.findByText("Alice");
-  const layout = screen.getByLabelText("Collection layout");
-  expect((within(layout).getByRole("option", { name: "Calendar" }) as HTMLOptionElement).disabled).toBe(false);
-  fireEvent.change(layout, { target: { value: "calendar" } });
+  expect(viewTab("Calendar").disabled).toBe(false);
+  fireEvent.click(viewTab("Calendar"));
   expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
-  expect(screen.queryByLabelText("Calendar date")).toBeNull();
+  expect(viewTab("Calendar").getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", { name: /^Date / })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
   expect(onAddDateField).toHaveBeenCalledOnce();
 
@@ -98,14 +109,14 @@ it("offers a calendar before the Collection has a date field, and asks for one",
   dated.tables[0]!.fields.push({ fieldId: visit, name: "Visit on", type: "date", required: false, unique: false });
   dated.operations.find(operation => operation.operationId === read)!.fieldIds.push(visit);
   rerender(<TransactionalCollectionPage {...props} dataset={dated} />);
-  expect((screen.getByLabelText("Calendar date") as HTMLSelectElement).value).toBe(visit);
+  expect(screen.getByRole("button", { name: "Date Visit on" }).title).toBe("Calendar date");
   expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
 });
 
 it("asks for a date field without a button for someone who cannot change fields", async () => {
   setup();
   await screen.findByText("Alice");
-  fireEvent.change(screen.getByLabelText("Collection layout"), { target: { value: "calendar" } });
+  fireEvent.click(viewTab("Calendar"));
   expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
 });
@@ -235,7 +246,10 @@ describe("a Data Collection's table", () => {
   it.each([[false, "1 record"], [true, "1 record on this page"]] as const)("counts the records, and says on this page only when another page exists (next page: %s)", async (next, words) => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page("Alice", next) : { id: 1, version: 1 } }));
     setup({ invoke }); await screen.findByText("Alice");
-    expect(screen.getByText(words, { selector: "footer span" })).toBeTruthy();
+    // The count sits beside the Collection's name, and nowhere else.
+    expect(screen.getByTestId("collection-record-count").textContent).toBe(words);
+    expect(screen.getByRole("heading", { level: 1, name: "People" }).closest("header")!.contains(screen.getByTestId("collection-record-count"))).toBe(true);
+    expect(screen.queryAllByText(/\brecords?\b/).filter(element => element.closest("footer"))).toEqual([]);
   });
 
   it("saves a cell with the record's version: Enter saves, Escape cancels, and the keys go back to the table", async () => {
@@ -640,18 +654,129 @@ describe("a Data Collection's table", () => {
     expect(within(grid()).getAllByRole("columnheader").map(header => header.textContent)).toEqual(["", "Name", "Amount", "Status"]);
   });
 
-  it("keeps creation outside management and returns focus when its disclosure closes", async () => {
+  it("keeps creation outside the actions menu, runs a command and closes, and returns focus to its button on Escape", async () => {
     const onReviewSchema = vi.fn(); const onCustomize = vi.fn(); setup({onReviewSchema, onCustomize}); await screen.findByText("Alice");
-    const manage = screen.getByLabelText("Manage Collection");
-    const details = manage.closest("details")!;
-    expect(screen.getAllByRole("button", { name: "New record"})[0]!.closest("details")).toBeNull();
-    fireEvent.click(manage); expect(details.open).toBe(true);
-    const fields = screen.getByRole("button",{name:"Fields and names"});
-    fireEvent.click(fields); expect(onReviewSchema).toHaveBeenCalledOnce();
-    fireEvent.click(manage); fireEvent.click(screen.getByRole("button",{name:"Customize…"})); expect(onCustomize).toHaveBeenCalledOnce();
+    const manage = screen.getByRole("button", { name: "Manage Collection" });
+    expect(manage.getAttribute("aria-haspopup")).toBe("menu");
     fireEvent.click(manage);
+    const menu = screen.getByRole("menu", { name: "Manage Collection" });
+    expect(within(menu).queryByRole("menuitem", { name: "New record" })).toBeNull();
+    expect(menu.contains(screen.getAllByRole("button", { name: "New record"})[0]!)).toBe(false);
+    fireEvent.click(command("Fields and names")); expect(onReviewSchema).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(command("Customize…")); expect(onCustomize).toHaveBeenCalledOnce();
+    const fields = command("Fields and names");
     fields.focus(); fireEvent.keyDown(fields,{key:"Escape"});
-    expect(details.open).toBe(false); expect(document.activeElement).toBe(manage);
+    expect(screen.queryByRole("menu")).toBeNull(); await waitFor(() => expect(document.activeElement).toBe(manage));
+  });
+  it("lists every command the page was given under View and Collection, and none it was not", async () => {
+    const description = dataset(); description.operations.find(operation => operation.operationId === create)!.access = "link";
+    const handlers = { onReviewSchema: vi.fn(), onRefresh: vi.fn(), onCustomize: vi.fn(), onCreateForm: vi.fn(), onManageAccess: vi.fn(), onTransferCsv: vi.fn(), onHistory: vi.fn(),
+      onPendingResponses: vi.fn(), onExportRecovery: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
+    const onToggle = vi.fn(), manage = vi.fn();
+    const full = setup({ dataset: description, ...handlers, automations: { open: false, count: 2, onToggle },
+      views: { list: [], busy: false, select: vi.fn(), create: vi.fn(), rename: vi.fn(), remove: vi.fn(), setField: vi.fn(), edit: vi.fn(), manage } });
+    await screen.findByText("Alice");
+    command("Refresh");
+    expect(commandsBySection()).toEqual([
+      ["View", ["Fields and names", "Views", "Refresh"]],
+      ["Collection", ["Automations2", "Customize…", "Create form", "Manage access", "Import or export CSV", "History", "Pending responses", "Export recovery", "Open source", "Archive"]],
+    ]);
+    const runs: Array<[string | RegExp, () => void]> = [["Fields and names", handlers.onReviewSchema], ["Views", manage], ["Refresh", handlers.onRefresh], [/^Automations/, onToggle], ["Customize…", handlers.onCustomize],
+      ["Create form", handlers.onCreateForm], ["Manage access", handlers.onManageAccess], ["Import or export CSV", handlers.onTransferCsv], ["History", handlers.onHistory],
+      ["Pending responses", handlers.onPendingResponses], ["Export recovery", handlers.onExportRecovery], ["Open source", handlers.onOpenSource], ["Archive", handlers.onArchive]];
+    for (const [name, handler] of runs) { fireEvent.click(command(name)); expect(handler, String(name)).toHaveBeenCalledOnce(); }
+    full.unmount();
+    // A page given nothing still reads its records again, and offers nothing else.
+    setup(); await screen.findByText("Alice");
+    command("Refresh");
+    expect(commandsBySection()).toEqual([["View", ["Refresh"]]]);
+  });
+  it("holds the menu's commands while a form is open and says why, except what needs no records", async () => {
+    const handlers = { onReviewSchema: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
+    const onToggle = vi.fn();
+    setup({ ...handlers, automations: { open: false, count: 0, onToggle } }); await screen.findByText("Alice");
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
+    for (const name of ["Fields and names", "Refresh", "Archive"]) {
+      const row = command(name);
+      expect(row.getAttribute("aria-disabled"), name).toBe("true");
+      expect(document.getElementById(row.getAttribute("aria-describedby")!)!.textContent, name).toBe("Save or cancel the open form first.");
+      fireEvent.click(row);
+    }
+    expect(handlers.onReviewSchema).not.toHaveBeenCalled(); expect(handlers.onArchive).not.toHaveBeenCalled();
+    // The tabs and the search wait too, as the dropdowns and the search did.
+    expect(viewTabs().every(tab => (tab as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.getByLabelText<HTMLInputElement>("Search collection").disabled).toBe(true);
+    expect(command("Open source").getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(command("Open source")); expect(handlers.onOpenSource).toHaveBeenCalledOnce();
+    fireEvent.click(command("Automations")); expect(onToggle).toHaveBeenCalledOnce();
+  });
+  const pendingView = { viewId: id(30), name: "Pending", kind: "table" as const, search: "", filters: [], sort: null };
+  const statusBoard = { viewId: id(31), name: "By status", kind: "board" as const, search: "", filters: [], sort: null, groupBy: status };
+  const savedViews = () => ({ list: [pendingView, statusBoard], busy: false, select: vi.fn(), create: vi.fn(async () => null), rename: vi.fn(async () => null), remove: vi.fn(), setField: vi.fn(), edit: vi.fn(), manage: vi.fn() });
+  it("shows All records and each saved view as tabs to someone who can save views, and opens the one pressed", async () => {
+    const views = savedViews();
+    const result = setup({ views }); await screen.findByText("Alice");
+    expect(viewTabs().map(tab => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([["All records", "true"], ["Pending", "false"], ["By status", "false"]]);
+    // All records is every record as a table. It is not a saved view, so it has no menu.
+    expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
+    fireEvent.contextMenu(viewTab("All records"));
+    expect(screen.queryByRole("menu")).toBeNull();
+    // A view's layout is the view's: no dropdown chooses a saved view or a layout.
+    expect(screen.queryByRole("combobox")).toBeNull();
+    fireEvent.click(viewTab("Pending"));
+    expect(views.select).toHaveBeenLastCalledWith(id(30));
+    result.rerender(<TransactionalCollectionPage {...result.props} activeView={pendingView} />);
+    await screen.findByText("Alice");
+    expect(viewTab("Pending").getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(viewTab("All records"));
+    expect(views.select).toHaveBeenLastCalledWith(null);
+  });
+  it("adds a view from +, and renames, edits and deletes the open one from its tab's menu", async () => {
+    const views = savedViews(), onAddDateField = vi.fn();
+    setup({ views, activeView: pendingView, onAddDateField }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    const popover = within(screen.getByRole("dialog", { name: "Add a view" }));
+    fireEvent.click(popover.getByRole("radio", { name: "Board" }));
+    // A board groups by a field the table can sort.
+    expect(within(popover.getByLabelText("Group by")).getAllByRole("option").map(option => option.textContent)).toEqual(["Name", "Amount", "Status"]);
+    fireEvent.change(popover.getByLabelText("Group by"), { target: { value: status } });
+    fireEvent.click(popover.getByRole("button", { name: "Create view" }));
+    await waitFor(() => expect(views.create).toHaveBeenCalledExactlyOnceWith({ name: "Board", kind: "board", groupBy: status }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
+    // The table has no date field, so a calendar asks for one the existing way.
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
+    expect(screen.getByText("This Collection has no date field.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+    expect(onAddDateField).toHaveBeenCalledOnce();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Add a view" }), { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    expect(screen.getAllByRole("menuitem").map(item => item.textContent)).toEqual(["Rename", "Edit view…", "Delete"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit view…" }));
+    expect(views.edit).toHaveBeenCalledExactlyOnceWith(id(30));
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const rename = within(screen.getByRole("dialog", { name: "Rename Pending" }));
+    expect(rename.getByLabelText<HTMLInputElement>("Name").maxLength).toBe(100);
+    fireEvent.change(rename.getByLabelText("Name"), { target: { value: "Waiting" } });
+    fireEvent.click(rename.getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(views.rename).toHaveBeenCalledExactlyOnceWith(id(30), "Waiting"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // A deleted view comes back from its notice's Undo, so Delete asks nothing.
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(views.remove).toHaveBeenCalledExactlyOnceWith(id(30));
+  });
+  it("holds the tabs and their controls while the views file is read or written", async () => {
+    setup({ views: { ...savedViews(), busy: true }, activeView: pendingView }); await screen.findByText("Alice");
+    expect(viewTabs().every(tab => (tab as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Add a view" }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "View actions" }).disabled).toBe(true);
+    const row = command("Views");
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+    expect(document.getElementById(row.getAttribute("aria-describedby")!)!.textContent).toBe("dohc is reading the saved views.");
   });
   it("keeps saved filters when sorting and resets paging when switching views",async()=>{
     const activeView={viewId:id(30),name:"Pending",kind:"table" as const,search:"Alice",filters:[{fieldId:status,value:"New"}],sort:{fieldId:name,direction:"asc" as const}};
@@ -926,7 +1051,7 @@ describe("a Data Collection's record details and forms", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(uploadFile.mock.calls[0]![1].aborted).toBe(true);
     await act(async () => pendingUpload.reject(new DOMException("The upload was cancelled.", "AbortError")));
-    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(command("Refresh").getAttribute("aria-disabled")).toBeNull();
   });
 
   it("closes details on Escape and returns keyboard focus to the row", async () => {
@@ -978,7 +1103,7 @@ describe("a Data Collection's record details and forms", () => {
   it("clears previously displayed records when a read loses access", async () => {
     const result = setup(); await screen.findByText("Alice");
     result.invoke.mockRejectedValueOnce(Error("Access revoked"));
-    fireEvent.click(screen.getByRole("button", {name:"Refresh"}));
+    fireEvent.click(command("Refresh"));
     await waitFor(() => expect(result.onError).toHaveBeenCalled());
     expect(screen.queryByText("Alice")).toBeNull();
   });
@@ -997,7 +1122,7 @@ describe("a Data Collection's record details and forms", () => {
     expect(dialog.queryByRole("button", { name: "Delete record…" })).toBeNull();
     expect(dialog.queryByRole("button", { name: "Edit Name" })).toBeNull();
     fireEvent.click(dialog.getByRole("button", { name: "Close" }));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" })); expect(onRefresh).toHaveBeenCalledOnce();
+    fireEvent.click(command("Refresh")); expect(onRefresh).toHaveBeenCalledOnce();
     expect(invoke).toHaveBeenCalledOnce();
   });
 
@@ -1133,10 +1258,15 @@ describe("a Data Collection's record details and forms", () => {
   });
   it("offers form creation only with a public create action and a connected handler", async () => {
     const onCreateForm = vi.fn(); const result = setup({ onCreateForm }); await screen.findByText("Alice");
-    expect(screen.queryByRole("button", { name: "Create form" })).toBeNull();
+    command("Refresh");
+    expect(screen.queryByRole("menuitem", { name: "Create form" })).toBeNull();
     const description = dataset(); description.operations.find(operation => operation.operationId === create)!.access = "link";
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} />); await screen.findByText("Alice");
-    fireEvent.click(screen.getByRole("button", { name: "Create form" })); expect(onCreateForm).toHaveBeenCalledOnce();
+    fireEvent.click(command("Create form")); expect(onCreateForm).toHaveBeenCalledOnce();
+    // Without a connected handler, a public create action offers no form.
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} onCreateForm={undefined} />);
+    command("Refresh");
+    expect(screen.queryByRole("menuitem", { name: "Create form" })).toBeNull();
   });
 });
 
@@ -1310,7 +1440,7 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   expect(invoke).toHaveBeenCalledTimes(3);
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(false);
-  expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(command("Refresh").getAttribute("aria-disabled")).toBeNull();
 });
 
 it("stands lines in for records not yet shown, and keeps the words while a shown page reloads", async () => {
@@ -1330,14 +1460,17 @@ it("stands lines in for records not yet shown, and keeps the words while a shown
   await act(async () => again.resolve({ result: page() }));
 });
 
-it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {
+it("shows the ⚡ button before New record, and a ⚡ that names the automations on each field they set", async () => {
+  const onToggle = vi.fn();
   setup({
-    automationsButton: <button type="button">Automations</button>,
+    automations: { open: false, count: 2, onToggle },
     fieldMarks: new Map([["Amount", ["Round the amount"]], ["Status", ["Review new people", "Stamp"]]]),
   });
   await screen.findByText("Alice");
-  const header = screen.getByRole("heading", { name: "People" }).closest("header")!;
-  expect(within(header).getAllByRole("button").map(button => button.textContent)).toEqual(["Automations", "New record"]);
+  const toolbar = screen.getByTestId("collection-new-record").parentElement!;
+  expect(within(toolbar).getAllByRole("button").map(button => button.textContent || button.getAttribute("aria-label"))).toEqual(["Search", "Automations2", "Manage Collection", "New record"]);
+  fireEvent.click(screen.getByTestId("collection-automations-button"));
+  expect(onToggle).toHaveBeenCalledOnce();
   const marks = within(grid()).getAllByTestId("table-field-mark");
   expect(marks.map(found => found.closest("button")?.textContent)).toEqual(["Amount", "Status"]);
   // The mark's words describe the field's sort control, and show on hover or keyboard focus.
@@ -1941,7 +2074,7 @@ describe("one queue for a table's changes", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(command("Refresh"));
     await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
     await loaded();
     expect(mark("Name")).toBe("unconfirmed");

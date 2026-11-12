@@ -1,5 +1,5 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
@@ -14,7 +14,7 @@ import { relativeTime } from "../relativeTime";
 import { computerInSentence, shownScheduleHost } from "../scheduleHost";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { EmptyState, GhostButton, IconButton, SecondaryButton } from "../ui/controls";
+import { EmptyState, IconButton, SecondaryButton } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
@@ -107,40 +107,6 @@ export function automationCount(file: ListCollectionAutomationsResult | null, ta
 /** False once dohc knows a Collection's automations.yaml does not exist yet. */
 export function automationsFileMade(file: ListCollectionAutomationsResult | null): boolean {
   return (file?.status === "shared" ? file.definitions.file.status : file?.status) !== "missing";
-}
-
-/** The ⚡ Automations button at the top of a Collection, with how many it has. */
-export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void; toolbar?: boolean }) {
-  if (props.toolbar) {
-    return (
-      <GhostButton
-        size="toolbar"
-        data-testid="collection-automations-button"
-        aria-pressed={props.open}
-        onClick={props.onClick}
-      >
-        <Zap size={14} strokeWidth={1.9} aria-hidden />
-        Automations
-        {props.count > 0 ? <span className="text-[12px] tabular-nums text-subtle">{props.count}</span> : null}
-      </GhostButton>
-    );
-  }
-  return (
-    <SecondaryButton
-      data-testid="collection-automations-button"
-      aria-pressed={props.open}
-      onClick={props.onClick}
-      className={`flex items-center gap-1.5${props.open ? " bg-panel-2 text-ink" : ""}`}
-    >
-      <Zap size={12} aria-hidden />
-      Automations
-      {props.count > 0 ? (
-        <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
-          {props.count}
-        </span>
-      ) : null}
-    </SecondaryButton>
-  );
 }
 
 /**

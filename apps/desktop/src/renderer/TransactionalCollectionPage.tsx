@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from "react";
-import { AlertTriangle, Archive, CalendarDays, Check, ChevronLeft, ChevronRight, Clock, Download, Eraser, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Table2, Undo2, X } from "lucide-react";
+import { AlertTriangle, Archive, Check, ChevronLeft, ChevronRight, Clock, Download, Eraser, FileCode, FileInput, FileSpreadsheet, History, Inbox, LayoutList, PanelsTopLeft, RefreshCw, Shield, SlidersHorizontal, Undo2, X, Zap } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
@@ -15,6 +15,7 @@ import { isComposingKey } from "./ui/keys";
 import { AutomationFieldIcon, automationFieldMarkLabel, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
+import { CollectionFrame, type CollectionFrameTab, type CollectionFrameViewField, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { CollectionAttachmentInput, CollectionRelationInput, invalidField } from "./CollectionResourceInputs";
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import { ResourceCell, ResourceCellEditor } from "./TransactionalResourceCells";
@@ -44,12 +45,15 @@ export interface TransactionalButtons {
 }
 export interface TransactionalCollectionPageProps extends CollectionResources {
   buttons?: TransactionalButtons;
-  /** The ⚡ Automations button, at the top beside New record. */
-  automationsButton?: ReactNode;
+  /** The ⚡ panel's button: whether the panel is open, how many automations the table has, and what a press does. */
+  automations?: { open: boolean; count: number; onToggle(): void };
+  /** The ⚡ panel, docked at the right of the view. */
+  panel?: ReactNode;
   /** The fields switched-on automations set, by name, with those automations' names. */
   fieldMarks?: FieldMarks;
   activeView?: CollectionTableView | null;
-  viewControls?(disabled: boolean): ReactNode;
+  /** What someone who can save views does with them. Without it, the tabs change the layout on this computer and save nothing. */
+  views?: TransactionalViewControls;
   copy?: DatasetCopyStatus;
   onRefresh?(): void;
   recordsVersion?: number;
@@ -74,10 +78,36 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   /** Opens the fields dialog on a new Date field, for a calendar that has none. */
   onAddDateField?(): void;
   onCustomize?(): void;
+  /** Opens the file that describes the Collection. */
+  onOpenSource?(): void;
   onManageAccess?(): void;
   onExportRecovery?(): void;
   onArchive?(): void;
 }
+/** A table's saved views, as the tabs show and change them. */
+export interface TransactionalViewControls {
+  list: readonly CollectionTableView[];
+  /** The views file is being read or written. */
+  busy: boolean;
+  /** Opens a saved view, or All records for null. */
+  select(viewId: string | null): void;
+  /** Each answers what went wrong as a sentence, or null. */
+  create(view: NewCollectionView): Promise<string | null>;
+  rename(viewId: string, name: string): Promise<string | null>;
+  remove(viewId: string): void;
+  /** Saves the field a board groups by, or the date field a calendar uses. */
+  setField(viewId: string, field: { groupBy: string } | { dateField: string }): void;
+  /** Opens the editor for a view's search, sort and filters. */
+  edit(viewId: string): void;
+  /** Opens the list of views. */
+  manage(): void;
+}
+const ALL_RECORDS = "all-records";
+/** The tabs of someone who cannot save views: one per layout. A board shows only when a field can group it. */
+const LAYOUT_TABS: readonly CollectionFrameTab[] = [{ id: "table", name: "Table", kind: "table" }, { id: "board", name: "Board", kind: "board" }, { id: "calendar", name: "Calendar", kind: "calendar" }];
+const FORM_OPEN = "Save or cancel the open form first.";
+const RECORDS_LOADING = "Wait for the records to load.";
+const RECORDS_FAILED = "dohc could not load the records. Refresh first.";
 type Query = { after: TransactionalCursor | null; search: string; filters?: CollectionTableView["filters"]; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
 /** The last confirmed edit that can be reversed: its record at the version its receipt reported, and the values it replaced. */
@@ -861,71 +891,100 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const inPlace = (field: TransactionalField) => field.type !== "checkbox" && field.type !== "multi-select";
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
-  const hasManagement = props.onCustomize || props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
-  return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4" onFocus={event => {
+  // The page's own controls wait for a read or an open form, as they did as buttons. A menu row says why.
+  const paused = disabled || editor !== null;
+  const why = (needsRecords = false) => editor !== null ? FORM_OPEN : disabled ? RECORDS_LOADING : needsRecords && failure !== null ? RECORDS_FAILED : undefined;
+  const icon = (Icon: typeof Archive) => <Icon size={14} strokeWidth={1.9} aria-hidden />;
+  // The tabs. Someone who can save views gets All records and each saved view. Anyone else gets the three
+  // layouts, which change what this computer shows and save nothing.
+  const saved = props.views;
+  const groupable = fields.filter(supportsSort);
+  const tabs: readonly CollectionFrameTab[] = saved
+    ? [{ id: ALL_RECORDS, name: "All records", kind: "table" }, ...saved.list.map((view): CollectionFrameTab => ({ id: view.viewId, name: view.name, kind: view.kind, saved: true }))]
+    : LAYOUT_TABS.filter(tab => tab.kind !== "board" || groupable.length > 0);
+  const showLayout = (kind: CollectionTableView["kind"]) => setLocalView({ viewId: "local", name: "Current view", search: query.search, filters: query.filters ?? [], sort: query.sort ?? null, kind,
+    ...(kind === "board" ? { groupBy: fields.find(field => field.type === "select")?.fieldId ?? groupable[0]?.fieldId } : {}),
+    ...(kind === "calendar" ? { dateField: dateFields[0]?.fieldId } : {}) });
+  const frameViews: CollectionFrameViews | undefined = saved && {
+    groupFields: groupable.map(field => ({ id: field.fieldId, name: field.name })),
+    dateFields: dateFields.map(field => ({ id: field.fieldId, name: field.name })),
+    onAddDateField: props.onAddDateField,
+    nameMaxLength: 100,
+    create: saved.create, rename: saved.rename, remove: saved.remove, onEdit: saved.edit,
+    // A deleted view comes back from its notice's Undo.
+    confirmDelete: false,
+  };
+  // A saved view keeps the field its board groups by and its calendar's date field. A layout that is not saved changes here only.
+  const changeViewField = (field: { groupBy: string } | { dateField: string }) => {
+    if (!shownView) return;
+    if (saved && localView === null && props.activeView?.viewId === shownView.viewId) saved.setField(shownView.viewId, field);
+    else setLocalView({ ...shownView, ...field });
+  };
+  const viewField: CollectionFrameViewField | undefined = shownView?.kind === "board"
+    ? { label: "Group board by", prefix: "Group by", value: shownView.groupBy, options: groupable.map(field => ({ id: field.fieldId, name: field.name })), onChange: groupBy => changeViewField({ groupBy }) }
+    : shownView?.kind === "calendar" && shownView.dateField
+      ? { label: "Calendar date", prefix: "Date", value: shownView.dateField, options: dateFields.map(field => ({ id: field.fieldId, name: field.name })), onChange: dateField => changeViewField({ dateField }) }
+      : undefined;
+  const shownRecords = !visual && page ? page.rows.length : null;
+  return <CollectionFrame name={table.name} aria-busy={busy} onFocus={event => {
     const fieldId = event.target.closest<HTMLElement>("[data-field]")?.dataset.field;
     lastFocus.current = fieldId === undefined ? null : { element: event.target, fieldId };
-  }}>
-    <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
-      <div className="flex shrink-0 items-center gap-2">{props.automationsButton}
-      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={writeDisabled || editor !== null} onClick={event => openCreate(event.currentTarget)}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}</div>
-    </header>
-    <div className="flex flex-wrap items-center gap-2">
-      {props.viewControls?.(disabled || editor !== null)}
-      <span className="relative flex items-center text-muted">
-        {selectedView?.kind === "board" ? <PanelsTopLeft size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" /> : selectedView?.kind === "calendar" ? <CalendarDays size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" /> : <Table2 size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" />}
-        <select aria-label="Collection layout" className={`${selectClass.replace("w-full", "w-auto").replace("px-2", "pl-8 pr-2")}`} disabled={disabled || editor !== null} value={selectedView?.kind ?? "table"} onChange={event => {
-        const kind = event.target.value as CollectionTableView["kind"];
-        setLocalView({viewId:"local",name:"Current view",search:query.search,filters:query.filters??[],sort:query.sort??null,kind,
-          ...(kind==="board"?{groupBy:fields.find(field=>field.type==="select")?.fieldId??fields.find(supportsSort)?.fieldId}:{}),
-          ...(kind==="calendar"?{dateField:dateFields[0]?.fieldId}:{})});
-      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar">Calendar</option></select></span>
-      {selectedView?.kind==="board" ? <select aria-label="Group board by" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.groupBy??""} onChange={event=>setLocalView({...selectedView,groupBy:event.target.value})}>{fields.filter(supportsSort).map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
-      {shownView?.kind==="calendar" && shownView.dateField ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={shownView.dateField} onChange={event=>setLocalView({...shownView,dateField:event.target.value})}>{dateFields.map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
-      {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={writeDisabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
-      {undo && !offline ? <SecondaryButton disabled={writeDisabled || queue.size > 0} onClick={undoLast} className="flex items-center gap-1.5"><Undo2 size={14} strokeWidth={1.9} aria-hidden />Undo last edit</SecondaryButton> : null}
-      <form className="ml-auto flex min-w-40 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
-      <input aria-label="Search collection" placeholder="Search records" type="search" maxLength={200} className={`${inputClass.replace("w-full", "w-48 min-w-32 flex-1")}`} value={search} disabled={disabled || editor !== null} onChange={event => setSearch(event.target.value)} />
-      <IconButton type="submit" aria-label="Search" title="Search" disabled={disabled || editor !== null}><Search size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Refresh" title="Refresh" disabled={disabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}><RefreshCw size={16} strokeWidth={1.9} aria-hidden /></IconButton>
-      </form>
-      {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={writeDisabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
-      {hasManagement ? <details className="group relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }} onClick={event => { if (event.target instanceof Element && event.target.closest("button:not(:disabled)")) event.currentTarget.open = false; }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
-        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
-          <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
-        </summary>
-        <div className="dohc-popover absolute right-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
-          {props.onReviewSchema ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={writeDisabled || editor !== null} onClick={props.onReviewSchema}><LayoutList size={14} strokeWidth={1.9} aria-hidden />Fields and names</SecondaryButton> : null}
-          {props.onManageAccess ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onManageAccess}><Shield size={14} strokeWidth={1.9} aria-hidden />Manage access</SecondaryButton> : null}
-          {props.onExportRecovery ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onExportRecovery}><Download size={14} strokeWidth={1.9} aria-hidden />Export recovery</SecondaryButton> : null}
-          {props.onTransferCsv ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={writeDisabled || editor !== null} onClick={props.onTransferCsv}><FileSpreadsheet size={14} strokeWidth={1.9} aria-hidden />Import or export CSV</SecondaryButton> : null}
-          {props.onHistory ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onHistory}><History size={14} strokeWidth={1.9} aria-hidden />History</SecondaryButton> : null}
-          {props.onPendingResponses ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}><Inbox size={14} strokeWidth={1.9} aria-hidden />Pending responses</SecondaryButton> : null}
-          {props.onCustomize ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onCustomize}><SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />Customize…</SecondaryButton> : null}
-          {props.onArchive ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onArchive}><Archive size={14} strokeWidth={1.9} aria-hidden />Archive</SecondaryButton> : null}
-        </div>
-      </details> : null}
-    </div>
-    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
-      : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
-    {unshown.length > 0 ? <UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} onDismissDeletion={id => queue.dismissDeletion(id)} /> : null}
+  }}
+    // A count of this page's records. It says so when the Collection holds more pages.
+    count={shownRecords === null ? undefined : `${shownRecords} ${shownRecords === 1 ? "record" : "records"}${previous.length > 0 || (page?.nextCursor ?? null) !== null ? " on this page" : ""}`}
+    status={props.copy ? <span role="status" className="truncate text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+      : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : undefined}
+    tabs={tabs} activeTabId={saved ? props.activeView?.viewId ?? ALL_RECORDS : selectedView?.kind ?? "table"}
+    onSelectTab={tabId => { if (saved) saved.select(tabId === ALL_RECORDS ? null : tabId); else showLayout(tabId as CollectionTableView["kind"]); }}
+    tabsDisabled={paused || saved?.busy === true} views={frameViews} viewField={viewField}
+    search={{ value: search, onChange: setSearch, disabled: paused, onSubmit: () => void load({ ...query, after: null, search }, []) }}
+    actions={[
+      ...(undo && !offline ? [{ id: "undo", label: "Undo last edit", icon: icon(Undo2), disabled: writeDisabled || queue.size > 0, onClick: undoLast }] : []),
+      ...(onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => ({ id: operation.operationId, label: operation.label, disabled: writeDisabled, onClick: () => onCustomAction(operation.operationId) })) : []),
+    ]}
+    automations={props.automations}
+    newRecord={canCreate ? { disabled: writeDisabled || editor !== null, onClick: openCreate } : undefined}
+    menuLabel="Manage Collection"
+    menu={[
+      { label: "View", commands: [
+        props.onReviewSchema && { id: "fields", label: "Fields and names", icon: icon(LayoutList), disabled: writeDisabled || editor !== null, reason: why(true), onSelect: props.onReviewSchema },
+        saved && { id: "views", label: "Views", icon: icon(PanelsTopLeft), disabled: paused || saved.busy, reason: why() ?? "dohc is reading the saved views.", onSelect: saved.manage },
+        { id: "refresh", label: "Refresh", icon: icon(RefreshCw), disabled: paused, reason: why(), onSelect: () => props.onRefresh ? props.onRefresh() : void load(query) },
+      ] },
+      { label: "Collection", commands: [
+        props.automations && { id: "automations", label: "Automations", icon: icon(Zap), count: props.automations.count, onSelect: props.automations.onToggle },
+        props.onCustomize && { id: "customize", label: "Customize…", icon: icon(SlidersHorizontal), disabled: paused, reason: why(), onSelect: props.onCustomize },
+        canCreateForm && props.onCreateForm && { id: "form", label: "Create form", icon: icon(FileInput), disabled: writeDisabled || editor !== null, reason: why(true), onSelect: props.onCreateForm },
+        props.onManageAccess && { id: "access", label: "Manage access", icon: icon(Shield), disabled: paused, reason: why(), onSelect: props.onManageAccess },
+        props.onTransferCsv && { id: "csv", label: "Import or export CSV", icon: icon(FileSpreadsheet), disabled: writeDisabled || editor !== null, reason: why(true), onSelect: props.onTransferCsv },
+        props.onHistory && { id: "history", label: "History", icon: icon(History), disabled: paused, reason: why(), onSelect: props.onHistory },
+        props.onPendingResponses && { id: "pending", label: "Pending responses", icon: icon(Inbox), disabled: paused, reason: why(), onSelect: props.onPendingResponses },
+        props.onExportRecovery && { id: "recovery", label: "Export recovery", icon: icon(Download), disabled: paused, reason: why(), onSelect: props.onExportRecovery },
+        props.onOpenSource && { id: "source", label: "Open source", icon: icon(FileCode), onSelect: props.onOpenSource },
+        props.onArchive && { id: "archive", label: "Archive", icon: icon(Archive), disabled: paused, reason: why(), onSelect: props.onArchive },
+      ] },
+    ]}
+    panel={props.panel}
+  ><div className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
+    {unshown.length > 0 ? <div className="shrink-0 px-5"><UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} onDismissDeletion={id => queue.dismissDeletion(id)} /></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
-    {busy ? page ? <p role="status" className="m-0 text-[12px] text-muted">Loading records…</p> : <SkeletonRows label="Loading records…" /> : null}
+    {busy ? page ? <p role="status" className="m-0 px-5 text-[12px] text-muted">Loading records…</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
-    : visual && shownView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
+    : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
       onReadInPlace={rows => { showOpenRecord(rows); const shows = visualRead.current; visualRead.current = Number.POSITIVE_INFINITY; view.readShown(Number.isFinite(shows) ? shows : -1, rows); }}
       disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
       canMove={fieldId=>editOperation(fieldId)!==undefined}
       onMove={(row,fieldId,value)=>{const operation=editOperation(fieldId),field=fields.find(field=>field.fieldId===fieldId);if(!operation||!field||disabled)return;
-        queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"},view);}} /></Suspense> : null}
+        queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"},view);}} /></Suspense></div> : null}
     {failure && !busy && !visualBusy && (visual || !page) ? <CollectionUnavailable waiting={failure.wait !== null} words={failure.wait?.ended ? WAIT_ENDED : failure.words} onRetry={failure.retry} /> : null}
     {/* The table always shows its columns, so an empty Collection already says what a record holds. An offline copy pauses an open editor with what it holds. */}
     {!visual && page ? <div className="min-h-0 flex-1"><DataTable schema={schema} records={records} sort={sort} onSortChange={sortTable} canSortField={names.canSortField} fieldLabel={names.fieldLabel} recordName={nameRecord}
       onCellChange={changeCell} onDraftAbandoned={keepDraft} editingDisabled={offline} canEditCell={canEditCell} cellStatuses={view.statuses} acknowledgedWriteId={view.acknowledged} subscribeToDiscardedWrites={queue.subscribeToDiscarded}
       hostCells={hostCells} fieldMarks={tableMarks} renderButton={renderButton} onOpenRecord={openRecord} onNewRecord={canCreate ? newRecord : undefined}
       emptyText={page.rows.length > 0 || (!query.search && canCreate) ? undefined : query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."} /></div> : null}
-    {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"}{previous.length > 0 || page.nextCursor !== null ? " on this page" : ""}</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
+    {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex shrink-0 items-center justify-end gap-2 px-5 pb-2 text-[12px] text-muted"><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
     {/* While a field is open in details, its other controls wait. Closing details closes the field, as Cancel does. */}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={offline} disabled={disabled || detailsEdit !== null} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
       editing={detailsEdit ? { fieldId: detailsEdit.field.fieldId, name: editEntry!.field.name, content: <div data-edit-in-place className="flex min-w-0 flex-1 items-start gap-2" onKeyDown={editKeys}>
@@ -936,11 +995,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       onDelete={remove && confirmDelete ? () => { void deleteRecord(details); } : undefined}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
     {/* A new record's form, and an edit whose record details has closed. Escape cancels it, as Cancel does. */}
-    {editor && !detailsEdit ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onKeyDown={editKeys} onSubmit={event => { event.preventDefault(); submitEditor(); }}>
+    {editor && !detailsEdit ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="mx-5 mb-3 shrink-0 rounded-lg border border-line bg-panel p-3" onKeyDown={editKeys} onSubmit={event => { event.preventDefault(); submitEditor(); }}>
       <div className="flex flex-wrap gap-3">{form.map(entry => <div key={entry.field.fieldId} data-field={entry.field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{entry.field.name}</span>{valueInput(entry)}{fieldError(entry)}</div>)}</div>
       <div className="mt-3 flex flex-wrap items-center justify-end gap-2"><span className="mr-auto">{formNote}</span><SecondaryButton disabled={formHeld} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton ref={formSave} type="submit" disabled={formHeld || !formOperation}>{sent && sent.state !== "unconfirmed" ? "Saving…" : editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}
-  </section>;
+  </div></CollectionFrame>;
 }
 
 type LoadFailure = { words: string; retry(): void; wait: { ms: number; ended: boolean } | null };

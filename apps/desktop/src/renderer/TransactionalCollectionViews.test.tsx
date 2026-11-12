@@ -230,11 +230,52 @@ it("leaves the offer out when the read action cannot find records outside the mo
 it("offers layout changes to readers without owner view-source controls",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.range?{range:input.range}:{}),...(input.group?{group:input.group}:{})}};});
   setup(invoke,{...board,kind:"table"});
-  await waitFor(()=>expect(screen.getByLabelText("Collection layout").hasAttribute("disabled")).toBe(false));
-  fireEvent.change(screen.getByLabelText("Collection layout"),{target:{value:"calendar"}});
+  const tabs=()=>within(screen.getByTestId("collection-view-switcher")).getAllByRole<HTMLButtonElement>("button");
+  const tab=(name:string)=>tabs().find(tab=>tab.textContent===name)!;
+  await waitFor(()=>expect(tab("Calendar").disabled).toBe(false));
+  // The layouts are tabs that change what this computer shows. None is a saved view.
+  expect(tabs().map(tab=>[tab.textContent,tab.getAttribute("aria-pressed")])).toEqual([["Table","true"],["Board","false"],["Calendar","false"]]);
+  fireEvent.click(tab("Calendar"));
   await screen.findByRole("button",{name:"January"});
-  expect(screen.queryByRole("button",{name:"Views"})).toBeNull();
-  expect((screen.getByLabelText("Calendar date") as HTMLSelectElement).value).toBe("date");
+  expect(tab("Calendar").getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button",{name:"Add a view"})).toBeNull();
+  expect(screen.queryByRole("button",{name:"View actions"})).toBeNull();
+  fireEvent.contextMenu(tab("Calendar"));
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Manage Collection"}));
+  expect(screen.queryByRole("menuitem",{name:"Views"})).toBeNull();
+  fireEvent.keyDown(screen.getByRole("menu"),{key:"Escape"});
+  expect(screen.getByRole("button",{name:"Date Date"}).title).toBe("Calendar date");
+  // A board groups by the first select field, and its field changes here only.
+  fireEvent.click(tab("Board"));
+  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  expect(within(screen.getByRole("menu",{name:"Group board by"})).getAllByRole("menuitemradio").map(row=>[row.textContent,row.getAttribute("aria-checked")])).toEqual([["Name","false"],["Status","true"],["Date","false"]]);
+  fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
+  expect(await screen.findByRole("button",{name:"Group by Name"})).toBeTruthy();
+  expect(invoke.mock.calls.some(([request])=>JSON.stringify(request.input).includes('"name"'))).toBe(true);
+});
+it("saves the field a saved board groups by, and changes nothing here until its file does",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.group?{group:input.group}:{})}};});
+  const views={list:[board],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
+  const result=setup(invoke,board);
+  result.rerender(<TransactionalCollectionPage {...result.props} views={views}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
+  expect(views.setField).toHaveBeenCalledExactlyOnceWith("board",{groupBy:"name"});
+  expect(screen.getByRole("button",{name:"Group by Status"})).toBeTruthy();
+  // The saved view's tab is the open one, among All records and the saved views.
+  expect(within(screen.getByTestId("collection-view-switcher")).getAllByRole("button").filter(tab=>tab.hasAttribute("aria-pressed")).map(tab=>[tab.textContent,tab.getAttribute("aria-pressed")])).toEqual([["All records","false"],["Board","true"]]);
+});
+it("saves the date field of a saved calendar",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.range?{range:input.range}:{})}};});
+  const due={fieldId:"due",name:"Due",type:"date" as const,required:false,unique:false};
+  const dated={...dataset,tables:[{...dataset.tables[0]!,fields:[...dataset.tables[0]!.fields,due]}],operations:dataset.operations.map(operation=>operation.operationId==="read"?{...operation,fieldIds:[...operation.fieldIds,"due"]}:operation)};
+  const views={list:[calendar],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
+  const result=setup(invoke,calendar);
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={dated} views={views}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Date Date"}));
+  fireEvent.click(screen.getByRole("menuitemradio",{name:"Due"}));
+  expect(views.setField).toHaveBeenCalledExactlyOnceWith("calendar",{dateField:"due"});
 });
 it("paginates calendar results without implying the first 50 events cover the month",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{

@@ -8,9 +8,13 @@ import type { AutomationRunSettledEvent, FindDatasetCollectionResult, ListCollec
 import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollection";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPanel";
-import type { TransactionalButtons } from "./TransactionalCollectionPage";
+import type { TransactionalButtons, TransactionalViewControls } from "./TransactionalCollectionPage";
+import type { CollectionTableView } from "./collectionTableViews";
 
-const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
+const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(),
+  // The owner's page reads the table's saved views. Unless a test saves some, the workspace has no views file.
+  readWorkspaceText: vi.fn(async (_input: { relativePath: string }): Promise<{ text: string; contentHash: string; truncated: boolean }> => { throw Error("missing"); }),
+  listWorkspaceFiles: vi.fn(async (_input: unknown) => ({ files: [] as Array<{ path: string }> })), writeWorkspaceText: vi.fn(),
   listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
@@ -31,8 +35,14 @@ const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
 vi.mock("./CreateDatasetFormDialog", () => ({ CreateDatasetFormDialog: (props: { onApproveChoices?(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void> }) =>
   <button onClick={() => void props.onApproveChoices!({ workspaceId: "workspace-a", preparationId: "choices", revisionSha256: "a".repeat(64), approvalDigest: "d".repeat(64) }, new AbortController().signal)
     .then(() => formDialog.outcomes.push("approved"), (error: Error) => formDialog.outcomes.push(error.message))}>Approve public choices</button> }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
-  {props.automationsButton}
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automations?: { open: boolean; count: number; onToggle(): void }; panel?: ReactNode; views?: TransactionalViewControls; activeView?: CollectionTableView | null; onOpenSource?(): void; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
+  {props.automations && <button data-testid="collection-automations-button" aria-pressed={props.automations.open} onClick={props.automations.onToggle}>Automations{props.automations.count > 0 ? props.automations.count : null}</button>}
+  {props.panel}
+  {props.onOpenSource && <button onClick={props.onOpenSource}>Open source</button>}
+  {props.views && <section aria-label="View tabs"><output aria-label="Open view">{props.activeView?.name ?? "All records"}</output>
+    {props.views.list.map(view => <span key={view.viewId}><button onClick={() => props.views!.select(view.viewId)}>Open {view.name}</button><button onClick={() => props.views!.edit(view.viewId)}>Edit {view.name}</button></span>)}
+    <button disabled={props.views.busy} onClick={props.views.manage}>Views</button>
+    <button onClick={() => { void props.views!.create({ name: "Everything", kind: "table" }); }}>Add view</button></section>}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-fields={props.dataset?.tables[0]?.fields.map(field => field.name).join(",")} data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
@@ -49,6 +59,70 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 // A builder left with changes keeps its draft for the next panel, so each test starts with none.
 afterEach(() => { cleanup(); resetAutomationButtonsForTests(); resetKeptAutomationDraftsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
+
+it("shows no path above the page, and opens the Collection's file from Open source", async () => {
+  backend.dataset.mockResolvedValue({ kind: "description", dataset });
+  const onOpenFile = vi.fn();
+  const { container } = render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={onOpenFile} onOpenScheduleSettings={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open source" }));
+  expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("data/dataset.json");
+  expect(container.textContent).not.toContain("data/dataset.json");
+});
+
+describe("a dataset table's saved views", () => {
+  const readable: DatasetDescription = { ...dataset, operations: [...dataset.operations, { operationId: id(5), tableId: id(2), name: "read", label: "Read", kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] }] };
+  const unpaid: CollectionTableView = { viewId: id(20), name: "Unpaid", kind: "table", search: "Pending", filters: [], sort: null };
+  const viewsPath = `collection-views/${id(1)}/${id(2)}.json`;
+  const saved = (views: CollectionTableView[]) => ({ text: JSON.stringify({ formatVersion: 1, datasetId: id(1), tableId: id(2), views }), contentHash: "c".repeat(64), truncated: false });
+  // Later tests start with no views file again, and with no view kept open on this computer.
+  afterEach(() => { backend.readWorkspaceText.mockImplementation(async () => { throw Error("missing"); }); localStorage.clear(); });
+  const renderPage = (owner: boolean, onError = vi.fn()) => render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onNotice={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+
+  it("gives the owner the table's saved views, opens the one chosen, and opens the existing editor from Edit view…", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: readable });
+    backend.readWorkspaceText.mockResolvedValue(saved([unpaid]));
+    const onError = vi.fn();
+    renderPage(true, onError);
+    const open = await screen.findByRole("button", { name: "Open Unpaid" });
+    expect(backend.readWorkspaceText).toHaveBeenCalledWith({ workspaceId: "workspace-a", relativePath: viewsPath });
+    // No view was open on this computer before, so the page starts on All records.
+    expect(screen.getByLabelText("Open view").textContent).toBe("All records");
+    fireEvent.click(open);
+    expect(screen.getByLabelText("Open view").textContent).toBe("Unpaid");
+    fireEvent.click(screen.getByRole("button", { name: "Edit Unpaid" }));
+    const editor = within(screen.getByRole("region", { name: "Collection views" }));
+    expect(editor.getByLabelText<HTMLInputElement>("View name").value).toBe("Unpaid");
+    expect(editor.getByLabelText<HTMLInputElement>("View search").value).toBe("Pending");
+    fireEvent.click(editor.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("region", { name: "Collection views" })).toBeNull();
+    // Views opens the same list of views.
+    fireEvent.click(screen.getByRole("button", { name: "Views" }));
+    expect(within(screen.getByRole("region", { name: "Collection views" })).getByRole("button", { name: "Edit view Unpaid" })).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("writes a view added from the tabs to the table's file, naming the hash it read", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: readable });
+    backend.readWorkspaceText.mockResolvedValue(saved([unpaid]));
+    backend.writeWorkspaceText.mockResolvedValue({ status: "written", contentHash: "d".repeat(64) });
+    renderPage(true);
+    await screen.findByRole("button", { name: "Open Unpaid" });
+    fireEvent.click(screen.getByRole("button", { name: "Add view" }));
+    await waitFor(() => expect(backend.writeWorkspaceText).toHaveBeenCalledOnce());
+    const write = backend.writeWorkspaceText.mock.calls[0]![0] as { workspaceId: string; relativePath: string; text: string; expectedContentHash: string };
+    expect(write).toMatchObject({ workspaceId: "workspace-a", relativePath: viewsPath, expectedContentHash: "c".repeat(64) });
+    expect((JSON.parse(write.text) as { views: CollectionTableView[] }).views.map(view => view.name)).toEqual(["Unpaid", "Everything"]);
+  });
+
+  it("gives someone who does not own the Collection no saved views, and reads no views file", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: readable });
+    backend.readWorkspaceText.mockResolvedValue(saved([unpaid]));
+    renderPage(false);
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByRole("region", { name: "View tabs" })).toBeNull();
+    expect(backend.readWorkspaceText).not.toHaveBeenCalled();
+  });
+});
 
 describe("a dataset table's buttons", () => {
   const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };

@@ -7,7 +7,6 @@ import { useRequestSequence } from "../useRequestSequence";
 import {
   automationCount,
   automationsFileMade,
-  AutomationsButton,
   AutomationsNote,
   AutomationsPanel,
   useCollectionAutomations,
@@ -16,7 +15,7 @@ import { automationTableOf, builderFields, type AutomationTable } from "./automa
 import type { Automation } from "./automationSentence";
 import { useDatasetFieldMarks, type FieldMarks } from "./collectionFieldMarks";
 
-// The ⚡ button, panel, and field marks of one dataset table, which is a
+// The ⚡ button's state, the panel, and the field marks of one dataset table, which is a
 // Collection. A dataset keeps one automations.yaml in its folder for all its
 // tables, so main first names that folder, then the panel works on it as it
 // does for a document Collection and lists the automations of this table.
@@ -40,7 +39,8 @@ export function useDatasetAutomations(props: {
   /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
   onOpenFields?: () => void;
 }): {
-  button: ReactNode;
+  /** What the page's Automations button and menu row show and do. */
+  toggle: { open: boolean; count: number; onToggle: () => void };
   panel: ReactNode;
   fieldMarks: FieldMarks;
   /** Opens the panel's builder on a new automation, such as one a button starts. */
@@ -102,14 +102,12 @@ export function useDatasetAutomations(props: {
   }, []);
   const fields = useMemo(() => builderFields(described?.fields ?? []), [described]);
   const full = collectionPath !== null && table !== undefined;
-  // The full panel may hold a draft, so the header's button asks it to close.
-  const button = (
-    <AutomationsButton
-      open={open}
-      count={automationCount(automations.file, table)}
-      onClick={() => (!open ? setOpen(true) : full ? setCloseAsk((ask) => ask + 1) : close())}
-    />
-  );
+  // The full panel may hold a draft, so the page's button asks it to close.
+  const toggle = {
+    open,
+    count: automationCount(automations.file, table),
+    onToggle: () => (!open ? setOpen(true) : full ? setCloseAsk((ask) => ask + 1) : close()),
+  };
   const panel = !open ? null : full ? (
     <AutomationsPanel
       workspaceId={workspaceId}
@@ -144,5 +142,5 @@ export function useDatasetAutomations(props: {
       ) : found.status === "cannot-run" ? found.reason : undefined}
     </AutomationsNote>
   );
-  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automationsFileMade(automations.file) };
+  return { toggle, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automationsFileMade(automations.file) };
 }

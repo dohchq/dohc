@@ -149,9 +149,12 @@ Use a dataset with explicitly authorized reads for private responses.
 
 ## Manage the same records
 
-Choose **Table**, **Board**, or **Calendar** in the Collection's layout control.
-For a board, choose **Group board by**. For a calendar, choose **Calendar date**.
-Use **Create view** to save a layout with filters and sorting.
+The tabs above the records are the Collection's views. **All records** is always the first.
+Choose **+** beside the tabs to add a **Table**, **Board**, or **Calendar** view.
+A board asks which field to group by. A calendar asks which date field to use.
+Change either later with **Group by** or **Date**, at the right of the tabs.
+To give a view a search, a sort, or filters, open its tab's menu and choose **Edit view…**.
+Someone who cannot save views gets **Table**, **Board**, and **Calendar** tabs. Those change the layout on that computer only.
 Boards page through groups and their records. Calendars request the visible date range.
 Moving a card or date invokes the permitted edit operation with the record's current version.
 Read-only access cannot move records. A refused move leaves the saved record unchanged.

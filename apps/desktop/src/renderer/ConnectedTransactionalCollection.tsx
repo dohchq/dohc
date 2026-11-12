@@ -6,8 +6,7 @@ import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus, DatasetMigrationPreparation, DatasetSchemaChange } from "@dohc/cli/dataset";
-import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
-import type { CollectionTableView } from "./collectionTableViews";
+import { useCollectionTableViews } from "./useCollectionTableViews";
 import { bridge } from "./bridge";
 import { dirnameOf } from "./path";
 import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
@@ -77,7 +76,6 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     return { ...fields, datasetPath, expectedDatasetId };
   };
   const describedId = useRef<string | undefined>(undefined);
-  const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
   // Why this computer cannot use the workspace's Collections; the page says so in place.
@@ -212,6 +210,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     onRecordsChanged: () => setRecordsVersion(value => value + 1),
     onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings,
     onOpenFields: owner ? () => { setViewingHistory(false); setEditingFields(true); } : undefined });
+  // The view source controls are the owner's. Anyone else changes the layout on their own computer.
+  const views = useCollectionTableViews({ enabled: owner, workspaceId, dataset, tableId, onError, onNotice });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetPath, expectedDatasetId: datasetId });
@@ -269,13 +269,15 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
       return result;
     }} />}</>;
-  // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><div className="flex min-w-0 px-1"><button type="button" className="min-w-0 truncate rounded-md px-3 py-1 text-left font-mono text-[12px] text-muted hover:bg-hover hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button></div><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled}
+  // The page docks the ⚡ panel at the right of its view. Open source opens the file that describes the Collection.
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled}
     buttons={buttonColumns}
-    automationsButton={automations.button}
+    automations={automations.toggle}
+    panel={automations.panel}
     fieldMarks={automations.fieldMarks}
-    activeView={owner ? activeView : null}
-    viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
+    activeView={views?.active ?? null}
+    views={views ?? undefined}
+    onOpenSource={() => onOpenFile(datasetPath)}
     copy={copy}
     onRefresh={() => { void refresh(); }}
     onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}
@@ -327,7 +329,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
         return { value, label: display(label ? row.values[label.fieldId] : value) || String(value) };
       }), hasMore: page.nextCursor !== null };
     }}
-    invoke={invoke} /></div>{automations.panel}</div>
+    invoke={invoke} /></div>
+    {views?.dialog}
     {viewingPending && owner && !copy?.offline && <CollectionPendingResponsesDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setViewingPending(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
