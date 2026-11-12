@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { editorTabTestId } from "../src/testPins";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
@@ -21,7 +22,8 @@ const OWNER_TOKEN = "test:e2e-granter", RECIPIENT_TOKEN = "test:e2e-recipient";
 const OWNER_EMAIL = "e2e-granter@dohc.test", RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
 // The Collection opens on a board. These specs follow a record with nothing typed in it through the relay, and in a
 // table New record starts a row that makes no record until it holds a value. Beside a board it makes the record at once.
-const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n";
+// Its second view is a table, where one step types a record in the new row.
+const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
 type Op = { originId: string; opKind: string; payload: Record<string, unknown> };
 async function log(relay: SyncRelayHandle): Promise<Op[]> {
   const query = new URLSearchParams({ since: "0", limit: "1000", ...(relayAdoptedIdentity(relay.dbPath, OWNER_ID) ?? {}) });
@@ -42,11 +44,24 @@ async function openCollection(page: Page) {
 /**
  * Makes a record with New record, and opens its page. The record opens in the panel beside the board, in no file tab,
  * so the specs that follow its page through the relay open the page from the panel.
+ *
+ * The panel may still show the record made before: it takes the new record only once that record exists. The panel
+ * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
+ * before it presses Open as page. Pressed sooner, it opens the page of the record before.
+ *
+ * It then closes the panel, so the specs go on with the record's page alone, as they did when New record opened it.
  */
 async function newRecordPage(page: Page, file = "Untitled") {
   await page.getByTestId("collection-new-record").click();
-  await page.getByTestId("collection-record-panel").getByRole("button", { name: "Open as page", exact: true }).click({ timeout: 30_000 });
-  await expect(page.getByTestId(`tab-${COLLECTION}/${file}.md`)).toBeVisible({ timeout: 30_000 });
+  const panel = page.getByRole("complementary", { name: file, exact: true });
+  await panel.getByRole("button", { name: "Open as page", exact: true }).click({ timeout: 30_000 });
+  const tab = page.getByTestId(`tab-${COLLECTION}/${file}.md`);
+  await expect(tab).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId(editorTabTestId(`tab://collection/${COLLECTION}`)).click();
+  await panel.getByRole("button", { name: "Close record", exact: true }).click();
+  await expect(page.getByTestId("collection-record-panel")).toHaveCount(0);
+  await tab.click();
+  await expect(tab).toHaveAttribute("data-active", "true");
 }
 async function records(page: Page) {
   return page.evaluate(async collectionPath => {
@@ -452,6 +467,22 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     await test.info().attach("lost acknowledgement and relay replay", { contentType: "application/json", body: JSON.stringify(responses, null, 2) });
+
+    // A recipient's new row, through the relay: the task typed in the table's row makes a record on Enter, and both
+    // the creation and the field write of what was typed reach the owner.
+    await openCollection(page);
+    await page.getByTestId("collection-view-switcher").getByRole("button", { name: "Table", exact: true }).click();
+    await page.getByTestId("collection-new-record").click();
+    const rowEditor = page.locator("[data-cell-editor] input");
+    await rowEditor.fill("Typed in the new row");
+    await rowEditor.press("Enter");
+    await expect.poll(async () => (await records(page)).length, { timeout: 120_000 }).toBe(2);
+    const typed = (await records(page)).find(record => record.id !== created!.id)!;
+    await expect.poll(() => fixture.ownerText(typed.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Typed in the new row");
+    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id).sort(), { timeout: 120_000 }).toEqual([created!.id, typed.id].sort());
+    // The row saved, so its record has a row in the table, and no file tab opened for it.
+    await expect(page.getByRole("grid").getByRole("button", { name: "Open Untitled 2", exact: true })).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId(`tab-${typed.path}`)).toHaveCount(0);
   });
 });
 
