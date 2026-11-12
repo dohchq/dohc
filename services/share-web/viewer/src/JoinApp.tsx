@@ -211,7 +211,7 @@ export default function JoinApp(props: {token: string | null}) {
       const {icon, title, body} = REFUSED[stage.code];
       return <Page pageRef={page} icon={icon} failed title={title}>
         <p>{body}</p>
-        <button className="handoff-button secondary" disabled={busy} aria-busy={busy || undefined} onClick={load}>Try again</button>
+        <button className="handoff-button secondary" disabled={busy} aria-busy={busy || undefined} onClick={load}>{busy ? "Checking…" : "Try again"}</button>
         {failure}
         {signedIn(stage.account)}
       </Page>;
@@ -231,7 +231,7 @@ export default function JoinApp(props: {token: string | null}) {
  */
 function JoinedLimit(props: {joined: boolean}) {
   return <p data-testid="join-limit">{props.joined
-    ? "Find it in the dohc app, in Sharing under Shared with me. It opens there once dohc can open joined workspaces."
+    ? "It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet."
     : "This version of dohc can't open a joined workspace yet. Once you join, it's listed in the dohc app, in Sharing under Shared with me."}</p>;
 }
 
@@ -257,14 +257,15 @@ function Page(props: {
   icon?: IconName;
   failed?: boolean;
   title?: string;
-  // What a screen reader hears when the page changes to this stage. Default: the title.
+  // What a screen reader hears when the page changes to a stage whose heading
+  // does not take focus. A focused heading is read already, so it is not repeated here.
   announce?: string;
   busy?: boolean;
   children?: ReactNode;
 }) {
   return <div ref={props.pageRef} className="state-page join-page">
     {/* One polite region for every stage, so each change is read once it lands. */}
-    <p className="sr-only" role="status" aria-live="polite">{props.announce ?? props.title}</p>
+    <p className="sr-only" role="status" aria-live="polite">{props.announce ?? ""}</p>
     <span className="bar-mark"><DohcMark /></span>
     <main className="state" aria-busy={props.busy || undefined}>
       <div className="state-message">

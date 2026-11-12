@@ -1576,7 +1576,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
         parse: input => { noExtraArgs(input.operands, "members list"); return { verb: "members", request: { action: "list" } }; },
       },
       invite: {
-        capabilityId: "members.invite", summary: "Invite someone by email. dohc sends no email: they join when they sign in with that address, so send them the invite link.", operands: "<email>",
+        capabilityId: "members.invite", summary: "Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.", operands: "<email>",
         parse: input => {
           const [email, ...extra] = input.operands; noExtraArgs(extra, "members invite");
           if (!email) return fail("Provide an email address.");

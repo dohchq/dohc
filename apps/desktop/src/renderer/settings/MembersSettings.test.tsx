@@ -259,29 +259,21 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "letBackIn", person: "m-dee" });
   });
 
-  it("says dohc sends no email after an invite, names the address, and offers the invite link", async () => {
+  it("says dohc sends no email, then names the invited address and how that person gets in", async () => {
     bridge.workspaceMembers.mockImplementation(async ({ request }) => ({ status: "ready",
       view: request.action === "invite" ? ownerView({ people: [owner, ana, bo, cy, dee, person({ memberId: "m-eve", state: "invited", email: "eve@test", joinedAtMs: null })] }) : ownerView() }));
     renderMembers();
     await screen.findByTestId("settings-members-page");
     await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
     const sent = await screen.findByTestId("settings-members-invite-sent");
-    expect(sent.textContent).toContain("Invited eve@test.");
-    expect(sent.textContent).toContain("dohc doesn't send email.");
-    expect(sent.textContent).toContain("They join when they sign in to dohc with this address");
+    expect(within(screen.getByTestId("settings-members-invite")).getByText(/^dohc doesn't send email\. /u)).toBeTruthy();
+    expect(sent.textContent).toContain("Invited eve@test. Tell them to sign in to dohc with this address.");
+    expect(sent.textContent).not.toContain("invite link");
     expect(sent.closest('[role="status"]')).not.toBeNull();
-    expect(screen.getByTestId("settings-members-invite-sent-copy")).toBeTruthy();
+    // An email invite never offers to turn on the open invite link.
+    expect(screen.queryByRole("button", { name: "Turn on invite link" })).toBeNull();
+    expect(screen.queryByTestId("settings-members-invite-sent-copy")).toBeNull();
     expect(within(row("m-eve")).getByText(/^Joins when they sign in · Invited /u)).toBeTruthy();
-  });
-
-  it("offers to turn the invite link on after an invite when it is off", async () => {
-    const off = ownerView({ inviteLink: { enabled: false, url: null } });
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: off }));
-    renderMembers();
-    await screen.findByTestId("settings-members-page");
-    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
-    await userEvent.click(await screen.findByRole("button", { name: "Turn on invite link" }));
-    expect(requests().at(-1)).toEqual({ action: "link", change: "turn-on" });
   });
 
   it("keeps an address typed while the invite runs", async () => {

@@ -93,7 +93,7 @@ it("previews the workspace and its owner, says before Join that dohc can't open 
   await click("Join workspace");
   expect(heading()?.textContent).toBe("You joined Community");
   expect(container.querySelector('[data-testid="join-limit"]')?.textContent)
-    .toBe("Find it in the dohc app, in Sharing under Shared with me. It opens there once dohc can open joined workspaces.");
+    .toBe("It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet.");
   expect(text()).toContain("Signed in as Sam · Sign out");
   expect(sessionStorage.getItem("dohc.join.token")).toBeNull();
   expect(paths(fetch)).toEqual(["/api/account/session", "/api/members/join-preview", "/api/members/join"]);
@@ -103,7 +103,7 @@ it("tells a person already in the workspace so, with no Join", async () => {
   server({"/api/account/session": signedIn, "/api/members/join-preview": () => jsonResponse({...PREVIEW, alreadyMember: true})});
   await render();
   expect(heading()?.textContent).toBe("You're already in Community");
-  expect(text()).toContain("Find it in the dohc app");
+  expect(text()).toContain("It's listed in the dohc app");
   expect([...container.querySelectorAll("button")].map(node => node.textContent)).toEqual(["Sign out"]);
 });
 
@@ -148,6 +148,22 @@ it.each([
   await click("Try again");
   expect(heading()?.textContent).toBe("Join Community");
   expect(paths(fetch).filter(path => path === "/api/members/join-preview")).toHaveLength(2);
+});
+
+it("says it is checking while Try again asks again", async () => {
+  sessionStorage.setItem("dohc.join.token", TOKEN);
+  const again = held();
+  let first = true;
+  server({"/api/account/session": signedIn, "/api/members/join-preview": () => {
+    if (!first) return again.response;
+    first = false;
+    return jsonResponse({ok: false, code: "full"}, 409);
+  }});
+  await render();
+  await act(async () => button("Try again").click());
+  expect(button("Checking…").getAttribute("aria-busy")).toBe("true");
+  await act(async () => again.send(jsonResponse(PREVIEW)));
+  await settle(() => heading()?.textContent === "Join Community");
 });
 
 it("previews again after a refresh once an admin fixed access", async () => {
@@ -234,7 +250,8 @@ it("moves focus to each new stage's heading, or to the sign-in form's first fiel
   await settle(() => heading()?.textContent === "Join Community");
   expect(document.activeElement).toBe(heading());
   expect(heading()?.tabIndex).toBe(-1);
-  expect(announced()).toBe("Join Community");
+  // The focused heading is read, so the status region does not repeat it.
+  expect(announced()).toBe("");
   expect(container.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
 
   await act(async () => button("Join workspace").click());
@@ -242,7 +259,7 @@ it("moves focus to each new stage's heading, or to the sign-in form's first fiel
   await act(async () => joining.send(jsonResponse(JOINED)));
   await settle(() => heading()?.textContent === "You joined Community");
   expect(document.activeElement).toBe(heading());
-  expect(announced()).toBe("You joined Community");
+  expect(announced()).toBe("");
 });
 
 it("marks Sign in busy while it signs in", async () => {

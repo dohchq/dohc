@@ -82,7 +82,7 @@ Returns the requested action's result, listed under [`dohc app`](#dohc-app). Onl
 
 ### `dohc_members`
 
-Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: they join when they sign in to dohc with that address, so pass on the invite link yourself); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
+Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
 
 Members belong to the original workspace and its owner. Shared profiles do not offer this tool.
 
@@ -1081,7 +1081,7 @@ With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, wo
 dohc members invite <email> [options]
 ```
 
-Invite someone by email. dohc sends no email: they join when they sign in with that address, so send them the invite link.
+Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.
 
 With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
 

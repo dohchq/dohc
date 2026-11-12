@@ -14,7 +14,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { relativeTime } from "../relativeTime";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { CopyButton, CopyField, type CopySecret } from "../ui/CopyButton";
+import { CopyField, type CopySecret } from "../ui/CopyButton";
 import { EmptyState, FieldError, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -493,9 +493,7 @@ export function MembersPage(props: {
           <InviteRow
             people={view.people}
             busy={busy("invite")}
-            link={{ url: linkOn ? view.inviteLink?.url ?? null : null, busy: busy("link") }}
             onInvite={(email) => run({ action: "invite", email })}
-            onTurnOnLink={() => void run({ action: "link", change: "turn-on" })}
           />
           <SettingRow
             title="Invite link"
@@ -629,7 +627,7 @@ export function MembersPage(props: {
       {can.endForEveryone && !alone ? (
         <SettingsSection>
           <SettingRow title="End membership" testId="settings-members-end"
-            description="Everyone except you loses access. Your workspace stays on this computer.">
+            description="Everyone except you loses access, and this can't be undone. Your workspace stays on this computer.">
             <SecondaryButton data-testid="settings-members-end-open" disabled={busy("end")} onClick={() => setConfirm({ kind: "end" })}>
               {busy("end") ? "Ending…" : "End membership"}
             </SecondaryButton>
@@ -708,10 +706,7 @@ function displayName(person: WorkspacePerson): string {
 function InviteRow(props: {
   people: readonly WorkspacePerson[];
   busy: boolean;
-  // The invite link while it is on, and whether a change to it is running.
-  link: { url: string | null; busy: boolean };
   onInvite: (email: string) => Promise<boolean>;
-  onTurnOnLink: () => void;
 }) {
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -734,6 +729,7 @@ function InviteRow(props: {
     <SettingRow
       title="Invite by email"
       testId="settings-members-invite"
+      description="dohc doesn't send email. The person joins when they sign in to dohc with the address you enter."
       aside={
         <form
           noValidate
@@ -782,23 +778,11 @@ function InviteRow(props: {
           <div role="status" className="empty:hidden">
             {sent ? (
               <p data-testid="settings-members-invite-sent" className="m-0 text-[12px] text-muted">
-                Invited <span className="font-medium text-ink">{sent}</span>. dohc doesn't send email. They join when they sign in to dohc
-                with this address, so send them the invite link.
+                Invited <span className="font-medium text-ink">{sent}</span>. Tell them to sign in to dohc with this address. The workspace
+                then shows in their Sharing, under Shared with me.
               </p>
             ) : null}
           </div>
-          {sent ? (
-            <div className="flex">
-              {props.link.url ? (
-                <CopyButton label="Copy invite link" copiedLabel="Invite link copied" testId="settings-members-invite-sent-copy"
-                  getText={() => props.link.url} sensitive={LINK_SECRET} />
-              ) : (
-                <SecondaryButton size="row" data-testid="settings-members-invite-sent-link" disabled={props.link.busy} onClick={props.onTurnOnLink}>
-                  Turn on invite link
-                </SecondaryButton>
-              )}
-            </div>
-          ) : null}
         </form>
       }
     />
