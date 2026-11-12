@@ -6,6 +6,7 @@ import {
   YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
 } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceFolderTimeoutError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -1915,6 +1916,12 @@ describe("engine Y.Doc IPC adapter", () => {
       ],
       [
         new YDocSessionUnreleasedError("notes/a.md", new Error("held")),
+        { available: false, engineMayHoldDocument: true },
+      ],
+      // The workspace folder stopped answering before the engine opened the
+      // workspace. The writable plain editor would write to that same folder.
+      [
+        new EngineWorkspaceFolderTimeoutError("workspace-1", 2_000),
         { available: false, engineMayHoldDocument: true },
       ],
       [

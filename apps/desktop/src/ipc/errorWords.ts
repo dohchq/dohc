@@ -187,6 +187,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineWorkspaceRetryDeadlineError: { "*": "dohc could not reach this workspace in time. Try again." },
   EngineWorkspaceRebuildingError: { "*": "dohc is rebuilding this workspace's data store. Try again in a moment." },
   EngineWorkspaceShuttingDownError: { "*": "dohc is quitting." },
+  EngineWorkspaceFolderTimeoutError: { "*": "dohc could not reach this workspace's folder." },
   EngineWorkspaceRebindError: { "*": null },
   EngineWorkspaceSessionsClosedError: { "*": null },
   EngineRequestError: { "*": null },

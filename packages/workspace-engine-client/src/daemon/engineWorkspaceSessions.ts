@@ -268,6 +268,25 @@ export class EngineWorkspaceShuttingDownError extends Error {
   }
 }
 
+// The workspace folder did not answer the checks made before the daemon opens
+// the workspace, as a network drive that stopped responding does. The
+// message names the workspace id, never the folder: these messages reach
+// copy details and agents.
+export class EngineWorkspaceFolderTimeoutError extends Error {
+  readonly workspaceId: string;
+  readonly deadlineMs: number;
+
+  constructor(workspaceId: string, deadlineMs: number) {
+    super(
+      `Rust engine stopped waiting for the folder of workspace ${workspaceId}: ` +
+        `it did not answer within ${deadlineMs}ms. Retry the operation once the folder responds.`,
+    );
+    this.name = "EngineWorkspaceFolderTimeoutError";
+    this.workspaceId = workspaceId;
+    this.deadlineMs = deadlineMs;
+  }
+}
+
 // The refusals a document open must not answer with the writable plain editor.
 // Each means the same thing to the surface — the engine did not open this
 // document, and the writable plain editor is not safe. The engine may still
@@ -286,6 +305,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
   return (
     error instanceof EngineWorkspaceRetryDeadlineError ||
     error instanceof EngineWorkspaceShuttingDownError ||
+    error instanceof EngineWorkspaceFolderTimeoutError ||
     error instanceof YdocOpenTimedOutError ||
     isWorkspaceUpdatingRefusal(error) ||
     isYdocFileNotReadRefusal(error) ||
@@ -1441,7 +1461,7 @@ export class EngineWorkspaceSessions {
     workspace: EngineWorkspace,
     requested: () => void,
   ): Promise<EngineWorkspaceBinding> {
-    await this.prepareWorkspace(workspace.rootPath);
+    await this.prepareWithinDeadline(workspace);
     requested();
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
@@ -1475,6 +1495,24 @@ export class EngineWorkspaceSessions {
       workspace: opened.workspace as WorkspaceHandle,
       localStateReady: opened.localStateReady === true,
     };
+  }
+
+  // A folder that stops answering, as a network drive can, would hold the
+  // open here, before the daemon request's own deadline starts. The file
+  // system calls cannot be cancelled. A reopen while they are still pending
+  // waits on them again under a new deadline, instead of starting more calls
+  // that can hang the same way. Once they settle, the preparation is dropped,
+  // so a failed one is never reused.
+  private async prepareWithinDeadline(workspace: EngineWorkspace): Promise<void> {
+    const preparation = this.prepareWorkspace(workspace.rootPath);
+    const outcome = await Effect.runPromise(Effect.raceFirst(
+      Effect.promise(() => preparation.then(() => "settled" as const, () => "settled" as const)),
+      Effect.as(Effect.sleep(this.workspaceOpenDeadlineMs), "deadline" as const),
+    ));
+    if (outcome === "deadline") {
+      throw new EngineWorkspaceFolderTimeoutError(workspace.workspaceId, this.workspaceOpenDeadlineMs);
+    }
+    await preparation;
   }
 
   private async prepareWorkspace(rootPath: string): Promise<void> {
