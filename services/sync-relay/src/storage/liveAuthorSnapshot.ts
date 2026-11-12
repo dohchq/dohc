@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorEntry, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
-import { parseLiveUpdateIdentifier, type ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import { admitsLiveAuthorship, parseLiveUpdateIdentifier, type ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import { isPersonalAgentId } from "../relayLogInputs";
 import type { StorageContext } from "./context";
-import { assertWorkspaceQuota } from "./workspaces";
+import { assertWorkspaceQuota, workspaceOwner } from "./workspaces";
 
 export interface TrustedLiveAccount {
   readonly accountId: string;
@@ -72,4 +72,30 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
   if (context.agent) authors.push({kind: "agent",...context.agent,
     onBehalfOf: context.kind === "link" ? context.publicPrincipalId : authority.principalId});
   return parseLiveAuthorSnapshot(authors);
+}
+
+/**
+ * A personal agent's snapshot, from its authority alone: the agent, by the
+ * name it has now, on behalf of the account that owns it. An agent the relay
+ * doesn't know gets none, which admission refuses.
+ */
+export function personalLiveAuthorSnapshot(storage: StorageContext,
+  authority: Extract<ServerDerivedLiveUpdateAuthority, {principalKind: "personal"}>): LiveAuthorSnapshot {
+  const agent = storage.db.prepare("SELECT owner_user_id,name FROM sync_relay_personal_agents WHERE agent_id=?").get(authority.principalId);
+  if (!agent) return [];
+  return parseLiveAuthorSnapshot([{kind: "agent", agentId: authority.principalId, agentName: String(agent.name),
+    onBehalfOf: String(agent.owner_user_id), depth: 0}]);
+}
+
+/**
+ * Whether a new update in `workspaceId` may credit `authors` under
+ * `authority`. A personal agent edits only in its owner's workspace, so it
+ * acts on behalf of that workspace's owner.
+ */
+export function admitsWorkspaceLiveAuthorship(storage: StorageContext, workspaceId: string,
+  authority: ServerDerivedLiveUpdateAuthority, authors: LiveAuthorSnapshot): boolean {
+  if (!admitsLiveAuthorship(authority, authors)) return false;
+  if (authority.principalKind !== "personal") return true;
+  const [agent] = authors;
+  return agent?.kind === "agent" && agent.onBehalfOf === workspaceOwner(storage, workspaceId);
 }

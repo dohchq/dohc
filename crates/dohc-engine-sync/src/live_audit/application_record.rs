@@ -92,7 +92,8 @@ struct ParsedRecord {
     canonical_digest: String,
     canonical_version: u8,
     authors: dohc_engine_collab::author_coverage::Authors,
-    names_personal_agent: bool,
+    author_snapshot: Vec<LiveAuthorEntry>,
+    coverage_names_personal_agent: bool,
 }
 
 struct ParsedMetadata {
@@ -100,7 +101,8 @@ struct ParsedMetadata {
     preceding: Preceding,
     canonical_version: u8,
     authors: dohc_engine_collab::author_coverage::Authors,
-    names_personal_agent: bool,
+    author_snapshot: Vec<LiveAuthorEntry>,
+    coverage_names_personal_agent: bool,
 }
 
 /// Where the lineage's audited history stood before an event: the endpoint
@@ -331,7 +333,8 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             preceding,
             canonical_version,
             authors,
-            names_personal_agent,
+            author_snapshot,
+            coverage_names_personal_agent,
         } = map.next_value_seed(MetadataSeed {
             storage_failure: self.storage_failure,
             conn: self.conn,
@@ -412,7 +415,8 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             canonical_digest: dohc_engine_storage::hex(&canonical.finalize()),
             canonical_version,
             authors,
-            names_personal_agent,
+            author_snapshot,
+            coverage_names_personal_agent,
         })
     }
 }
@@ -487,7 +491,8 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         chain_v2.update(b"]");
         let mut version = 1;
         let mut covered_authors = dohc_engine_collab::author_coverage::Authors::default();
-        let mut names_personal_agent = false;
+        let mut author_snapshot = Vec::new();
+        let mut coverage_names_personal_agent = false;
         if let Some(key) = map.next_key::<String>()? {
             if key != "canonicalVersion" || map.next_value::<u8>()? != 2 {
                 return Err(serde::de::Error::custom("invalid metadata version"));
@@ -504,12 +509,12 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             }
             .validate_extensions()
             .map_err(serde::de::Error::custom)?;
-            names_personal_agent = authors.iter().any(is_personal_agent);
             let mut tail = b",\"canonicalVersion\":2,\"authorSnapshot\":".to_vec();
             serde_json::to_writer(&mut tail, &authors).map_err(serde::de::Error::custom)?;
             covered_authors
                 .union_json(&serde_json::to_string(&authors).map_err(serde::de::Error::custom)?)
                 .map_err(serde::de::Error::custom)?;
+            author_snapshot = authors;
             tail.extend_from_slice(b",\"firstSeenDeletes\":[");
             self.canonical.update(&tail);
             chain_v2.update(&tail);
@@ -530,7 +535,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
                 }
                 let coverage: Vec<LiveCheckpointAuthorCoverage> = map.next_value()?;
                 validate_checkpoint_coverage(&coverage).map_err(serde::de::Error::custom)?;
-                names_personal_agent |= coverage
+                coverage_names_personal_agent = coverage
                     .iter()
                     .any(|entry| is_personal_agent(&entry.author));
                 let checkpoint_authors: Vec<_> =
@@ -576,7 +581,8 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             preceding,
             canonical_version: version,
             authors: covered_authors,
-            names_personal_agent,
+            author_snapshot,
+            coverage_names_personal_agent,
         })
     }
 }
@@ -587,6 +593,28 @@ fn is_personal_agent(author: &LiveAuthorEntry) -> bool {
             agent_id.starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ID_PREFIX)
         }
         _ => false,
+    }
+}
+
+/// Only the relay admits a personal agent's work, and only the live host's
+/// replica records it, from a `service-host:` origin. The relay accepts that
+/// origin only from the host's own credential. From there, a personal agent's
+/// update credits that agent alone, and a checkpoint can credit any personal
+/// agent in its window. Any other update credits no personal agent.
+fn credits_personal_agents_as_admitted(record: &ParsedRecord, origin_id: &str) -> bool {
+    let host = origin_id.starts_with(crate::SERVICE_HOST_ORIGIN_PREFIX);
+    match &record.accepted.authority {
+        ServerDerivedLiveUpdateAuthority::Personal { principal_id } => {
+            host && matches!(
+                record.author_snapshot.as_slice(),
+                [LiveAuthorEntry::Agent { agent_id, on_behalf_of: Some(_), .. }]
+                    if agent_id == principal_id
+            )
+        }
+        _ => {
+            !record.author_snapshot.iter().any(is_personal_agent)
+                && (host || !record.coverage_names_personal_agent)
+        }
     }
 }
 
@@ -1302,16 +1330,11 @@ pub(super) fn apply_event_envelope(
     let passive = store.is_passive();
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
         let (payload, mut record) = parse_event_envelope(tx, op)?;
-        // Only the relay writes a personal agent's work, so a new record naming one is refused.
         // A record this engine already applied is redelivered through refresh, which keeps it.
-        if record.names_personal_agent {
-            return Err(invalid("live audit record cannot name a personal agent"));
-        }
-        if matches!(
-            record.accepted.authority,
-            ServerDerivedLiveUpdateAuthority::Personal { .. }
-        ) {
-            return Err(invalid("live audit record cannot claim personal authority"));
+        if !credits_personal_agents_as_admitted(&record, &op.origin_id) {
+            return Err(invalid(
+                "live audit record credits a personal agent the relay did not admit",
+            ));
         }
         if !insert_event(tx, &record, &payload.manifest, passive)? {
             tx.execute("INSERT INTO live_audit_event_conflicts(workspace_id,origin_id,origin_seq,record_digest) VALUES (?1,?2,?3,?4)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.manifest.record_digest]).map_err(SyncError::persist)?;
