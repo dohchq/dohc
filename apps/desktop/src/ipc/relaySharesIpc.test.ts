@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { relayShareOperations } from "./shareOperations";
 import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
 import {closeTestStorages, interceptStorage, request as relayRequest, testHandler, testStorage} from "../../../../services/sync-relay/src/testing";
-import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
+import { OwnerRestoreActionResponse, OwnerRestoreRelayReview } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers } from "./relaySharesIpc";
@@ -969,8 +969,10 @@ describe("registered owner restore handler", () => {
             : [false, true].map(moved => ({status, result: {kind: "resumed", proposalDigest: "b".repeat(64), receipt: {accepted: true}, moved}})))];
       for (const response of responses) {
         const h = harness();
-        h.request.mockResolvedValue({...response, ignored: "stripped"});
-        const parsed = OwnerRestoreActionResponse[action].parse(response);
+        h.request.mockResolvedValue({...response, ignored: "stripped", owner: {userId: "forged", email: "forged@example.com"}});
+        // A review also names the account the desktop asked as, which the relay never sends.
+        const parsed = action === "review" ? {...OwnerRestoreRelayReview.parse(response), owner: {userId: "owner", email: "owner@example.com"}}
+          : OwnerRestoreActionResponse[action].parse(response);
         expect(relayShareOperations.ownerRestore.result.parse(parsed)).toEqual(parsed);
         await expect(h.invoke(relayShareOperations.ownerRestore.channel, inputs[action])).resolves.toEqual(parsed);
       }

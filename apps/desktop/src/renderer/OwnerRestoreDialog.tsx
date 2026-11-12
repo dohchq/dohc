@@ -39,7 +39,8 @@ const DECLINING_MESSAGE = "Declining has not finished. Live editing of this file
 /** A Decline the relay refused to end. Asking again gets the same refusal. */
 export const DECLINE_REFUSED_MESSAGE = "Declining did not finish, and trying again will not finish it. Live editing of this file stays stopped.";
 type Authority = OwnerRestoreReview["acceptedEvents"][number]["metadata"]["accepted"]["authority"];
-// Account emails the relay resolved for this file's grants and authors, by account ID.
+// Account emails by account ID: those the relay resolved for this file's grants
+// and authors, and the owner's own.
 type Emails = ReadonlyMap<string, string>;
 const recipient = (row: {principalKind: string; email: string | null; userId: string | null}, emails: Emails) =>
   row.principalKind === "link" ? "Anyone using this link"
@@ -223,6 +224,8 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     const checked = await bridge().ownerRestore({workspaceId, action: "review", operationId: saved.operationId});
     if (!current(token)) return;
     operation.current = checked.status;
+    // A personal agent's change names the owner it acts for by this email.
+    setEmails(known => new Map([...known, [checked.owner.userId, checked.owner.email] as const]));
     if (!checked.result || "kind" in checked.result) {setState({kind: "pending", message: "dohc could not prepare the full change review. Retry to review it again."}); return;}
     if (checked.result.operationId !== saved.operationId || checked.result.proposalDigest !== proposalDigest) throw Error("The restore review changed. Retry to review it again.");
     setState({kind: "review", review: checked.result});

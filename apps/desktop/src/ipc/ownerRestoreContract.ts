@@ -80,6 +80,8 @@ export const OwnerRestoreRequest = z.discriminatedUnion("action", [
 export type OwnerRestoreRequest = z.infer<typeof OwnerRestoreRequest>;
 // A full workspace on the server is the one cause the relay names.
 const pending = z.object({kind: z.enum(["pending", "review-required"]), cause: z.literal("quota").optional()});
+/** The relay's review reply. The desktop adds the account it asked as. */
+export const OwnerRestoreRelayReview = z.object({status: OwnerRestoreStatus, result: z.union([OwnerRestoreReview, pending, z.null()])});
 export const OwnerRestoreActionResponse = {
   options: OwnerRestoreOptions,
   plan: OwnerRestorePlan,
@@ -90,7 +92,9 @@ export const OwnerRestoreActionResponse = {
   unfinished: OwnerUnfinishedRestores,
   prepare: z.object({status: OwnerRestoreStatus, result: z.union([pending,
     z.object({kind: z.literal("prepared"), proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer, replayed: z.boolean()})])}),
-  review: z.object({status: OwnerRestoreStatus, result: z.union([OwnerRestoreReview, pending, z.null()])}),
+  // The relay serves a review only to the workspace's owner, so `owner` is the
+  // account that asked. A personal agent acts on behalf of that account.
+  review: OwnerRestoreRelayReview.extend({owner: z.object({userId: id, email: z.string()})}),
   confirm: z.object({status: OwnerRestoreStatus, result: z.union([pending,
     // Moved: the file left the restore's path before it finished, and the renamed file kept its content.
     z.object({kind: z.literal("resumed"), proposalDigest: digest, receipt: z.unknown(), moved: z.boolean()})])}),

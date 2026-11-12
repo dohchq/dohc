@@ -53,7 +53,7 @@ import {
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { z } from "zod";
-import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
+import {OwnerRestoreActionResponse, OwnerRestoreRelayReview} from "./ownerRestoreContract";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { createShareLinkAgentActions } from "./shareLinkAgentActions";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
@@ -643,7 +643,10 @@ export function createRelaySharesIpcHandlers<
       }
       const raw = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials, path,
         body === undefined ? undefined : {method: "POST", body: JSON.stringify(body)}, {retainRestoreConflict: true}));
-      const result = OwnerRestoreActionResponse[input.action].parse(raw);
+      // The relay answered this account as the workspace's owner.
+      const result = input.action === "review"
+        ? {...OwnerRestoreRelayReview.parse(raw), owner: {userId: credentials.userId, email: credentials.email}}
+        : OwnerRestoreActionResponse[input.action].parse(raw);
       const coordinate = "status" in result ? result.status : "intent" in result ? result.intent : result;
       if ("document" in coordinate && coordinate.document.workspaceId !== input.workspaceId) throw new Error("The restore response belongs to another workspace.");
       if ("operationId" in input && "operationId" in coordinate && coordinate.operationId !== input.operationId) throw new Error("The restore response belongs to another operation.");
