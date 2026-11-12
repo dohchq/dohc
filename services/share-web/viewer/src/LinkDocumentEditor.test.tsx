@@ -38,6 +38,49 @@ async function click(text: string) {
   const button = [...container.querySelectorAll("button")].find(value => value.textContent === text); expect(button).toBeDefined();
   await act(async () => button!.click());
 }
+const panel = () => container.querySelector('aside[aria-label="Draft recovery"]');
+const status = () => container.querySelector('section[aria-label="Shared file"] [role="status"]')?.textContent;
+function unloadWarns() {const unload = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(unload); return unload.defaultPrevented;}
+async function opened() {
+  const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
+  await render(true, onClose); await settle(() => container.querySelector('[role="textbox"]') !== null);
+  return {...f, onClose};
+}
+it("shows no draft panel while an ordinary change saves", async () => {
+  const f = await opened();
+  await act(async () => f.update({pendingUpdates: 1}));
+  expect(status()).toBe("Saving changes…"); expect(panel()).toBeNull();
+});
+it("still warns before leaving while an ordinary change saves", async () => {
+  const f = await opened();
+  await act(async () => f.update({pendingUpdates: 1}));
+  expect(unloadWarns()).toBe(true);
+  await click("Done"); expect(f.onClose).not.toHaveBeenCalled(); expect(container.querySelector("dialog")?.open).toBe(true);
+  await click("Keep reviewing"); await act(async () => f.update({pendingUpdates: 0}));
+  expect(unloadWarns()).toBe(false);
+  await click("Done"); expect(f.onClose).toHaveBeenCalledOnce();
+});
+const resending: Pick<NamedLiveBrowserState, "status" | "reason">[] = [{status: "disconnected", reason: "transport-closed"},
+  {status: "authorizing", reason: null}, {status: "connecting", reason: null}, {status: "syncing", reason: null}];
+it.each(resending)("shows no draft panel while the page reconnects ($status) to send an unsent change again", async state => {
+  const f = await opened();
+  await act(async () => f.update({...state, pendingUpdates: 1}));
+  expect(panel()).toBeNull(); expect(unloadWarns()).toBe(true);
+});
+const stopped: Pick<NamedLiveBrowserState, "status" | "reason" | "pendingUpdates">[] = [{status: "quarantined", reason: "pending-update-limit", pendingUpdates: 0},
+  {status: "disconnected", reason: "authority-unavailable", pendingUpdates: 1}, {status: "closed", reason: null, pendingUpdates: 1}];
+it.each(stopped)("shows the draft panel when editing stopped ($status) with a change the page will not send", async state => {
+  const f = await opened();
+  await act(async () => f.update(state));
+  expect(panel()?.textContent).toContain("Review your draft"); expect(panel()?.textContent).toContain("Open current file");
+});
+it("shows the draft panel when access ends while a change is still saving", async () => {
+  const f = await opened();
+  await act(async () => f.update({pendingUpdates: 1}));
+  await render(false, f.onClose);
+  expect(f.session.close).toHaveBeenCalled(); expect(panel()?.textContent).toContain("exist only in this tab");
+  expect(container.textContent).not.toContain("Open current file"); expect(unloadWarns()).toBe(true);
+});
 it("shows the grant-scoped refusal with its next step", async () => {
   vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_comment_access.error));
   await render(true);

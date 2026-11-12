@@ -96,6 +96,37 @@ it("keeps a quarantined draft until explicit discard, then opens a fresh session
   expect(sessions[0]!.close).toHaveBeenCalledTimes(1); expect(sessions).toHaveLength(2);
   expect(container.querySelector('[role="textbox"]')?.textContent).toContain("Draft b");
 });
+const panel = () => container.querySelector('aside[aria-label="Draft recovery"]');
+function unloadWarns() {const unload = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(unload); return unload.defaultPrevented;}
+/** Opens docs/a.md as Alice and returns a way to change its session's state. */
+async function opened() {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session" ? jsonResponse({user: {id: "alice", name: "Alice"}}) : jsonResponse(files())));
+  await render(); await click("docs/a.md");
+  return (value: Partial<NamedLiveBrowserState>) => act(async () => {sessions[0]!.state = {...sessions[0]!.state, ...value}; sessions[0]!.notify();});
+}
+it("shows no draft panel while an ordinary change saves, and still warns before leaving", async () => {
+  const update = await opened();
+  await update({status: "live", pendingUpdates: 1});
+  expect(container.querySelector('section[aria-label="Shared file"] [role="status"]')?.textContent).toBe("Saving changes…");
+  expect(panel()).toBeNull(); expect(unloadWarns()).toBe(true);
+  await click("docs/b.md"); expect(container.querySelector("dialog")?.open).toBe(true); expect(sessions).toHaveLength(1);
+  await click("Keep reviewing"); await update({pendingUpdates: 0});
+  expect(unloadWarns()).toBe(false);
+});
+const resending: Pick<NamedLiveBrowserState, "status" | "reason">[] = [{status: "disconnected", reason: "transport-closed"},
+  {status: "authorizing", reason: null}, {status: "connecting", reason: null}, {status: "syncing", reason: null}];
+it.each(resending)("shows no draft panel while the page reconnects ($status) to send an unsent change again", async state => {
+  const update = await opened();
+  await update({...state, pendingUpdates: 1});
+  expect(panel()).toBeNull(); expect(unloadWarns()).toBe(true);
+});
+const stopped: Pick<NamedLiveBrowserState, "status" | "reason" | "pendingUpdates">[] = [{status: "quarantined", reason: "pending-update-limit", pendingUpdates: 0},
+  {status: "disconnected", reason: "authority-unavailable", pendingUpdates: 1}, {status: "closed", reason: null, pendingUpdates: 1}];
+it.each(stopped)("shows the draft panel when editing stopped ($status) with a change the page will not send", async state => {
+  const update = await opened();
+  await update(state);
+  expect(panel()?.textContent).toContain("Review your draft"); expect(panel()?.textContent).toContain("Open current file");
+});
 it.each([200, 401, 403])("distinguishes sign-in status %s from an unavailable invitation", async status => {
   let signedIn = false;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
