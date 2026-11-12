@@ -723,6 +723,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
+        | CollabError::BaselineSchemaVersionMissing
         | CollabError::FrontmatterEditRefused
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate
@@ -897,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_refusal_maps_the_wire_and_logs_each_cause_once() {
+    fn internal_refusal_logs_only_its_code_words() {
         use dohc_engine_files::MaterializeError;
         use dohc_engine_storage::StorageError;
 
@@ -907,17 +908,17 @@ mod tests {
                     "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)".into(),
                 )),
                 "workspace operation failed",
-                "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)",
+                "engine: internal refusal: INTERNAL relay-failed",
             ),
             (
                 RuntimeError::Relay(RelayError::Local("object apollo\nforged\r\t\u{0}\u{1b}\u{85}".into())),
                 "workspace operation failed",
-                "engine: internal refusal: relay error: local sync state failed: object apollo\\nforged\\r\\t\\u{0}\\u{1b}\\u{85}",
+                "engine: internal refusal: INTERNAL relay-failed",
             ),
             (
                 RuntimeError::Relay(RelayError::UnknownServerCode("unknown\nforged".into())),
                 "workspace operation failed",
-                "engine: internal refusal: relay error: relay returned unknown error code unknown\\nforged",
+                "engine: internal refusal: INTERNAL relay-failed",
             ),
             (
                 RuntimeError::Identity {
@@ -925,52 +926,52 @@ mod tests {
                     source: Some(std::io::Error::other("identity")),
                 },
                 "workspace operation failed",
-                "engine: internal refusal: could not resolve engine.db identity: missing identity: identity",
+                "engine: internal refusal: INTERNAL identity-unresolved",
             ),
             (
                 RuntimeError::Sync(SyncError::RetryableState {
                     reason: "ydoc-resulting-head-pending",
                 }),
                 "workspace operation failed",
-                "engine: internal refusal: synchronization error: replication state is not ready: ydoc-resulting-head-pending",
+                "engine: internal refusal: INTERNAL retryable-state",
             ),
             (
                 RuntimeError::Collab(CollabError::Corrupt {
                     reason: "missing lineage".into(),
                 }),
-                "workspace operation failed",
-                "engine: internal refusal: collaboration error: corrupt Y.Doc lineage: missing lineage",
+                "corrupt-lineage",
+                "engine: internal refusal: INTERNAL corrupt-lineage",
             ),
             (
                 RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
                     std::io::Error::other("missing search table"),
                 ))),
                 "workspace operation failed",
-                "engine: internal refusal: search error: search storage-core failure: engine store is corrupt: missing search table",
+                "engine: internal refusal: INTERNAL search-storage-core",
             ),
             (
                 RuntimeError::Domain(DomainError::CaptureNotOwned),
                 "workspace operation failed",
-                "engine: internal refusal: domain error: capture does not own this path current head",
+                "engine: internal refusal: INTERNAL capture-not-owned",
             ),
             (
                 RuntimeError::Domain(DomainError::StateCorrupt {
                     reason: "missing workspace row",
                 }),
                 "state-corrupt",
-                "engine: internal refusal: domain error: engine store is corrupt: missing workspace row",
+                "engine: internal refusal: INTERNAL state-corrupt",
             ),
             (
                 RuntimeError::Materialize(MaterializeError::UnsafeTargetPath),
                 "unsafe-target-path",
-                "engine: internal refusal: materialization error: job target path is not a safe workspace-relative path",
+                "engine: internal refusal: INTERNAL unsafe-target-path",
             ),
             (
                 RuntimeError::Storage(StorageError::MigrationFailed {
                     source: Some(Box::new(std::io::Error::other("missing table"))),
                 }),
                 "migration-failed: engine migration failed to apply: missing table",
-                "engine: internal refusal: storage error: engine migration failed to apply: missing table",
+                "engine: internal refusal: INTERNAL migration-failed",
             ),
         ] {
             let (wire, logged) = map_runtime_logged(error);
@@ -981,28 +982,18 @@ mod tests {
         }
     }
 
+    /// A server's hosting engine writes this line to the server's log, so the
+    /// path in an error's text must not reach it (#3791).
     #[test]
-    fn internal_refusal_caps_the_escaped_chain_on_a_char_boundary() {
-        use dohc_engine_storage::StorageError;
-
-        for detail in ["é".repeat(3000), "\n".repeat(3000)] {
-            let (wire, logged) = map_runtime_logged(RuntimeError::Storage(
-                StorageError::corrupt_public(std::io::Error::other(detail)),
-            ));
-            assert_eq!(
-                (wire.code, wire.message.as_str()),
-                (ErrorCode::Internal, "workspace operation failed"),
-            );
-            let line = logged.expect("Internal refusal logs its cause");
-            assert!((4093..=4096).contains(&line.len()), "{} bytes", line.len());
-            assert!(line.ends_with('…'));
-            assert!(
-                line.starts_with(
-                    "engine: internal refusal: storage error: engine store is corrupt: "
-                )
-            );
-            assert!(!line.chars().any(char::is_control));
-        }
+    fn internal_refusal_line_names_no_path() {
+        let path = "notes/secret plan.md";
+        let (wire, logged) = map_runtime_logged(RuntimeError::CaptureNotOwnedAfterHold {
+            path: path.into(),
+        });
+        assert_eq!(wire.code, ErrorCode::Internal);
+        let line = logged.expect("an internal refusal is logged");
+        assert_eq!(line, "engine: internal refusal: INTERNAL capture-not-owned");
+        assert!(!line.contains(path));
     }
 
     #[test]
@@ -1024,6 +1015,20 @@ mod tests {
                 RuntimeError::Collab(CollabError::AuthorCapacity),
                 ErrorCode::LimitExceeded,
                 "ydoc-author-capacity",
+            ),
+            (
+                RuntimeError::Collab(CollabError::MalformedUpdate {
+                    reason: "invalid public baseline schema".into(),
+                }),
+                ErrorCode::InvalidParams,
+                "malformed-update",
+            ),
+            (
+                RuntimeError::LiveApplication(ApplicationError::Collab(
+                    CollabError::BaselineSchemaVersionMissing,
+                )),
+                ErrorCode::InvalidParams,
+                "baseline-schema-version-missing",
             ),
             (
                 RuntimeError::Relay(RelayError::QuotaExceeded),
@@ -1561,13 +1566,8 @@ mod tests {
         let generic = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
         assert_eq!(generic.message, "workspace operation failed");
         assert_eq!(wire.retry, generic.retry);
-        // The engine's log keeps today's line, which names no path.
-        assert_eq!(
-            logged.as_deref(),
-            Some(
-                "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)"
-            ),
-        );
+        // The engine's log line names no path.
+        assert_eq!(logged.as_deref(), Some("engine: internal refusal: INTERNAL relay-failed"));
     }
 
     #[test]

@@ -11849,7 +11849,8 @@ mod projection_tests {
     fn engine_seeded_fix_keeps_inbound_missing_version_invalid() {
         let incoming = Ydoc::wire();
         let bytes = incoming.richdoc_append_paragraph("Incoming without schema metadata");
-        assert!(incoming.validate_public_baseline(&bytes).is_err());
+        let refusal = incoming.validate_public_baseline(&bytes).unwrap_err();
+        assert_eq!(refusal.code(), "baseline-schema-version-missing");
     }
 
     /// New page opens a note before its file exists, so nothing seeds it: its

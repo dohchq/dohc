@@ -19,6 +19,19 @@ it.each(["INVALID_PARAMS", "LIMIT_EXCEEDED"] as const)("retires unknown %s input
   expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code, message: "future-refusal", retry: "no" }, null))).toBe(true);
 });
 
+// The engine names these collaboration refusals by their code words. A
+// lineage that moved does not prove the edit itself was refused.
+it.each(["ydoc-lineage-stale", "lineage-write-stale", "lineage-epoch-changed", "lineage-predecessor-mismatch",
+  "lineage-state-vector-mismatch"])("does not retire an edit on a %s refusal", message => {
+  expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null))).toBe(false);
+});
+
+it.each(["update-too-large", "content-kind-mismatch", "malformed-update", "workspace operation failed"])(
+  "retires an edit on a %s refusal", message => {
+    expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null))).toBe(true);
+  },
+);
+
 it("keeps an oversized reply ambiguous after execution", () => {
   const wireError = {
     code: "INTERNAL", message: "response-wire-limit-exceeded", retry: "afterBackoff",

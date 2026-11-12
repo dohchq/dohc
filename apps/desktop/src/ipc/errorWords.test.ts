@@ -560,6 +560,22 @@ describe("error words", () => {
       .toBe("This share is read-only.");
   });
 
+  // The engine names a collaboration refusal by its code word. The person
+  // reads the caller's sentence, and the word goes only to Details.
+  it.each([
+    ["INVALID_PARAMS", "baseline-schema-version-missing"],
+    ["INVALID_PARAMS", "malformed-update"],
+    ["INVALID_PARAMS", "content-kind-mismatch"],
+    ["INTERNAL", "corrupt-lineage"],
+    ["INTERNAL", "markdown-reader-unavailable"],
+    ["LIMIT_EXCEEDED", "configured-byte-budget-exceeded"],
+  ] as const)("keeps the %s code word %s out of the words", (code, word) => {
+    const received = acrossIpc(refusal(code, word));
+    expect(readError(received)).toEqual({ words: null, mapped: false, cause: `DaemonRefusalError [${code}]: ${word}` });
+    const sentence = "dohc could not save notes/plan.md.";
+    expect(withErrorWords(sentence, received)).toBe(sentence);
+  });
+
   it("names https when the engine refuses a server address", () => {
     expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
       .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");

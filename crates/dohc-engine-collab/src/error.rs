@@ -35,6 +35,10 @@ pub enum CollabError {
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
+    /// A non-empty public baseline carries no `schemaVersion` metadata.
+    #[error("Y.Doc baseline has no schema version")]
+    BaselineSchemaVersionMissing,
+
     #[error("configured Y.Doc byte budget exceeded")]
     ConfiguredByteBudgetExceeded,
 
@@ -249,6 +253,7 @@ impl CollabError {
             CollabError::MarkdownReaderCapacity => "document-too-dense",
             CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
+            CollabError::BaselineSchemaVersionMissing => "baseline-schema-version-missing",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
             CollabError::EmptyUpdate => "empty-update",
