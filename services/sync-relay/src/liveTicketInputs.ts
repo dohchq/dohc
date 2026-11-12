@@ -2,7 +2,7 @@ import { types } from "node:util";
 import { parseHostEpoch, parseHostMode, parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier, parseLiveUpdateDigest } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveBrowserContext } from "./liveBrowserContext.js";
+import type { LiveTicketScope } from "./liveBrowserContext.js";
 import type { LiveHostConnectionCoordinate, TicketHostReport } from "./storage.js";
 
 export function ticketRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -24,9 +24,17 @@ export function ticketRecord(value: unknown, fields: readonly string[]): Record<
   return result;
 }
 
-export function snapshotLiveTicketScope(value: unknown): LiveBrowserContext {
+export function snapshotLiveTicketScope(value: unknown): LiveTicketScope {
   if (typeof value !== "object" || value === null || types.isProxy(value)) throw new TypeError("Invalid live-ticket scope.");
   const kind = Object.getOwnPropertyDescriptor(value, "kind")?.value;
+  if (kind === "personal") {
+    const scope = ticketRecord(value, ["kind", "workspaceId", "agentId", "connectionId", "accessTokenHash", "resourceHash", "fenceEpoch"]);
+    const fenceEpoch = scope.fenceEpoch;
+    if (typeof fenceEpoch !== "number" || !Number.isSafeInteger(fenceEpoch) || fenceEpoch < 0) throw new TypeError("Invalid live-ticket fence epoch.");
+    return { kind: "personal", workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
+      agentId: parseLiveUpdateIdentifier(scope.agentId, "agent ID"), connectionId: parseLiveUpdateIdentifier(scope.connectionId, "connection ID"),
+      accessTokenHash: parseTicketHash(scope.accessTokenHash), resourceHash: parseTicketHash(scope.resourceHash), fenceEpoch };
+  }
   if (kind !== "named" && kind !== "link") throw new TypeError("Invalid live-ticket scope kind.");
   const agent = kind === "link" && Object.getOwnPropertyDescriptor(value, "agentConnectionId") !== undefined;
   const scope = ticketRecord(value, kind === "named" ? ["kind", "workspaceId", "shareId", "grantId", "userId"] :

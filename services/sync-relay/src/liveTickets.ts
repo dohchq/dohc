@@ -1,7 +1,7 @@
 import { randomUUID, type BinaryLike } from "node:crypto";
 import { parseLiveTicketAudience, parseLiveTicketToken, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveBrowserContext } from "./liveBrowserContext.js";
+import type { LiveTicketScope } from "./liveBrowserContext.js";
 import type { SyncRelayStorage, TicketHostReport } from "./storage.js";
 import { ticketRecord, snapshotLiveTicketScope, snapshotTicketHostReport } from "./liveTicketInputs.js";
 import { hashLiveTicketToken, mintLiveTicketToken } from "./liveTicketSecurity.js";
@@ -11,7 +11,7 @@ export interface LiveTicketOptions {
   readonly audience: string;
   readonly key: BinaryLike;
   readonly hostReports: {
-    currentBinding(scope: LiveBrowserContext, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null>;
+    currentBinding(scope: LiveTicketScope, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null>;
   };
   readonly entropy?: (byteLength: number) => Uint8Array;
   readonly newTicketId?: () => string;
@@ -26,7 +26,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
   const newTicketId = options.newTicketId ?? randomUUID;
   const currentBinding = hostReports.currentBinding.bind(hostReports);
 
-  async function readReport(scope: LiveBrowserContext, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null> {
+  async function readReport(scope: LiveTicketScope, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null> {
     signal?.throwIfAborted();
     const candidate = await currentBinding({ ...scope }, objectId, signal);
     signal?.throwIfAborted();
@@ -36,8 +36,8 @@ export function createLiveTickets(options: LiveTicketOptions) {
   }
 
   return {
-    async mint(input: unknown, context: LiveBrowserContext, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number; publicPrincipalId?: string } | null> {
-      let scope: LiveBrowserContext;
+    async mint(input: unknown, context: LiveTicketScope, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number; publicPrincipalId?: string } | null> {
+      let scope: LiveTicketScope;
       let objectId: string;
       try {
         scope = snapshotLiveTicketScope(context);
@@ -52,8 +52,8 @@ export function createLiveTickets(options: LiveTicketOptions) {
         return minted === null ? null : { token, ...minted };
       } catch { throw new Error("Live-ticket operation failed."); }
     },
-    async redeem(token: unknown, context: LiveBrowserContext, signal?: AbortSignal): Promise<RedeemedLiveTicket | null> {
-      let scope: LiveBrowserContext;
+    async redeem(token: unknown, context: LiveTicketScope, signal?: AbortSignal): Promise<RedeemedLiveTicket | null> {
+      let scope: LiveTicketScope;
       try { parseLiveTicketToken(token); scope = snapshotLiveTicketScope(context); }
       catch { return null; }
       try {

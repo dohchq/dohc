@@ -1,7 +1,8 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
-import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
+import {serviceHostDocumentEnabled, serviceHostDocumentEnrolled} from "./serviceHostEnrollment";
+import { personalReachIn, readPersonalAuthority } from "./personalAgents";
 import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
 import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 import { allowsServiceActivation, readServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -64,7 +65,7 @@ import {
   LIVE_TICKET_LIFETIME_MS,
   type RedeemedLiveTicket,
 } from "@dohc/live-session-contract/live-ticket";
-import type { LiveBrowserContext } from "../liveBrowserContext";
+import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -86,8 +87,15 @@ export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest):
   if (nodeTypes.isProxy(outer.actor)) throw new TypeError("live authority actor must not be a proxy");
   const kind = typeof outer.actor === "object" && outer.actor !== null
     ? Object.getOwnPropertyDescriptor(outer.actor, "kind") : undefined;
-  if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named" && kind.value !== "link")) {
+  if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named" && kind.value !== "link" && kind.value !== "personal")) {
     throw new TypeError("live authority requires an authenticated actor");
+  }
+  if (kind.value === "personal") {
+    const actor = ticketRecord(outer.actor, ["kind", "workspaceId", "agentId", "connectionId", "accessTokenHash", "resourceHash", "fenceEpoch"]);
+    if (typeof actor.fenceEpoch !== "number" || !Number.isSafeInteger(actor.fenceEpoch) || actor.fenceEpoch < 0) throw new TypeError("live authority requires a fence epoch");
+    return { document, actor: { kind: "personal", workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID"),
+      agentId: parseLiveUpdateIdentifier(actor.agentId, "agent ID"), connectionId: parseLiveUpdateIdentifier(actor.connectionId, "connection ID"),
+      accessTokenHash: parseTicketHash(actor.accessTokenHash), resourceHash: parseTicketHash(actor.resourceHash), fenceEpoch: actor.fenceEpoch } };
   }
   if (kind.value === "link" && Object.getOwnPropertyDescriptor(outer.actor, "agentConnectionId") !== undefined) {
     const actor = ticketRecord(outer.actor, ["kind", "agentConnectionId", "accessTokenHash", "resourceHash", "grantId", "workspaceId"]);
@@ -391,7 +399,7 @@ export function automationRecordBinding(storage: StorageContext, workspaceId: st
   throw new Error("The shared file is unavailable. Restore access, then try again.");
 }
 
-export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveBrowserContext, requestedObjectId: string): LiveObjectHostBindingResult {
+export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveTicketScope, requestedObjectId: string): LiveObjectHostBindingResult {
   const scope = snapshotLiveTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
   return storage.readLiveAuthority(() => {
     if (!ticketScopeIsCurrent(storage, scope)) return { kind: "refused", reason: "not-authorized" };
@@ -401,7 +409,7 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
     const document = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId,
       lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id) };
     if (!serviceHostDocumentEnabled(storage, document)) return {kind: "refused", reason: "host-unavailable"};
-    if (scope.kind === "named") {
+    if (scope.kind === "named" || scope.kind === "personal") {
       const current = currentLiveDocumentBinding(storage, { document, actor: liveBrowserActor(scope) });
       return current.kind === "current" ? { kind: "current", binding: current.binding, host: current.host } : current;
     }
@@ -483,7 +491,17 @@ function snapshotTicketLookup(input: Record<string, unknown>): LiveTicketLookup 
     scope: snapshotLiveTicketScope(input.scope) };
 }
 
-export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveBrowserContext): boolean {
+// A personal agent at its scope's fence, still reaching the scope's workspace at Edit in an account that owns it.
+function currentPersonalEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "personal" }>) {
+  const now = Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid personal authority clock.");
+  const connection = readPersonalAuthority(storage, {accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash}, actor.fenceEpoch, now);
+  if (!connection || connection.connectionId !== actor.connectionId || connection.agentId !== actor.agentId) return null;
+  return personalReachIn(storage, connection, actor.workspaceId)?.level === "edit" ? connection : null;
+}
+
+export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveTicketScope): boolean {
+    if (scope.kind === "personal") return currentPersonalEdit(storage, liveBrowserActor(scope)) !== null;
     const grant = storage.getShareGrant(scope.grantId);
     const share = grant && storage.getShare(grant.shareId);
     return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
@@ -492,7 +510,7 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveBrowser
           .get(scope.sessionId, scope.capabilityHash)) && currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
   }
 
-export function currentTicketAuthority(storage: StorageContext, scope: LiveBrowserContext, objectId: string, report: TicketHostReport):
+export function currentTicketAuthority(storage: StorageContext, scope: LiveTicketScope, objectId: string, report: TicketHostReport):
     Extract<CurrentLiveBindingResult, { kind: "current" }> {
     if (report.binding.workspaceId !== scope.workspaceId || report.binding.objectId !== objectId ||
       !ticketScopeIsCurrent(storage, scope)) throw LIVE_TICKET_REFUSED;
@@ -512,10 +530,12 @@ export function matchingTicket(storage: StorageContext, input: LiveTicketLookup,
     const { claims, redeemedAtMs } = parseStoredLiveTicket(row);
     if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
       claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== input.scope.kind ||
-      (input.scope.kind === "named" ? claims.authority.principalId !== input.scope.userId :
+      // A personal ticket opens only for the agent and connection it was minted for.
+      (input.scope.kind === "personal" ? claims.authority.principalId !== input.scope.agentId || row.personal_connection_id !== input.scope.connectionId :
+      input.scope.kind === "named" ? claims.authority.principalId !== input.scope.userId :
         ("agentConnectionId" in input.scope ? row.agent_connection_id !== input.scope.agentConnectionId : row.link_session_id !== input.scope.sessionId) ||
         currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal?.principalId !== claims.authority.principalId) ||
-      claims.authority.grantId !== input.scope.grantId ||
+      claims.authority.grantId !== (input.scope.kind === "personal" ? null : input.scope.grantId) ||
       !ticketScopeIsCurrent(storage, input.scope)) throw LIVE_TICKET_REFUSED;
     return claims;
   }
@@ -555,7 +575,7 @@ export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): 
       storeLiveTicketInTransaction(storage, { claims, tokenHash: owned.tokenHash,
         linkSessionId: "sessionId" in owned.scope ? owned.scope.sessionId : null,
         agentConnectionId: "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
-        personalConnectionId: null }, now, policy);
+        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null }, now, policy);
       return { expiresAtMs: claims.expiresAtMs,
         ...(current.authority.principalKind === "link" ? {publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority)} : {}) };
     });
@@ -629,7 +649,8 @@ export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedem
         JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
         throw LIVE_TICKET_REFUSED;
       }
-      return consumeLiveTicketInTransaction(storage, { ticketId: claims.ticketId, tokenHash: owned.tokenHash, personalConnectionId: null }, now);
+      return consumeLiveTicketInTransaction(storage, { ticketId: claims.ticketId, tokenHash: owned.tokenHash,
+        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null }, now);
     });
   }
 
@@ -774,6 +795,15 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
         grantId: link.grant.grantId, grantGeneration: link.grant.generation });
       bound = bindLiveDocument(storage, document, stored, actor, link.share, link.effectiveSelector);
+    } else if (actor.kind === "personal") {
+      // Reach at Edit includes the account's ownership of the workspace. Only
+      // the self-hosted live host hosts documents for agents, and only those
+      // it enrolled.
+      if (document.workspaceId !== actor.workspaceId || !currentPersonalEdit(storage, actor)) return { kind: "refused", reason: "not-authorized" };
+      if (host.configuredMode !== "service" || !serviceHostDocumentEnrolled(storage, document)) return { kind: "refused", reason: "host-unavailable" };
+      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "personal", principalId: actor.agentId,
+        grantId: null, grantGeneration: null });
+      bound = bindOwnedLiveDocument(storage, document, stored);
     } else {
       if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) return { kind: "refused", reason: "not-authorized" };
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
@@ -854,7 +884,7 @@ function liveDocumentIsCurrent(storage: StorageContext, document: LiveDocumentKe
       !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath);
   }
 
-type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner" }>;
+type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner" | "personal" }>;
 
 /**
  * A recipient's share decides whether the recipient is admitted and what it
