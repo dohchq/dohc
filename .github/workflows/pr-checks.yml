@@ -285,7 +285,7 @@ jobs:
 
   confinement-compiler:
     name: compiler confinement
-    needs: [changes, javascript-prepare]
+    needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 20
@@ -306,6 +306,13 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Wait for the prepared engine and compiler tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verification/wait-preparation.mjs compiler
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: javascript-prepared-${{ github.run_attempt }}
@@ -318,9 +325,6 @@ jobs:
         with:
           name: compiler-tests-${{ github.run_attempt }}
           path: .agent-artifacts/verification
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
-        with:
-          tool: cargo-nextest@0.9.143
       - name: Compiler confinement
         run: |
           set -euo pipefail
@@ -347,7 +351,7 @@ jobs:
 
   confinement-relay:
     name: relay confinement
-    needs: [changes, javascript-prepare]
+    needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 20
@@ -368,6 +372,10 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - name: Wait for the prepared engine
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verification/wait-preparation.mjs js
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: javascript-prepared-${{ github.run_attempt }}

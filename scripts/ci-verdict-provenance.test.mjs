@@ -536,7 +536,7 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
   assert.doesNotMatch(prepare.steps.find(step => step.name === "Pack prepared artifacts").run, /packages\/app-backend-runtime\/dist/u);
   for (const kind of ["compiler", "relay"]) {
     const id = "confinement-" + kind, job = jobs[id];
-    assert.deepEqual(job.needs, ["changes", "javascript-prepare"]);
+    assert.equal(job.needs, "changes");
     assert.deepEqual(workflowExpression(job["runs-on"], workflowContext({enabled: "true"})), ["ubuntu-24.04"]);
     for (const [name, other] of Object.entries(jobs)) if (name !== "verification") assert.ok(![other.needs].flat().includes(id));
     const restore = job.steps.find(step => step.name === "Restore prepared artifacts").run;
@@ -545,6 +545,12 @@ test("confinement jobs reuse identified artifacts without occupying worker runne
     assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === "Restore prepared artifacts"));
     assert.equal(job.steps[toolchain].run, "rustup show active-toolchain || rustup toolchain install");
     assert.equal(job.steps.some(step => step.run?.includes("app-backend-runtime build")), kind === "relay");
+    const wait = job.steps.findIndex(step => step.run === `node scripts/verification/wait-preparation.mjs ${kind === "compiler" ? "compiler" : "js"}`);
+    const downloads = job.steps.flatMap((step, index) => step.uses?.startsWith("actions/download-artifact@") ? [index] : []);
+    assert.ok(wait > toolchain && wait > job.steps.findIndex(step => step.name === "Install dependencies"));
+    assert.ok(downloads.length === (kind === "compiler" ? 2 : 1) && downloads.every(index => index > wait));
+    assert.equal(job.steps[wait].env.GITHUB_TOKEN, "${{ github.token }}");
+    if (kind === "compiler") assert.ok(wait > job.steps.findIndex(step => step.uses?.startsWith("taiki-e/install-action@")));
   }
   const compiler = jobs["confinement-compiler"].steps.find(step => step.name === "Compiler confinement").run;
   assert.match(compiler, /cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --retries=0 --no-tests=fail/);
@@ -611,7 +617,7 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
   }
 });
 
-test("the workflow graph stays within twenty concurrent jobs", () => {
+test("the workflow graph pins its peak concurrent jobs", () => {
   const {jobs} = load(workflow), names = Object.keys(jobs);
   const ancestors = name => {
     const needs = jobs[name].needs ?? [];
@@ -624,7 +630,7 @@ test("the workflow graph stays within twenty concurrent jobs", () => {
     if (simultaneous.some(name => simultaneous.some(other => before.get(name).has(other)))) continue;
     peak = Math.max(peak, simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0));
   }
-  assert.equal(peak, 20);
+  assert.equal(peak, 21);
 });
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {

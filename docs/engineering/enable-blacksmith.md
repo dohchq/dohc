@@ -70,12 +70,12 @@ The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
-Gate timing records each gate's span and preparation plus confinement execution, without estimating workload from runner waits.
+Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
 An over-budget run with more than 30 s of gate-job runner wait warns that timing is unmeasured; uncontended overruns fail.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
-The workflow runs 16 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 20 concurrent jobs.
-The initial peak is 19, including preparation, Rust build, and Rust policy. Preparation ends before the two confinement jobs start.
+The workflow runs 16 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 21 concurrent jobs.
+The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
 Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
@@ -117,7 +117,8 @@ The `compiler confinement` and `relay confinement` jobs always use GitHub's `ubu
 Their engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
 Both download and check the prepared artifacts. Both install Rust because the engine fingerprint reads the compiler version.
 They run compiler and replica proofs on separate runners; only the compiler job needs nextest.
-Workers and aggregates do not wait for confinement. The final verdict requires both jobs and includes their longer execution time in both gates.
+Both confinement jobs overlap setup with preparation, then wait for their published artifacts under a 15-minute cap.
+Workers do not wait for confinement. Aggregates and final verification require both jobs and include their finishes in both gates' wall spans.
 If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
 The relay job runs the replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
 Both jobs fail if any required test skips.

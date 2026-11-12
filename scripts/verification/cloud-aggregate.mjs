@@ -52,8 +52,8 @@ export function aggregateRust(records) {
 export const CLOUD_JOB_GRAPH = {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
-  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes", "javascript-prepare"] },
-  "confinement-relay": { names: ["relay confinement"], needs: ["changes", "javascript-prepare"] },
+  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
+  "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
   "javascript-workers": { names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
   "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
@@ -64,33 +64,28 @@ export const CLOUD_JOB_GRAPH = {
 
 function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  return Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id === "changes" || id === "javascript-prepare"
+  return Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id === "changes" || id === "javascript-prepare" || id.startsWith("confinement-")
     || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
-const confinementNames = Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id.startsWith("confinement-")).flatMap(([, job]) => job.names);
-
-function gateTiming(scope, required, confinement = [], metadata = required) {
-  const all = [...required, ...confinement];
-  if (all.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
+function gateTiming(scope, required, metadata = required) {
+  if (required.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
   const start = Date.parse(required.find(job => job.name === "what changed").started_at);
   const spanSeconds = (Math.max(...required.map(job => Date.parse(job.completed_at))) - start) / 1000;
-  const confinementSeconds = confinement.length ? (Date.parse(required.find(job => job.name === "shared preparation").completed_at) - start
-    + Math.max(...confinement.map(job => Date.parse(job.completed_at) - Date.parse(job.started_at)))) / 1000 : null;
-  const jobs = all.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
+  const jobs = required.map(({ name, created_at, started_at, completed_at, conclusion }) => ({ name, createdAt: created_at,
     startedAt: started_at, finishedAt: completed_at, conclusion, runnerWaitSeconds: Math.max(0, (Date.parse(started_at) - Date.parse(created_at)) / 1000) }));
   // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
   const javascriptNames = CLOUD_JOB_GRAPH["javascript-workers"].names;
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
     runnerWaitSeconds: Math.max(0, (Date.parse(job.started_at) - Date.parse(job.created_at)) / 1000) || 0 })) : [];
-  const longest = [...jobs.filter(job => job.name !== "what changed" && !confinementNames.includes(job.name)), ...javascriptWaits]
+  const longest = [...jobs.filter(job => job.name !== "what changed"), ...javascriptWaits]
     .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
-  const contended = longest.runnerWaitSeconds > 30, seconds = Math.max(spanSeconds, confinementSeconds ?? 0);
+  const contended = longest.runnerWaitSeconds > 30, seconds = spanSeconds;
   const budgetSeconds = scope === "js" ? 300 : 600;
   const timing = seconds <= budgetSeconds ? "within budget" : contended ? "unmeasured" : "over budget";
-  return { spanSeconds, confinementSeconds, seconds, budgetSeconds, contended, timing, jobs,
+  return { spanSeconds, seconds, budgetSeconds, contended, timing, jobs,
     ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${budgetSeconds}s budget; longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s.` } : {}) };
 }
 
@@ -101,14 +96,13 @@ function requireBudget(scope, timing) {
 }
 
 export function completedGateTiming(scope, jobs, commit) {
-  const expected = [...gateJobNames(scope), ...confinementNames];
+  const expected = gateJobNames(scope);
   const required = jobs.filter(job => expected.includes(job.name));
   if (!commit || required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  return requireBudget(scope, gateTiming(scope, required.filter(job => !confinementNames.includes(job.name)),
-    required.filter(job => confinementNames.includes(job.name)), jobs));
+  return requireBudget(scope, gateTiming(scope, required, jobs));
 }
 
 export async function verifyCompletedCloud(scope, { env = process.env, readJobs = () => cloudApi({ env }).jobs(), outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
@@ -163,7 +157,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), [], all));
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), all));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;

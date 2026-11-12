@@ -3,14 +3,16 @@ import { resolve } from "node:path";
 import { cloudApi, QUEUED_STATUSES } from "./cloud-api.mjs";
 
 export async function waitForPreparation(scope, { env = process.env, request = fetch, pause = setTimeout, now = Date.now, download = false } = {}) {
-  const preparation = scope === "js" ? { job: "shared preparation", artifact: "javascript-prepared" }
-    : scope === "rust" ? { job: "Rust build once", artifact: "rust-tests" } : null;
-  if (!preparation) throw new Error("Select js or rust preparation.");
+  const preparation = scope === "js" ? { job: "shared preparation", artifacts: ["javascript-prepared"] }
+    : scope === "compiler" ? { job: "shared preparation", artifacts: ["javascript-prepared", "compiler-tests"] }
+    : scope === "rust" ? { job: "Rust build once", artifacts: ["rust-tests"] } : null;
+  if (!preparation) throw new Error("Select js, compiler or rust preparation.");
   for (const key of ["GITHUB_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_TOKEN"]) {
     if (!env[key]) throw new Error(`Missing ${key} for shared preparation.`);
   }
   const api = cloudApi({ env, request }), deadline = now() + 15 * 60_000;
-  const name = `${preparation.artifact}-${env.GITHUB_RUN_ATTEMPT}`;
+  const names = preparation.artifacts.map(artifact => `${artifact}-${env.GITHUB_RUN_ATTEMPT}`);
+  let name = names.shift();
   let build, checkAt = -Infinity;
   console.log(`Waiting for ${name}; dependency setup overlaps the shared build.`);
   try {
@@ -49,7 +51,9 @@ export async function waitForPreparation(scope, { env = process.env, request = f
               }
               if (download) return { artifact, response };
               await response.body.cancel();
-              return { artifact };
+              if (!names.length) return { artifact };
+              name = names.shift();
+              break;
             }
             saw404 = true;
             await response.body?.cancel();
