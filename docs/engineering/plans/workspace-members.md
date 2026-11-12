@@ -14,7 +14,7 @@ The first use is a community workspace, such as "dohc Community": docs, chats, a
 
 Slack, Notion, and Linear give a workspace a few fixed roles: owner, admin, member, and guest. Buzz (buzz.xyz) adds a moderator. Notion lets an admin limit a page to certain people, and the page's children inherit that. Discord lets an admin limit a channel to certain roles or people, for example an announcements channel where only admins post. Custom roles appear only in Discord and in enterprise plans.
 
-This plan takes the fixed roles, and Notion's and Discord's access on each folder or channel.
+This plan takes the fixed roles, and Notion's and Discord's access on each page or channel, as rules on folders and Groups.
 
 ## Size
 
@@ -119,7 +119,7 @@ The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the
 dohc already has email invites, the three access levels, grants with revocation, Groups, a checked write path for Collection files, server reads while the owner is offline, and per-workspace agent reach. These parts are new:
 
 - **A share of the whole workspace.** Every live share today names specific paths, a Group, or a chat. A version share with no paths covers the whole workspace, but frozen at one version (`packages/security-contract/src/shareSelector.ts`). The relay's file filter allows nothing for a live file share with no paths (`services/sync-relay/src/shareFilter.ts`). A member's share covers the current workspace and anything added later.
-- **Roles held by the relay**, next to the grants. Access rules come from `access.yaml` files in the owner's workspace.
+- **Roles held by the relay**, next to the grants. A folder's rule comes from its `access.yaml` file in the owner's workspace. A Group's rule is saved on the Group.
 - **One reachable set per member, used everywhere.** Files, search, History, links, Collections, chats, and agent tools all read through it. Piece 1 builds this set before any rule exists, so piece 3 does not have to change every surface again.
 - **New Markdown pages under Edit.** The checked write path that creates Collection records today also creates pages in folders where the person has Edit.
 - **Deleting Group messages.** Only share discussion messages can be deleted today (`services/sync-relay/src/discussionRoutes.ts`).
