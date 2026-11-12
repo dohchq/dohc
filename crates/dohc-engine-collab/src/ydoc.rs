@@ -11872,7 +11872,7 @@ mod projection_tests {
         assert_eq!(meta.len(&shared.doc.transact()), 0);
         let refusal = shared.validate_public_baseline(&base).unwrap_err();
         assert!(
-            matches!(&refusal, CollabError::MalformedUpdate { reason } if reason == "invalid public baseline schema"),
+            matches!(&refusal, CollabError::BaselineSchemaVersionMissing),
             "{refusal:?}"
         );
         // The same note with the version the seed would have written passes.
