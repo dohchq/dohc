@@ -965,12 +965,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       ] },
     ]}
     panel={props.panel}
-  ><div className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
-    {unshown.length > 0 ? <div className="shrink-0 px-5"><UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} onDismissDeletion={id => queue.dismissDeletion(id)} /></div> : null}
+  // The table starts at the tabs' line, as a document Collection's does. What stands above or in place of it keeps 12px under the tabs.
+  ><div className="flex min-h-0 flex-1 flex-col gap-3">
+    {unshown.length > 0 ? <div className="shrink-0 px-5 pt-3"><UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} onDismissDeletion={id => queue.dismissDeletion(id)} /></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
-    {busy ? page ? <p role="status" className="m-0 px-5 text-[12px] text-muted">Loading records…</p> : <SkeletonRows label="Loading records…" /> : null}
+    {busy ? page ? <p role="status" className="m-0 px-5 text-[12px] text-muted first:pt-3">Loading records…</p> : <SkeletonRows label="Loading records…" className="first:mt-3" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
-    : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
+    : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3 first:pt-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
       onReadInPlace={rows => { showOpenRecord(rows); const shows = visualRead.current; visualRead.current = Number.POSITIVE_INFINITY; view.readShown(Number.isFinite(shows) ? shows : -1, rows); }}
       disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}

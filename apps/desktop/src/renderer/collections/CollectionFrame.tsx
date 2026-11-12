@@ -159,7 +159,7 @@ export function CollectionFrame({
           <span className="truncate">{name}</span>
         </h1>
         {count !== undefined ? (
-          <span data-testid="collection-record-count" className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{count}</span>
+          <span data-testid="collection-record-count" className="shrink-0 text-[12px] tabular-nums text-muted">{count}</span>
         ) : null}
         <span className="flex-1" />
         {status}
