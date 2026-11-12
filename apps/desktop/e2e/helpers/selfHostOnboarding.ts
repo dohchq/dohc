@@ -81,6 +81,7 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
       // The texts the service host settled for one path, in every store it keeps.
       liveHostTexts: (path: string) => liveHostTexts(directory, path),
+      liveHosting: (workspaceId: string, path: string) => liveHosting(directory, workspaceId, path),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -565,6 +566,29 @@ function liveHostTexts(directory: string, path: string): string[] {
   const hostRoot = join(directory, "relay-deployment", "live-host");
   return readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
     .flatMap((entry) => momentTextsForPath(join(hostRoot, entry.name), path));
+}
+
+// The relay's enrollment of one path, and every activation of its document.
+// Flags and IDs only.
+function liveHosting(directory: string, workspaceId: string, path: string) {
+  const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
+  try {
+    const enrollment = db.prepare(
+      "SELECT object_id, retired, host_drained_at_ms, owner_stop FROM sync_relay_service_host_enrollments WHERE workspace_id=? AND path=?",
+    ).get(workspaceId, path);
+    if (!enrollment) return null;
+    const activations = db.prepare(
+      `SELECT activation_id, predecessor_activation_id, retired_at_ms FROM sync_relay_service_activations
+       WHERE workspace_id=? AND main_version_id='main' AND object_id=? LIMIT 16`,
+    ).all(workspaceId, enrollment.object_id);
+    return {
+      retired: Number(enrollment.retired) === 1, drained: enrollment.host_drained_at_ms !== null,
+      ownerStop: enrollment.owner_stop === null ? null : String(enrollment.owner_stop),
+      activations: activations.map((row) => ({ activationId: String(row.activation_id),
+        predecessorActivationId: row.predecessor_activation_id === null ? null : String(row.predecessor_activation_id),
+        retired: row.retired_at_ms !== null })),
+    };
+  } finally { db.close(); }
 }
 
 // How far the server's live work on one document has gone: the relay's

@@ -31,7 +31,7 @@ async function closeNote(page: Page): Promise<void> {
   await expect(tab).toHaveCount(0);
 }
 
-test("@live-owner-open an owner edit queued while the server hosts the note nowhere reaches its new live copy once the owner opens it", async ({browser}, info) => {
+test("@live-owner-open an owner edit queued while the server hosts the note nowhere reaches a successor live copy once the server answers the desktop's owner open", async ({browser}, info) => {
   test.setTimeout(600_000);
   const signal = AbortSignal.timeout(info.timeout - 10_000);
   const ownerTemp = await createTempWorkspace();
@@ -43,7 +43,7 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
   const ownerAccount = {email: `owner-${randomUUID()}@example.test`, password: `Owner-${randomUUID()}`, name: "Owner"};
   const recipientAccount = {email: `recipient-${randomUUID()}@example.test`, password: `Recipient-${randomUUID()}`};
   // While set, the server answers the desktop's owner opens with 503, so an
-  // edit stays queued until the owner opens the note.
+  // edit stays queued until the server answers them again.
   let holdOwnerOpens = false;
   const accountPage = async () => {
     const context = await browser.newContext();
@@ -106,11 +106,21 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
       }, {timeout: 120_000, intervals: [1_000]}).toBe(true);
       return created;
     });
+    // The activation the share's hosting started, which the retirement ends.
+    const started = stack.liveHosting(workspace.workspaceId, PATH)?.activations.filter(activation => !activation.retired) ?? [];
+    expect(started).toHaveLength(1);
+    const original = started[0]!.activationId;
 
-    await test.step("stopping the note's only share retires it without a Stop, and the list stops naming it live", async () => {
+    await test.step("stopping the note's only share retires its enrollment and activation without a Stop, the host lets the note go, and the list stops naming it live", async () => {
       await page.evaluate(shareId =>
         (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.revokeRelayShare({shareId}), share.shareId);
       await expect.poll(hosted, {timeout: 120_000, intervals: [1_000]}).toBe(false);
+      // A retirement still running would keep the enrollment for an owner open that comes during it.
+      await expect.poll(() => {
+        const hosting = stack!.liveHosting(workspace.workspaceId, PATH);
+        return hosting && {retired: hosting.retired, drained: hosting.drained, ownerStop: hosting.ownerStop,
+          originalRetired: hosting.activations.find(activation => activation.activationId === original)?.retired};
+      }, {timeout: 120_000, intervals: [1_000]}).toEqual({retired: true, drained: true, ownerStop: null, originalRetired: true});
     });
 
     const queued = await test.step("the owner types in the open note, and the edit waits on this computer", async () => {
@@ -127,11 +137,17 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
       return {acceptedHead};
     });
 
-    await test.step("the owner opens the note, and the queued edit reaches the server's new live copy", async () => {
+    await test.step("once the server answers again, the desktop's owner open re-enrolls the note in a successor activation, and the queued edit reaches it", async () => {
+      holdOwnerOpens = false;
+      // A 503 is not a refusal, so the desktop's next pass asks again for the
+      // note whose edit waits. Reopening the note only starts that pass now.
       await closeNote(page);
       await openNote(page);
-      holdOwnerOpens = false;
       await expect.poll(hosted, {timeout: 120_000, intervals: [1_000]}).toBe(true);
+      // One current activation, which follows the one the retirement ended.
+      await expect.poll(() => stack!.liveHosting(workspace.workspaceId, PATH)?.activations
+        .filter(activation => !activation.retired).map(activation => activation.predecessorActivationId),
+      {timeout: 120_000, intervals: [1_000]}).toEqual([original]);
       await expect.poll(() => stack!.livePublication(workspace.workspaceId, PATH).acceptedHead, {timeout: 120_000, intervals: [1_000]})
         .toBeGreaterThan(queued.acceptedHead);
       await expect.poll(() => stack!.liveHostTexts(PATH).some(text => text.includes(`${ANCHOR} ${TYPED}`)),

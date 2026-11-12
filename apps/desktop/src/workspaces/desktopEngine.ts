@@ -381,9 +381,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           let path = [...opened].find(([, at]) => at < listedAt)?.[0];
           path ??= (dependencies.ownerPendingPaths?.(workspaceId) ?? []).find(candidate => !hosted.has(candidate) && !refused.has(candidate));
           if (path === undefined) return;
+          const at = opened.get(path);
           const answer = await session.open(path, signal);
           check();
-          opened.delete(path);
+          // The owner opened it again while this was asked: that open stays, and this answer records nothing.
+          const now = ownerOpened.get(workspaceId);
+          if (now?.get(path) !== at) return;
+          now?.delete(path);
           if (answer === "refused") refused.add(path);
         };
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
