@@ -66,3 +66,10 @@ it("tells the page whether the link has apps to show", async () => {
   await settle(() => container.textContent!.includes("No apps are available"));
   expect(states.slice(2)).toEqual(["loading", "none"]);
 });
+it("keeps the list reachable when a page comes back empty with more to load", async () => {
+  const states: string[] = [], onState = (state: string) => {states.push(state);};
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({publications: [], nextCursor: "b".repeat(64)})));
+  await act(async () => root.render(<PublishedApps session="abcdefghijkl" onState={onState}/>));
+  await settle(() => [...container.querySelectorAll("button")].some(button => button.textContent === "Load more apps"));
+  expect(states.at(-1)).toBe("some");
+});

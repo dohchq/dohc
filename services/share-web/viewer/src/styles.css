@@ -256,7 +256,8 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 
 .popover { position: absolute; top: 48px; right: 12px; z-index: 30; width: 360px; max-width: calc(100% - 24px); max-height: calc(100% - 60px); overflow-y: auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 16px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); }
 .popover.link-more { width: 232px; border-radius: 8px; padding: 4px; }
-.popover.apps-lead { top: 96px; right: auto; left: 50%; width: min(440px, calc(100% - 32px)); transform: translateX(-50%); box-shadow: none; }
+/* The leading apps sit in the page, under anything that opens over it. */
+.popover.apps-lead { z-index: 10; top: 96px; right: auto; left: 50%; width: min(440px, calc(100% - 32px)); transform: translateX(-50%); box-shadow: none; }
 .menu-item, .link-page .link-more .handoff-open { display: flex; width: 100%; height: 32px; align-items: center; justify-content: flex-start; gap: 8px; border: 0; border-radius: 6px; padding: 0 8px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 400; }
 .menu-item:hover, .link-page .link-more .handoff-open:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
 .link-more .handoff-panel { max-width: none; padding: 8px; }
@@ -328,7 +329,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
   .side-panel { position: fixed; inset: 20% 0 0; z-index: 30; width: auto; border: 1px solid var(--viewer-line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: var(--viewer-shadow); }
   .side-panel[data-open="false"] { position: fixed; inset: 20% 0 0; }
   .link-page .comments-panel { border: 0; padding: 14px 16px 16px; }
-  .popover, .edit-notice { position: fixed; top: auto; right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; max-height: 80%; border-radius: 16px; }
+  .popover, .link-page .edit-notice { position: fixed; top: auto; right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; max-height: 80%; border-radius: 16px; }
   .popover.link-more { width: auto; padding: 8px; }
   .popover.apps-lead { position: absolute; top: 72px; right: 16px; bottom: auto; left: 16px; width: auto; transform: none; }
 }

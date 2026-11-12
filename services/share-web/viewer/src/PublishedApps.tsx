@@ -16,7 +16,7 @@ function parsePage(value: unknown): {publications: Publication[]; nextCursor: st
   return page as unknown as {publications: Publication[]; nextCursor: string | null};
 }
 
-/** Whether a link has apps to show. A list that could not load counts as some, so its Retry stays reachable. */
+/** Whether a link has apps to show. A list that could not load, or has more to load, counts as some, so its Retry and Load more stay reachable. */
 export type AppsState = "loading" | "none" | "some";
 export function PublishedApps({session, onState}: {session: string; onState?: (state: AppsState) => void}) {
   return <PublicationList key={session} session={session} onState={onState}/>;
@@ -48,7 +48,7 @@ function PublicationList({session, onState}: {session: string; onState?: (state:
     } catch {if (!controller.signal.aborted && active.current === controller) {setError("Could not load apps.");setStatus("failed");}}
   }
   useEffect(() => {void load(null);return () => active.current?.abort();}, []);
-  const state: AppsState = publications.length > 0 || status === "failed" ? "some" : status === "loading" ? "loading" : "none";
+  const state: AppsState = publications.length > 0 || status === "failed" || cursor !== null ? "some" : status === "loading" ? "loading" : "none";
   // Before paint, so a link that holds only apps never shows its empty page first.
   useLayoutEffect(() => {onState?.(state);}, [onState, state]);
   return <section aria-label="Shared apps">
