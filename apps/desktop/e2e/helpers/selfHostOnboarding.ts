@@ -18,7 +18,6 @@ import {
 } from "../../../../services/workspace-api/e2e/harness";
 import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import { parseStoredShareSelectorJson } from "../../../../services/sync-relay/src/shareFilter";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
@@ -416,16 +415,19 @@ function acceptedCursorBefore(directory: string, workspaceId: string, path: stri
   } finally { db.close(); }
 }
 
-/** The current binding of the fixture's retained owner enrollment, read in one relay snapshot. */
+/**
+ * The current binding of the fixture's retained owner enrollment, read in one relay snapshot:
+ * its activation's recorded binding at the live document's restore generation, as the relay
+ * gives it to the owner (`recordedLiveBinding`).
+ */
 function ownerLiveBinding(directory: string, workspaceId: string, path: string) {
   const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
   try {
     const rows = db.prepare(
       `SELECT d.workspace_id, d.main_version_id, d.object_id, d.lineage_claim_id,
-         d.current_path, d.restore_fence_generation, s.selector_json, a.relay_database_namespace
+         d.current_path, d.restore_fence_generation, a.binding_json, a.relay_database_namespace
        FROM sync_relay_service_host_enrollments e
        JOIN sync_relay_workspaces w ON w.workspace_id=e.workspace_id
-       JOIN sync_relay_shares s ON s.share_id=e.share_id
        JOIN sync_relay_live_documents d
          ON d.workspace_id=e.workspace_id AND d.main_version_id='main'
          AND d.object_id=e.object_id AND d.current_path=e.path
@@ -435,9 +437,8 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
        WHERE e.workspace_id=? AND e.path=? AND e.enabled=1 AND e.retired=0
          AND e.owner_user_id=w.owner_user_id
          AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity
-         AND s.workspace_id=e.workspace_id AND s.granter_user_id=e.owner_user_id
-         AND a.owner_user_id=e.owner_user_id AND a.share_id=e.share_id
-         AND a.completion_json IS NOT NULL
+         AND a.owner_user_id=e.owner_user_id
+         AND a.retired_at_ms IS NULL AND a.completion_json IS NOT NULL
          AND d.lineage_state='current' AND d.admission_state='open'
          AND EXISTS (
            SELECT 1 FROM sync_relay_object_moments m
@@ -452,15 +453,14 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
     assert.ok(rows.length <= 1, "The fixture has more than one current owner enrollment for its document.");
     const row = rows[0];
     if (!row) return null;
-    assert.equal(typeof row.selector_json, "string", "The owner share selector must be JSON text.");
-    const selector = parseStoredShareSelectorJson(row.selector_json as string);
-    assert.deepEqual(selector, { paths: [path], versionId: null }, "The fixture owner share selects only this main file.");
-    const binding = parseLiveObjectBinding({
-      workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
-      objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
-      currentPath: row.current_path, selectorPaths: selector!.paths,
-      restoreFenceGeneration: row.restore_fence_generation,
-    });
+    assert.equal(typeof row.binding_json, "string", "The owner activation's binding must be JSON text.");
+    const recorded = parseLiveObjectBinding(JSON.parse(row.binding_json as string));
+    assert.deepEqual(
+      [recorded.workspaceId, recorded.mainVersionId, recorded.objectId, recorded.lineageClaimId, recorded.currentPath],
+      [row.workspace_id, row.main_version_id, row.object_id, row.lineage_claim_id, row.current_path],
+      "The owner activation's binding names the live document.",
+    );
+    const binding = parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: row.restore_fence_generation });
     const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
     return { binding, relayDatabaseNamespace };
   } finally { db.close(); }
