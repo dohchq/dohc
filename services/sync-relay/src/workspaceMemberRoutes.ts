@@ -67,7 +67,6 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
   if (parts.length === 3 && parts[1] === "members") {
     if (parts[2] === "join") return { route: "members-join" };
     if (parts[2] === "join-preview") return { route: "members-join-preview" };
-    return null;
   }
   if (parts[2] !== "members" || parts.length < 3 || parts.length > 5) return null;
   let workspaceId: string;

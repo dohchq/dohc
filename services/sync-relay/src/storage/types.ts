@@ -997,7 +997,9 @@ export interface SyncRelayStorage {
   noticeHead(recipientUserId: string): number;
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
-  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
+  pendingShareNotices(
+    recipientUserId: string,
+  ): { grantId: string; granterUserId: string; showsGranterEmail: boolean }[];
   readAutomationHost(
     input: import("./automationHosts").AutomationHostReadInput,
   ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
@@ -2206,4 +2208,6 @@ export interface LiveTicketStoragePolicy {
 
 type WorkspaceMembersModule = typeof import("./workspaceMembers");
 type WorkspaceMembersMethod<K extends keyof WorkspaceMembersModule> =
-  WorkspaceMembersModule[K] extends (storage: never, ...args: infer A) => infer R ? (...args: A) => R : never;
+  WorkspaceMembersModule[K] extends (storage: never, ...args: infer A) => infer R
+    ? (...args: A) => R
+    : never;

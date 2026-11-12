@@ -204,6 +204,9 @@ describe("workspace member routes", () => {
     expect(parse(`/sync/${WORKSPACE}/members/unknown`)).toBeNull();
     expect(parse(`/sync/${WORKSPACE}/members/m-1/unknown`)).toBeNull();
     expect(parse("/sync/members/other")).toBeNull();
+    // A workspace may be called "members".
+    expect(parseRoute({ url: "http://relay.test/sync/members/members" })).toEqual({ route: "members", workspaceId: "members" });
+    expect(parse("/sync/members/members/level")).toEqual({ route: "members-level", workspaceId: "members" });
   });
 });
 
@@ -230,6 +233,20 @@ describe("what a member reaches", () => {
     await ownerAppend(h, [channel(LATER_GROUP, "later"), thread("t-later", LATER_GROUP, "later"), message("msg-later", "t-later", "a new group")]);
     expect(await pulledText(h, "ana", shareId)).toContain("later/new.md");
     expect(await pulledText(h, "ana", shareId, LATER_GROUP)).toContain("a new group");
+  });
+
+  it("joins presence for Groups and files, and never for General, direct messages, or agent chats", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const presence = (topic: string) =>
+      h(request("ana", `/sync/shares/${shareId}/presence?topic=${encodeURIComponent(topic)}&hold=0`));
+    for (const topic of [GROUP, "chat:thread:t-team", "docs/plan.md"]) {
+      expect((await presence(topic)).status, topic).toBe(200);
+    }
+    for (const topic of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT, "chat:thread:t-general", "chat:thread:t-dm"]) {
+      expect((await presence(topic)).status, topic).toBe(404);
+    }
   });
 
   it("lets Comment post and comment but not edit, View only read, and Edit change files", async () => {
@@ -276,6 +293,20 @@ describe("what a member reaches", () => {
     expect(response.status).toBe(200);
     const titles = ((await json(response)).notices as Array<{ title: string }>).map((row) => row.title);
     expect(titles.some((title) => /added you to Community$/u.test(title))).toBe(true);
+  });
+
+  it("names the owner to a member without the owner's email", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const row = await workspaceShare(h, "ana");
+    expect(row).toMatchObject({ granterEmail: null, sharerName: "Name owner" });
+    const detail = await h(request("ana", `/sync/shares/${row!.shareId as string}`));
+    expect(detail.status).toBe(200);
+    expect(await json(detail)).toMatchObject({ granterEmail: null, sharerName: "Name owner" });
+    const notices = await h(request("ana", "/sync/notices"));
+    const text = JSON.stringify(await json(notices));
+    expect(text).toContain("Name owner added you to Community");
+    expect(text).not.toContain(`${OWNER}@`);
   });
 });
 
@@ -516,6 +547,16 @@ describe("account deletion", () => {
     deleteAccount(storage, OWNER);
     expect((await pull(h, "ana", shareId)).status).toBe(404);
     expect(await workspaceShare(h, "ana")).toBeUndefined();
+  });
+
+  it("drops an email invite when the account at that address is deleted, freeing its seat for a new invite", async () => {
+    const { h, storage } = await seed();
+    expect((await invite(h, OWNER, "dee@elsewhere.example")).status).toBe(200);
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, KEY);
+    fenceAccount(context, KEY, "dee-old", "dee@elsewhere.example");
+    expect((await membersView(h, OWNER)).people).toHaveLength(1);
+    expect((await invite(h, OWNER, "dee@elsewhere.example")).status).toBe(200);
   });
 
   it("does not let a new account at a deleted account's address take over its ended invite", async () => {

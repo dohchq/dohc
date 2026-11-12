@@ -699,6 +699,18 @@ export function joinWorkspace(storage: StorageContext, input: {
 }
 
 /**
+ * Deletes the email invites for `email` whose grant ended, as when the
+ * account at that address was deleted. Such an invite admits nobody and
+ * must not hold a seat or block a new invite.
+ */
+export function dropEndedWorkspaceInvitesInTransaction(storage: StorageContext, email: string): void {
+  storage.db.prepare(
+    `DELETE FROM ${MEMBERS} WHERE state = 'invited' AND email = ?
+       AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants g WHERE g.grant_id = ${MEMBERS}.grant_id AND g.status = 'active')`,
+  ).run(email);
+}
+
+/**
  * Binds the email invites for `email` to `userId`, inside the transaction
  * that claims that email's share grants. Run before the grant claim: the
  * grant triggers then find each entry already active. An account that
@@ -706,12 +718,7 @@ export function joinWorkspace(storage: StorageContext, input: {
  * ends, so a removed account stays removed.
  */
 export function claimWorkspaceInvitesInTransaction(storage: StorageContext, email: string, userId: string, nowMs: number): void {
-  // An invite whose grant ended (an earlier account at this address was
-  // deleted) admits nobody.
-  storage.db.prepare(
-    `DELETE FROM ${MEMBERS} WHERE state = 'invited' AND email = ?
-       AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants g WHERE g.grant_id = ${MEMBERS}.grant_id AND g.status = 'active')`,
-  ).run(email);
+  dropEndedWorkspaceInvitesInTransaction(storage, email);
   const invites = storage.db.prepare(
     `SELECT * FROM ${MEMBERS} WHERE state = 'invited' AND email = ?`,
   ).all(email).map(rowToMember);

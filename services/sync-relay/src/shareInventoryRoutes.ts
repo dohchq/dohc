@@ -14,7 +14,7 @@ import {
   type AuthorizedShareAction,
 } from "./shareAuthorization";
 import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
-import type { createShareSummaries } from "./shareSummaries";
+import { showsGranterEmail, type createShareSummaries } from "./shareSummaries";
 import type {
   SyncRelayGrantedInventoryCursor,
   SyncRelayReceivedInventoryCursor,
@@ -70,15 +70,21 @@ export function createShareInventoryRoutes(
   linkKey?: string | Uint8Array,
   shareWebOrigin?: string,
 ) {
+  async function granterEmailFor(share: {
+    granterUserId: string;
+    selectorJson: string;
+  }): Promise<string | null> {
+    return lookupUserEmail && showsGranterEmail(share.selectorJson)
+      ? await lookupUserEmail(share.granterUserId)
+      : null;
+  }
   async function receivedSummaries(
     rows: readonly SyncRelayShareWithGrantRow[],
     actorUserId: string,
   ) {
     const receivedLookups = await Promise.all(
       rows.map(async (fallback) => {
-        const granterEmail = lookupUserEmail
-          ? await lookupUserEmail(fallback.share.granterUserId)
-          : null;
+        const granterEmail = await granterEmailFor(fallback.share);
         const sharerName =
           (await senderLabel?.(fallback.share.granterUserId, granterEmail)) ?? granterEmail;
         return { fallback, granterEmail, sharerName };
@@ -274,9 +280,7 @@ export function createShareInventoryRoutes(
     if (route.route === "share" && request.method === "GET") {
       await claimPendingShares(actor.userId);
       const initial = requireShareAction(route.shareId, actor.userId, "read");
-      const granterEmail = lookupUserEmail
-        ? await lookupUserEmail(initial.share.granterUserId)
-        : null;
+      const granterEmail = await granterEmailFor(initial.share);
       const sharerName =
         (await senderLabel?.(initial.share.granterUserId, granterEmail)) ?? granterEmail;
       const authorized = resolveReceivedShareAuthority({

@@ -270,8 +270,16 @@ export interface CreateSyncRelayHandlerOptions {
 const MAX_LINK_CURRENT_FILES = 5_000;
 
 const MEMBERSHIP_MANAGED_SHARE_ROUTES: ReadonlySet<string> = new Set([
-  "share-copy", "share-undo", "share-revoke", "share-grant-revoke", "share-grant-promote",
-  "share-link-create", "share-link-rotate", "share-link-retune", "share-link-agents", "share-link-agent-disconnect",
+  "share-copy",
+  "share-undo",
+  "share-revoke",
+  "share-grant-revoke",
+  "share-grant-promote",
+  "share-link-create",
+  "share-link-rotate",
+  "share-link-retune",
+  "share-link-agents",
+  "share-link-agent-disconnect",
 ]);
 
 export function createSyncRelayHandler({
@@ -538,15 +546,20 @@ export function createSyncRelayHandler({
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
     const labels = new Map<string, Promise<{ senderLabel: string; senderEmail: string | null }>>();
-    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+    for (const { grantId, granterUserId, showsGranterEmail } of storage.pendingShareNotices(
+      userId,
+    )) {
       try {
-        let label = labels.get(granterUserId);
+        const key = `${showsGranterEmail ? "email" : "name"}:${granterUserId}`;
+        let label = labels.get(key);
         if (label === undefined) {
           label = (async () => {
-            const senderEmail = (await lookupUserEmail?.(granterUserId)) ?? null;
+            const senderEmail = showsGranterEmail
+              ? ((await lookupUserEmail?.(granterUserId)) ?? null)
+              : null;
             return { senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail };
           })();
-          labels.set(granterUserId, label);
+          labels.set(key, label);
         }
         storage.noticeShareReceived({ grantId, ...(await label), nowMs: nowMs() });
       } catch (error) {
@@ -726,8 +739,18 @@ export function createSyncRelayHandler({
   });
 
   const respondToWorkspaceMembers = createWorkspaceMemberRoutes({
-    storage, nowMs, newId, newShareId, newGrantId, claimPendingShares, resolveUserIdByEmail,
-    lookupUserEmail, lookupUserDisplayName, linkKey, shareWebOrigin, discussionActivity,
+    storage,
+    nowMs,
+    newId,
+    newShareId,
+    newGrantId,
+    claimPendingShares,
+    resolveUserIdByEmail,
+    lookupUserEmail,
+    lookupUserDisplayName,
+    linkKey,
+    shareWebOrigin,
+    discussionActivity,
   });
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
@@ -820,7 +843,9 @@ export function createSyncRelayHandler({
     storage,
     (shareId, reader) => {
       const membership = storage.getWorkspaceMembershipByShare(shareId);
-      return membership ? { subjectName: membership.workspaceName } : storage.getShareLabels(shareId, reader);
+      return membership
+        ? { subjectName: membership.workspaceName }
+        : storage.getShareLabels(shareId, reader);
     },
     lookupUserEmail,
     namedBrowser ? shareWebOrigin : undefined,
@@ -1657,8 +1682,12 @@ export function createSyncRelayHandler({
       // anyone else gets their usual 404 and learns nothing about the share.
       if (MEMBERSHIP_MANAGED_SHARE_ROUTES.has(route.route) && "shareId" in route) {
         const stored = storage.getShare(route.shareId);
-        const selector = stored?.granterUserId === actor.userId ? parseStoredAnyShareSelectorJson(stored.selectorJson) : null;
-        if (selector && "kind" in selector && selector.kind === "workspace") throw relayError("workspace_share_managed");
+        const selector =
+          stored?.granterUserId === actor.userId
+            ? parseStoredAnyShareSelectorJson(stored.selectorJson)
+            : null;
+        if (selector && "kind" in selector && selector.kind === "workspace")
+          throw relayError("workspace_share_managed");
       }
 
       if (

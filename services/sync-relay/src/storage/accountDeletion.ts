@@ -8,6 +8,7 @@ import { noticeIdFrom } from "./notices";
 import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
+import { dropEndedWorkspaceInvitesInTransaction } from "./workspaceMembers";
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
@@ -190,6 +191,7 @@ export function fenceAccount(
         "UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=?,generation=generation+1 WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)",
       )
       .run(Date.now(), userId, normalizeEmail(email));
+    dropEndedWorkspaceInvitesInTransaction(storage, normalizeEmail(email));
     retireUncoveredServiceActivations(storage, covered, Date.now());
     storage.db
       .prepare(`UPDATE sync_relay_share_removals SET voided = 1
