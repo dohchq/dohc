@@ -25,6 +25,15 @@ const spawn = vi.hoisted(() => vi.fn());
 vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
   ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
 }));
+// A folder a test names here can't be removed, as when the disk refuses.
+const stuck = vi.hoisted(() => ({ path: null as string | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rm: async (...args: Parameters<typeof actual.rm>) => {
+    if (stuck.path !== null && String(args[0]) === stuck.path) throw Object.assign(new Error("the folder is busy"), { code: "EBUSY" });
+    return await actual.rm(...args);
+  } };
+});
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -2154,30 +2163,54 @@ describe("the automation replicas", () => {
     expect(storage.listAutomationWorkspaces()).toEqual([]);
   });
 
-  it("fails an account's deletion while its copy's phone writes can't settle, and settles them before its retry removes the copy", async () => {
+  // An account's deletion, as main.ts runs it, over the copies, and the folder of the copy of WORKSPACE.
+  async function deletingAccount(storage: SyncRelayStorage) {
+    const errors: Array<[unknown, string | undefined]> = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE], nowMs: () => 0, onError: (error, workspaceId) => errors.push([error, workspaceId]) });
+    await running.settled();
+    const folder = join(running.replica(WORKSPACE)!.root, "..", "..");
+    cleanup.push(async () => { stuck.path = null; });
+    let runtimeDone = false;
+    const deletion = createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer", fenceKey: "fence", invalidate() {},
+      deleteRuntime: async () => running.deleteWorkspaces([WORKSPACE]),
+      afterPhase(phase) { if (phase === "runtime") runtimeDone = true; } });
+    return { running, folder, errors, deletion, runtimeDone: () => runtimeDone };
+  }
+  const operationRows = (raw: ReturnType<typeof inspectDatabase>) => raw.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get();
+
+  it("deletes an account whose copy's phone writes can't be read, and reports the copy, with its folder and rows gone", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
-    const errors: unknown[] = [];
-    const { replicas: running, root } = await replicas(storage, () => [WORKSPACE], { ms: 0 }, (error) => errors.push(error));
+    const { running, folder, errors, deletion } = await deletingAccount(storage);
     phoneWrite(storage, "sent");
     accept(raw, "sent", 1);
     engine.receipts(new Error("the engine is busy"));
-    let settledAtRuntime: unknown[] | null = null;
-    const deletion = createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer", fenceKey: "fence", invalidate() {},
-      deleteRuntime: async () => running.deleteWorkspaces([WORKSPACE]),
-      afterPhase(phase) { if (phase === "runtime") settledAtRuntime = outcome(raw, "sent"); } });
-    await expect(deletion.purge("owner", "owner@example.test")).rejects.toThrow("the engine is busy");
-    expect(running.replica(WORKSPACE)).toBeUndefined();
-    expect(folders(root), "its folder stays").toHaveLength(1);
-    expect(storage.listAutomationWorkspaces(), "and its row").toHaveLength(1);
-    expect(outcome(raw, "sent")[0]).toBe("recorded");
-    expect(settledAtRuntime, "the deletion never got past its runtime phase").toBeNull();
-
-    engine.receipts(new Map([receipt("sent", 1)]));
     await deletion.purge("owner", "owner@example.test");
-    expect(settledAtRuntime).toEqual(["saved", "published", { threadId: "thread" }]);
-    expect(folders(root)).toEqual([]);
-    expect(raw.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()).toEqual({ n: 0 });
+    expect(errors).toContainEqual([new Error("the engine is busy"), WORKSPACE]);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(existsSync(folder)).toBe(false);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+    expect(operationRows(raw)).toEqual({ n: 0 });
+  });
+
+  it("keeps an account's deletion pending while its copy's folder can't be removed, and finishes once it can", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { folder, deletion, runtimeDone } = await deletingAccount(storage);
+    phoneWrite(storage, "sent");
+    accept(raw, "sent", 1);
+    engine.receipts(new Map([receipt("sent", 1)]));
+    stuck.path = folder;
+    await expect(deletion.purge("owner", "owner@example.test")).rejects.toThrow("the folder is busy");
+    expect(runtimeDone(), "the deletion stays in its fenced phase").toBe(false);
+    expect(existsSync(folder)).toBe(true);
+    expect(outcome(raw, "sent"), "its writes settled before the folder was to go").toEqual(["saved", "published", { threadId: "thread" }]);
+
+    stuck.path = null;
+    await deletion.purge("owner", "owner@example.test");
+    expect(runtimeDone()).toBe(true);
+    expect(existsSync(folder)).toBe(false);
+    expect(operationRows(raw)).toEqual({ n: 0 });
   });
 
   it("reads the phone's writes' receipts when a restarted copy's first sync fails, and stalls them on a whole-push rejection", async () => {

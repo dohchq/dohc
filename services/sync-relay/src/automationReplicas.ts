@@ -778,10 +778,13 @@ export async function startAutomationReplicas(options: {
   else storage.unavailable.addEventListener("abort", closeUnavailable, {once: true});
   return {
     /**
-     * Closes and removes these workspaces' copies. Nothing publishes from a
-     * deleted workspace, so each closed copy's phone writes settle first.
-     * Throws, after the others, when one couldn't settle: its folder and
-     * rows stay, and the deletion fails until its retry settles them.
+     * Closes and removes these workspaces' copies, as an account's deletion
+     * does. Nothing publishes from a deleted workspace, so each closed copy's
+     * phone writes settle first. One whose receipts can't be read is
+     * reported, and its folder goes anyway: the deletion's purge removes the
+     * account's rows, and deleting the workspace refuses any other account's.
+     * Throws, after the others, only when a folder couldn't be removed, so
+     * the deletion stays pending until its retry removes it.
      */
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       await runningPass?.catch(() => undefined);
@@ -792,10 +795,14 @@ export async function startAutomationReplicas(options: {
         try {
           await settleWorkspace(id, COULD_NOT_SEND);
         } catch (error) {
-          failed ??= {error};
-          continue;
+          if (signal.aborted) throw error;
+          observe(() => options.onError?.(error, id));
         }
-        await rm(folderOf(id), {recursive: true, force: true});
+        try {
+          await rm(folderOf(id), {recursive: true, force: true});
+        } catch (error) {
+          failed ??= {error};
+        }
       }
       if (failed) throw failed.error;
     },
