@@ -105,6 +105,8 @@ PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for rea
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
 PR checks distribute the complete selected JavaScript inventory across 16 workers.
 Worker 0 runs inside the JavaScript aggregate; workers 1–15 run as matrix jobs.
+Cloud workers retry failing Vitest group cases, desktop and account browser proofs, and node:test files once; other commands do not retry.
+Tests that pass on retry remain in worker, aggregate, and completed receipts under `flaky`, and appear as "Passed on retry" in job logs and step summaries.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
 Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
 Both install Rust to check the prepared engine fingerprint. Relay checks only that engine and builds its runtime bundles.

@@ -646,12 +646,19 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   }
 });
 
-test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
+test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", t => {
   const job = load(workflow).jobs.verification;
   assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare", "confinement-compiler", "confinement-relay"]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
+  const downloadIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+  assert.ok(downloadIndex >= 0 && downloadIndex < verdictIndex);
+  assert.equal(job.steps[downloadIndex].if, "needs.javascript.result == 'success'");
+  assert.equal(job.steps[downloadIndex].with.name, "verification-js-${{ github.run_attempt }}");
+  assert.equal(job.steps[downloadIndex].with.path, ".agent-artifacts/verification/aggregate");
+  const directory = mkdtempSync(join(tmpdir(), "completed-flaky-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   assert.equal(job.steps[verdictIndex].env.DOHC_WORKFLOW_HEAD_SHA, "${{ github.event.pull_request.head.sha || github.sha }}");
   const setupIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
   assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "verdicts need the selected Node on PATH");
@@ -664,11 +671,15 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
     created_at: new Date(started).toISOString(), started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
-  const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => spawnSync(process.execPath, ["--input-type=module", "-e",
-    `globalThis.fetch = async () => Response.json({jobs: JSON.parse(process.env.TIMING_JOBS)});\n${source}`], {
-    env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate, TIMING_JOBS: JSON.stringify(rows),
-      GITHUB_API_URL: "https://api.invalid", GITHUB_REPOSITORY: "owner/repo", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_SHA: checkout, DOHC_WORKFLOW_HEAD_SHA: "head", GITHUB_TOKEN: "fixture"}, encoding: "utf8", timeout: 10_000,
-  });
+  const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => {
+    writeFileSync(join(directory, "js-result.json"), JSON.stringify({ verdict: "PASS", commit: checkout, flaky: [] }));
+    const checkedSource = source.replace("verifyCompletedCloud(gate)", `verifyCompletedCloud(gate, { outputDirectory: ${JSON.stringify(directory)} })`);
+    return spawnSync(process.execPath, ["--input-type=module", "-e",
+      `globalThis.fetch = async () => Response.json({jobs: JSON.parse(process.env.TIMING_JOBS)});\n${checkedSource}`], {
+      env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate, TIMING_JOBS: JSON.stringify(rows),
+        GITHUB_API_URL: "https://api.invalid", GITHUB_REPOSITORY: "owner/repo", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_SHA: checkout, DOHC_WORKFLOW_HEAD_SHA: "head", GITHUB_TOKEN: "fixture"}, encoding: "utf8", timeout: 10_000,
+    });
+  };
   const jobs = (js, rust, jsResult, rustResult, confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped") =>
     ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, "javascript-prepare": {result: confinementResult}, "confinement-compiler": {result: confinementResult}, "confinement-relay": {result: confinementResult}});
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {

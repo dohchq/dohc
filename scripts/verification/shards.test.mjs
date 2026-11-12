@@ -5,7 +5,7 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
-import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, waitForGate } from "./cloud-aggregate.mjs";
+import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
@@ -580,4 +580,41 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
     await assert.rejects(run(rows, now), /missing or did not finish/u);
   }
   await assert.rejects(run(jobs, now, { GITHUB_SHA: "other-head" }), /requested commit/u);
+});
+
+test("JavaScript flaky evidence survives aggregation and the completed receipt without relaxing coverage", async t => {
+  const parent = resolve(".agent-artifacts/verification");
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "cloud-flaky-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const outputDirectory = join(root, "aggregate"), summary = join(root, "summary.md"), jobs = passingCloudJobs();
+  const commit = "checkout-merge-head", env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: jobs[0].head_sha, GITHUB_STEP_SUMMARY: summary };
+  const flaky = [{ id: "task-1", test: "recovered test", errors: ["first try"], retries: 1 }];
+  const records = [{ scope: "js", part: "prepare-0", commit, verdict: "PASS" }, ...Array.from({ length: JS_SHARDS }, (_, index) => ({
+    scope: "js", part: "worker-" + index, commit, verdict: "PASS", planned: Array.from({ length: JS_SHARDS }, (_, id) => "task-" + id),
+    assigned: ["task-" + index], completed: ["task-" + index], tests: [], flaky: index === 1 ? flaky : [], ...(!index ? { selfHostNative: {} } : {}),
+  }))];
+  assert.deepEqual(aggregateJavascript(records).flaky, flaky);
+  for (const mutate of [rows => rows[2].completed.pop(), rows => rows[2].completed.push("task-0")]) {
+    const broken = structuredClone(records); mutate(broken);
+    assert.throws(() => aggregateJavascript(broken));
+  }
+  for (const record of records) {
+    const directory = join(root, record.part); mkdirSync(directory);
+    writeFileSync(join(directory, "result.json"), JSON.stringify(record));
+  }
+  const log = t.mock.method(console, "log", () => {});
+  const gate = await aggregateCloud("js", root.replaceAll("\\", "/"), { readJobs: async () => jobs, now: () => Date.parse(jobs.find(job => job.name === "typecheck + tests").completed_at), env, outputDirectory });
+  assert.equal(gate.verdict, "PASS");
+  assert.deepEqual(gate.flaky, flaky);
+  await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
+  const completed = JSON.parse(readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"));
+  assert.equal(completed.verdict, "PASS");
+  assert.deepEqual(completed.flaky, flaky);
+  assert.equal(completed.commit, jobs[0].head_sha);
+  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]).filter(line => line.startsWith("Passed on retry:")), ["Passed on retry: recovered test", "Passed on retry: recovered test"]);
+  assert.equal(readFileSync(summary, "utf8"), "Passed on retry: recovered test\nPassed on retry: recovered test\n");
+  await assert.rejects(verifyCompletedCloud("js", { env: { ...env, GITHUB_SHA: "another-checkout" }, readJobs: async () => jobs, outputDirectory }), /aggregate.*commit/u);
+  rmSync(join(outputDirectory, "js-result.json"));
+  await assert.rejects(verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }), /ENOENT/u);
 });

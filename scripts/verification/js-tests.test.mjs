@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
+import { run } from "./process.mjs";
+import { runJavascript } from "./cloud.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
@@ -1039,4 +1041,76 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     assert.ok(report.steps.every(step => step.seconds >= 0 && step.finishedAt));
     assert.ok(report.seconds >= Math.max(...report.steps.map(step => step.seconds)));
   } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+for (const kind of ["desktop", "accounts"]) {
+  test("cloud " + kind + " accepts a flaky proof but rejects failed, skipped, empty, and missing-tag proofs", async t => {
+    const root = mkdtempSync(join(tmpdir(), "cloud-browser-retry-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const task = { id: kind + ":proof", kind, tag: "@proof" };
+    const group = { ...task, tasks: [task], weight: 1 };
+    for (const status of ["flaky", "unexpected", "skipped", "empty", "missing", "mixed"]) {
+      const record = { steps: [], tests: [], completed: [], flaky: [] };
+      const executeCommand = async (_command, args, options) => {
+        assert.ok(args.includes("--retries=1"));
+        const passing = ["flaky", "missing", "mixed"].includes(status);
+        writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME, JSON.stringify({
+          stats: { expected: status === "missing" ? 1 : 0, flaky: ["flaky", "mixed"].includes(status) ? 1 : 0, unexpected: ["unexpected", "mixed"].includes(status) ? 1 : 0, skipped: status === "skipped" ? 1 : 0 },
+          suites: [{ specs: status === "empty" ? [] : [{ file: "proof.spec.ts", title: status === "missing" ? "another proof" : "@proof recovered", ok: passing,
+            tests: [{ status: status === "missing" ? "expected" : status === "mixed" ? "flaky" : status, results: passing ? [{ status: "failed", retry: 0 }, { status: "passed", retry: 1 }] : [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] },
+          ...(status === "mixed" ? [{ file: "proof.spec.ts", title: "failed proof", ok: false, tests: [{ status: "unexpected", results: [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] }] : [])] }],
+        }));
+        if (status === "mixed") throw new Error("proof command failed");
+      };
+      const action = () => runJavascript([group], record, () => {}, undefined, { executeCommand, directory: root });
+      if (status === "flaky") {
+        await action();
+        assert.deepEqual(record.completed, [task.id]);
+        assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+      } else {
+        await assert.rejects(action(), status === "mixed" ? /proof command failed/u : status === "missing" ? /Missing desktop proof/u : /Browser proof failed or skipped/u);
+        assert.deepEqual(record.completed, []);
+        if (status === "mixed") assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+      }
+    }
+  });
+}
+
+test("cloud node:test files rerun once after a test failure; other commands do not", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-node-retry-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const [name, failures, nodeTest] of [["once", 1, true], ["twice", 2, true], ["check", 2, false]]) {
+    const marker = join(root, name + ".count"), file = join(root, name + ".mjs");
+    writeFileSync(file, "import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import test from 'node:test'; import assert from 'node:assert/strict'; const marker=" + JSON.stringify(marker) + "; const count=existsSync(marker)?Number(readFileSync(marker,'utf8'))+1:1; writeFileSync(marker,String(count)); " + (nodeTest ? "test('recovers',()=>assert.ok(count>" + failures + "));" : "process.exit(1);"));
+    const task = { id: "node:" + name, kind: "command", command: "node", args: [...(nodeTest ? ["--test"] : []), file], cwd: root };
+    const record = { steps: [], tests: [], completed: [], flaky: [] };
+    const action = () => runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root, executeCommand: (command, args, options) => {
+      const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
+      return run(command, args, { ...options, env });
+    } });
+    if (name === "once") {
+      await action();
+      assert.deepEqual(record.completed, [task.id]);
+      assert.equal(record.flaky.length, 1);
+      assert.match(record.flaky[0].test, /recovers/u);
+      assert.equal(record.flaky[0].retries, 1);
+    } else {
+      await assert.rejects(action());
+      assert.deepEqual(record.completed, []);
+    }
+    assert.equal(Number(readFileSync(marker, "utf8")), nodeTest ? 2 : 1);
+  }
+});
+
+test("cloud workers retain the errors and retry count from recovered Vitest files", async t => {
+  const root = mkdtempSync(join(tmpdir(), "cloud-vitest-retry-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const task = { id: "vitest:fixture", package: "fixture", cwd: root };
+  const flakyTests = [{ name: "recovered case", errors: ["first error"], retries: 1 }];
+  const record = { steps: [], tests: [], completed: [] };
+  await runJavascript([{ kind: "vitest", pkg: "fixture", tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root,
+    executeCommand: async (_command, args) => writeFileSync(args.at(-1), JSON.stringify({ verdict: "PASS", completed: [task.id], tests: [{ id: task.id, flakyTests }] })),
+  });
+  assert.deepEqual(record.completed, [task.id]);
+  assert.deepEqual(record.flaky, [{ id: task.id, test: "recovered case", errors: ["first error"], retries: 1 }]);
 });

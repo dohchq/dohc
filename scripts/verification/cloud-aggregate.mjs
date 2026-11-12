@@ -2,6 +2,7 @@ import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { reportFlaky } from "./flaky.mjs";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
@@ -21,7 +22,7 @@ export function aggregateJavascript(records) {
   const expected = inventory.map(id => ({ id }));
   assertTaskCoverage(expected, shards);
   if (records.filter(record => record.selfHostNative).length !== 1) throw new Error("The native delivery and restart proof did not produce its evidence.");
-  return { tasks: expected.length, tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })) };
+  return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })) };
 }
 
 export function aggregateRust(records) {
@@ -110,17 +111,23 @@ export function completedGateTiming(scope, jobs, commit) {
     required.filter(job => confinementNames.includes(job.name)), jobs));
 }
 
-export async function verifyCompletedCloud(scope) {
-  const report = { version: 1, scope, verdict: "FAIL", complete: true, commit: process.env.DOHC_WORKFLOW_HEAD_SHA };
+export async function verifyCompletedCloud(scope, { env = process.env, readJobs = () => cloudApi({ env }).jobs(), outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
+  const report = { version: 1, scope, verdict: "FAIL", complete: true, commit: env.DOHC_WORKFLOW_HEAD_SHA };
   try {
-    Object.assign(report, completedGateTiming(scope, await cloudApi().jobs(), report.commit));
+    if (scope === "js") {
+      const aggregate = JSON.parse(readFileSync(`${outputDirectory}/js-result.json`, "utf8"));
+      if (aggregate.verdict !== "PASS" || !env.GITHUB_SHA || aggregate.commit !== env.GITHUB_SHA) throw new Error("The JavaScript aggregate does not cover the checked-out commit.");
+      report.flaky = aggregate.flaky ?? [];
+    }
+    Object.assign(report, completedGateTiming(scope, await readJobs(), report.commit));
     report.verdict = "PASS";
   } catch (error) {
     Object.assign(report, error.timing, { error: error.message });
     throw error;
   } finally {
-    mkdirSync(".agent-artifacts/verification/aggregate", { recursive: true });
-    writeFileSync(`.agent-artifacts/verification/aggregate/${scope}-completed-result.json`, JSON.stringify(report, null, 2) + "\n");
+    mkdirSync(outputDirectory, { recursive: true });
+    writeFileSync(`${outputDirectory}/${scope}-completed-result.json`, JSON.stringify(report, null, 2) + "\n");
+    if (scope === "js") reportFlaky(report.flaky, env.GITHUB_STEP_SUMMARY);
     console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
   }
 }
@@ -169,6 +176,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
       for (const step of report.steps) console.log(`  ${step.status} ${step.name}`);
       console.log(`  ${report.verdict} complete gate${report.error ? `: ${report.error}` : ""}`);
     }
+    if (scope === "js") reportFlaky(report.flaky, env.GITHUB_STEP_SUMMARY);
     console.log(`[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s (${report.timing ?? "unavailable"}), ${report.tasks ?? 0} tasks`);
   }
 }

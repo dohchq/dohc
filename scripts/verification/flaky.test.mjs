@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { runVitestGroup } from "./vitest-group.mjs";
 import TestRecordReporter from "./test-record-reporter.mjs";
 import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
 import { flakyFixtureFiles } from "./flaky-fixture.mjs";
@@ -239,4 +240,34 @@ test("each runner's report gives its test times, and the slowest are kept longes
   ] }]), [{ test: "a.spec.ts › restarts", seconds: 66 }], "the attempt that passed, and no time for a test that never passed");
   assert.deepEqual(slowest([{ test: "a", seconds: 1.04 }, { test: "b", seconds: 40.26 }, { test: "c", seconds: 3 }], 2),
     [{ test: "b", seconds: 40.3 }, { test: "c", seconds: 3 }]);
+});
+
+test("cloud Vitest retries once, completes a recovered file, and retains both kinds of errors", async t => {
+  const parent = resolve(".agent-artifacts/verification/retry-tests");
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "vitest-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  writeFileSync(join(root, "vitest.config.mjs"), "export default {test:{include:['*.test.mjs'],fileParallelism:false}};");
+  const tasks = ["once", "twice"].map((name, index) => {
+    const file = join(root, name + ".test.mjs");
+    writeFileSync(file, "import {it,expect} from 'vitest'; let attempts=0; it('" + name + "',()=>{ expect(++attempts, 'first failure " + name + "').toBeGreaterThan(" + (index + 1) + "); });");
+    return { id: "vitest:retry::" + relative(process.cwd(), file).replaceAll("\\", "/"), package: "retry", cwd: root, script: "vitest run" };
+  });
+  const record = { tests: [], completed: [] }, exitCode = process.exitCode;
+  try { await assert.rejects(runVitestGroup(tasks, record, () => {})); }
+  finally { process.exitCode = exitCode; }
+  assert.deepEqual(record.completed, [tasks[0].id]);
+  const recovered = record.tests.find(row => row.id === tasks[0].id);
+  assert.equal(recovered.passed, 1);
+  assert.deepEqual(recovered.failedTests, []);
+  assert.equal(recovered.flakyTests.length, 1);
+  assert.equal(recovered.flakyTests[0].name, "once");
+  assert.equal(recovered.flakyTests[0].retries, 1);
+  assert.match(recovered.flakyTests[0].errors[0], /first failure once/u);
+  const failed = record.tests.find(row => row.id === tasks[1].id);
+  assert.equal(failed.failed, 1);
+  assert.deepEqual(failed.flakyTests, []);
+  assert.equal(failed.failedTests[0].retries, 1);
+  assert.match(failed.failedTests[0].errors.join("\n"), /first failure twice/u);
 });

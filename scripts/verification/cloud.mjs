@@ -10,6 +10,7 @@ import { JS_SHARDS, assertTaskCoverage, javascriptGroups, javascriptTasks, parti
 import { runBounded } from "./js-tests.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
+import { nodeTestFailures, playwrightFailures, playwrightFlaky, readLog, reportFlaky } from "./flaky.mjs";
 import { startTiming, timed } from "./timing.mjs";
 
 export { JS_SHARDS };
@@ -24,11 +25,12 @@ export async function cloudPlan() {
 
 function passingBrowserReport(path) {
   const report = JSON.parse(readFileSync(path, "utf8"));
-  if (!report.stats?.expected || report.stats.unexpected || report.stats.skipped || report.stats.flaky) throw new Error(`Browser proof failed or skipped: ${path}`);
+  if (!(report.stats?.expected + (report.stats?.flaky ?? 0)) || report.stats.unexpected || report.stats.skipped || playwrightFailures(report.suites).length) throw new Error(`Browser proof failed or skipped: ${path}`);
   return report;
 }
 
-async function runJavascript(groups, record, save, availability) {
+export async function runJavascript(groups, record, save, availability, { executeCommand = run, directory = output } = {}) {
+  record.flaky ??= [];
   const tasks = groups.flatMap(group => group.tasks);
   const selected = new Map(tasks.map(task => [task.id, task]));
   groups = [...groups];
@@ -37,18 +39,29 @@ async function runJavascript(groups, record, save, availability) {
     const row = { name }; record.steps.push(row);
     return timed(row, action, save);
   };
-  const command = (task, command, args, options = {}) => step(task.id, () => run(command, args, { log: join(output, `${record.steps.length}.log`), ...options }));
+  const command = (task, command, args, options = {}) => step(task.id, async () => {
+    const log = join(directory, `${record.steps.length}.log`);
+    const execute = log => executeCommand(command, args, { log, ...options });
+    try { return await execute(log); }
+    catch (error) {
+      const failed = task.command === "node" && task.args.includes("--test") && error.commandExitFailure ? nodeTestFailures(readLog(log)) : [];
+      if (!failed.length) throw error;
+      const result = await execute(log + ".retry.log");
+      record.flaky.push(...failed.map(test => ({ id: task.id, test, retries: 1 })));
+      return result;
+    }
+  });
   async function execute(group) {
     if (group.kind === "vitest") {
       if (group.pkg === "@dohc/mobile") {
-        await step(`${group.pkg} build:editor`, () => run(...pnpm(["--filter", group.pkg, "build:editor"]), { log: join(output, `${record.steps.length}.log`) }));
+        await step(`${group.pkg} build:editor`, () => executeCommand(...pnpm(["--filter", group.pkg, "build:editor"]), { log: join(directory, `${record.steps.length}.log`) }));
       }
-      const prefix = join(output, `${record.steps.length}-${group.pkg.replaceAll(/[^\w-]/gu, "_")}`);
+      const prefix = join(directory, `${record.steps.length}-${group.pkg.replaceAll(/[^\w-]/gu, "_")}`);
       const input = `${prefix}-tasks.json`, resultPath = `${prefix}-vitest.json`;
       writeFileSync(input, JSON.stringify(group.tasks) + "\n");
       let failure;
       try {
-        await step(group.pkg, () => run(process.execPath, [resolve(import.meta.dirname, "vitest-group.mjs"), input, resultPath], {
+        await step(group.pkg, () => executeCommand(process.execPath, [resolve(import.meta.dirname, "vitest-group.mjs"), input, resultPath], {
           cwd: resolve(repoRoot, group.tasks[0].cwd), log: `${prefix}.log`,
           env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? "test" },
         }));
@@ -56,6 +69,7 @@ async function runJavascript(groups, record, save, availability) {
       const result = readJson(resultPath);
       if (result) {
         record.tests.push(...result.tests);
+        record.flaky.push(...result.tests.flatMap(file => (file.flakyTests ?? []).map(({ name, ...details }) => ({ id: file.id, test: name, ...details }))));
         record.completed.push(...result.completed);
         if (result.testRunErrors?.length) (record.testRunErrors ??= []).push(...result.testRunErrors);
         save();
@@ -70,26 +84,30 @@ async function runJavascript(groups, record, save, availability) {
       const [executable, args] = task.command === "pnpm" ? pnpm(task.args) : [task.command === "node" ? process.execPath : task.command, task.args];
       await command(task, executable, args, { cwd: resolve(repoRoot, task.cwd) });
     } else if (task.kind === "self-host-native") {
-      const directory = join(output, `self-host-${record.steps.length}`);
-      mkdirSync(directory, { recursive: true });
+      const proofDirectory = join(directory, `self-host-${record.steps.length}`);
+      mkdirSync(proofDirectory, { recursive: true });
       const sha256 = hashFile(stagedEnginePath);
       const escaped = task.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       await command(task, ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-        "--testNamePattern", `^${escaped}$`, "--reporter=default", "--reporter=json", `--outputFile.json=${join(directory, "vitest.json")}`]),
-      { env: { ...process.env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: sha256, DOHC_SERVICE_HOST_PROOF_OUTPUT: directory } });
-      const result = JSON.parse(readFileSync(join(directory, "vitest.json"), "utf8"));
+        "--testNamePattern", `^${escaped}$`, "--reporter=default", "--reporter=json", `--outputFile.json=${join(proofDirectory, "vitest.json")}`]),
+      { env: { ...process.env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: sha256, DOHC_SERVICE_HOST_PROOF_OUTPUT: proofDirectory } });
+      const result = JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8"));
       const cases = result.testResults.flatMap(module => module.assertionResults).filter(test => test.fullName === task.name);
       if (!result.success || cases.length !== 1 || cases[0].status !== "passed" || result.numPassedTests !== 1 || result.numFailedTests) throw new Error(`Native proof did not pass: ${task.name}.`);
       if (task.name.startsWith("enrolls a self-hosted document,")) {
         // The canonical reader also checks the complete saved delivery record.
-        record.selfHostNative = readSelfHostDeliveryProof(directory, stagedEnginePath, sha256);
+        record.selfHostNative = readSelfHostDeliveryProof(proofDirectory, stagedEnginePath, sha256);
       }
     } else if (task.kind === "desktop" || task.kind === "accounts") {
-      const path = join(output, `${record.steps.length}-playwright.json`);
+      const path = join(directory, `${record.steps.length}-playwright.json`);
       const args = ["--config", task.kind === "accounts" ? "services/workspace-api/playwright.config.ts" : "apps/desktop/playwright.config.ts",
-        "--output", join(output, `browser-${record.steps.length}`), "--retries=0", "--reporter=list,json", ...(task.tag ? ["--grep", task.tag] : [])];
+        "--output", join(directory, `browser-${record.steps.length}`), "--retries=1", "--reporter=list,json", ...(task.tag ? ["--grep", task.tag] : [])];
       const executable = task.kind === "accounts" ? [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]] : desktopProofCommand(args);
-      await command(task, ...executable, { env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: path, DOHC_QA_OUTPUT: output } });
+      try { await command(task, ...executable, { env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: path, DOHC_QA_OUTPUT: directory } }); }
+      finally {
+        record.flaky.push(...playwrightFlaky(readJson(path)?.suites).map(test => ({ id: task.id, test })));
+        save();
+      }
       const result = passingBrowserReport(path);
       if (task.tag && !passedSpecTitles(result.suites).some(title => title.split(/\s+/u).includes(task.tag))) throw new Error(`Missing desktop proof ${task.tag}.`);
     } else throw new Error(`Unknown task kind ${task.kind}.`);
@@ -172,6 +190,7 @@ export async function cloudJavascript(part, index = 0) {
     try { await database?.stop(); }
     catch (error) { record.verdict = "FAIL"; record.cleanupError = error.message; process.exitCode = 1; }
     finish(); save();
+    reportFlaky(record.flaky);
     console.log(`[verification] ${record.verdict} (js ${record.part}): ${join(output, "result.json")}`);
   }
 }

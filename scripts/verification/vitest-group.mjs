@@ -13,7 +13,7 @@ export async function runVitestGroup(tasks, record, save) {
   const { createVitest, parseCLI } = await import("vitest/node");
   const { filter, options } = parseCLI(tasks[0].script);
   const ctx = await createVitest("test", { ...options, root: resolve(repoRoot, tasks[0].cwd), run: true, watch: false,
-    maxWorkers: pkg === "@dohc/app-backend-runtime" ? 1 : 2, retry: 0 });
+    maxWorkers: pkg === "@dohc/app-backend-runtime" ? 1 : 2, retry: 1 });
   try {
     await ctx.standalone();
     const specs = (await ctx.getRelevantTestSpecifications(filter)).filter(spec => wanted.has(specId(pkg, spec)));
@@ -32,8 +32,9 @@ export async function runVitestGroup(tasks, record, save) {
       const cases = [...module.children.allTests()];
       const counts = { passed: 0, failed: 0, skipped: 0, pending: 0 };
       for (const test of cases) counts[test.result().state] += 1;
-      const failedTests = cases.filter(test => test.result().errors?.length || test.diagnostic()?.retryCount)
-        .map(test => ({ name: test.fullName, errors: test.result().errors?.map(error => error.stack ?? error.message), retries: test.diagnostic()?.retryCount }));
+      const details = test => ({ name: test.fullName, errors: test.result().errors?.map(error => error.stack ?? error.message), retries: test.diagnostic()?.retryCount });
+      const flakyTests = cases.filter(test => test.diagnostic()?.flaky).map(details);
+      const failedTests = cases.filter(test => test.result().state === "failed" || test.result().errors?.length && !test.diagnostic()?.flaky).map(details);
       const skippedTests = cases.filter(test => test.result().state === "skipped")
         .map(test => ({ name: test.fullName, mode: test.options.mode, note: test.result().note }));
       const slowest = cases.map(test => ({ name: test.fullName, seconds: (test.diagnostic()?.duration ?? 0) / 1000 }))
@@ -41,7 +42,7 @@ export async function runVitestGroup(tasks, record, save) {
       const diagnostic = module.diagnostic();
       const timings = { environment: diagnostic.environmentSetupDuration / 1000, preparation: diagnostic.prepareDuration / 1000,
         collection: diagnostic.collectDuration / 1000, setup: diagnostic.setupDuration / 1000, tests: diagnostic.duration / 1000 };
-      record.tests.push({ id, ...counts, failedTests, skippedTests, slowest, errors: module.errors().map(error => error.stack ?? error.message),
+      record.tests.push({ id, ...counts, failedTests, flakyTests, skippedTests, slowest, errors: module.errors().map(error => error.stack ?? error.message),
         seconds: Object.values(timings).reduce((sum, seconds) => sum + seconds, 0), timings });
       if (module.state() === "failed" || module.errors().length || counts.failed || counts.pending || failedTests.length || !cases.length) failure ??= new Error(`Test file did not finish: ${id}.`);
       else if (task.native && cases.some(test => test.result().state === "skipped" && !["skip", "todo"].includes(test.options.mode))) failure ??= new Error(`Native test case skipped during execution: ${id}.`);

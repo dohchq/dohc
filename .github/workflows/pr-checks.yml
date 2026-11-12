@@ -763,6 +763,12 @@ jobs:
         with:
           node-version: "24"
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: needs.javascript.result == 'success'
+        with:
+          name: verification-js-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/aggregate
+
       - name: Require every selected gate
         env:
           JOBS: ${{ toJSON(needs) }}
