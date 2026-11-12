@@ -324,8 +324,6 @@ export class WriteQueue {
           if (row) { this.unknown.delete(recordKey); this.versions.set(recordKey, { version: row.version, seq: pending.seq }); }
           else { pending.lookup = true; pending.stuck = false; }
         }
-        // A read that started after a record's last receipt shows the record no older than that receipt left it.
-        for (const shown of rows) { const known = this.versions.get(JSON.stringify(shown.id)); if (known && known.seq <= token) known.version = shown.version; }
         if (page.unread !== null && page.unread <= token) page.unread = null;
         this.changed();
         this.pump();
@@ -552,7 +550,10 @@ export class WriteQueue {
         const now = rules.fields.find(field => field.fieldId === fieldId)!;
         return [fieldId, isEmptyValue(typed.value) && fieldShape(now) !== fieldShape(typed.under) ? emptyValue(now) : typed.value];
       }));
-      const expectedVersion = write.record ? this.versions.get(write.record.key)?.version ?? write.baseVersion : 0;
+      // A change goes with the newer of two versions: the one its page showed when it was made, and the one the
+      // record's last receipt gave. No read raises it. A change made before its page showed what someone else did
+      // to the record is then refused, and never sent over a value the person did not see.
+      const expectedVersion = write.record ? Math.max(write.baseVersion, this.versions.get(write.record.key)?.version ?? 0) : 0;
       const input: AppBackendJson = write.kind === "create" ? { values } : write.kind === "delete" ? { id: write.record!.id, expectedVersion } : { id: write.record!.id, expectedVersion, values };
       write.request = { workspaceId: rules.workspaceId, datasetId: rules.datasetId, revision: rules.revision, revisionSha256: rules.revisionSha256, operationId: write.operationId, input, idempotencyKey: write.key };
     }

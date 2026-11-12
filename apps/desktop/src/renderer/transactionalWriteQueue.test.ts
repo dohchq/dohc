@@ -96,6 +96,46 @@ describe("the order changes go in", () => {
 });
 
 describe("the version a record's next change goes with", () => {
+  it("is the one its last receipt gave, not one another page's read found since: a change from a page that has not shown that read is refused, not sent over it", async () => {
+    const rules = host(), first = open(rules), second = open(host());
+    first.queue.enqueue(edit(row(1, 1), name, "Alicia"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 2 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // Someone else changes the record. The first page reads it at version 3. The second page still shows version 2.
+    first.page.readShown(first.page.readStarted(), [row(1, 3)]);
+    second.queue.enqueue(edit(row(1, 2), amount, 9));
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 2, values: { amount: 9 } });
+  });
+
+  it("is the one its last receipt gave for a change made before a read showed the record changed since", async () => {
+    const rules = host(), { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // A change to another record is out, so the next change to record 1 waits its turn.
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    queue.enqueue(edit(row(1, 3), amount, 9));
+    // Meanwhile someone else changes record 1, and the page reads it. The waiting change was typed before that.
+    page.readShown(page.readStarted(), [row(1, 4), row(2, 4)]);
+    rules.calls[1]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(3));
+    expect(rules.inputs("edit")[2]).toEqual({ id: 1, expectedVersion: 3, values: { amount: 9 } });
+  });
+
+  it("is the version the page showed when the change was made, where that is newer than the last receipt", async () => {
+    const rules = host(), first = open(rules), second = open(host());
+    first.queue.enqueue(edit(row(1, 1), name, "Alicia"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 2 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // The first page shows the record as someone else left it, and the person changes it there.
+    first.page.readShown(first.page.readStarted(), [row(1, 3)]);
+    first.queue.enqueue(edit(row(1, 3), amount, 9));
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 3, values: { amount: 9 } });
+    second.close();
+  });
+
   it("waits for a page's read when a receipt reports no version, and uses the version that read returns", async () => {
     const rules = host(), { queue, page } = open(rules);
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
@@ -308,9 +348,10 @@ describe("one queue for a table", () => {
     // Each page shows the confirmed value until its own read shows it. This read finds the record changed again since.
     a.page.readShown(a.page.readStarted(), [row(1, 5)]);
     expect([state(a.page, 1, name), state(b.page, 1, name)]).toEqual([undefined, "pending"]);
-    // A change from the page that has not read yet goes with the newest version any page has read, not its own old one.
+    // A change from the page that has not read yet goes with the version the confirmed change left, which both pages
+    // show. It does not go with what only the other page has read, so the Collection refuses it over what this page never showed.
     b.queue.enqueue(edit(row(1, 2), amount, 9));
-    expect(left.calls[1]!.request.input).toEqual({ id: 1, expectedVersion: 5, values: { amount: 9 } });
+    expect(left.calls[1]!.request.input).toEqual({ id: 1, expectedVersion: 3, values: { amount: 9 } });
   });
 
   it("goes on sending with no page open, and reports to the open shell of its workspace", async () => {
