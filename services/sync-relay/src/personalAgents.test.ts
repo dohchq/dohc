@@ -9,6 +9,7 @@ import type {
   CredentialFenceChange,
   CredentialFenceListener,
 } from "@dohc/workspace-auth/credentialFence";
+import { CREDENTIAL_FENCE_READ_TIMEOUT_MS } from "@dohc/workspace-auth/credentialFence";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
@@ -18,7 +19,7 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
 import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
-import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, FENCE_READ_TIMEOUT_MS, singleFlightFenceReads, type PersonalRunningEntry } from "./personalAgents";
+import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, singleFlightFenceReads, type PersonalRunningEntry } from "./personalAgents";
 import { personalAgentOrigin, personalCollectionOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies, type ServerCopies } from "./serverCopies";
@@ -2667,7 +2668,7 @@ describe("single-flight fence reads", () => {
       const stalled = fenceRead(OWNER);
       const waiting = fenceRead(OWNER);
       const failed = expect(stalled).rejects.toThrow("The fence read timed out.");
-      await vi.advanceTimersByTimeAsync(FENCE_READ_TIMEOUT_MS - 1);
+      await vi.advanceTimersByTimeAsync(CREDENTIAL_FENCE_READ_TIMEOUT_MS - 1);
       expect(read).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1);
       await failed;

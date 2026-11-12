@@ -60,11 +60,11 @@ export type PersonalFreshRead = () => Promise<unknown>;
  * so a closing session stops waiting for it rather than cancelling it.
  */
 export function untilAborted<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
     void read.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
   });
 }
 

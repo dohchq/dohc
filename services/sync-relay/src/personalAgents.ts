@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { isAgentHue } from "@dohc/workspace-contracts/agent-hues";
 import {
+  CREDENTIAL_FENCE_READ_TIMEOUT_MS,
   CREDENTIAL_FENCE_RETRY_MS,
   type CredentialFence,
   type CredentialFenceChange,
@@ -36,8 +37,6 @@ export type PersonalAgentRoute =
  * a later one has been read.
  */
 export const CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS = 60_000;
-/** How long a fence read may wait for Postgres, connection included, before it fails as unavailable. */
-export const FENCE_READ_TIMEOUT_MS = 5_000;
 const MAX_OWNER_BODY_BYTES = 16 * 1024;
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
@@ -147,14 +146,15 @@ export async function respondToWorkspaceName(
  * asked before it began, so every answer was read after its call: a caller
  * that asks while a read runs waits for the next, which begins once that one
  * settles and answers everyone who asked meanwhile. A read still running
- * after `FENCE_READ_TIMEOUT_MS` fails with `timedOut()`.
+ * after `CREDENTIAL_FENCE_READ_TIMEOUT_MS`, waiting for a connection included,
+ * fails with `timedOut()`.
  */
 export function singleFlightFenceReads(read: (userId: string) => Promise<number>, timedOut: () => Error): (userId: string) => Promise<number> {
   const running = new Map<string, { settled: Promise<void>; next?: Promise<number> }>();
   const begin = (userId: string): Promise<number> => {
     // A read Postgres doesn't answer in time fails, so callers waiting for the next read aren't held behind it.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const epoch = Promise.race([read(userId), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timedOut()), FENCE_READ_TIMEOUT_MS); })])
+    const epoch = Promise.race([read(userId), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timedOut()), CREDENTIAL_FENCE_READ_TIMEOUT_MS); })])
       .finally(() => clearTimeout(timer));
     const flight: { settled: Promise<void>; next?: Promise<number> } = { settled: epoch.then(() => undefined, () => undefined) };
     running.set(userId, flight);
