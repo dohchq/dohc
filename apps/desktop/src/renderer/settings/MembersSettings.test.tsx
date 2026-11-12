@@ -7,6 +7,7 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (overrides: Partial<WorkspacePerson> & Pick<WorkspacePerson, "memberId">): WorkspacePerson => ({
@@ -62,6 +63,11 @@ async function openMenu(memberId: string) {
   await userEvent.click(within(row(memberId)).getByTestId("settings-members-row-menu"));
   // The menu opens in the top layer, which jsdom does not show.
   return screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent);
+}
+async function makeAdmin(memberId: string) {
+  await openMenu(memberId);
+  await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Make admin" }));
+  await userEvent.click(screen.getByTestId("settings-members-confirm"));
 }
 
 beforeEach(() => {
@@ -184,8 +190,7 @@ describe("Members page", () => {
     await screen.findByTestId("settings-members-page");
     const answer = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
-    await openMenu("m-bo");
-    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Make admin" }));
+    await makeAdmin("m-bo");
     bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: memberView() }));
     rerender({ cloud: cloud({ status: status({ email: "bo@test" }) }) });
     await screen.findByText("Leave this workspace");
@@ -199,8 +204,7 @@ describe("Members page", () => {
     await screen.findByTestId("settings-members-page");
     const answer = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
-    await openMenu("m-bo");
-    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Make admin" }));
+    await makeAdmin("m-bo");
     expect(within(row("m-bo")).getByTestId("settings-members-row-busy")).toBeTruthy();
     expect(row("m-bo").getAttribute("aria-busy")).toBe("true");
     expect(within(row("m-ana")).getByTestId("settings-members-row-menu")).toBeTruthy();
@@ -217,8 +221,7 @@ describe("Members page", () => {
     const second = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    await openMenu("m-bo");
-    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Make admin" }));
+    await makeAdmin("m-bo");
     await act(async () => second.resolve({ status: "ready", view: ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] }) }));
     await act(async () => first.resolve({ status: "ready", view: ownerView({ memberLevel: "edit" }) }));
     expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
@@ -254,6 +257,45 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "link", change: "turn-off" });
     await userEvent.click(within(row("m-dee")).getByRole("button", { name: "Let back in" }));
     expect(requests().at(-1)).toEqual({ action: "letBackIn", person: "m-dee" });
+  });
+
+  it("says dohc sends no email after an invite, names the address, and offers the invite link", async () => {
+    bridge.workspaceMembers.mockImplementation(async ({ request }) => ({ status: "ready",
+      view: request.action === "invite" ? ownerView({ people: [owner, ana, bo, cy, dee, person({ memberId: "m-eve", state: "invited", email: "eve@test", joinedAtMs: null })] }) : ownerView() }));
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const sent = await screen.findByTestId("settings-members-invite-sent");
+    expect(sent.textContent).toContain("Invited eve@test.");
+    expect(sent.textContent).toContain("dohc doesn't send email.");
+    expect(sent.textContent).toContain("They join when they sign in to dohc with this address");
+    expect(sent.closest('[role="status"]')).not.toBeNull();
+    expect(screen.getByTestId("settings-members-invite-sent-copy")).toBeTruthy();
+    expect(within(row("m-eve")).getByText(/^Joins when they sign in · Invited /u)).toBeTruthy();
+  });
+
+  it("offers to turn the invite link on after an invite when it is off", async () => {
+    const off = ownerView({ inviteLink: { enabled: false, url: null } });
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: off }));
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await userEvent.click(await screen.findByRole("button", { name: "Turn on invite link" }));
+    expect(requests().at(-1)).toEqual({ action: "link", change: "turn-on" });
+  });
+
+  it("keeps an address typed while the invite runs", async () => {
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const answer = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
+    const field = screen.getByTestId("settings-members-invite-email") as HTMLInputElement;
+    await userEvent.type(field, "eve@test{Enter}");
+    await userEvent.clear(field);
+    await userEvent.type(field, "fay@test");
+    await act(async () => answer.resolve({ status: "ready", view: ownerView() }));
+    expect(field.value).toBe("fay@test");
+    expect((await screen.findByTestId("settings-members-invite-sent")).textContent).toContain("eve@test");
   });
 
   it("checks the email when Invite is pressed, then invites and clears the field", async () => {
@@ -300,10 +342,13 @@ describe("Members page", () => {
     expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1");
   });
 
-  it("says when the server does not list this account", async () => {
+  it("says in plain words when the server does not list this account, and offers Sync and sharing", async () => {
     bridge.workspaceMembers.mockResolvedValueOnce({ status: "refused" });
-    renderMembers();
-    expect((await screen.findByTestId("settings-members-refused")).textContent).toContain("does not show this workspace's Members");
+    const { props } = renderMembers();
+    const refused = await screen.findByTestId("settings-members-refused");
+    expect(refused.textContent).toContain("This account isn't in this workspace anymore, or can't see who is in it.");
+    await userEvent.click(within(refused).getByRole("button", { name: "Sync and sharing" }));
+    expect(props.onOpenSync).toHaveBeenCalled();
   });
 
   it("leaves after a warning, then says so", async () => {
@@ -316,14 +361,97 @@ describe("Members page", () => {
     expect((await screen.findByTestId("settings-members-left")).textContent).toBe("You left Community.");
   });
 
-  it("ends membership after a warning, then lists again", async () => {
-    bridge.workspaceMembers.mockImplementation(async ({ request }) =>
-      request.action === "end" ? { status: "done" } : { status: "ready", view: ownerView() });
-    renderMembers();
+  it("ends membership after saying it cannot be undone, then says it ended over the owner alone", async () => {
+    // After End, the relay lists the owner alone, with the link off and no name.
+    const after = ownerView({ workspaceName: "Community", people: [owner], inviteLink: { enabled: false, url: null } });
+    let ended = false;
+    bridge.workspaceMembers.mockImplementation(async ({ request }) => {
+      if (request.action === "end") {
+        ended = true;
+        return { status: "done" };
+      }
+      return { status: "ready", view: ended ? after : ownerView() };
+    });
+    const { props } = renderMembers();
     await userEvent.click(await screen.findByTestId("settings-members-end-open"));
-    expect(screen.getByTestId("settings-members-confirm-end").textContent).toContain("Copies already on their computers stay with them.");
+    const confirm = screen.getByTestId("settings-members-confirm-end").textContent;
+    expect(confirm).toContain("the list of people, including Removed, is deleted.");
+    expect(confirm).toContain("This cannot be undone. To bring people back, invite them again.");
     await userEvent.click(screen.getByTestId("settings-members-confirm"));
-    await vi.waitFor(() => expect(requests()).toEqual([{ action: "list" }, { action: "end" }, { action: "list" }]));
+    const notice = await screen.findByTestId("settings-members-ended");
+    expect(notice.textContent).toContain("Membership ended");
+    expect(notice.textContent).toContain("invite them by email or turn on the invite link.");
+    expect(document.activeElement).toBe(notice);
+    await vi.waitFor(() => expect(within(screen.getByTestId("settings-members-people")).getAllByTestId("settings-members-row")).toHaveLength(1));
+    expect(requests()).toEqual([{ action: "list" }, { action: "end" }, { action: "list" }]);
+    expect(screen.queryByTestId("settings-members-end")).toBeNull();
+    expect(screen.queryByTestId("settings-members-alone")).toBeNull();
+    expect(props.onError).not.toHaveBeenCalled();
+
+    // The next change takes the notice down.
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    await vi.waitFor(() => expect(screen.queryByTestId("settings-members-ended")).toBeNull());
+  });
+
+  it("offers End membership only when someone else, an invite, or a removed account is listed", async () => {
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView({ people: [owner] }) }));
+    renderMembers();
+    await screen.findByTestId("settings-members-alone");
+    expect(screen.queryByTestId("settings-members-end")).toBeNull();
+    cleanup();
+    for (const people of [[owner, cy], [owner, dee]]) {
+      bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView({ people }) }));
+      renderMembers();
+      expect(await screen.findByTestId("settings-members-end")).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it("asks before making someone an admin, saying what admins can do", async () => {
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    await openMenu("m-bo");
+    await userEvent.click(screen.getByRole("menuitem", { hidden: true, name: "Make admin" }));
+    const dialog = screen.getByTestId("settings-members-confirm-admin");
+    expect(dialog.textContent).toContain("Make Bo an admin?");
+    expect(dialog.textContent).toContain("Admins can invite and remove members, change the invite link and member level, and see emails.");
+    await userEvent.click(screen.getByTestId("settings-members-confirm-cancel"));
+    expect(requests()).toEqual([{ action: "list" }]);
+    await makeAdmin("m-bo");
+    expect(requests().at(-1)).toEqual({ action: "role", person: "m-bo", role: "admin" });
+  });
+
+  it("tells the owner and admins that members cannot open the workspace yet, and a member only the level in words", async () => {
+    renderMembers();
+    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(JOINED_WORKSPACE_LIMIT.members);
+    expect(within(screen.getByTestId("settings-members-level")).getByText("Member level")).toBeTruthy();
+    cleanup();
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
+    renderMembers();
+    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(JOINED_WORKSPACE_LIMIT.members);
+    cleanup();
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: memberView() }));
+    renderMembers();
+    const level = within(await screen.findByTestId("settings-members-level"));
+    expect(level.getByText("What members can do")).toBeTruthy();
+    // No bare level word sits where a control would.
+    expect(level.queryByText("Edit")).toBeNull();
+    expect(screen.queryByTestId("settings-members-limit")).toBeNull();
+  });
+
+  it("keeps the level control in place while a change runs", async () => {
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const control = screen.getByTestId("settings-members-level-control");
+    const before = control.previousElementSibling;
+    expect(before?.getAttribute("aria-hidden")).toBe("true");
+    const answer = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    expect(screen.getByTestId("settings-members-level-busy")).toBeTruthy();
+    // The spinner fills the place kept for it, so nothing before the control is added.
+    expect(screen.getByTestId("settings-members-level-control").previousElementSibling).toBe(before);
+    await act(async () => answer.resolve({ status: "ready", view: ownerView({ memberLevel: "edit" }) }));
   });
 
   it("filters a long list by name or email", async () => {

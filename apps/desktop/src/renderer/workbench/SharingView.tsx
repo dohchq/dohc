@@ -35,6 +35,7 @@ import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -711,7 +712,7 @@ function ReceivedRow(props: {
               label: "Open",
               onSelect: () => undefined,
               disabled: true,
-              description: "This version of dohc cannot open a workspace you joined.",
+              description: JOINED_WORKSPACE_LIMIT.open,
             },
           ]
         : [];

@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { CloudOff, LoaderCircle, LogIn, LogOut, Mail, RotateCcw, Search, ShieldOff, UserMinus, UserX } from "lucide-react";
+import { CircleCheck, CloudOff, LoaderCircle, LogIn, LogOut, Mail, RotateCcw, Search, ShieldCheck, ShieldOff, UserMinus, UserX } from "lucide-react";
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import {
   memberPermissions,
@@ -11,9 +11,10 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import { bridge } from "../bridge";
 import { SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { relativeTime } from "../relativeTime";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { CopyField, type CopySecret } from "../ui/CopyButton";
+import { CopyButton, CopyField, type CopySecret } from "../ui/CopyButton";
 import { EmptyState, FieldError, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -137,6 +138,9 @@ export function MembersSettings(props: {
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
   const [pending, setPending] = useState<{ key: string; items: ReadonlyMap<PendingKey, MembersRequest> } | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // The owner ended membership here. The page says so above what it lists
+  // next, until another change goes through.
+  const [ended, setEnded] = useState<string | null>(null);
   // Views apply in the order their requests went out, so an older answer that
   // arrives late cannot undo a newer change.
   const issued = useRef(0);
@@ -208,6 +212,7 @@ export function MembersSettings(props: {
     settle();
     if (!scope.isCurrent(token)) return true;
     report.current.onClearError?.(identity);
+    if (request.action !== "end") setEnded((current) => (current === scopeKey ? null : current));
     if (result.status === "ready") showView(scopeKey, order, result.view);
     else if (result.status === "refused") setLoad({ key: scopeKey, load: { status: "refused" } });
     else if (request.action === "leave") {
@@ -216,7 +221,14 @@ export function MembersSettings(props: {
         key: scopeKey,
         load: { status: "left", workspaceName: current?.load.status === "ready" ? current.load.view.workspaceName : props.workspaceName },
       }));
-    } else setAttempt((count) => count + 1);
+    } else {
+      // Ended: the people this page listed are gone, so it shows none of
+      // them while it reads the owner's page again.
+      applied.current = order;
+      setEnded(scopeKey);
+      setLoad({ key: scopeKey, load: { status: "loading" } });
+      setAttempt((count) => count + 1);
+    }
     return true;
   }, [scopeKey, workspaceId, props.workspaceName]);
 
@@ -230,7 +242,9 @@ export function MembersSettings(props: {
           load={shown}
           pending={shownPending}
           workspaceName={props.workspaceName}
+          ended={ended !== null && ended === scopeKey}
           onRetry={() => setAttempt((count) => count + 1)}
+          onOpenSync={props.onOpenSync}
           run={run}
         />
       </MembersGateView>
@@ -255,7 +269,7 @@ function MembersGateView(props: { gate: MembersGate; cloud: CloudSettings | unde
       );
     case "not-synced":
       return (
-        <GateState reason="not-synced" icon={CloudOff} action={{ label: "Set up sync", run: props.onOpenSync }}>
+        <GateState reason="not-synced" icon={CloudOff} action={{ label: "Set up sync", run: props.onOpenSync, primary: true }}>
           Turn on sync to invite people to this workspace.
         </GateState>
       );
@@ -288,10 +302,16 @@ function MembersGateView(props: { gate: MembersGate; cloud: CloudSettings | unde
   }
 }
 
-function GateState(props: { reason: string; icon: typeof CloudOff; action?: { label: string; run: () => void; primary?: boolean } | undefined; children: ReactNode }) {
+function GateState(props: {
+  reason: string;
+  icon: typeof CloudOff;
+  action?: { label: string; run: () => void; primary?: boolean } | undefined;
+  testId?: string;
+  children: ReactNode;
+}) {
   const Button = props.action?.primary ? PrimaryButton : SecondaryButton;
   return (
-    <div data-testid="settings-members-gate" data-reason={props.reason} className="flex min-h-48 flex-col pt-8">
+    <div data-testid={props.testId ?? "settings-members-gate"} data-reason={props.reason} className="flex min-h-48 flex-col pt-8">
       <EmptyState icon={props.icon} title={props.children}>
         {props.action ? <Button onClick={props.action.run}>{props.action.label}</Button> : null}
       </EmptyState>
@@ -303,13 +323,25 @@ export function MembersLoadView(props: {
   load: Load;
   pending: ReadonlyMap<PendingKey, MembersRequest>;
   workspaceName: string;
+  // Membership ended from this page, and nothing has changed since.
+  ended?: boolean;
   onRetry: () => void;
+  onOpenSync: () => void;
   run: (request: MembersRequest) => Promise<boolean>;
 }) {
+  return (
+    <>
+      {props.ended ? <EndedNotice /> : null}
+      <MembersLoadState {...props} />
+    </>
+  );
+}
+
+function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
   const { load } = props;
   switch (load.status) {
     case "loading":
-      return <SkeletonRows rows={6} label="Loading Members…" testId="settings-members-loading" />;
+      return <MembersSkeleton />;
     case "failed":
       return (
         <div data-testid="settings-members-failed" className="rounded-lg border border-line bg-panel p-1">
@@ -318,9 +350,9 @@ export function MembersLoadView(props: {
       );
     case "refused":
       return (
-        <div data-testid="settings-members-refused" className="flex min-h-48 flex-col pt-8">
-          <EmptyState icon={ShieldOff} title="Your server does not show this workspace's Members to this account." />
-        </div>
+        <GateState testId="settings-members-refused" reason="refused" icon={ShieldOff} action={{ label: "Sync and sharing", run: props.onOpenSync }}>
+          This account isn't in this workspace anymore, or can't see who is in it.
+        </GateState>
       );
     case "left":
       return (
@@ -329,12 +361,63 @@ export function MembersLoadView(props: {
         </div>
       );
     case "ready":
-      return <MembersPage view={load.view} pending={props.pending} run={props.run} />;
+      return <MembersPage view={load.view} pending={props.pending} ended={props.ended} run={props.run} />;
   }
+}
+
+// Said in place of the people the page listed. Focus lands on it, since the
+// End membership control that had it is gone.
+function EndedNotice() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  return (
+    <div ref={ref} tabIndex={-1} role="status" data-testid="settings-members-ended"
+      className="mb-8 flex items-start gap-3 rounded-lg border border-line bg-panel p-3">
+      <CircleCheck size={16} aria-hidden className="mt-0.5 shrink-0 text-success" />
+      <div className="min-w-0">
+        <p className="m-0 text-[13px] font-medium text-ink">Membership ended</p>
+        <p className="m-0 mt-1 text-[12px] text-muted">Everyone except you lost access. To work with people again, invite them by email or turn on the invite link.</p>
+      </div>
+    </div>
+  );
+}
+
+// The page's shape while it loads: the Invite card's rows, then People.
+function MembersSkeleton() {
+  const bar = "block h-2 rounded bg-skeleton";
+  return (
+    <div role="status" data-testid="settings-members-loading" className="dohc-reveal-if-slow">
+      <span className="sr-only">Loading Members…</span>
+      <div aria-hidden>
+        <span className={`${bar} mb-4 mt-1 w-14`} />
+        <div className="rounded-lg border border-line bg-panel px-5">
+          {["w-28", "w-20", "w-24"].map((width) => (
+            <div key={width} className="flex flex-col gap-3 border-b border-line py-5 last:border-b-0">
+              <span className={`${bar} ${width}`} />
+              <span className={`${bar} w-[62%]`} />
+            </div>
+          ))}
+        </div>
+        <span className={`${bar} mb-4 mt-10 w-16`} />
+        <div className="rounded-lg border border-line bg-panel">
+          {["w-32", "w-24", "w-28"].map((width) => (
+            <div key={width} className="flex min-h-12 items-center gap-3 border-b border-line px-3 py-2 last:border-b-0">
+              <span className="size-8 shrink-0 rounded-full bg-skeleton" />
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                <span className={`${bar} ${width}`} />
+                <span className={`${bar} w-40`} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type Confirm =
   | { kind: "remove"; person: WorkspacePerson }
+  | { kind: "admin"; person: WorkspacePerson }
   | { kind: "reset" }
   | { kind: "leave" }
   | { kind: "end" };
@@ -343,6 +426,7 @@ type Confirm =
 export function MembersPage(props: {
   view: WorkspaceMembersView;
   pending: ReadonlyMap<PendingKey, MembersRequest>;
+  ended?: boolean | undefined;
   run: (request: MembersRequest) => Promise<boolean>;
 }) {
   const { view, pending, run } = props;
@@ -394,7 +478,7 @@ export function MembersPage(props: {
     if (can.setAdmins) {
       items.push(person.role === "admin"
         ? { label: "Make member", onSelect: () => void run({ action: "role", person: person.memberId, role: "member" }) }
-        : { label: "Make admin", onSelect: () => void run({ action: "role", person: person.memberId, role: "admin" }) });
+        : { label: "Make admin", onSelect: () => setConfirm({ kind: "admin", person }) });
     }
     if (person.role === "admin" ? can.removeAdmins : can.removeMembers) {
       items.push({ label: "Remove from workspace", danger: true, onSelect: () => setConfirm({ kind: "remove", person }) });
@@ -406,35 +490,61 @@ export function MembersPage(props: {
     <div data-testid="settings-members-page" data-viewer-role={view.viewer.role}>
       {manages ? (
         <SettingsSection title="Invite">
-          <InviteRow people={view.people} busy={busy("invite")} onInvite={(email) => run({ action: "invite", email })} />
+          <InviteRow
+            people={view.people}
+            busy={busy("invite")}
+            link={{ url: linkOn ? view.inviteLink?.url ?? null : null, busy: busy("link") }}
+            onInvite={(email) => run({ action: "invite", email })}
+            onTurnOnLink={() => void run({ action: "link", change: "turn-on" })}
+          />
           <SettingRow
             title="Invite link"
             testId="settings-members-link"
+            // The switch stays on the title's line at every width; what it
+            // makes sits under the words. -mr-4 cancels the text column's
+            // margin, so the switch lines up with the other rows' controls.
+            detail={(
+              <span className="-mr-4 ml-auto flex shrink-0 items-center gap-2">
+                <SwitchControl
+                  label="Invite link"
+                  checked={linkOn}
+                  busy={busy("link")}
+                  disabled={busy("link")}
+                  onChange={(on) => void run({ action: "link", change: on ? "turn-on" : "turn-off" })}
+                />
+              </span>
+            )}
             description={linkOn ? "Anyone with the link can join as a member." : "Turn it on to let anyone with the link join as a member."}
             aside={view.inviteLink?.url && linkOn ? (
-              <div className="max-w-md">
-                <CopyField label="Copy invite link" copiedLabel="Invite link copied" copyTestId="settings-members-link-copy"
-                  getText={() => view.inviteLink?.url ?? null} sensitive={LINK_SECRET}>
-                  <span data-testid="settings-members-link-url" title={view.inviteLink.url}>{view.inviteLink.url}</span>
-                </CopyField>
+              <div className="flex max-w-md flex-wrap items-center gap-2">
+                <div className="min-w-0 flex-[1_1_12rem]">
+                  <CopyField label="Copy invite link" copiedLabel="Invite link copied" copyTestId="settings-members-link-copy"
+                    getText={() => view.inviteLink?.url ?? null} sensitive={LINK_SECRET}>
+                    <span data-testid="settings-members-link-url" title={view.inviteLink.url}>{view.inviteLink.url}</span>
+                  </CopyField>
+                </div>
+                {view.inviteLink.enabled ? (
+                  <SecondaryButton size="row" data-testid="settings-members-link-reset" disabled={busy("link")} onClick={() => setConfirm({ kind: "reset" })}>
+                    Reset link
+                  </SecondaryButton>
+                ) : null}
               </div>
             ) : undefined}
+          />
+          <SettingRow
+            title="Member level"
+            testId="settings-members-level"
+            description={(
+              <>
+                <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
+                <span data-testid="settings-members-limit" className="mt-1 block">{JOINED_WORKSPACE_LIMIT.members}</span>
+              </>
+            )}
           >
-            {view.inviteLink?.enabled ? (
-              <SecondaryButton data-testid="settings-members-link-reset" disabled={busy("link")} onClick={() => setConfirm({ kind: "reset" })}>
-                Reset link
-              </SecondaryButton>
-            ) : null}
-            <SwitchControl
-              label="Invite link"
-              checked={linkOn}
-              busy={busy("link")}
-              disabled={busy("link")}
-              onChange={(on) => void run({ action: "link", change: on ? "turn-on" : "turn-off" })}
-            />
-          </SettingRow>
-          <SettingRow title="Member level" testId="settings-members-level" description={<span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>}>
-            {busy("level") ? <LoaderCircle data-testid="settings-members-level-busy" size={12} aria-hidden className="shrink-0 animate-spin text-subtle" /> : null}
+            {/* The spinner's place is kept while idle, so the control never moves. */}
+            <span aria-hidden className="grid size-3 shrink-0 place-items-center">
+              {busy("level") ? <LoaderCircle data-testid="settings-members-level-busy" size={12} className="animate-spin text-subtle" /> : null}
+            </span>
             <SegmentedControl
               label="Member level"
               testId="settings-members-level-control"
@@ -453,9 +563,8 @@ export function MembersPage(props: {
         </SettingsSection>
       ) : (
         <SettingsSection>
-          <SettingRow title="Member level" testId="settings-members-level" description={<span data-testid="settings-members-level-words">{LEVEL_WORDS[view.memberLevel]}</span>}>
-            <span className="text-[13px] text-ink">{LEVEL_NAMES[view.memberLevel]}</span>
-          </SettingRow>
+          <SettingRow title="What members can do" testId="settings-members-level"
+            description={<span data-testid="settings-members-level-words">{LEVEL_WORDS[view.memberLevel]}</span>} />
         </SettingsSection>
       )}
 
@@ -484,7 +593,7 @@ export function MembersPage(props: {
             busy={busy(`person:${person.memberId}`)} menu={rowMenu(person)} />
         )}
       </PeopleGroup>
-      {alone && manages ? (
+      {alone && manages && !props.ended ? (
         <p data-testid="settings-members-alone" className="m-0 mt-2 px-3 text-[12px] text-muted">
           Only you are in this workspace. Invite people by email, or send them the invite link.
         </p>
@@ -513,7 +622,7 @@ export function MembersPage(props: {
       ) : null}
 
       <SettingsSection>
-        {can.endForEveryone ? (
+        {can.endForEveryone && !alone ? (
           <SettingRow title="End membership" testId="settings-members-end"
             description="Everyone except you loses access. Your workspace stays on this computer.">
             <SecondaryButton data-testid="settings-members-end-open" disabled={busy("end")} onClick={() => setConfirm({ kind: "end" })}>
@@ -535,6 +644,7 @@ export function MembersPage(props: {
           setConfirm(null);
           switch (confirm.kind) {
             case "remove": return void run({ action: "remove", person: confirm.person.memberId });
+            case "admin": return void run({ action: "role", person: confirm.person.memberId, role: "admin" });
             case "reset": return void run({ action: "link", change: "reset" });
             case "leave": return void run({ action: "leave" });
             case "end": return void run({ action: "end" });
@@ -544,17 +654,23 @@ export function MembersPage(props: {
   );
 }
 
-const LEVEL_NAMES: Record<MemberLevel, string> = { view: "View", comment: "Comment", edit: "Edit" };
-
 function MembersConfirm(props: { confirm: Confirm; workspaceName: string; onCancel: () => void; onConfirm: () => void }) {
   const { confirm } = props;
-  const common = { onCancel: props.onCancel, onConfirm: props.onConfirm, intent: "danger" as const, cancelTestId: "settings-members-confirm-cancel", confirmTestId: "settings-members-confirm" };
+  const plain = { onCancel: props.onCancel, onConfirm: props.onConfirm, cancelTestId: "settings-members-confirm-cancel", confirmTestId: "settings-members-confirm" };
+  const common = { ...plain, intent: "danger" as const };
   switch (confirm.kind) {
     case "remove":
       return (
         <ConfirmDialog {...common} testId="settings-members-confirm-remove" icon={UserMinus}
           title={`Remove ${displayName(confirm.person)} from ${props.workspaceName}?`} confirmLabel="Remove">
           <p className="m-0">Copies already on their computers stay with them. You can let them back in from Removed.</p>
+        </ConfirmDialog>
+      );
+    case "admin":
+      return (
+        <ConfirmDialog {...plain} testId="settings-members-confirm-admin" icon={ShieldCheck}
+          title={`Make ${displayName(confirm.person)} an admin?`} confirmLabel="Make admin">
+          <p className="m-0">Admins can invite and remove members, change the invite link and member level, and see emails.</p>
         </ConfirmDialog>
       );
     case "reset":
@@ -572,7 +688,7 @@ function MembersConfirm(props: { confirm: Confirm; workspaceName: string; onCanc
     case "end":
       return (
         <ConfirmDialog {...common} testId="settings-members-confirm-end" icon={UserX} title="End membership for everyone?" confirmLabel="End membership">
-          <p className="m-0">Everyone except you loses access, and the invite link stops working. Copies already on their computers stay with them.</p>
+          <p className="m-0">Everyone except you loses access, and the list of people, including Removed, is deleted. This cannot be undone. To bring people back, invite them again.</p>
         </ConfirmDialog>
       );
   }
@@ -582,9 +698,19 @@ function displayName(person: WorkspacePerson): string {
   return person.name?.trim() || person.email || "this person";
 }
 
-function InviteRow(props: { people: readonly WorkspacePerson[]; busy: boolean; onInvite: (email: string) => Promise<boolean> }) {
+function InviteRow(props: {
+  people: readonly WorkspacePerson[];
+  busy: boolean;
+  // The invite link while it is on, and whether a change to it is running.
+  link: { url: string | null; busy: boolean };
+  onInvite: (email: string) => Promise<boolean>;
+  onTurnOnLink: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The address the last invite went to. dohc sends no email, so the row
+  // says how that person gets in.
+  const [sent, setSent] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const errorId = useId();
   const check = (value: string): string | null => {
@@ -614,8 +740,13 @@ function InviteRow(props: { people: readonly WorkspacePerson[]; busy: boolean; o
               input.current?.focus();
               return;
             }
-            void props.onInvite(email.trim()).then((sent) => {
-              if (sent) setEmail("");
+            const submitted = email.trim();
+            setSent(null);
+            void props.onInvite(submitted).then((done) => {
+              if (!done) return;
+              setSent(submitted);
+              // An address typed while the invite ran stays.
+              setEmail((current) => (current.trim() === submitted ? "" : current));
             });
           }}
         >
@@ -641,6 +772,26 @@ function InviteRow(props: { people: readonly WorkspacePerson[]; busy: boolean; o
             </PrimaryButton>
           </div>
           {error ? <FieldError id={errorId} testId="settings-members-invite-error">{error}</FieldError> : null}
+          <div role="status" className="empty:hidden">
+            {sent ? (
+              <p data-testid="settings-members-invite-sent" className="m-0 text-[12px] text-muted">
+                Invited <span className="font-medium text-ink">{sent}</span>. dohc doesn't send email. They join when they sign in to dohc
+                with this address, so send them the invite link.
+              </p>
+            ) : null}
+          </div>
+          {sent ? (
+            <div className="flex">
+              {props.link.url ? (
+                <CopyButton label="Copy invite link" copiedLabel="Invite link copied" testId="settings-members-invite-sent-copy"
+                  getText={() => props.link.url} sensitive={LINK_SECRET} />
+              ) : (
+                <SecondaryButton size="row" data-testid="settings-members-invite-sent-link" disabled={props.link.busy} onClick={props.onTurnOnLink}>
+                  Turn on invite link
+                </SecondaryButton>
+              )}
+            </div>
+          ) : null}
         </form>
       }
     />
@@ -684,7 +835,7 @@ function PersonRow(props: {
   const name = person.name?.trim() || null;
   const title = name ?? person.email ?? "No name";
   const second = invited
-    ? person.invitedAtMs !== null ? `Invited ${relativeTime(person.invitedAtMs)}` : "Invited"
+    ? ["Joins when they sign in", person.invitedAtMs !== null ? `Invited ${relativeTime(person.invitedAtMs)}` : null].filter(Boolean).join(" · ")
     : removed
       ? [props.showEmail && name ? person.email : null, person.removedAtMs !== null ? `Removed ${relativeTime(person.removedAtMs)}` : "Removed"].filter(Boolean).join(" · ")
       : props.showEmail && name ? person.email : null;
