@@ -191,8 +191,14 @@ describe("ended Edit Collection shares", () => {
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     }
     view.rerender(shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }));
-    // The row goes with the right to add records. Finishing its creation meets the shell's refusal, in a notice with what was typed.
-    if (action !== "record creation") await act(async () => send());
+    // The row goes with the right to add records, and starts no request as it goes. A notice keeps what was typed,
+    // and its Try again, which finishes the same creation, meets the shell's refusal.
+    if (action === "record creation") {
+      await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(PART_WAY));
+      expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
+    } else await act(async () => send());
     const message = "Your access to this share ended.";
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message));
     if (action === "record creation") expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk");
@@ -728,8 +734,13 @@ describe("ended Edit Collection shares", () => {
     const view = render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
     await newRowSays(PART_WAY);
-    // The share ends, so the row goes, and what finishes its creation is refused.
+    // The share ends, so the row goes, and starts no request as it goes. A notice keeps what was typed.
     view.rerender(shell(bridge, ENDED_SHARE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk"));
+    expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+    // Its Try again finishes the same creation, which the ended share refuses.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share ended."));
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
   });

@@ -4409,6 +4409,12 @@ export function DesktopWorkspaceShell(props: {
 
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
+  // Whether this shell is still the window's. A creation that answers after it closed paints nothing here.
+  const shellOpen = useRef(true);
+  useLayoutEffect(() => {
+    shellOpen.current = true;
+    return () => { shellOpen.current = false; };
+  }, []);
   const createCollectionRecord = useCallback(
     async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void, options: NewRecordOptions = {}) => {
       const selection = workspaceSelection.current;
@@ -4419,41 +4425,58 @@ export function DesktopWorkspaceShell(props: {
       const name = reservedPath.slice(collectionPath.length + 1, -3);
       pendingRecordPaths.current.add(reservedPath);
       // The page that asked shows a failure in place, where it still can. Otherwise the shell reports it.
-      const shownInPage = (reason: string, retry: (() => void) | null) => options.onFailure?.({ reason, retry }) ?? false;
+      const shownInPage = (reason: string, retry: (() => void) | null, partial = false) => options.onFailure?.({ reason, retry, partial }) ?? false;
+      // The window shows another workspace by now: this shell closed, or took another workspace. It paints nothing more.
+      const moved = () => workspaceSelection.current !== selection || !shellOpen.current;
       const execute = async (recordId?: string): Promise<void> => {
-        if (workspaceSelection.current !== selection) return;
+        // Main takes no creation for a workspace the window no longer shows. The page keeps what was typed.
+        if (moved()) { shownInPage("This window changed workspaces before dohc created the record.", null); return; }
         if (shareView && !shareViewWritableRef.current) {
           const message = shareWriteRefusalRef.current;
           if (!shownInPage(message, null)) reportShellError(message, new Error(message));
           return;
         }
+        let result: Awaited<ReturnType<ReturnType<typeof bridge>["createCollectionRecord"]>>;
         try {
-          const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
-          if (workspaceSelection.current !== selection) return;
-          if ("kind" in result) {
-            const resume = result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null;
-            // Files with no way to finish them stay in the notice too, whose details name them.
-            if (!shownInPage(creationPartialNotice(result), resume) || resume === null) reportShellError("dohc could not finish this record.", new CreationPartialError(result), resume);
-            return;
-          }
-          await refreshFiles();
-          if (workspaceSelection.current !== selection) return;
-          if (result.delivery === "refused") {
-            if (shareView) await checkShareAccess();
-            if (workspaceSelection.current !== selection) return;
-            const restricted = shareView && !shareViewWritableRef.current;
-            const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
-            if (!shownInPage(reason, null)) reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created, options));
-          } else created?.(result);
-          if (options.open !== false) openFile(result.path);
+          result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
         } catch (error) {
+          // Only an error from the creation itself is a creation that failed.
+          if (moved()) { shownInPage(withErrorWords("dohc could not create this record.", error), null); return; }
           if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();
-          if (workspaceSelection.current !== selection) return;
+          if (moved()) { shownInPage(withErrorWords("dohc could not create this record.", error), null); return; }
           if (shareView && !shareViewWritableRef.current) {
             const message = shareWriteRefusalRef.current;
             if (!shownInPage(message, null)) reportShellError(message, new Error(message));
           } else if (!shownInPage(withErrorWords("dohc could not create this record.", error), null)) reportShellError("Could not create a record.", error);
+          return;
         }
+        if ("kind" in result) {
+          const partial = result;
+          const resume = partial.retry.mode === "resume" && !moved() ? () => void execute(partial.retry.recordId) : null;
+          // The file exists and the record is not finished. Files with no way to finish them stay in the notice too, whose details name them.
+          const shown = shownInPage(creationPartialNotice(partial), resume, true);
+          if (!moved() && (!shown || resume === null)) reportShellError("dohc could not finish this record.", new CreationPartialError(partial), resume);
+          return;
+        }
+        // The record exists. What was typed for it is written whatever happens next, as an edit made just before a
+        // switch is: the field writes are kept by workspace above the shell.
+        if (result.delivery !== "refused") created?.(result);
+        if (moved()) {
+          if (result.delivery === "refused") shownInPage(result.reason ?? "The sync relay did not accept this record.", null);
+          return;
+        }
+        // A listing that does not refresh is its own failure, and does not undo the creation.
+        try { await refreshFiles(); } catch (error) { reportShellError("Could not refresh workspace files.", error); }
+        if (moved()) return;
+        if (result.delivery === "refused") {
+          // A check of the share's access that fails leaves the refusal to say why.
+          try { if (shareView) await checkShareAccess(); } catch { /* The refusal is reported below. */ }
+          if (moved()) return;
+          const restricted = shareView && !shareViewWritableRef.current;
+          const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
+          if (!shownInPage(reason, null)) reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created, options));
+        }
+        if (options.open !== false) openFile(result.path);
       };
       try { await execute(); }
       finally { pendingRecordPaths.current.delete(reservedPath); }

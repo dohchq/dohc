@@ -43,9 +43,12 @@ import { CollectionCustomizeDialog, documentCollectionFiles } from "./collection
 import { CollectionFrame, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
+import { collectionChangeShell } from "./collectionChangeShells";
 import {
   collectionWritesPaused,
+  currentCollectionWriteLineage,
   enqueueCollectionFieldWrite,
+  retainUnsavedCollectionRecord,
   useCollectionWriteLineage,
   useCollectionWritesPaused,
   useCollectionWriteStatus,
@@ -152,7 +155,12 @@ export interface NewRecordOptions {
    * Receives why the record was not made, and what finishes a creation that
    * stopped part way. True when the page shows it, so the shell reports nothing.
    */
-  onFailure?(failure: { reason: string; retry: (() => void) | null }): boolean;
+  onFailure?(failure: {
+    reason: string;
+    retry: (() => void) | null;
+    /** The record's file exists and the record is not finished. `retry` finishes that same creation. */
+    partial?: boolean;
+  }): boolean;
 }
 
 /**
@@ -526,14 +534,16 @@ export function CollectionPage({
   // The global host finishes accepted edits after this page unmounts.
   const lineage = useCollectionWriteLineage(workspaceId);
   const enqueueCellChange = useCallback(
-    (change: CollectionCellChange, createOption?: string) => {
+    // `settled`: the write landed, or is kept in the list of unsaved changes with its value. It runs once.
+    (change: CollectionCellChange, createOption?: string, settled?: () => void) => {
       const editId = ++nextEditId.current;
       const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
       enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
         completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
+        settled?.();
       }, () => {
         for (const listener of discardListeners.current) listener(editId);
-      });
+      }, settled);
       return editId;
     },
     [workspaceId, collectionPath, lineage],
@@ -565,6 +575,7 @@ export function CollectionPage({
   // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
   const [justMade, setJustMade] = useState<string | null>(null);
   const openMade = useRef<(recordId: string) => void>(() => undefined);
+  const panelShows = recordPanel.openKeyRef;
   /**
    * Makes a record from a board or a calendar, with a value in one field
    * where the column or the day gives one. The record then opens in the
@@ -573,10 +584,12 @@ export function CollectionPage({
    */
   const makeRecord = useCallback(
     (field?: string, value?: CollectionValue) => {
+      // The record the panel shows as the person asks. One they open meanwhile keeps the panel, and its focus.
+      const asked = panelShows.current;
       onNewRecord(collectionPath, (record) => {
         if (field !== undefined && value !== undefined && value !== null) enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
         const show = () => {
-          if (pageOpen.current) openMade.current(record.recordId);
+          if (pageOpen.current && panelShows.current === asked) openMade.current(record.recordId);
         };
         // The view reads its records first, so the panel finds the new one among them.
         if (pageOpen.current) void store.refresh().then(show, show);
@@ -589,44 +602,81 @@ export function CollectionPage({
     () => (startNewRow.current ? startNewRow.current() : makeRecord()),
     [makeRecord],
   );
+  // The lineage this page opened under. The shell opens a new page when the workspace changes versions or restores
+  // earlier work, so a row typed here belongs to this one, whatever the workspace's lineage is by the time it is saved.
+  const pageLineage = useState(() => currentCollectionWriteLineage(workspaceId))[0];
   const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, onNotice, collectionName: collectionPath });
   rowHost.current = { onNewRecord, enqueueCellChange, onError, onNotice, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
   /**
    * The table's new row. Saving it creates the record's file, named from
    * the row's title or name, then writes each typed value as an edit of a
-   * cell does. One object for the page's life, so the table builds nothing again.
+   * cell does. Once the file is made the row never creates again, and it is
+   * saved when every one of those writes has settled. One object for the
+   * page's life, so the table builds nothing again.
    */
   const tableNewRecord = useMemo((): TableNewRecord => {
     const text = (value: CollectionValue) => (Array.isArray(value) ? value.join(", ") : String(value));
+    /**
+     * Keeps what a row held and did not save where the person can copy it:
+     * a notice of this workspace's shell while the window shows the
+     * workspace, and once it shows another, the list of unsaved Collection
+     * changes, which outlives the shell and keeps entries by workspace.
+     */
+    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null) => {
+      if (collectionChangeShell(workspaceId)) {
+        const message = `dohc did not create a record in ${rowHost.current.collectionName}. ${reason} You typed: ${typed}`;
+        rowHost.current.onError(message, new TextNotSavedError(message, typed), retry);
+      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, values, `dohc did not create this record. ${reason}`);
+    };
     const save: TableNewRecord["save"] = (values, report) => {
       const now = rowHost.current;
       const entries = Object.entries(values).map(([field, value]) => ({ field, value }));
       const named = labelField(entries);
       const typed = entries.map((entry) => `${entry.field}: ${text(entry.value)}`).join(", ");
+      // What a field write checks, checked before the file is made: a file made where its values would be refused
+      // is a named record with empty fields. The row keeps its values, or a report takes all of them once.
+      const refusal = mayNotWrite.current()
+        ?? (collectionWritesPaused(workspaceId) ? "Editing was paused while dohc changed files in this workspace." : null)
+        ?? (pageLineage !== currentCollectionWriteLineage(workspaceId) ? "This workspace changed versions or restored earlier work." : null);
+      if (refusal !== null) {
+        if (!report({ state: "refused", reason: refusal }) && typed !== "") keep(values, typed, refusal, null);
+        return;
+      }
       now.onNewRecord(collectionPath, (record) => {
-        // The record exists, so what was typed is written whether or not the page is still open.
-        for (const { field, value } of entries) now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
-        const shown = () => {
-          if (!pageOpen.current) return;
-          report({ state: "saved" });
-          // A record past the rows loaded so far has no row to show it.
-          const loaded = store.getState();
-          if (!loaded.records.some((entry) => entry.id === record.recordId) && loaded.nextCursor !== null) {
-            rowHost.current.onNotice("Created a record. It is past the records loaded here.");
-          }
+        // The file is made. The row never creates again: what remains is its field writes, which go on whether or
+        // not the page is still open.
+        report({ state: "made" });
+        let out = entries.length;
+        const saved = () => {
+          // Each write landed, or is kept in the list of unsaved changes with its value, its Try again and its copy.
+          // The view reads its records next, and the table then says whether a row on screen shows the record.
+          if (report({ state: "saved", recordId: record.recordId }) && pageOpen.current) void store.refresh();
         };
-        // The record's own row is on the page before the new row goes. A page that closed reads nothing again.
-        if (pageOpen.current) void store.refresh().then(shown, shown);
+        if (out === 0) return saved();
+        for (const { field, value } of entries) {
+          let settled = false;
+          now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value }, undefined, () => {
+            if (settled) return;
+            settled = true;
+            if (--out === 0) saved();
+          });
+        }
       }, {
         ...(named === null ? {} : { title: text(values[named] ?? null) }),
         open: false,
         onFailure: (failure) => {
-          if (pageOpen.current && report({ state: "refused", reason: failure.reason, ...(failure.retry ? { retry: failure.retry } : {}) })) return true;
+          // A file that exists and is not finished leaves the row in doubt: its Try again finishes the same
+          // creation, and Discard or closing the table hands what was typed to a report. A creation that did
+          // not run is refused, and the row takes typing again.
+          const status = failure.partial
+            ? { state: "unconfirmed" as const, reason: failure.reason, ...(failure.retry ? { retry: failure.retry } : {}),
+                discard: () => keep(values, typed, failure.reason, null), released: () => keep(values, typed, failure.reason, failure.retry) }
+            : { state: "refused" as const, reason: failure.reason };
+          if (pageOpen.current && report(status)) return true;
           // A record with nothing typed in it has nothing to keep, so the shell reports it as it does any creation.
           if (typed === "") return false;
-          // The row went with its table, so what it held goes to a notice, which can make the record again.
-          const message = `dohc did not create a record in ${rowHost.current.collectionName}. ${failure.reason} You typed: ${typed}`;
-          rowHost.current.onError(message, new TextNotSavedError(message, typed), failure.retry ?? (() => save(values, () => false)));
+          // The row went with its table, so what it held is kept, with what makes the record again where nothing was made.
+          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => save(values, () => false)));
           return true;
         },
       });
@@ -640,20 +690,20 @@ export function CollectionPage({
       },
       save,
       // What the row held and did not save goes to a notice, whose details hold all of it. Nothing is created.
+      onOutOfView: () => rowHost.current.onNotice("Created a record. It is not among the records on screen."),
       onUnsaved: (row) => {
         const typed = [...Object.entries(row.values).map(([field, value]) => `${field}: ${text(value)}`), ...(row.text ? [`${row.text.field}: ${row.text.text}`] : [])].join(", ");
         const field = Object.keys(row.values)[0] ?? "";
-        const why = dropRefusal.current() ?? (row.why === "field" ? "The field changed, or this view no longer shows it." : `Enter a value ${row.text?.field ?? "the field"} can take.`);
-        const message = row.why === "field"
-          ? `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${typed}`
-          : `dohc did not create a record in ${rowHost.current.collectionName}. ${why} You typed: ${typed}`;
+        if (row.why === "closed") return keep(row.values, typed, `Enter a value ${row.text?.field ?? "the field"} can take.`, null);
+        const why = mayNotWrite.current() ?? "The field changed, or this view no longer shows it.";
+        const message = `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${typed}`;
         rowHost.current.onError(message, new TextNotSavedError(message, typed));
-        return row.why === "field" ? `The ${field} field changed, so its value left this row. A notice has what you typed.` : undefined;
+        return `The ${field} field changed, so its value left this row. A notice has what you typed.`;
       },
     };
-  }, [collectionPath, store]);
-  // Why the page may not write now, read when the new row gives a value back.
-  const dropRefusal = useRef<() => string | null>(() => null);
+  }, [collectionPath, store, workspaceId, pageLineage]);
+  // Why the page may not write now, read when the new row is saved or gives a value back.
+  const mayNotWrite = useRef<() => string | null>(() => null);
   // A board column's New: the record starts with the column's value, written
   // through the same queue as any edit once the record exists.
   const groupBy = activeView?.kind === "board" ? activeView.groupBy : undefined;
@@ -681,6 +731,9 @@ export function CollectionPage({
   if (heldRecord ?? found?.record) lastRecord.current = heldRecord ?? found?.record ?? null;
   else if (lastRecord.current?.id !== openRecordId || found !== null) lastRecord.current = null;
   const shownRecord = lastRecord.current;
+  useEffect(() => {
+    if (justMade !== null && justMade === openRecordId && shownRecord !== null) setJustMade(null);
+  }, [justMade, openRecordId, shownRecord]);
   const recordProblem = heldRecord === undefined && found !== null && found.record === null ? found.problem : undefined;
   const held = heldRecord !== undefined;
   // Where the open record was last found. It outlives the rows that hold the record, which a refresh drops.
@@ -724,7 +777,7 @@ export function CollectionPage({
   const accessRefusal = () => !draftAccess.current.readOnly && !draftAccess.current.accessEnded ? null
     : draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
       : "Your access to this share changed. Ask for Edit access, then reopen the share.");
-  dropRefusal.current = accessRefusal;
+  mayNotWrite.current = accessRefusal;
   // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
   const knownRecords = useRef(new Map<string, CollectionRecord>());
   useEffect(() => {

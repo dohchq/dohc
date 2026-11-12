@@ -348,6 +348,9 @@ export type CollectionFieldWrite = {
   // acknowledge the edit. An already-running query cannot.
   onIndexed?: () => void;
   onDiscarded?: () => void;
+  // The write left the queue for the retained failures, where its value
+  // waits with its retry and its copy. It can run again after a retry.
+  onRetained?: () => void;
   // A select option the collection's schema must gain before the cell value
   // writes. Cleared when that schema write lands, so a retry after a later
   // failure replays only what did not land. Undefined for a plain edit.
@@ -363,6 +366,10 @@ export type CollectionWriteFailure = CollectionFieldWrite & {
   message: string;
   superseded?: boolean;
   recoveryOnly?: boolean;
+  // What a person typed for a record dohc could not create, kept to copy.
+  // It is no write of a record's file: `change` names the Collection, and
+  // its value holds the typed values by field.
+  newRecord?: boolean;
 };
 
 export type CollectionWriteStatus = {
@@ -484,6 +491,28 @@ function recordWriteOrder(write: CollectionFieldWrite): boolean {
 function retainFailure(write: CollectionFieldWrite, message: string, recoveryOnly = false): void {
   const superseded = recordWriteOrder(write);
   failures = [...failures, { ...write, message, superseded, recoveryOnly }];
+  write.onRetained?.();
+}
+
+/**
+ * Keeps what a person typed for a record dohc could not create, in the
+ * retained list of its own workspace: the Collection, why, and the values
+ * to copy. The list outlives the workspace's shell, so the entry is there
+ * when the window shows another workspace. It has no retry, since no file
+ * exists to write to: the person copies the values, then discards it.
+ */
+export function retainUnsavedCollectionRecord(
+  workspaceId: string,
+  collectionPath: string,
+  values: Readonly<Record<string, CollectionValue>>,
+  message: string,
+): void {
+  nextWriteId += 1;
+  failures = [...failures, {
+    id: nextWriteId, workspaceId, collectionPath, lineage: collectionWriteLineage(workspaceId), message, recoveryOnly: true, newRecord: true,
+    change: { recordId: "", recordPath: collectionPath, field: "New record", value: { ...values } },
+  }];
+  notify();
 }
 
 export function setCollectionFieldWriteAccess(workspaceId: string, refusal: string | null): void {
@@ -505,6 +534,11 @@ export function setCollectionFieldWriteAccess(workspaceId: string, refusal: stri
 
 function collectionWriteLineage(workspaceId: string): number {
   return workspaceLineages.get(workspaceId) ?? 0;
+}
+
+/** The workspace's lineage now, for a caller that checks a page's own before it starts work that ends in a field write. */
+export function currentCollectionWriteLineage(workspaceId: string): number {
+  return collectionWriteLineage(workspaceId);
 }
 
 // Called at the shell's confirmed version/restore boundary, before its
@@ -558,11 +592,12 @@ export function enqueueCollectionFieldWrite(
   lineage = collectionWriteLineage(workspaceId),
   onIndexed?: () => void,
   onDiscarded?: () => void,
+  onRetained?: () => void,
 ): boolean {
   nextWriteId += 1;
   const key = keyFor(workspaceId, collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
-  const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage, onIndexed, onDiscarded };
+  const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage, onIndexed, onDiscarded, onRetained };
   if (accessRefusals.has(workspaceId) || pausedWorkspaces.has(workspaceId) || lineage !== collectionWriteLineage(workspaceId)) {
     const message = lineage !== collectionWriteLineage(workspaceId)
       ? STALE_LINEAGE_MESSAGE
@@ -648,7 +683,7 @@ export function retryCollectionFieldWrite(id: number): void {
   if (failure.superseded || failure.recoveryOnly || failure.lineage !== collectionWriteLineage(failure.workspaceId)) return;
   failures = failures.filter((entry) => entry.id !== id);
   enqueueCollectionFieldWrite(failure.workspaceId, failure.collectionPath, failure.change,
-    failure.createOption, failure.lineage, failure.onIndexed, failure.onDiscarded);
+    failure.createOption, failure.lineage, failure.onIndexed, failure.onDiscarded, failure.onRetained);
 }
 
 /** The user's explicit decision to drop a retained failure's value. */
@@ -670,7 +705,8 @@ export function discardCollectionFieldWrite(id: number): void {
 
 /** True while an accepted cell edit has not reached its record's document. */
 export function retainedCollectionFieldWritePaths(workspaceId: string): string[] {
-  return [...new Set([...queue, ...failures].filter(write => write.workspaceId === workspaceId).map(write => write.change.recordPath))];
+  // A record that was never created has no file an edit could be waiting to reach.
+  return [...new Set([...queue, ...failures.filter(failure => !failure.newRecord)].filter(write => write.workspaceId === workspaceId).map(write => write.change.recordPath))];
 }
 
 export function hasPendingCollectionFieldWrites(): boolean {

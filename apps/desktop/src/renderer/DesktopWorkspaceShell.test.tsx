@@ -20,7 +20,7 @@ import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEdit
 import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
 import { deferred } from "../testing/deferred";
-import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
+import { CollectionFieldWriteHost, collectionWriteFailures, resetCollectionFieldWritesForTests, retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW, OTHER_WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -402,7 +402,7 @@ describe("collection folders", () => {
       if (title !== null) fireEvent.change(editor()!, { target: { value: title } });
       if (notes === undefined) return fireEvent.keyDown(editor()!, { key: "Enter" });
       fireEvent.keyDown(editor()!, { key: "Tab" });
-      fireEvent.keyDown(screen.getByRole("grid"), { key: "Enter" });
+      fireEvent.keyDown(screen.getByRole("grid"), { key: "F2" });
       fireEvent.change(editor()!, { target: { value: notes } });
       fireEvent.keyDown(editor()!, { key: "Enter" });
     };
@@ -422,6 +422,113 @@ describe("collection folders", () => {
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Untitled");
     for (const name of ["Plan Q4 Launch", "Plan Q4 Launch 2", "Untitled"]) expect(screen.queryByTestId(editorTabTestId(`tasks/${name}.md`))).toBeNull();
+  });
+
+  /** Opens the tasks Collection, whose records have a title, and answers what types a title in its new row and saves the row. */
+  async function openTasksWithTitle(bridge: ReturnType<typeof makeBridge>, render: () => unknown) {
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
+    bridge.getCollection.mockResolvedValue({
+      path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
+      schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }], views: [] },
+    });
+    render();
+    const row = await waitFor(() => {
+      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      expect(row?.dataset.collection).toBe("true");
+      return row!;
+    });
+    fireEvent.click(row);
+    const editor = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input");
+    return async (title: string, leave: "Enter" | null) => {
+      fireEvent.click(await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }));
+      await waitFor(() => expect(editor()).not.toBeNull());
+      fireEvent.change(editor()!, { target: { value: title } });
+      // With no key, the title stays in its open editor: the row is still being typed.
+      if (leave) fireEvent.keyDown(editor()!, { key: leave });
+    };
+  }
+  const otherWorkspaceShell = (bridge: ReturnType<typeof makeBridge>) => (
+    <>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell key={OTHER_WORKSPACE.workspaceId} workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+    </>
+  );
+
+  it("writes a new record's typed values, and reports the listing on its own, when the file listing fails after the record is made", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
+    // The creation succeeds, and the listing that follows it does not.
+    bridge.createCollectionRecord.mockImplementationOnce(async (payload) => {
+      bridge.listWorkspaceFiles = vi.fn(async () => { throw new Error("The listing is not ready."); });
+      return { path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+    });
+    await typeRow("Milk", "Enter");
+    // The record exists, so its title is written, or kept with its Try again, and the row does not say it could not be created.
+    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Could not refresh workspace files."));
+    expect(document.querySelector("[data-new-record-status='refused']")).toBeNull();
+    expect(screen.queryByText(/could not create this record/)).toBeNull();
+    // Nothing offers a second file for it.
+    expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+    resetCollectionFieldWritesForTests();
+  });
+
+  it("still writes the typed values of a record made as the window switched workspaces, for its own workspace", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
+    bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
+    let view!: ReturnType<typeof renderShell>;
+    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
+    await typeRow("Milk", "Enter");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
+    // The same shell takes the other workspace before main answers that it made the record.
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await act(async () => pending.resolve({ path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz" }));
+    // The title is with the field writes of the workspace the record was made in, as a cell edit made before the switch is.
+    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]));
+    expect(retainedCollectionFieldWritePaths(OTHER_WORKSPACE.workspaceId)).toEqual([]);
+    // Nothing of that record is painted in the workspace the window shows now.
+    expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
+    expect(document.querySelector("[data-new-record]")).toBeNull();
+    resetCollectionFieldWritesForTests();
+  });
+
+  it.each([
+    ["was still being typed", false],
+    ["was being created, and main refused it", true],
+  ] as const)("keeps a new row that %s when the window switched workspaces, in the list of unsaved changes of its own workspace", async (_when, sending) => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
+    bridge.createCollectionRecord.mockImplementation(() => pending.promise);
+    let view!: ReturnType<typeof renderShell>;
+    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
+    await typeRow("Milk", sending ? "Enter" : null);
+    if (sending) await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
+    // The root mounts a new shell for the workspace switched to.
+    view.rerender(otherWorkspaceShell(bridge));
+    if (sending) await act(async () => pending.reject(new Error("Record creation stopped because this window changed workspaces.")));
+    // The row could not be created at all. The list that outlives the shell keeps it, with its Collection and what was typed.
+    await waitFor(() => expect(collectionWriteFailures().map((failure) => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value]))
+      .toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]));
+    const kept = await screen.findByTestId("collection-write-failure");
+    expect(kept.textContent).toContain("New record in tasks");
+    expect(kept.textContent).toContain("dohc did not create this record.");
+    expect(within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value).toContain('"title": "Milk"');
+    // A row never sent asks main for nothing once the window shows another workspace.
+    expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
+    // Nothing of it is painted in the workspace the window shows now.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    resetCollectionFieldWritesForTests();
   });
 
   it("opens a collection folder as its views tab with its columns and a New record row", async () => {
