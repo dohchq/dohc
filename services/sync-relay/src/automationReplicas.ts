@@ -12,6 +12,8 @@ import * as Result from "effect/Result";
 import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {createEngineClient, EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {SyncRelayStorage} from "./storage";
+import {replayUnfinishedWrites} from "./accountChatWrites";
+import {OPERATION_STALLED_KEEP_MS} from "./storage/operationRecords";
 import {
   AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS,
   AUTOMATION_WORKSPACE_LEAVE_AFTER_MS,
@@ -224,6 +226,10 @@ export async function startAutomationReplicas(options: {
 
   const unfinishedIncarnations = (workspaceId: string) =>
     new Set(storage.listUnfinishedAccountOperations({workspaceId}).map((record) => record.incarnation));
+
+  // The workspaces whose oldest unfinished phone write stayed unknown for OPERATION_STALLED_KEEP_MS past its active time.
+  const overdueCopies = () => storage.unfinishedOperationActiveEnds()
+    .filter(({activeUntilMs}) => nowMs() >= activeUntilMs + OPERATION_STALLED_KEEP_MS).map(({workspaceId}) => workspaceId);
 
   /**
    * Settles the phone's unfinished writes in one incarnation's folder before
@@ -454,6 +460,11 @@ export async function startAutomationReplicas(options: {
     try {
       // A pulled moment lands in the main version, as on a computer that joins.
       await request(engineClient, "versions.ensureMain", {workspaceId: row.workspaceId}, handle);
+      // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their
+      // stored commands before the copy pushes, while their account may still publish them.
+      await replayUnfinishedWrites({storage, copy: replica, nowMs,
+        records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
+        onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
       // A copy with a long history catches up over several passes, after the others.
       if (!(await replica.step())) schedule();
     } catch (error) {
@@ -514,6 +525,16 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
+    // A phone write whose outcome stayed unknown this long past its active time ends with its copy's folder:
+    // the copy closes and the folder settles, so nothing in it publishes again, and its unfinished writes are
+    // refused. The marked folder then goes, as retirement or the next open removes a settled one, and a later
+    // visit gets a fresh copy.
+    for (const workspaceId of overdueCopies()) {
+      ok = await each(workspaceId, async () => {
+        await replicas.get(workspaceId)?.close();
+        await settleWorkspace(workspaceId, COULD_NOT_SEND);
+      }) && ok;
+    }
     // A copy keeps the phone's unsent writes' reason exactly while they may still publish from it.
     storage.restorePublicationReasons();
     const publishing = new Set(storage.publishingCopies().map((copy) => copy.workspaceId));
@@ -718,6 +739,10 @@ export async function startAutomationReplicas(options: {
       if (failedSyncs.has(row.workspaceId)) continue;
       if (row.leftAtMs !== null) next = Math.min(next, row.reasons.includes("automation") ? row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS : nowMs());
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
+    }
+    // So is the end of the time a copy's oldest unfinished phone write may stay unknown.
+    for (const {workspaceId, activeUntilMs} of storage.unfinishedOperationActiveEnds()) {
+      if (!failedSyncs.has(workspaceId)) next = Math.min(next, activeUntilMs + OPERATION_STALLED_KEEP_MS);
     }
     let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
     // A copy's next attempt to publish the phone's writes is a deadline of its own.

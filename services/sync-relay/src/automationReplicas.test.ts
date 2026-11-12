@@ -9,7 +9,10 @@ import { inspect } from "node:util";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatsLiveAdapter, type JsonValue, type Request } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { phoneWriteIds, publicationStages, type WriteCommand } from "./accountChatWrites";
 import { authorizeAutomationReplication, deriveAutomationReplicaBearer } from "./automationReplicaCredential";
 import { removeAutomationReplicas, startAutomationReplicas } from "./automationReplicas";
 import { startServerCopies } from "./serverCopies";
@@ -17,7 +20,7 @@ import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
 import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, type CopyReason } from "./storage/automationWorkspaces";
-import { OPERATION_ACTIVE_MS } from "./storage/operationRecords";
+import { OPERATION_ACTIVE_MS, OPERATION_STALLED_KEEP_MS } from "./storage/operationRecords";
 import type { PublicationCommand } from "./operationPublication";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage, closeTestStorage, reopenTestStorage } from "./testing";
 import { notifyRelayWrite } from "./relayWriteChanges";
@@ -263,6 +266,8 @@ describe("the automation replicas", () => {
     // Handles opened without a relay, as a read of a closed copy's folder opens them, and how many of their closes fail next.
     const folderHandles: string[] = [];
     let failFolderCloses = 0;
+    // The copies' chats, which every engine the test starts shares.
+    const chats = new ChatsLoopbackEngine();
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void; authToken?: string }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -302,7 +307,9 @@ describe("the automation replicas", () => {
             case "sync.applyPull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
               fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
               changedPaths: [{ versionId: "main", path: "Tasks/automations.yaml", operation: "write", contentKind: "text" }] } };
-            default: throw new Error(`unexpected ${request.method}`);
+            default:
+              if (request.method.startsWith("chats.")) return await chats.sendRequest(request as unknown as Request);
+              throw new Error(`unexpected ${request.method}`);
           }
         }),
         close: vi.fn(), waitForExit: vi.fn(async () => undefined),
@@ -314,7 +321,7 @@ describe("the automation replicas", () => {
     });
     return { sent, engines, failPush: (value: boolean | Error, workspace?: string) => { failPush = value; failingWorkspace = workspace; },
       receipts: (value: Map<string, unknown> | Error | (() => Promise<Map<string, unknown>>)) => { receipts = value; },
-      folderHandles, failFolderCloses: (count: number) => { failFolderCloses = count; },
+      folderHandles, failFolderCloses: (count: number) => { failFolderCloses = count; }, chats,
       methods: () => sent.map((request) => request.method) };
   }
 
@@ -2691,6 +2698,59 @@ describe("the automation replicas", () => {
     // The next pass gives back the reason the saved write held.
     await pass();
     expect(storage.listAutomationWorkspaces()[0]?.reasons, "saved, it keeps the copy no more").toEqual(["account"]);
+  });
+
+  it("replays a phone write's stage that never committed from its stored command when its copy opens, before the copy pushes", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    // The copy's first open gets the engine's first handle.
+    const chats = new ChatsLiveAdapter(engine.chats, "handle-1", { workspaceId: WORKSPACE });
+    const group = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning", type: "both" });
+    const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+    const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+    const write: WriteCommand = { kind: "start", lane: "chat", channelId: group.channelId, threadId: ids.threadId,
+      messageId: ids.messageId("post"), body: "Lunch?" };
+    // A crash after the row and before the engine's stage: the row is all there is.
+    const claim = storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+      binding: { workspaceId: WORKSPACE, operation: "send", args: { operationId: "unsent" } }, incarnation: 1,
+      replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+      command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+    expect(claim.kind).toBe("recorded");
+
+    await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]));
+    const started = engine.sent.find((request) => request.method === "chats.threads.start");
+    expect(started, "the stored command's stage").toMatchObject({ workspace: "handle-1", idempotencyKey: ids.key("post"), params: {
+      channelId: group.channelId, lane: "chat", messageId: ids.messageId("post"), body: "Lunch?",
+      authorKind: "human", authorDisplayName: "Owner", authorUserId: "owner", stageReceipt: true,
+    } });
+    const methods = engine.methods();
+    expect(methods.indexOf("chats.threads.start"), "replayed before the copy pushes").toBeLessThan(methods.indexOf("sync.push"));
+  });
+
+  it("refuses a copy's phone writes once its oldest stayed unknown thirty days past its active time, and opens the next visit a fresh copy", async () => {
+    const { storage, raw } = await relay();
+    fakeEngine();
+    const clock = { ms: 0 };
+    const { running, pass } = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]), { clock });
+    phoneWrite(storage, "stuck");
+    clock.ms = OPERATION_ACTIVE_MS;
+    await pass(WORKSPACE);
+    expect(outcome(raw, "stuck")[0]).toBe("stalled");
+    const kept = join(running.replica(WORKSPACE)!.root, "..", "kept");
+    await writeFile(kept, "");
+
+    clock.ms = OPERATION_ACTIVE_MS + OPERATION_STALLED_KEEP_MS - 1;
+    await pass(WORKSPACE);
+    expect(outcome(raw, "stuck")[0], "a day short of the bound").toBe("stalled");
+    expect(existsSync(kept)).toBe(true);
+
+    clock.ms += 1;
+    await pass(WORKSPACE);
+    // The folder settled, so nothing in it publishes again, and the write says so.
+    expect(outcome(raw, "stuck")).toEqual(["refused", "pending", { threadId: null, reason: "Couldn't send" }]);
+    expect(existsSync(kept), "the settled folder went").toBe(false);
+    expect(running.replica(WORKSPACE), "the visit has a fresh copy").toMatchObject({ incarnation: 1 });
+    expect(storage.listUnfinishedOperationCopies()).toEqual([]);
   });
 
   it("stalls a copy's phone writes once their receipts keep failing to read, and keeps the copy", async () => {

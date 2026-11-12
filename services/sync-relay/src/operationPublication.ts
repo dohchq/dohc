@@ -30,7 +30,16 @@ export type RefusalReason =
   | "too old";
 export const COULD_NOT_SEND: RefusalReason = "Couldn't send";
 export const WORKSPACE_CHANGED: RefusalReason = "This workspace changed on your server";
+export const TOO_OLD: RefusalReason = "too old";
 const ALREADY_ANSWERED: RefusalReason = "already answered";
+const REFUSAL_REASONS: ReadonlySet<string> = new Set<RefusalReason>([
+  ALREADY_ANSWERED, "The message it replies to wasn't sent", WORKSPACE_CHANGED, COULD_NOT_SEND, TOO_OLD,
+]);
+
+/** Whether `reason` is one of the answers a refused write may give the phone. */
+export function isRefusalReason(reason: string): reason is RefusalReason {
+  return REFUSAL_REASONS.has(reason);
+}
 
 /** How long a request waits for its write to publish before it answers pending. */
 export const PUBLICATION_DEADLINE_MS = 20_000;
@@ -53,6 +62,12 @@ export type PublicationStage = {
   /** A `post` or `reply` stage writes the operation's message. */
   role: "post" | "reply" | "decision" | "reaction";
   records: ExpectedRecord[];
+  /**
+   * The thread a stage proposed when the engine may write to a running
+   * conversation instead. Each expected field equal to it is compared with
+   * the thread the stage's receipt names.
+   */
+  engineThread?: string;
 };
 export type ExpectedRecord = {
   /** The relay row's op kind, such as `chat.message.append`. */
@@ -91,8 +106,9 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
   const decoded: PublicationStage[] = [];
   for (const value of stages as unknown[]) {
     const stage = asRecord(value);
-    const key = stage?.key, role = stage?.role, records = stage?.records;
+    const key = stage?.key, role = stage?.role, records = stage?.records, engineThread = stage?.engineThread;
     if (typeof key !== "string" || !key || typeof role !== "string" || !isRole(role) || !Array.isArray(records)) return null;
+    if (engineThread !== undefined && (typeof engineThread !== "string" || !engineThread)) return null;
     const expected: ExpectedRecord[] = [];
     for (const item of records as unknown[]) {
       const record = asRecord(item);
@@ -101,7 +117,7 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
       // Parsed from the stored JSON, so every field is JSON.
       expected.push({ kind, fields: fields as { [field: string]: JsonValue }, ...(optional === true ? { optional } : {}) });
     }
-    decoded.push({ key, role, records: expected });
+    decoded.push({ key, role, records: expected, ...(engineThread === undefined ? {} : { engineThread }) });
   }
   return decoded;
 }
@@ -140,7 +156,7 @@ export function judgeOperation(
     }
     // A stage that wrote nothing has nothing to publish.
     if (receipt.outcome === "no-op") continue;
-    const accepted = accepts(storage, record, receipt.coordinates, stage.records, settling !== null);
+    const accepted = accepts(storage, record, receipt.coordinates, expectedRecords(stage, receipt.threadId), settling !== null);
     if (accepted === "refused") refused = true;
     else if (accepted === "unresolved") unresolved = true;
     else if (stage.role === "post" || stage.role === "reply") messagePublished = true;
@@ -152,6 +168,18 @@ export function judgeOperation(
   if (unresolved) return refuse(settling ?? COULD_NOT_SEND);
   if (refused) return refuse(COULD_NOT_SEND);
   return { stage: "saved", messagePublished, result: { threadId } };
+}
+
+// The records a stage must have made, with the thread its receipt names
+// wherever the stage proposed one the engine could replace.
+function expectedRecords(stage: PublicationStage, threadId: string): readonly ExpectedRecord[] {
+  const proposed = stage.engineThread;
+  if (proposed === undefined || proposed === threadId) return stage.records;
+  return stage.records.map((record) => ({
+    ...record,
+    fields: Object.fromEntries(Object.entries(record.fields)
+      .map(([field, value]): [string, JsonValue] => [field, value === proposed ? threadId : value])),
+  }));
 }
 
 // Whether the relay accepted every record a stage's coordinates name, each

@@ -14,6 +14,7 @@ import {
   type PublicationStage,
   type ReceiptReader,
 } from "./operationPublication";
+import { publicationStages, type AuthorSnapshot, type WriteCommand } from "./accountChatWrites";
 import type { SyncRelayStorage } from "./storage";
 import { OPERATION_ACTIVE_MS, OPERATION_TOMBSTONE_BATCH, type OperationRecord, type OperationStage } from "./storage/operationRecords";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
@@ -456,4 +457,83 @@ it("turns settled writes into tombstones a batch at a time", async () => {
   expect(await tombstoneSettledOperations(storage, 10, pause)).toBe(2 * OPERATION_TOMBSTONE_BATCH + 3);
   expect(pause).toHaveBeenCalledTimes(2);
   expect(storage.tombstoneSettledAccountOperations).toHaveBeenCalledWith(10);
+});
+
+describe("what a phone chat write must publish", () => {
+  const author: AuthorSnapshot = { accountId: OWNER, displayName: "Ana", actorKey: null };
+  const keyOf = (role: string) => `operation-1:${role}`;
+  function recordWrite(storage: SyncRelayStorage, write: WriteCommand): OperationRecord {
+    const command = JSON.parse(JSON.stringify({ stages: publicationStages(write, author, keyOf), write, author })) as JsonValue;
+    const claim = storage.recordAccountOperation({
+      accountId: OWNER, operationId: "operation-1", binding: { workspaceId: WORKSPACE, operation: "send", args: { operationId: "operation-1" } },
+      incarnation: 1, replicationEpoch: "epoch", streamIdentity: "stream", command, writesMessage: write.kind !== "react", nowMs: 0,
+    });
+    if (claim.kind !== "recorded") throw new Error(`expected a new record, got ${claim.kind}`);
+    return claim.record;
+  }
+  const at = (stageKey: string, threadId: string, originSeqs: number[]) => ({
+    stageKey, state: "present", outcome: "written", threadId,
+    coordinates: originSeqs.map((originSeq) => ({ originId: ORIGIN, originSeq, state: "pushed" })),
+  });
+  const message = (threadId: string, body = "Lunch?") =>
+    ({ messageId: "message-1", threadId, authorKind: "human", authorDisplayName: "Ana", authorUserId: OWNER, body, createdAtMs: 1 });
+
+  it("saves a send the engine put in its group's running conversation, with the thread's structure, the follow, and the open question", async () => {
+    const { storage, accepted } = await relay();
+    const write = recordWrite(storage, { kind: "start", lane: "chat", channelId: "channel-1", threadId: "thread-proposed",
+      messageId: "message-1", body: "Lunch?", needsDecision: true });
+    accepted(1, "chat.thread.create", { threadId: "thread-running", title: "", createdAtMs: 1, lane: "chat", channelSlug: "planning" });
+    accepted(2, "chat.message.append", message("thread-running"));
+    accepted(3, "chat.follow.set", { ...followPayload, targetId: "thread-running" });
+    accepted(4, "chat.decision.set", { threadId: "thread-running", messageId: "message-1", state: "open", atMs: 1 });
+    const engine = copy(new Map([[keyOf("post"), at(keyOf("post"), "thread-running", [1, 2, 3, 4])]]));
+    expect(await publishOperation({ storage, copy: engine.replica, record: write, ...clock() }))
+      .toMatchObject({ state: "saved", record: { messageState: "published", result: { threadId: "thread-running" } } });
+  });
+
+  it("keeps a send pending while its message names the thread it proposed instead of the one the engine used", async () => {
+    const { storage, accepted } = await relay();
+    const write = recordWrite(storage, { kind: "start", lane: "chat", channelId: "channel-1", threadId: "thread-proposed",
+      messageId: "message-1", body: "Lunch?" });
+    accepted(1, "chat.message.append", message("thread-proposed"));
+    const engine = copy(new Map([[keyOf("post"), at(keyOf("post"), "thread-running", [1])]]));
+    expect(await publishOperation({ storage, copy: engine.replica, record: write, deadlineMs: 1_000, ...clock() }))
+      .toMatchObject({ state: "pending", record: { messageState: "pending" } });
+  });
+
+  it("saves a reply in a thread it already wrote in, with no structure or follow, once its question's open record is there too", async () => {
+    const { storage, accepted } = await relay();
+    const write = recordWrite(storage, { kind: "reply", threadId: THREAD, messageId: "message-1", body: "Lunch?", options: ["Noon", "One"] });
+    accepted(1, "chat.message.append", message(THREAD));
+    const asked = new Map([[keyOf("reply"), at(keyOf("reply"), THREAD, [1])]]);
+    expect(await publishOperation({ storage, copy: copy(asked).replica, record: write, deadlineMs: 1_000, ...clock() }),
+      "a poll's open record is required").toMatchObject({ state: "pending", record: { messageState: "pending" } });
+    accepted(2, "chat.decision.set", { threadId: THREAD, messageId: "message-1", state: "open", options: ["Noon", "One"], atMs: 1 });
+    const both = new Map([[keyOf("reply"), at(keyOf("reply"), THREAD, [1, 2])]]);
+    expect(await publishOperation({ storage, copy: copy(both).replica, record: write, ...clock() }))
+      .toMatchObject({ state: "saved", record: { messageState: "published" } });
+  });
+
+  it("saves an answer by its reply and the decision that reply resolved", async () => {
+    const { storage, accepted } = await relay();
+    const write = recordWrite(storage, { kind: "answer", threadId: THREAD, messageId: "reply-1", body: "Yes", questionId: "question" });
+    accepted(1, "chat.message.append", messagePayload());
+    accepted(2, "chat.follow.set", followPayload);
+    accepted(3, "chat.decision.set", decisionPayload());
+    const receipts = new Map([[keyOf("reply"), at(keyOf("reply"), THREAD, [1, 2])], [keyOf("decision"), at(keyOf("decision"), THREAD, [3])]]);
+    expect(await publishOperation({ storage, copy: copy(receipts).replica, record: write, ...clock() })).toMatchObject({ state: "saved" });
+  });
+
+  it("saves a reaction with or without the follow a first reaction adds", async () => {
+    for (const follows of [false, true]) {
+      const { storage, accepted } = await relay();
+      const write = recordWrite(storage, { kind: "react", threadId: THREAD, messageId: "question", emoji: "👍", state: "added" });
+      accepted(1, "chat.reaction.set", { reactionId: "r", threadId: THREAD, messageId: "question", emoji: "👍", authorId: OWNER,
+        authorKind: "human", authorDisplayName: "Ana", state: "added", atMs: 1 });
+      if (follows) accepted(2, "chat.follow.set", followPayload);
+      const receipts = new Map([[keyOf("reaction"), at(keyOf("reaction"), THREAD, follows ? [1, 2] : [1])]]);
+      expect(await publishOperation({ storage, copy: copy(receipts).replica, record: write, ...clock() }), `follows: ${follows}`)
+        .toMatchObject({ state: "saved", record: { messageState: null } });
+    }
+  });
 });

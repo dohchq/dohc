@@ -872,7 +872,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs", "stageReceipt",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -890,7 +890,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs", "stageReceipt",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -901,11 +901,11 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.readStateMarkThreadRead:
       return ["threadId", "upToSequence", "expectedRevision", "nowMs"];
     case CHATS_METHOD.decisionResolve:
-      return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs"];
+      return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs", "stageReceipt"];
     case CHATS_METHOD.reactionSet:
       return [
         "threadId", "messageId", "emoji", "author", "replicationAuthorId",
-        "state", "nowMs",
+        "state", "nowMs", "stageReceipt",
       ];
     case CHATS_METHOD.decisionsListForThread:
     case CHATS_METHOD.reactionsList:
