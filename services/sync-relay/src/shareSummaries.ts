@@ -29,6 +29,13 @@ function storedSelectorKind(
   return {};
 }
 
+// Whether a recipient sees the granter's email. A member sees the owner by
+// name only; the owner and admins see emails on the Members page.
+export function showsGranterEmail(selectorJson: string): boolean {
+  const kind: { selectorKind?: string } = storedSelectorKind(selectorJson);
+  return kind.selectorKind !== "workspace";
+}
+
 // A workspace share's grants carry a file level; chat and Group grants carry a chat level.
 function readableAccess(selector: StoredAnyShareSelector, access: string): boolean {
   return "kind" in selector && selector.kind !== "workspace" ? isChatShareAccessValue(access) : isShareAccessValue(access);

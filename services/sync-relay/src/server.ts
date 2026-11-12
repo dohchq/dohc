@@ -392,15 +392,16 @@ export function createSyncRelayHandler({
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
     const labels = new Map<string, Promise<{senderLabel: string; senderEmail: string | null}>>();
-    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+    for (const { grantId, granterUserId, showsGranterEmail } of storage.pendingShareNotices(userId)) {
       try {
-        let label = labels.get(granterUserId);
+        const key = `${showsGranterEmail ? "email" : "name"}:${granterUserId}`;
+        let label = labels.get(key);
         if (label === undefined) {
           label = (async () => {
-            const senderEmail = await lookupUserEmail?.(granterUserId) ?? null;
+            const senderEmail = showsGranterEmail ? await lookupUserEmail?.(granterUserId) ?? null : null;
             return {senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail};
           })();
-          labels.set(granterUserId, label);
+          labels.set(key, label);
         }
         storage.noticeShareReceived({ grantId, ...await label, nowMs: nowMs() });
       } catch (error) {

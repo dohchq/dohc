@@ -711,7 +711,7 @@ export interface SyncRelayStorage {
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
-  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
+  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string; showsGranterEmail: boolean }[];
   readAutomationHost(input: import("./automationHosts").AutomationHostReadInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;

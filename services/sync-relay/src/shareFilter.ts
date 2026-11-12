@@ -700,7 +700,12 @@ export function presenceTopicAllowedForShare(
       const path = resolvedThreadPath(chat, chat.threadFileBinding(threadId));
       return path !== null && pathVisibleThroughShare(files, path);
     }
-    return workspaceGroupReachable(topic, chat) || pathVisibleThroughShare(files, topic);
+    // A topic naming General or any created channel answers only through its
+    // Group, never through a file of the same name.
+    if (topic === GENERAL_CHANNEL_WIRE_ID || chat.channelKind(topic) !== undefined) {
+      return workspaceGroupReachable(topic, chat);
+    }
+    return pathVisibleThroughShare(files, topic);
   }
   // A group answers for both of its halves: a chat topic through its
   // channel, a path topic through its folder.
