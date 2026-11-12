@@ -406,6 +406,12 @@ export function createDesktopCliServer<State>(
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      makeWorkReference: async (target) => {
+        const made = await withEngineAdapter(workspace, adapter =>
+          adapter.makeWorkReference({ workspaceId: workspace.workspaceId, target, signal: publicationAttachment }));
+        if (made === null) throw new Error("The workspace engine is not running.");
+        return made.reference;
+      },
       createGroup: (input) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
         operation.assertCurrent();
         if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");

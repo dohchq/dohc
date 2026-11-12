@@ -15,6 +15,9 @@ describe("post text", () => {
     expect(titleRepeatsFirstLine(`${"a".repeat(78)}…`, `${"a".repeat(78)} ${"b".repeat(10)}`)).toBe(true);
     // Characters are code points: 81 emoji are cut to 79, not to 39.
     expect(titleRepeatsFirstLine(`${"🧭".repeat(79)}…`, "🧭".repeat(81))).toBe(true);
+    // A work link the cut would split is dropped whole.
+    const [a, b] = [`@[work:${"A".repeat(43)}]`, `@[work:${"B".repeat(43)}]`];
+    expect(titleRepeatsFirstLine(`Plans live in ${a}. See…`, `Plans live in ${a}. See ${b} and more.`)).toBe(true);
   });
 
   it("keeps an explicit title, even one that ends in …", () => {

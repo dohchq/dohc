@@ -3689,6 +3689,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("live_personal_authority.sql"),
         sets_user_version: None,
     },
+    // A work reference can name a chat or a thread.
+    Migration {
+        ordinal: 96,
+        id: "v2-work-reference-chats",
+        sql: include_str!("work_reference_chats.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5725,6 +5732,10 @@ mod tests {
                 "v2-live-personal-authority",
                 "00536edaa3f05c210affce630f2332e76630dc67ac94fbb4f0d5ebd01bf6b1ff",
             ),
+            (
+                "v2-work-reference-chats",
+                "6c97a01bc90c9bc22b1b4f65b1625283973da1ea08002af1e31d673d4484886c",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6372,6 +6383,102 @@ mod tests {
             )
             .unwrap();
         assert_eq!(totals, (2, 32 + 84));
+    }
+
+    /// Chats and threads become reference targets with every reference and
+    /// outbox row kept, and the rebuilt table still refuses a row that does
+    /// not fit its kind, a second reference to one target, and any change.
+    #[test]
+    fn work_reference_chats_keep_references_and_outbox() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-work-reference-chats");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 96);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let (a, b) = ("A".repeat(43), "B".repeat(43));
+        conn.execute_batch(&format!(
+            "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, version_id, created_at_ms)              VALUES ('{a}', 'ws', 'file', 'object', 'main', 1);              INSERT INTO work_references(reference, workspace_id, target_kind, target_id, thread_id, channel_id, created_at_ms)              VALUES ('{b}', 'ws', 'message', 'message', 'thread', 'channel', 2);              INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES ('{b}', 7);"
+        ))
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT reference, target_kind FROM work_references ORDER BY reference")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (a.clone(), "file".to_owned()),
+                (b.clone(), "message".to_owned())
+            ]
+        );
+        let outbox: Vec<(String, i64)> = conn
+            .prepare("SELECT reference, enqueued_at_ms FROM work_reference_outbox")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(outbox, [(b.clone(), 7)]);
+        let insert = |reference: &str,
+                      kind: &str,
+                      target: &str,
+                      thread: Option<&str>,
+                      channel: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id,                  thread_id, channel_id, created_at_ms) VALUES (?1, 'ws', ?2, ?3, ?4, ?5, 1)",
+                rusqlite::params![reference, kind, target, thread, channel],
+            )
+        };
+        assert!(insert(&"C".repeat(43), "chat", "target", None, None).is_ok());
+        assert!(insert(&"D".repeat(43), "thread", "target", None, Some("channel")).is_ok());
+        assert!(
+            insert(&"E".repeat(43), "thread", "target", None, None).is_err(),
+            "a second reference to one thread"
+        );
+        // Each bad shape names another target, so only its shape can refuse it.
+        for (kind, thread, channel) in [
+            ("chat", None, Some("channel")),
+            ("chat", Some("thread"), None),
+            ("thread", Some("thread"), None),
+            ("folder", None, None),
+        ] {
+            assert!(
+                insert(&"F".repeat(43), kind, "other", thread, channel).is_err(),
+                "{kind} {thread:?} {channel:?}"
+            );
+        }
+        assert!(
+            conn.execute(
+                "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+                [&a]
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+                ["G".repeat(43)],
+            )
+            .is_err(),
+            "the outbox still names work_references"
+        );
+        conn.execute("DELETE FROM work_references WHERE reference = ?1", [&b])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM work_reference_outbox", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0, "deleting a reference still clears its outbox row");
     }
 
     /// The work reference tables arrive empty on an existing store, and refuse

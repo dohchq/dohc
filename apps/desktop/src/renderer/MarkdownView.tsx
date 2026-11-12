@@ -285,6 +285,10 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  // Main takes no live edits to this note from this computer until Try again
+  // sends its queue or a Stop releases the note. The session stays bound, so
+  // remote edits still show.
+  liveEditingPaused?: "refused" | "full";
   // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
@@ -903,6 +907,7 @@ export function MarkdownView(props: {
     // Its set-aside row says why until the person dismisses it.
     notSaved: engine.permanentFailureWhileEditing &&
       !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
+    livePaused: props.liveEditingPaused,
   }).join(" ");
 
   useEffect(() => {
@@ -1022,6 +1027,7 @@ export function MarkdownView(props: {
   const readOnly =
     readOnlyCopy !== null ||
     !!props.forceReadOnly ||
+    !!props.liveEditingPaused ||
     engine.notInVersion ||
     engine.documentUnavailable ||
     engine.liveHostUnavailable ||
@@ -2216,8 +2222,8 @@ export function MarkdownView(props: {
               testId="markdown-save-state"
               truncate
               quietWhenCalm
-              state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
-              shown={engine.readOnlyWhileEditing || readOnlyCopy
+              state={engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused ? "read-only" : engineChipState}
+              shown={engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={

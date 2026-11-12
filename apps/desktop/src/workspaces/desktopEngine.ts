@@ -409,10 +409,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
               for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
               const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
-              for (const path of paused) if (!documents.some(document => document.binding.currentPath === path)) paused.delete(path);
+              // The renderer keeps a paused note read-only until it reads the list again.
+              // A size check would miss one leaving while another pauses during the pass.
+              let unpaused = false;
+              for (const path of paused) if (!documents.some(document => document.binding.currentPath === path)) {paused.delete(path); unpaused = true;}
               failedOwnerDocuments.set(workspaceId, failures);
               frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
+                if (unpaused) notifyRenderer({workspaceId});
                 setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
               }
@@ -444,8 +448,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               if (blocked) frozen.add(path); else if (result !== "retry") frozen.delete(path);
               // A pass delivers one waiting edit, so only an empty queue takes edits again.
               // A refused queue, which this pass may have found, has its own notice.
-              for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) paused.delete(pausedPath);
+              for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) {paused.delete(pausedPath); unpaused = true;}
               if (result === "acknowledged" || result === "frozen") {notifyRenderer({workspaceId}); dependencies.notifyOwnerDraftsChanged?.(workspaceId);}
+              else if (unpaused) notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || paused.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
                 frozen.size && !ownerMustAct ? "document-unavailable" : paused.size && !reason ? "unsent-edits-limit" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};

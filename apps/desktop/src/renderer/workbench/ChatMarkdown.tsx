@@ -14,12 +14,13 @@ import {
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import type { Root as HastRoot } from "hast";
 import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx-runtime";
-import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
 import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
+import { WorkRef } from "./workReferences";
 import {
   chatChips,
   chatMarkdownWeight,
@@ -66,6 +67,7 @@ function ChipView(props: { index: number; children?: ReactNode }) {
       </span>
     );
   }
+  if (chip.kind === "work") return <WorkRef reference={chip.reference} interactive={!inLink} testId={scope.testId} />;
   const onOpenPath = inLink ? undefined : scope.onOpenPath;
   return (
     <Ref
@@ -206,11 +208,17 @@ function drawTree(tree: HastRoot): ReactNode {
   });
 }
 
+// File and work links in source order, before a body's chips are known.
+function chatLinkRanges(body: string) {
+  const { files, works } = scanChatLinks(body);
+  return works.length === 0 ? files : [...files, ...works].sort((a, b) => a.start - b.start);
+}
+
 // The words of the body with its chips, as one paragraph with its line
 // breaks. `strip` drops Markdown syntax; a body without any skips it. Before
 // its chips are known, page references still keep their names as typed.
 function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean }) {
-  const kept = props.chips.length > 0 || !props.strip ? props.chips : extractChatFileReferenceTokens(props.body);
+  const kept = props.chips.length > 0 || !props.strip ? props.chips : chatLinkRanges(props.body);
   const { text, atoms } = props.strip
     ? stripMarkdown(props.body, kept)
     : { text: props.body, atoms: kept.map((chip, index) => ({ start: chip.start, end: chip.end, index })) };

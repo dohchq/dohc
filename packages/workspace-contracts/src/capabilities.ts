@@ -208,6 +208,8 @@ export const CAPABILITIES = {
   "chat.reaction.set": capability("Set the local person's reaction to added or removed.", {ipc: ["setChatReaction"]}),
   "chat.message.link": capability("Make a web link to a message in a workspace that syncs.", {ipc: ["makeMessageLink"]}),
   "work.link.resolve": capability("Find the message a work link names, in the window's workspace or another on the link's server.", {ipc: ["resolveWorkLink"]}),
+  "work.reference.make": capability("Make a link to a chat, thread, message, file, or Collection to put in a chat message.", {ipcReason: "Agents make links through the CLI or MCP. People's chips come from the links agents write.", mcp: {owner: ["dohc_link"]}, mcpReason: "Only the owning workspace makes links. Shared profiles omit it; socket admission remains the gate."}),
+  "work.reference.describe": capability("Show what the work links in chat messages name, and where each opens.", {ipc: ["describeWorkReferences"]}),
   "group.list": capability("List the Groups in this workspace.", {ipcReason: "No IPC channel carries this capability.", mcp: {owner: ["dohc_list_groups"], view: ["dohc_list_groups"], comment: ["dohc_list_groups"], edit: ["dohc_list_groups"]}}),
   "chat.threads.list": capability("List the threads in a Group.", {ipc: ["listChannelThreads"]}),
   "chat.inbox.read": capability("List unread threads. For an agent, also list its unread requests: mentions of it, its DMs, and replies in threads it posted in.", {ipc: ["listPersonalChatFeed"], mcp: {owner: ["dohc_wait_for_messages"]}}),

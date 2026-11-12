@@ -7,6 +7,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
+import { WorkLinkText } from "./workReferences";
 import { WorkStatus } from "./WorkCard";
 
 // A post in a group's feed, drawn as a row: who and when on one line, the
@@ -36,17 +37,24 @@ export interface PostData {
 
 // The engine's chat_thread_display_title (chats.rs): an untitled post's title
 // is its first line with whitespace runs collapsed, and a line over 80
-// characters becomes its first 79, trimmed, plus "…". Characters are Unicode
-// scalar values, and whitespace is Rust's char::is_whitespace.
+// characters becomes its first 79, trimmed, plus "…", less a work link the
+// cut would split. Characters are Unicode scalar values, and whitespace is
+// Rust's char::is_whitespace.
 const DERIVED_TITLE_MAX_CHARS = 80;
+const WORK_LINK = /@\[work:[A-Za-z0-9_-]{43}\]/gu;
 const RUST_WHITESPACE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
 
 function derivedTitle(firstLine: string): string {
   const line = firstLine.split(RUST_WHITESPACE).filter(Boolean).join(" ");
   const chars = [...line];
   if (chars.length <= DERIVED_TITLE_MAX_CHARS) return line;
+  let cut = chars.slice(0, DERIVED_TITLE_MAX_CHARS - 1).join("").length;
+  for (const link of line.matchAll(WORK_LINK)) {
+    if (link.index >= cut) break;
+    if (cut < link.index + link[0].length) cut = link.index;
+  }
   // The collapsed line's only whitespace is single spaces.
-  return `${chars.slice(0, DERIVED_TITLE_MAX_CHARS - 1).join("").replace(/ $/, "")}…`;
+  return `${line.slice(0, cut).replace(/ $/, "")}…`;
 }
 
 // Whether a post's title is the one the engine derives from its first line,
@@ -294,14 +302,14 @@ export function PostCard(props: {
               plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
             }`}
           >
-            {heading}
+            <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
           </span>
           {excerpt ? (
             <span
               data-testid="chats-post-excerpt"
               className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
             >
-              {excerpt}
+              <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
             </span>
           ) : null}
           {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (

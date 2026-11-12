@@ -6928,6 +6928,32 @@ export type ResolveWorkLinkPayload = z.infer<typeof ResolveWorkLinkPayload>;
 // workspace on this computer that syncs with the link's server holds it.
 export const WorkLinkPlace = WorkspaceActivatedMessage.extend({ workspaceId: WORKSPACE_ID }).strict();
 export type WorkLinkPlace = z.infer<typeof WorkLinkPlace>;
+// The work references in chat messages' `@[work:REF]` links, which this
+// workspace's engine resolves.
+export const WORK_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const DescribeWorkReferencesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  references: z.array(z.string().regex(WORK_REFERENCE_PATTERN)).min(1).max(64),
+}).strict();
+export type DescribeWorkReferencesPayload = z.infer<typeof DescribeWorkReferencesPayload>;
+// What a work link shows and where it opens. `kind` is null when this
+// workspace holds no such work, or holds it no longer. `label` is a chat's
+// name, a thread's title, or the path of a file, app, record, or Collection.
+// `open` is null when nothing here opens it.
+export const WorkReferenceOpen = z.discriminatedUnion("to", [
+  z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("collection"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("chat-channel"), channel: OPAQUE_ID }).strict(),
+  z.object({ to: z.literal("chat"), thread: OPAQUE_ID, channel: OPAQUE_ID.optional(), message: OPAQUE_ID.optional() }).strict(),
+]);
+export type WorkReferenceOpen = z.infer<typeof WorkReferenceOpen>;
+export const WorkReferenceView = z.object({
+  reference: z.string().regex(WORK_REFERENCE_PATTERN),
+  kind: z.enum(["chat", "thread", "message", "file", "app", "collection", "record", "data"]).nullable(),
+  label: z.string().max(4_096),
+  open: WorkReferenceOpen.nullable(),
+}).strict();
+export type WorkReferenceView = z.infer<typeof WorkReferenceView>;
 export const workLinkOperations = {
   makeMessageLink: {
     capabilityId: "chat.message.link",
@@ -6941,6 +6967,13 @@ export const workLinkOperations = {
     scope: "workspace",
     channel: "desktop:resolve-work-link",
     payload: ResolveWorkLinkPayload, result: WorkLinkPlace.nullable(),
+    guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
+  },
+  describeWorkReferences: {
+    capabilityId: "work.reference.describe",
+    scope: "workspace",
+    channel: "desktop:describe-work-references",
+    payload: DescribeWorkReferencesPayload, result: z.array(WorkReferenceView),
     guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
   },
 } as const satisfies OperationTable;

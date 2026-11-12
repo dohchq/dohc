@@ -306,6 +306,7 @@ fn a_reference_survives_reopen_and_asking_again_returns_it() {
             },
             state: WorkTargetState::Live,
             path: Some("notes/plan.md".to_owned()),
+            title: None,
             created_at_ms: 3,
             registration: WorkReferenceRegistration::Pending,
         }
@@ -546,6 +547,144 @@ fn a_deleted_target_resolves_as_deleted() {
         Err(DomainError::WorkTargetNotFound)
     ));
     assert_eq!(count(&store, "work_references"), 2);
+}
+
+fn titled(store: &EngineStore, reference: &str) -> (WorkTarget, WorkTargetState, Option<String>) {
+    match resolve_work_reference(store, WS, reference).expect("resolve") {
+        WorkReferenceResolution::Found {
+            target,
+            state,
+            title,
+            ..
+        } => (target, state, title),
+        WorkReferenceResolution::Unknown => panic!("{reference} is unknown"),
+    }
+}
+
+#[test]
+fn a_chat_or_thread_reference_names_it_by_id_and_shows_its_title() {
+    let (_scratch, _db, mut store) = fresh();
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(WS, "chan", "Trip", ChatChannelKind::Channel, 3, &NoFaults)
+        .expect("channel");
+    chats
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: WS.to_owned(),
+                channel_id: "chan".to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "message".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: Some("user-ada".to_owned()),
+                origin: None,
+                body: "
+  Book the flights  
+by Friday"
+                    .to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                now_ms: 4,
+                request_id: None,
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+            },
+            &NoFaults,
+        )
+        .expect("thread");
+    let chat_input = WorkTargetInput::Chat {
+        channel_id: "chan".to_owned(),
+    };
+    let chat = make(&mut store, &chat_input, 5);
+    assert!(chat.created);
+    assert_eq!(make(&mut store, &chat_input, 6).reference, chat.reference);
+    let thread = make(
+        &mut store,
+        &WorkTargetInput::Thread {
+            thread_id: "thread".to_owned(),
+        },
+        5,
+    )
+    .reference;
+    let message = make(
+        &mut store,
+        &WorkTargetInput::Message {
+            message_id: "message".to_owned(),
+        },
+        5,
+    )
+    .reference;
+    let chat_target = WorkTarget::Chat {
+        channel_id: "chan".to_owned(),
+    };
+    let thread_target = WorkTarget::Thread {
+        thread_id: "thread".to_owned(),
+        channel_id: Some("chan".to_owned()),
+    };
+    assert_eq!(
+        titled(&store, &chat.reference),
+        (
+            chat_target.clone(),
+            WorkTargetState::Live,
+            Some("Trip".to_owned())
+        )
+    );
+    // An untitled thread's link reads as the title chats show for it. Its
+    // first line is blank, so that is the untitled fallback.
+    let first_line = Some("New chat".to_owned());
+    assert_eq!(
+        titled(&store, &thread),
+        (
+            thread_target.clone(),
+            WorkTargetState::Live,
+            first_line.clone()
+        )
+    );
+    assert_eq!(titled(&store, &message).2, first_line);
+    for missing in [
+        WorkTargetInput::Chat {
+            channel_id: "nowhere".to_owned(),
+        },
+        WorkTargetInput::Thread {
+            thread_id: "nowhere".to_owned(),
+        },
+    ] {
+        assert!(matches!(
+            make_work_reference(&mut store, WS, &missing, 7, &NoFaults),
+            Err(DomainError::WorkTargetNotFound)
+        ));
+    }
+
+    store
+        .write_with(&NoFaults, |tx| {
+            for table in ["chat_messages", "chat_threads", "chat_channels"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
+                    [WS],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .expect("drop chat");
+    assert_eq!(
+        titled(&store, &chat.reference),
+        (chat_target, WorkTargetState::Deleted, None)
+    );
+    assert_eq!(
+        titled(&store, &thread),
+        (thread_target, WorkTargetState::Deleted, None)
+    );
+    assert_eq!(titled(&store, &message).2, None);
 }
 
 #[test]

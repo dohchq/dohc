@@ -626,6 +626,19 @@ The agent inbox belongs to the owning workspace. Shared profiles do not offer th
 
 Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
 
+### `dohc_link`
+
+Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `group`: `string`
+- `thread`: `string`
+- `message`: `string`
+- `path`: `string`
+
+Returns `{ kind, reference, link }`.
+
 ### `dohc_read_chat`
 
 Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. A message an agent reported work with has `work`, and a post whose thread has such a report has its Work card in `post.work`. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
@@ -1260,6 +1273,23 @@ dohc chat groups [options]
 List the Groups in this workspace.
 
 With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
+
+#### `dohc chat link`
+
+```sh
+dohc chat link [options]
+```
+
+Make a link to put in a chat message.
+
+Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names. The link keeps working after a rename or a move. Someone who cannot see what it names sees it as unavailable.
+
+- `--group <group>`: Link a Group, DM, or agent chat, by name, #slug, or id.
+- `--thread <id>`: Link a thread.
+- `--message <id>`: Link a message.
+- `--path <path>`: Link a file, or a Collection by its folder.
+
+With `--json`, prints `{ schemaVersion, kind, reference, link }`.
 
 #### `dohc chat create-group`
 

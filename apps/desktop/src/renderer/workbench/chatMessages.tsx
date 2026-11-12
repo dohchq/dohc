@@ -7,6 +7,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
+import { WorkRef } from "./workReferences";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -34,7 +35,7 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
-import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentions, scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
 import { isPersonalAgentId, personalAgentName, personalAgentsVersion, subscribeChosenColors } from "./chosenColors";
 
@@ -67,6 +68,13 @@ export function usePersonalAgentNames(): number {
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
 // the parent's `whitespace-pre-wrap`.
+// Whether a body holds a file or work link: a chip a reader can open, so the
+// row around it is not itself a button.
+export function hasChatLinks(body: string): boolean {
+  const { files, works } = scanChatLinks(body);
+  return files.length > 0 || works.length > 0;
+}
+
 export function MentionText(props: {
   body: string;
   candidates: readonly MentionCandidate[];
@@ -78,7 +86,7 @@ export function MentionText(props: {
   // the rendered output into pieces, but must not reset Markdown fence state
   // and accidentally turn a handle inside an unmatched/multiline fence into a
   // mention.
-  const fileTokens = extractChatFileReferenceTokens(props.body);
+  const { files: fileTokens, works } = scanChatLinks(props.body);
   const fileTargets = resolveFileMentionNavigationTargets(
     fileTokens,
     props.attachments ?? [],
@@ -88,9 +96,20 @@ export function MentionText(props: {
   let cursor = 0;
   let mentionIndex = 0;
   let fileIndex = 0;
-  while (mentionIndex < mentions.length || fileIndex < fileTokens.length) {
+  let workIndex = 0;
+  while (mentionIndex < mentions.length || fileIndex < fileTokens.length || workIndex < works.length) {
     const mention = mentions[mentionIndex];
     const fileToken = fileTokens[fileIndex];
+    const work = works[workIndex];
+    if (work && (!mention || work.start < mention.start) && (!fileToken || work.start < fileToken.start)) {
+      if (work.start > cursor) content.push(props.body.slice(cursor, work.start));
+      content.push(
+        <WorkRef key={`work:${work.start}`} reference={work.reference} interactive={props.onOpenPath !== undefined} testId={props.testId} />,
+      );
+      cursor = work.end;
+      workIndex += 1;
+      continue;
+    }
     if (fileToken && (!mention || fileToken.start < mention.start)) {
       if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
       const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
@@ -764,10 +783,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }, [indexes, props.messages, messageKey]);
   const hasReactionButtons = Boolean(props.reactionControls && !props.reactionControls.readOnly);
   const canOpenPath = props.onOpenPath !== undefined;
+  // A work link opens without a file opener, so its row is actionable either way.
   const actionableIndexes = useMemo(() => {
-    if (hasReactionButtons || !canOpenPath) return [];
-    return props.messages.flatMap((message, index) =>
-      extractChatFileReferenceTokens(message.body).length > 0 ? [index] : []);
+    if (hasReactionButtons) return [];
+    return props.messages.flatMap((message, index) => {
+      const { files, works } = scanChatLinks(message.body);
+      return works.length > 0 || (canOpenPath && files.length > 0) ? [index] : [];
+    });
   }, [props.messages, hasReactionButtons, canOpenPath]);
   const pinned = useMemo(() => {
     const focusedIndex = focusedMessage ? indexes.get(focusedMessage) : undefined;

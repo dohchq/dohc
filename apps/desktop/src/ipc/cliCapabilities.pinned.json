@@ -263,6 +263,9 @@
     "chatLinks": [
       "chat.read"
     ],
+    "link": [
+      "work.reference.make"
+    ],
     "versionList": [
       "version.list"
     ],
@@ -310,6 +313,7 @@
     "document stop": "share.live.document.stop",
     "document resume": "share.live.document.resume",
     "chat groups": "group.list",
+    "chat link": "work.reference.make",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",
     "chat watch": "chat.inbox.read",

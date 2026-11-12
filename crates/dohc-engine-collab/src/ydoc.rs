@@ -5054,6 +5054,37 @@ fn out_json<T: ReadTxn>(txn: &T, out: Out) -> Value {
     }
 }
 
+/// What an outside save's fold did to find the blocks it keeps, counted on
+/// this thread so tests can hold its cost to counts rather than times.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FoldWork {
+    /// Blocks built in the scratch body to compare against.
+    pub(crate) built: usize,
+    /// Nodes `same_xml` compared.
+    pub(crate) compared: usize,
+    /// Nodes `xml_json` serialized.
+    pub(crate) serialized: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FOLD_WORK: std::cell::Cell<FoldWork> = const {
+        std::cell::Cell::new(FoldWork { built: 0, compared: 0, serialized: 0 })
+    };
+}
+
+macro_rules! count_fold_work {
+    ($field:ident) => {
+        #[cfg(test)]
+        FOLD_WORK.with(|work| {
+            let mut now = work.get();
+            now.$field += 1;
+            work.set(now);
+        });
+    };
+}
+
 /// How many of `body`'s blocks at the start and at the end are already what
 /// `blocks` would insert there, compared without overlapping.
 fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
@@ -5080,13 +5111,14 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     // differs.
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
+        count_fold_work!(built);
         insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }
-        fresh.get(&scratch_txn, 0).is_some_and(|new| {
-            plain_xml(txn, old) && xml_json(txn, old.clone()) == xml_json(&scratch_txn, new)
-        })
+        fresh
+            .get(&scratch_txn, 0)
+            .is_some_and(|new| same_xml(txn, old, &scratch_txn, &new))
     };
     let most = len.min(blocks.len() as u32);
     let mut start = 0;
@@ -5105,26 +5137,55 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     (start, end)
 }
 
-/// Whether `node` holds only XML and plain values, which [`xml_json`] spells
-/// without loss. It spells an embedded shared type by its debug name.
-fn plain_xml<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
-    match node {
-        XmlOut::Element(element) => {
-            element
-                .attributes(txn)
-                .all(|(_, value)| matches!(value, Out::Any(_)))
-                && element.children(txn).count() as u32 == element.len(txn)
-                && element.children(txn).all(|child| plain_xml(txn, &child))
+/// Whether `old` is exactly `new`: the same tag, attributes and children, and
+/// the same text runs with the same formatting. Only plain values compare, so
+/// an embedded shared type or a value that isn't XML never matches.
+fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
+    count_fold_work!(compared);
+    match (old, new) {
+        (XmlOut::Element(old), XmlOut::Element(new)) => {
+            let len = old.len(old_txn);
+            if old.tag() != new.tag() || len != new.len(new_txn) {
+                return false;
+            }
+            let mut attributes = 0;
+            for (key, value) in old.attributes(old_txn) {
+                attributes += 1;
+                match (value, new.get_attribute(new_txn, key)) {
+                    (Out::Any(value), Some(Out::Any(other))) if value == other => {}
+                    _ => return false,
+                }
+            }
+            if attributes != new.attributes(new_txn).count() {
+                return false;
+            }
+            // `children` stops at a value that isn't XML, so such a child
+            // leaves the count short.
+            let mut children = 0;
+            for (old, new) in old.children(old_txn).zip(new.children(new_txn)) {
+                if !same_xml(old_txn, &old, new_txn, &new) {
+                    return false;
+                }
+                children += 1;
+            }
+            children == len
         }
-        XmlOut::Text(text) => text
-            .diff(txn, YChange::identity)
-            .iter()
-            .all(|chunk| matches!(chunk.insert, Out::Any(_))),
-        XmlOut::Fragment(_) => false,
+        (XmlOut::Text(old), XmlOut::Text(new)) => {
+            let old = old.diff(old_txn, YChange::identity);
+            let new = new.diff(new_txn, YChange::identity);
+            old.len() == new.len()
+                && old.iter().zip(&new).all(|(old, new)| {
+                    matches!(old.insert, Out::Any(_))
+                        && old.insert == new.insert
+                        && old.attributes == new.attributes
+                })
+        }
+        _ => false,
     }
 }
 
 fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {
+    count_fold_work!(serialized);
     match node {
         XmlOut::Element(el) => {
             let mut attrs = BTreeMap::new();

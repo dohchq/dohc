@@ -2,14 +2,16 @@
 //! workspace, made on this device so `@` and Copy link work offline.
 //!
 //! A reference is 256 random bits in unpadded base64url. It names a target by
-//! stable identity: a message id, a file object id, a record id, a Collection's
-//! schema file, or a transactional table and record. A path or a name is only
-//! display data, so a rename or a move never changes what a reference names.
+//! stable identity: a message id, a chat's channel id, a thread id, a file
+//! object id, a record id, a Collection's schema file, or a transactional
+//! table and record. A path or a name is only display data, so a rename or a
+//! move never changes what a reference names.
 //! Asking again for the same target on this device returns the same reference.
 //! A new reference and its registration outbox entry commit in one
 //! transaction, so a crash leaves both or neither.
 
 use crate::DomainError;
+use crate::chats::chat_thread_display_title;
 use crate::collections::is_record_id;
 use crate::store::{get_active_version_in, validate_addressable_plaintext_path};
 use base64::Engine as _;
@@ -35,6 +37,13 @@ pub const WORK_REFERENCE_LENGTH: usize = 43;
 pub enum WorkTargetInput {
     Message {
         message_id: String,
+    },
+    /// A Group, DM or agent chat.
+    Chat {
+        channel_id: String,
+    },
+    Thread {
+        thread_id: String,
     },
     /// Exactly one of `objectId` and `path`.
     File {
@@ -90,6 +99,13 @@ pub enum WorkTarget {
     /// `channelId` is null for a file's conversation.
     Message {
         message_id: String,
+        thread_id: String,
+        channel_id: Option<String>,
+    },
+    /// A Group, DM or agent chat.
+    Chat { channel_id: String },
+    /// `channelId` is null for a file's conversation.
+    Thread {
         thread_id: String,
         channel_id: Option<String>,
     },
@@ -162,6 +178,10 @@ pub enum WorkReferenceResolution {
         /// Where a live file, app, record, or Collection is now. Display only.
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// A live chat's name, or the title of a live thread or of a live
+        /// message's thread. Display only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         created_at_ms: i64,
         registration: WorkReferenceRegistration,
     },
@@ -299,6 +319,14 @@ fn learned_row(
             thread_id: Some(thread_id),
             channel_id,
             ..Binding::of("message", message_id)
+        },
+        WorkTarget::Chat { channel_id } => Binding::of("chat", channel_id),
+        WorkTarget::Thread {
+            thread_id,
+            channel_id,
+        } => Binding {
+            channel_id,
+            ..Binding::of("thread", thread_id)
         },
         WorkTarget::File {
             version_id,
@@ -578,6 +606,29 @@ fn bind(
                 ..Binding::of("message", message_id.clone())
             })
         }
+        WorkTargetInput::Chat { channel_id } => {
+            identifier(channel_id)?;
+            chat_name(conn, workspace_id, channel_id)?.ok_or(DomainError::WorkTargetNotFound)?;
+            Ok(Binding::of("chat", channel_id.clone()))
+        }
+        WorkTargetInput::Thread { thread_id } => {
+            identifier(thread_id)?;
+            let channel_id = conn
+                .prepare_cached(
+                    "SELECT channel_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+                )
+                .map_err(DomainError::sql_corrupt)?
+                .query_row(params![workspace_id, thread_id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .optional()
+                .map_err(DomainError::sql_corrupt)?
+                .ok_or(DomainError::WorkTargetNotFound)?;
+            Ok(Binding {
+                channel_id,
+                ..Binding::of("thread", thread_id.clone())
+            })
+        }
         WorkTargetInput::File {
             version_id,
             object_id,
@@ -745,6 +796,7 @@ fn resolve_in(
         WorkReferenceRegistration::Registered
     };
     // The target, and where it is now: `None` when it is gone.
+    let mut title = None;
     let (target, current) = match kind.as_str() {
         "message" => {
             let present = conn
@@ -755,12 +807,35 @@ fn resolve_in(
                 .query_row(params![workspace_id, target_id], |_| Ok(()))
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
+            let thread_id = thread_id.ok_or_else(corrupt)?;
+            if present.is_some() {
+                title = thread_title(conn, workspace_id, &thread_id)?;
+            }
             let target = WorkTarget::Message {
                 message_id: target_id,
-                thread_id: thread_id.ok_or_else(corrupt)?,
+                thread_id,
                 channel_id,
             };
             (target, present.map(|()| (None, WorkTargetState::Live)))
+        }
+        "chat" => {
+            title = chat_name(conn, workspace_id, &target_id)?;
+            let current = title.as_ref().map(|_| (None, WorkTargetState::Live));
+            (
+                WorkTarget::Chat {
+                    channel_id: target_id,
+                },
+                current,
+            )
+        }
+        "thread" => {
+            title = thread_title(conn, workspace_id, &target_id)?;
+            let current = title.as_ref().map(|_| (None, WorkTargetState::Live));
+            let target = WorkTarget::Thread {
+                thread_id: target_id,
+                channel_id,
+            };
+            (target, current)
         }
         "file" | "app" | "documentRecord" | "documentCollection" => {
             let version_id = version_id.ok_or_else(corrupt)?;
@@ -818,9 +893,48 @@ fn resolve_in(
         target,
         state,
         path,
+        title,
         created_at_ms,
         registration,
     })
+}
+
+/// A chat's name, or `None` when this workspace has no such chat.
+fn chat_name(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<Option<String>, DomainError> {
+    conn.prepare_cached(
+        "SELECT name FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
+    )
+    .map_err(DomainError::sql_corrupt)?
+    .query_row(params![workspace_id, channel_id], |row| row.get(0))
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// A thread's title as chats show it, or `None` when this workspace has no
+/// such thread.
+fn thread_title(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, DomainError> {
+    let row: Option<(String, Option<String>)> = conn
+        .prepare_cached(
+            "SELECT t.title, (SELECT m.body FROM chat_messages m \
+               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+               ORDER BY m.message_order LIMIT 1) \
+             FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .query_row(params![workspace_id, thread_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(row.map(|(title, first)| chat_thread_display_title(&title, first.as_deref())))
 }
 
 fn version(

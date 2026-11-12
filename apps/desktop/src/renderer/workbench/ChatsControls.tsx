@@ -3,6 +3,7 @@ import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
 import { SectionLabel } from "../ui/controls";
+import { WorkLinkText } from "./workReferences";
 
 // Why a committed share read carried no rows. "unreachable" covers both a
 // relay that did not answer and a listing the IPC rejected outright: dohc
@@ -169,7 +170,7 @@ export function ChatHeader(props: {
           data-testid={`${props.testId}-title`}
           className={`min-w-0 truncate text-ink ${props.large ? "text-[15px] font-semibold" : "text-[13px] font-medium"}`}
         >
-          {props.label}
+          <WorkLinkText text={props.label} interactive testId={`${props.testId}-title`} />
         </span>
         {props.description ? (
           <span className="min-w-0 flex-1 truncate text-[12px] text-muted">

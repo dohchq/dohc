@@ -4460,6 +4460,7 @@ describe("chatDispatchService", () => {
   const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server.";
   const APPROVALS = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
   const REPORT = "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
+  const LINKS = "To link a chat, thread, message, or Collection, call `dohc_link` and write the `link` it returns.";
 
   it.each([
     [undefined, "argument"],
@@ -4482,7 +4483,7 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
-    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} Reply in-thread`);
+    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} ${LINKS} Reply in-thread`);
     else expect(prompt).toContain("thread. Report outcomes, not tool logs. Reply in-thread");
     if (!tool) expect(prompt).not.toContain("approve");
   });

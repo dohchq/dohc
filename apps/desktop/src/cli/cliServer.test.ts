@@ -1,4 +1,4 @@
-import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups } from "@dohc/mcp/tools";
+import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups, makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { createGroup } from "../workspaces/groupCreate";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
 import { createShareRosters } from "../automations/shareRoster";
@@ -19,6 +19,7 @@ import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
   parseCliResult,
+  type CliLinkTarget,
   type CliRequest,
   type CliRequestWithoutToken,
   type CliResultByVerb,
@@ -1329,6 +1330,51 @@ describe("CLI socket server", () => {
     context.readOnly = true; registryWorkspace.readOnly = true;
     await expect(invoke("groupCreate", { cwd: workspaceRoot, actor: "agent", name: "Later" })).rejects.toThrow("chats are not available in a read-only shared view");
     await expect(stat(join(workspaceRoot, "later"))).rejects.toThrow();
+  });
+
+  it("links a Group, thread, message, and path through the CLI and MCP, and refuses a read-only workspace", async () => {
+    const made: unknown[] = [];
+    context.makeWorkReference = async target => {
+      if (target.kind === "documentCollection") throw new Error("not a Collection");
+      const path = target.kind === "file" && "path" in target ? target.path : undefined;
+      if (path === "missing.md") throw new Error("work-target-not-found");
+      if (path === "stopped.md") throw new Error("The workspace engine is not running.");
+      made.push(target);
+      return String(made.length).padStart(43, "R");
+    };
+    const started = await post({ actor: "agent", title: "Flights", body: "Book by Friday" });
+    const general = (await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.find(group => group.slug === "general")!;
+    const link = (target: CliLinkTarget) => invoke("link", { cwd: workspaceRoot, actor: "agent", target });
+    await expect(link({ kind: "group", group: "general" })).resolves.toEqual({
+      reference: "R".repeat(42) + "1", link: `@[work:${"R".repeat(42)}1]`, kind: "chat",
+    });
+    expect((await link({ kind: "thread", thread: started.threadId })).kind).toBe("thread");
+    expect((await link({ kind: "message", message: started.messageId })).kind).toBe("message");
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    await writeFile(join(workspaceRoot, "plans", "trip.md"), "# Trip");
+    expect((await invoke("link", { cwd: join(workspaceRoot, "plans"), actor: "agent", target: { kind: "path", path: "trip.md" } })).kind).toBe("file");
+    // The CLI names chats by short ids; links name them by their engine ids.
+    expect(general.id).toBe("ch_1");
+    expect(made).toEqual([
+      { kind: "chat", channelId: expect.stringMatching(/^channel-/u) },
+      { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },
+      { kind: "message", messageId: expect.stringMatching(/^message-/u) },
+      { kind: "file", path: "plans/trip.md" },
+    ]);
+    await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
+    // Only a path the engine cannot find is missing; another failure says what it is.
+    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow("dohc could not find missing.md");
+    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow("The workspace engine is not running.");
+    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow("path rejected (traversal)");
+
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({ kind: "chat", link: `@[work:${"R".repeat(42)}5]` });
+    await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual({
+      ok: false, reason: "Pass exactly one of group, thread, message, and path.",
+    });
+
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    await expect(link({ kind: "group", group: "general" })).rejects.toThrow("This workspace is read-only. Make links in the owning workspace.");
   });
 
   it("keeps CLI and MCP group listings available when one wire lookup rejects", async () => {
