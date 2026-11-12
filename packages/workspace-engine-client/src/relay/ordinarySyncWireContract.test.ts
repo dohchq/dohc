@@ -473,6 +473,7 @@ describe("ordinary publication state", () => {
     ["stages out of order", { stages: [lost, written, absent] }],
     ["a winner on a written stage", { stages: [{ ...written, winnerMessageId: "other" }, lost, absent] }],
     ["journal rows on a lost stage", { stages: [written, { ...lost, coordinates: written.coordinates }, absent] }],
+    ["a written stage with no journal rows", { stages: [{ ...written, coordinates: [] }, lost, absent] }],
   ] as const)("rejects %s", (_case, value) => {
     expect(() => decodeOrdinaryPublicationState(value, keys)).toThrow(ProtocolShapeError);
   });

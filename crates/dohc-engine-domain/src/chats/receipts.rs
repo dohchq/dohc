@@ -4,8 +4,8 @@
 //! how far each has been pushed.
 
 use super::{
-    ChatActorKind, ChatDecision, ChatDecisionState, ChatReaction, ChatReactionState,
-    LinkedChatStore,
+    ChatActorKind, ChatDecision, ChatDecisionState, ChatReaction, ChatReactionState, ChatThread,
+    ChatThreadLane, LinkedChatStore,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -90,6 +90,21 @@ pub struct ChatStagePublication {
 struct StoredCoordinate {
     origin_id: String,
     origin_seq: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredThread {
+    workspace_id: String,
+    thread_id: String,
+    title: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    lane: String,
+    channel_id: Option<String>,
+    linked_object_id: Option<String>,
+    linked_path_hint: Option<String>,
+    linked_at_ms: Option<i64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -191,14 +206,19 @@ fn emitted_since(
         .collect())
 }
 
-/// The cell a resolve or reaction answered, kept so a retry answers it again.
+/// What a stage answered and a retry answers again: the thread a start
+/// returned, or the cell a resolve or reaction returned. A sent message is
+/// immutable, so a send keeps nothing.
 pub(super) enum StageResult<'a> {
     Message,
+    Thread(&'a ChatThread),
     Decision(&'a ChatDecision),
     Reaction(&'a ChatReaction),
 }
 
-/// Write the receipt of the stage `stage_key` in the stage's transaction.
+/// Write the receipt of the stage `stage_key` in the stage's transaction. A
+/// written stage that added no journal row never reaches another copy, so it
+/// fails and its transaction rolls back.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_receipt(
     tx: &Transaction<'_>,
@@ -210,10 +230,27 @@ pub(super) fn record_receipt(
     mark: &JournalMark,
     result: StageResult<'_>,
 ) -> Result<(), DomainError> {
-    let coordinates = serde_json::to_string(&emitted_since(tx, workspace_id, mark)?)
-        .map_err(|_| corrupt_receipt())?;
+    let emitted = emitted_since(tx, workspace_id, mark)?;
+    if outcome == ChatStageOutcome::Written && emitted.is_empty() {
+        return Err(DomainError::InvalidInput {
+            reason: "stage-not-published",
+        });
+    }
+    let coordinates = serde_json::to_string(&emitted).map_err(|_| corrupt_receipt())?;
     let result_json = match result {
         StageResult::Message => None,
+        StageResult::Thread(thread) => Some(serde_json::to_string(&StoredThread {
+            workspace_id: thread.workspace_id.clone(),
+            thread_id: thread.thread_id.clone(),
+            title: thread.title.clone(),
+            created_at_ms: thread.created_at_ms,
+            updated_at_ms: thread.updated_at_ms,
+            lane: thread.lane.as_str().to_owned(),
+            channel_id: thread.channel_id.clone(),
+            linked_object_id: thread.linked_object_id.clone(),
+            linked_path_hint: thread.linked_path_hint.clone(),
+            linked_at_ms: thread.linked_at_ms,
+        })),
         StageResult::Decision(decision) => Some(serde_json::to_string(&StoredDecision {
             thread_id: decision.thread_id.clone(),
             message_id: decision.message_id.clone(),
@@ -273,6 +310,42 @@ fn stored_result(
     stored
         .map(|json| json.ok_or_else(corrupt_receipt))
         .transpose()
+}
+
+fn has_receipt(
+    conn: &Connection,
+    workspace_id: &str,
+    stage_key: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = ?2)",
+        params![workspace_id, stage_key],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+pub(super) fn replayed_thread(
+    conn: &Connection,
+    workspace_id: &str,
+    stage_key: &str,
+) -> Result<Option<ChatThread>, DomainError> {
+    let Some(json) = stored_result(conn, workspace_id, stage_key)? else {
+        return Ok(None);
+    };
+    let stored: StoredThread = serde_json::from_str(&json).map_err(|_| corrupt_receipt())?;
+    Ok(Some(ChatThread {
+        workspace_id: stored.workspace_id,
+        thread_id: stored.thread_id,
+        title: stored.title,
+        created_at_ms: stored.created_at_ms,
+        updated_at_ms: stored.updated_at_ms,
+        lane: ChatThreadLane::from_db(&stored.lane)?,
+        channel_id: stored.channel_id,
+        linked_object_id: stored.linked_object_id,
+        linked_path_hint: stored.linked_path_hint,
+        linked_at_ms: stored.linked_at_ms,
+    }))
 }
 
 pub(super) fn replayed_decision(
@@ -393,6 +466,27 @@ fn stage_publication(
 }
 
 impl LinkedChatStore<'_> {
+    /// A retry on a handle that records receipts replays only a stage that
+    /// recorded one. A key first used without a receipt would otherwise read
+    /// as absent although its write committed.
+    pub(super) fn require_stage_receipt(
+        &self,
+        workspace_id: &str,
+        stage_key: &str,
+    ) -> Result<(), DomainError> {
+        if !self.stage_receipts {
+            return Ok(());
+        }
+        let receipted = self
+            .store
+            .read_with(|conn| has_receipt(conn, workspace_id, stage_key))?;
+        if receipted {
+            Ok(())
+        } else {
+            Err(DomainError::IdempotencyKeyReuseMismatch)
+        }
+    }
+
     /// Each stage key's receipt and how far each of its journal rows has been
     /// published, all read from one snapshot.
     pub fn publication_state(

@@ -123,7 +123,8 @@ export type OrdinaryPublicationState = (typeof OrdinaryPublicationStateSchema)["
 /**
  * A `sync.ordinary.publicationState` answer for `stageKeys`: one stage per
  * key, in the order asked, with no field the contract does not name. Only a
- * lost stage names a winner, and only a written stage lists journal rows.
+ * lost stage names a winner, and exactly the written stages list journal
+ * rows: a written stage with none would never reach another copy.
  */
 export function decodeOrdinaryPublicationState(value: unknown, stageKeys: readonly string[]): OrdinaryPublicationState {
   const method = ORDINARY_PUBLICATION_STATE_METHOD;
@@ -137,7 +138,7 @@ export function decodeOrdinaryPublicationState(value: unknown, stageKeys: readon
   }
   for (const stage of stages) {
     if (stage.state === "present" && ((stage.winnerMessageId !== undefined && stage.outcome !== "lost") ||
-      (stage.outcome !== "written" && stage.coordinates.length > 0))) {
+      ((stage.outcome === "written") !== (stage.coordinates.length > 0)))) {
       throw new ProtocolShapeError(`${method} result: ${stage.outcome} stage does not match its receipt`);
     }
   }

@@ -464,19 +464,21 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            let kept = self.store.read_with(|conn| {
+                receipts::replayed_reaction(conn, &input.workspace_id, &input.request_id)
+            })?;
+            if let Some(reaction) = kept {
+                return Ok(reaction);
+            }
+            self.require_stage_receipt(&input.workspace_id, &input.request_id)?;
             return self.store.read_with(|conn| {
-                let stored =
-                    receipts::replayed_reaction(conn, &input.workspace_id, &input.request_id)?;
-                match stored {
-                    Some(reaction) => Ok(reaction),
-                    None => require_reaction_cell(
-                        conn,
-                        &input.workspace_id,
-                        &input.message_id,
-                        &emoji,
-                        &author_id,
-                    ),
-                }
+                require_reaction_cell(
+                    conn,
+                    &input.workspace_id,
+                    &input.message_id,
+                    &emoji,
+                    &author_id,
+                )
             });
         }
 

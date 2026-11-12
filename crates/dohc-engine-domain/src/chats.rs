@@ -2842,9 +2842,6 @@ impl<'a> LinkedChatStore<'a> {
         }
     }
 
-    /// The Group automation claims committed writes took since the last call.
-    /// A message this computer stores, written here or replayed from a parked
-    /// coordinate, is claimed in the transaction that stores it.
     /// Record a stage receipt for each keyed thread start, send, resolve, and
     /// reaction set this handle writes.
     pub fn record_stage_receipts(&mut self, record: bool) -> &mut Self {
@@ -2852,6 +2849,9 @@ impl<'a> LinkedChatStore<'a> {
         self
     }
 
+    /// The Group automation claims committed writes took since the last call.
+    /// A message this computer stores, written here or replayed from a parked
+    /// coordinate, is claimed in the transaction that stores it.
     pub fn take_automation_claims(&mut self) -> Vec<crate::AutomationClaim> {
         std::mem::take(&mut self.automation_claims)
     }
@@ -3503,6 +3503,14 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            let kept = self.store.read_with(|conn| {
+                receipts::replayed_thread(conn, &input.workspace_id, request_id)
+            })?;
+            if let Some(thread) = kept {
+                let message = self.reconstruct_message(&input.workspace_id, &input.message_id)?;
+                return Ok((thread, message));
+            }
+            self.require_stage_receipt(&input.workspace_id, request_id)?;
             return self.reconstruct_thread_message(&input.workspace_id, &input.message_id);
         }
 
@@ -3754,7 +3762,7 @@ impl<'a> LinkedChatStore<'a> {
                     thread_id,
                     None,
                     mark,
-                    receipts::StageResult::Message,
+                    receipts::StageResult::Thread(&thread),
                 )?;
             }
             bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
@@ -3911,6 +3919,7 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            self.require_stage_receipt(&input.workspace_id, request_id)?;
             return self.reconstruct_message(&input.workspace_id, &input.message_id);
         }
 
@@ -4210,15 +4219,15 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            let kept = self.store.read_with(|conn| {
+                receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)
+            })?;
+            if let Some(decision) = kept {
+                return Ok(decision);
+            }
+            self.require_stage_receipt(&input.workspace_id, &input.request_id)?;
             return self.store.read_with(|conn| {
-                let stored =
-                    receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)?;
-                match stored {
-                    Some(decision) => Ok(decision),
-                    None => {
-                        require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
-                    }
-                }
+                require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
             });
         }
 

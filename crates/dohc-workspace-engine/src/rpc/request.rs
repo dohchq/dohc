@@ -110,12 +110,14 @@ pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<Str
 }
 
 /// A stage receipt is keyed by the request's idempotency key, so asking for
-/// one needs a key.
+/// one needs a key that `required_idempotency_key` would accept.
 pub(super) fn require_stage_receipt_key(
     stage_receipt: bool,
     request_id: Option<&str>,
 ) -> Result<(), WireError> {
-    if stage_receipt && request_id.is_none() {
+    if stage_receipt
+        && request_id.is_none_or(|key| key.is_empty() || key.chars().any(char::is_control))
+    {
         return Err(WireError::new(
             ErrorCode::InvalidParams,
             "stage-receipt-requires-idempotency-key",

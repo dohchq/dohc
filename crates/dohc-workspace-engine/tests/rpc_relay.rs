@@ -4758,6 +4758,29 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
         .unwrap_err();
     assert_eq!(unkeyed.code, ErrorCode::InvalidParams);
     assert_eq!(unkeyed.message, "stage-receipt-requires-idempotency-key");
+    id += 1;
+    let empty_key = transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(
+                id,
+                "chats.messages.send",
+                Some(handle.clone()),
+                "",
+                json!({
+                    "threadId": "thread", "messageId": "empty-key-reply",
+                    "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+                    "body": "Empty key", "nowMs": 23, "stageReceipt": true,
+                }),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(empty_key.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        empty_key.message, "stage-receipt-requires-idempotency-key",
+        "checking only that a key is present -> an empty key fails later as a storage error."
+    );
 
     let stages = |answer: Value| answer["stages"].as_array().cloned().expect("stages");
     let asked = json!({ "stageKeys": ["stage-post", "stage-missing", "desktop-send"] });

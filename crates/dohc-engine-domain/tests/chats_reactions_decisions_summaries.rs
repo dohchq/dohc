@@ -2684,3 +2684,97 @@ fn a_keyed_write_without_a_stage_receipt_records_none() {
         .expect("publication state");
     assert!(answer.iter().all(|stage| stage.receipt.is_none()));
 }
+
+#[test]
+fn a_receipted_stage_that_publishes_nothing_rolls_back() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+    let mut local = keyed_reaction("local", "cy", ChatReactionState::Added, 30);
+    local.replication_author_id = None;
+    let journal = local_journal(&store);
+
+    let failed = receipted(&mut store).set_reaction(&local, &NO_FAULTS);
+    assert!(
+        matches!(
+            failed,
+            Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "stage-not-published"
+            })
+        ),
+        "receipting a local-only write as written -> the phone reports saved for a write no copy sees."
+    );
+    let (cells, ledger): (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_reactions WHERE workspace_id = ?1",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'local'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("counts");
+    assert_eq!((cells, ledger), (0, 0));
+    assert_eq!(receipt(&store, "local"), None);
+    assert_eq!(local_journal(&store), journal);
+}
+
+#[test]
+fn a_receipted_retry_of_a_stage_that_recorded_no_receipt_is_refused() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let post = keyed_post("post", "thread", "opening", 20);
+    let reaction = keyed_reaction("react", "cy", ChatReactionState::Added, 30);
+    let mut desktop = LinkedChatStore::new(&mut store);
+    desktop
+        .start_channel_thread(&post, &NO_FAULTS)
+        .expect("desktop post");
+    desktop
+        .set_reaction(&reaction, &NO_FAULTS)
+        .expect("desktop reaction");
+    let journal = local_journal(&store);
+
+    let mut phone = receipted(&mut store);
+    assert!(
+        matches!(
+            phone.start_channel_thread(&post, &NO_FAULTS),
+            Err(dohc_engine_domain::DomainError::IdempotencyKeyReuseMismatch)
+        ),
+        "replaying a key that recorded no receipt -> publication state reads absent for a committed post."
+    );
+    assert!(matches!(
+        phone.set_reaction(&reaction, &NO_FAULTS),
+        Err(dohc_engine_domain::DomainError::IdempotencyKeyReuseMismatch)
+    ));
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(&post, &NO_FAULTS)
+        .expect("a retry without a receipt still replays");
+    assert_eq!(local_journal(&store), journal);
+    assert_eq!(receipt_count(&store), 0);
+}
+
+#[test]
+fn a_receipted_post_replays_the_thread_it_returned() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let post = keyed_post("post", "thread", "opening", 20);
+    let first = receipted(&mut store)
+        .start_channel_thread(&post, &NO_FAULTS)
+        .expect("post");
+    assert_eq!(first.0.updated_at_ms, 20);
+    send(&mut store, "thread", "reply", 30, false);
+
+    let replayed = receipted(&mut store)
+        .start_channel_thread(&post, &NO_FAULTS)
+        .expect("retry");
+    assert_eq!(
+        replayed, first,
+        "rebuilding the thread from its row -> a retried post reports the reply's time as its own."
+    );
+}
