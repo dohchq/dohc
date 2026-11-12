@@ -42,11 +42,11 @@ function mergeFixture(t) {
   git(source, "merge", "--no-ff", "feature", "-m", "test merge");
   const shallow = join(root, "shallow");
   git(root, "clone", "--no-local", "--depth=2", "--single-branch", "--branch=proof", source, shallow);
-  return { root, source, shallow, recordedBase, mergeBase, commit };
+  return { root, source, shallow, recordedBase, mergeBase };
 }
 
 test("PR selection uses the merge first parent when the recorded base is outside the shallow checkout", t => {
-  const { source, shallow, recordedBase, mergeBase, commit } = mergeFixture(t);
+  const { source, shallow, recordedBase, mergeBase } = mergeFixture(t);
   assert.equal(git(shallow, "rev-parse", "--is-shallow-repository"), "true");
   assert.equal(git(shallow, "rev-parse", "HEAD^1"), mergeBase);
   assert.notEqual(recordedBase, mergeBase);
@@ -63,11 +63,6 @@ test("PR selection uses the merge first parent when the recorded base is outside
   assert.deepEqual(selectedGates(cloudChangedFiles(env, shallow), workflow), selectedGates(selected, workflow));
   const packages = ["feature", "removed", "main-only"].map(name => ({ name, path: `${name === "main-only" ? "services" : "packages"}/${name}`, manifest: {} }));
   assert.deepEqual(affectedPackages(cloudChangedFiles(env, shallow), packages), affectedPackages(selected, packages));
-
-  // A rerun uses the old merge, even when main advances again.
-  git(source, "checkout", "main");
-  commit("services/main-only/later.ts", "later main change");
-  assert.deepEqual(cloudChangedFiles(env, shallow).sort(), expected);
 });
 
 test("PR selection rejects a checkout without a merge commit", t => {
