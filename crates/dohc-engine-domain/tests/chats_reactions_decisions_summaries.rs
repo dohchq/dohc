@@ -2726,6 +2726,59 @@ fn a_receipted_stage_that_publishes_nothing_rolls_back() {
 }
 
 #[test]
+fn a_receipted_reaction_on_an_unexported_message_is_refused() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "opening".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "opening".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("local-only post");
+    let journal = local_journal(&store);
+
+    let failed = receipted(&mut store).set_reaction(
+        &keyed_reaction("react", "cy", ChatReactionState::Added, 30),
+        &NO_FAULTS,
+    );
+    assert!(
+        matches!(
+            failed,
+            Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "stage-not-published"
+            })
+        ),
+        "a follow row standing in for the reaction -> the phone reports saved for a reaction no copy sees."
+    );
+    assert_eq!(receipt(&store, "react"), None);
+    assert_eq!(local_journal(&store), journal);
+}
+
+#[test]
 fn a_receipted_retry_of_a_stage_that_recorded_no_receipt_is_refused() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

@@ -503,6 +503,13 @@ impl<'a> LinkedChatStore<'a> {
                     &thread_id,
                     &input.message_id,
                 )?;
+            // An implicit follow row alone would satisfy the receipt's row check
+            // for a reaction no other copy will see.
+            if stage_receipt && !replicate {
+                return Err(DomainError::InvalidInput {
+                    reason: "stage-not-published",
+                });
+            }
             let prior_at_ms: Option<i64> = tx
                 .query_row(
                     "SELECT at_ms FROM chat_reactions \
