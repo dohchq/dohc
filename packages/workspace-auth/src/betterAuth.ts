@@ -12,7 +12,7 @@ import {
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SessionKind } from "./session";
-import type { SignUpAdmission } from "./signUp";
+import { SIGN_UP_INVITE_LINK_HEADER, type AdmitAccount, type SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
 /** Verification and reset links expire one hour after dohc sends them. */
@@ -48,7 +48,7 @@ interface WorkspaceAuthOptions {
   // Admission trusts the typed address, and anyone could have typed the
   // sign-up password, so on a closed server no password works until someone
   // opens the emailed link and chooses one there.
-  admitAccount?: (email: string) => Promise<SignUpAdmission>;
+  admitAccount?: AdmitAccount;
   accountDeletion?: {
     preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
     delete(
@@ -110,8 +110,9 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         ? {
             user: {
               create: {
-                before: async (user: { email: string }) => {
-                  refuseUnadmitted(await admitAccount(user.email));
+                before: async (user: { email: string }, context: { headers?: Headers; request?: Request } | null) => {
+                  const headers = context?.headers ?? context?.request?.headers;
+                  refuseUnadmitted(await admitAccount(user.email, headers?.get(SIGN_UP_INVITE_LINK_HEADER) || null));
                 },
               },
             },
