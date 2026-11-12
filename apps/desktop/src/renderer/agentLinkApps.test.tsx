@@ -37,6 +37,7 @@ it.each([
   ["a command separator", "https://relay.test/mcp/agent/w/a;b"],
   ["a subshell", "https://relay.test/mcp/agent/w/$(id)"],
   ["an IPv6 host", "https://[::1]:8443/mcp/agent/w/ws-1"],
+  ["a tilde, which zsh can read as a pattern", "https://relay.test/mcp/agent/w/a~b"],
 ])("gives no command for a link with %s, which a shell would not take as typed", (_what, link) => {
   expect(agentLinkSetups(link, "dohc-personal").map((setup) => setup.id)).toEqual(["grok-bot"]);
 });
@@ -106,7 +107,7 @@ it("keeps a list opened again open when the earlier answer's time is up", async 
 
 it("says a refused copy on its row and reports it without keeping a secret link to try again with", async () => {
   const user = userWith("real");
-  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
   const report = vi.fn<ReportShellFailure>();
   renderMenu({ link: SHARE, sensitive: true, report });
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
@@ -115,7 +116,16 @@ it("says a refused copy on its row and reports it without keeping a secret link 
   expect(report).toHaveBeenCalledTimes(1);
   const failure = report.mock.calls[0]![0];
   expect(failure.message).toContain("dohc could not copy the address for an agent.");
-  expect(JSON.stringify(failure)).not.toContain(SHARE);
+  expect(failure.message).not.toContain(SHARE);
+  // Once the menu is gone, Try again has no address to copy: it says where to get one.
+  cleanup();
+  expect(writeText).toHaveBeenCalledTimes(1);
+  act(() => failure.retry?.());
+  expect(writeText).toHaveBeenCalledTimes(1);
+  expect(report).toHaveBeenCalledTimes(2);
+  const later = report.mock.calls[1]![0];
+  expect(later.retry).toBeNull();
+  expect(later.message).toContain("Reset the link in Share to get a new one.");
 });
 
 it("cannot open while there is no link", async () => {

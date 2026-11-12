@@ -1112,6 +1112,12 @@ describe("RelayShareDialog", () => {
     await user.click(copy);
     expect(writeText).toHaveBeenCalledExactlyOnceWith(agentAddress);
     expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+    // The same address as the commands one named agent takes, still never shown.
+    await user.click(screen.getByTestId("share-link-agent-apps"));
+    await user.click(screen.getByTestId("share-link-agent-apps-codex"));
+    expect(writeText).toHaveBeenLastCalledWith(`codex mcp add dohc-share --url ${agentAddress}
+codex mcp login dohc-share`);
+    expect(document.body.textContent).not.toContain(agentAddress);
   });
 
   it("offers no agent address for a link that is not a share link", async () => {

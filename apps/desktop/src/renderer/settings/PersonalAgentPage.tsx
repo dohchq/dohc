@@ -351,7 +351,6 @@ export function PersonalAgentPage(props: {
                 getText={() => (synced ? agentLink(account, props.workspaceId) : null)}
               />
               <AgentLinkAppMenu
-                key={props.workspaceId}
                 link={synced ? agentLink(account, props.workspaceId) : null}
                 server="dohc-personal"
                 testId="personal-agent-link-apps"

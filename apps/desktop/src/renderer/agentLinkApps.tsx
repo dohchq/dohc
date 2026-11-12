@@ -8,7 +8,7 @@ export type AgentLinkServer = "dohc-personal" | "dohc-share";
 
 // A link made only of these needs no quoting in sh, PowerShell or cmd, so a
 // command that holds it runs as pasted. Any other link gets no command.
-const PASTES_AS_TYPED = /^[A-Za-z0-9:/._~-]+$/u;
+const PASTES_AS_TYPED = /^[A-Za-z0-9:/._-]+$/u;
 
 type AgentLinkApp = { id: string; label: string; text: (link: string, server: AgentLinkServer) => string | null };
 
