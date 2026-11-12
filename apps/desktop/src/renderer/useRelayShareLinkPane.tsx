@@ -2421,8 +2421,6 @@ export function useRelayShareLinkPane(props: {
       >
         {group.rows.map((row) => renderLinkRow(group, row))}
 
-        {canAdd && ownerDiscussion.expanded ? renderOwnerDiscussion(group) : null}
-
         {canAdd ? (
           <div className="flex flex-col gap-2 border-t border-line px-3 py-2">
             <div className="flex items-center gap-2">
@@ -2458,6 +2456,8 @@ export function useRelayShareLinkPane(props: {
             <AutomationShareNote note={addNote} />
           </div>
         ) : null}
+
+        {canAdd && ownerDiscussion.expanded ? renderOwnerDiscussion(group) : null}
       </div>
     );
   }
