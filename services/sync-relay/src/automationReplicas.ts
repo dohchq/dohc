@@ -1,7 +1,7 @@
 import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
 import {mkdir, open as openFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises";
-import {join} from "node:path";
+import {basename, join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -951,9 +951,15 @@ const DISCARDED = ".discarded-";
  * marker where a copy would open it. The leftover goes when the parent's
  * unowned names are next removed: open() removes every name in a copy's
  * folder but its incarnation, and the sweep every name in the root that no
- * copy's row names. A path already gone is nothing to do.
+ * copy's row names. A path already gone is nothing to do. A leftover is
+ * removed as it is: renaming it again would only lengthen its name on each
+ * retry, until no rename fits.
  */
 async function discard(path: string): Promise<void> {
+  if (basename(path).includes(DISCARDED)) {
+    await rm(path, {recursive: true, force: true});
+    return;
+  }
   const discarded = `${path}${DISCARDED}${randomBytes(8).toString("hex")}`;
   try {
     await rename(path, discarded);

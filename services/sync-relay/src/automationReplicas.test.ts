@@ -2412,6 +2412,10 @@ describe("the automation replicas", () => {
     expect(existsSync(join(folder, leftover!, "settled")), "its marker went first").toBe(false);
     expect(existsSync(join(folder, leftover!, "workspace", "sentinel"))).toBe(true);
 
+    // A retry whose removal fails again removes the leftover in place: renaming it again would lengthen its name each time.
+    await pass(WORKSPACE);
+    expect(readdirSync(folder).filter((entry) => entry.includes(".discarded-")), "the leftover kept its name").toEqual([leftover]);
+
     // The removal works again; the retry opens a fresh copy and removes the leftover.
     stuck.path = null;
     await pass(WORKSPACE);
