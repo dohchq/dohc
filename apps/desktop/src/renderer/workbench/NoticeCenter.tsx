@@ -646,6 +646,15 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // Resume fails the same way because ordinary edits never give the document a new base, so nothing offers it.
+  if (reason === "live-history-over-budget") {
+    return {
+      title: "Live editing can't start",
+      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to see which document.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   if (reason === "conflict-parent-withheld") {
     return {
       title: "Live editing can't resume",

@@ -435,6 +435,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
   }
+  serviceHostDocumentBaseAfter(input: Parameters<typeof serviceHostFeedStorage.serviceHostDocumentBaseAfter>[1]) {
+    return serviceHostFeedStorage.serviceHostDocumentBaseAfter(this, input);
+  }
   hasServiceHostConflictEffect(input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1]) {
     return serviceHostFeedStorage.hasServiceHostConflictEffect(this, input);
   }

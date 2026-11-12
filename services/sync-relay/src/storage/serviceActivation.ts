@@ -17,12 +17,13 @@ import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMEN
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
   type OrdinaryActivationBounds} from "./ordinaryActivationSource";
-import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+import {ServiceActivationHistoryOverBudget,type OrdinaryActivationValidator} from "./ordinaryActivationValidation";
 /** A retained activation whose stored record can't be read back. Only the operator can repair it. */
 export class ServiceActivationDamaged extends Error {
   constructor(options?: ErrorOptions) { super("Retained service activation is damaged.", options); }
 }
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
+export {ServiceActivationHistoryOverBudget} from "./ordinaryActivationValidation";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -345,8 +346,10 @@ export class ServiceActivationStore {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
     const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
-    if(capturedBytes>input.bounds.maxCaptureBytes||input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
-      throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    if(capturedBytes>input.bounds.maxCaptureBytes)throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    // The history read charges the baseline to the same budget, so a baseline past it waits for a new base too.
+    if(input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
+      throw new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured byte budget.");
     }
     const source = parseNativeOwnerActivationSource(input.capture.source, input.capture.source.currentPath, 20_971_520), document = key(source), baselineBytes = new Uint8Array(input.capture.baselineBytes),
       fullState = new Uint8Array(input.capture.fullState), activationId = input.capture.activationId;
@@ -387,6 +390,7 @@ export class ServiceActivationStore {
       ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
+    if (validation.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(validation.message);
     if (validation.kind !== "accepted") throw new Error(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {

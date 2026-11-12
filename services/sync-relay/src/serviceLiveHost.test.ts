@@ -5351,7 +5351,8 @@ it("resumes a document whose retained activation diverged once, then not again u
 // Proves: a document with no Y.Doc lineage has nothing to activate, so its
 // first capture blocks it and no pass captures it again, while its workspace
 // keeps pulling. Unblocking allows exactly one more capture. Any other conflict
-// on a first capture keeps it waiting, captured again on every pass.
+// on a first capture keeps it waiting and captured again, waiting longer between
+// tries, not on every pass.
 it.each([
   ["blocks", "live-document-without-lineage", withoutLineage, "without-lineage"],
   ["keeps retrying", "live-application-conflict", diverged, undefined],
@@ -5370,7 +5371,8 @@ it.each([
   await vi.waitFor(() => {expect(visits()).toBeGreaterThan(visited + 2); expect(o.pullCount()).toBeGreaterThan(pulls + 2);});
   expect(o.host.blocked(plain)).toBe(block);
   if (block === undefined) {
-    expect(captures()).toBeGreaterThan(2);
+    expect(captures()).toBeLessThan(visits());
+    await vi.waitFor(() => expect(captures()).toBeGreaterThan(2), {timeout: 10_000});
     return;
   }
   expect(captures()).toBe(1);

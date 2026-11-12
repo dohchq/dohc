@@ -12,7 +12,7 @@ import {NATIVE_MOMENT_FIELDS} from "./serviceActivationPublication";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import {stableJsonStringify} from "../canonicalJson";
 import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
-import type {OrdinaryActivationBaseline,OrdinaryActivationHistory,OrdinaryActivationProof,Projection} from "./ordinaryActivationValidation";
+import {requireWithinBudget,type OrdinaryActivationBaseline,type OrdinaryActivationHistory,type OrdinaryActivationProof,type Projection} from "./ordinaryActivationValidation";
 
 export class ServiceActivationStaleCut extends Error {
   constructor(){super("Ordinary replication advanced before service activation.");}
@@ -56,11 +56,13 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
     (SELECT length(CAST(payload_json AS BLOB))+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
-  requireValue(size&&integer(size.entries)&&size.entries>0&&size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
-  requireValue(integer(size.bytes)&&size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");
+  requireValue(size&&integer(size.entries)&&size.entries>0,"Ordinary activation base history is unavailable.");
+  requireWithinBudget(size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
+  requireValue(integer(size.bytes),"Ordinary activation metadata is damaged.");
+  requireWithinBudget(size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");
   const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,relay_admission,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
   let charged=baselineBytes.length;
-  const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
+  const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
   // Prove each move backward from the current path, without skipping a step.
   let provedPath=source.currentPath,latestMove:number|null=null,latestWrite:number|null=null;
@@ -164,7 +166,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:History
   if(history.artifact!==null){
     requireValue(proof,"Ordinary activation found a later ordinary file moment with a divergent projection.");
     let charged=proof.charged;
-    const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
+    const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
     const kept=new Map(proof.projections.map(({index,...projection})=>[index,projection]));
     const last=history.updates.length-1,sourceProjection={projectedMarkdownSha256:source.sourceDigest,projectedMarkdownByteLength:source.sourceByteLength};
     // Validation proved the complete history projects the source.
