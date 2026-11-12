@@ -273,6 +273,32 @@ describe("Members page", () => {
     expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
   });
 
+  it("still reads the page again when a change from an earlier visit to this workspace answers last", async () => {
+    const linkOff = { inviteLink: { enabled: false, url: null } };
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
+    const { rerender } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const old = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(old.promise);
+    await makeAdmin("m-bo");
+    rerender({ workspaceId: "ws-2" });
+    await screen.findByTestId("settings-members-page");
+    rerender({ workspaceId: "ws-1" });
+    await screen.findByTestId("settings-members-page");
+    const link = deferred<MembersResult>();
+    const level = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    const both = ownerView({ memberLevel: "edit" });
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
+    await act(async () => link.resolve({ status: "ready", view: both }));
+    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, memberLevel: "edit" }) }));
+    await act(async () => old.resolve({ status: "ready", view: ownerView(linkOff) }));
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
+  });
+
   it("keeps saying the account left when a change overlapped Leave", async () => {
     bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
     renderMembers();
