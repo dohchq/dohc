@@ -12,7 +12,10 @@ const scope: OrdinaryCheckpointScope = {namespace: "relay", document, replicatio
 const checkpoint = (throughRelaySeq: number, text: string): OrdinaryCheckpoint => {
   const state = new TextEncoder().encode(text);
   return {throughRelaySeq, foldedEntries: throughRelaySeq, state, stateSha256: sha256(state), currentPath: "notes/a.md",
-    projection: {projectedMarkdownSha256: sha256(`${text}.md`), projectedMarkdownByteLength: text.length}, projectionStableFromSeq: throughRelaySeq};
+    projection: {projectedMarkdownSha256: sha256(`${text}.md`), projectedMarkdownByteLength: text.length},
+    tail: [{relaySeq: throughRelaySeq, originId: "typist", originSeq: throughRelaySeq - 1, ordinary: true, projection: null}],
+    moments: [{relaySeq: 2, operation: "write", projectedMarkdownSha256: sha256(""), projectedMarkdownByteLength: 0,
+      write: {blobSha256: sha256("saved"), byteLength: 5, objectMoment: true}}], momentsFromSeq: throughRelaySeq};
 };
 
 /** A workspace whose relay log holds `rows` rows, so the committed cursor is `rows`. */

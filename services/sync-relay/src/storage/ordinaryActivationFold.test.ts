@@ -1,0 +1,121 @@
+import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
+import type { StorageContext } from "./context";
+import { checkpointPolicySha256, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./ordinaryActivationCheckpoint";
+import { foldOrdinaryCheckpointPage, type OrdinaryFoldBounds, type OrdinaryFoldValidator } from "./ordinaryActivationFold";
+import { validateOrdinaryActivation } from "./ordinaryActivationValidation";
+import { ACTIVATION, typedNote, typedRelayNote, type TypedRelayNote } from "../testing/typedNotes";
+import { createLiveMarkdownRegistrationValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await close();});
+const seed = (keystrokes: number) => typedRelayNote(keystrokes, close => {cleanup.push(close);});
+const validate: OrdinaryFoldValidator = async work => validateOrdinaryActivation(work, ACTIVATION.validation);
+const project = createLiveMarkdownRegistrationValidator(ACTIVATION.validation);
+// The bars from the agreed #3763 plan.
+const PAGE_MS = 250, LOCK_MS = 10;
+
+function folding(note: TypedRelayNote, bounds: OrdinaryFoldBounds, check: OrdinaryFoldValidator = validate) {
+  const storage = note.deployment.storage as unknown as StorageContext;
+  const scope: OrdinaryCheckpointScope = {namespace: note.deployment.history.namespace, document: note.document, replicationEpoch: "epoch",
+    streamIdentity: "stream", base: {relaySeq: note.capture.source.baseRelaySeq, originId: "typist", originSeq: 1},
+    policySha256: checkpointPolicySha256(ACTIVATION.validation)};
+  const fold = () => foldOrdinaryCheckpointPage(storage, {scope, bounds, validate: check, nowMs: () => 7});
+  /** Folds until the checkpoint is current or the fold stops, and returns the last outcome. */
+  const all = async () => {
+    for (let pages = 0; pages < 1_000; pages++) {const outcome = await fold(); if (outcome.kind !== "folded") return outcome;}
+    throw new Error("The fold did not finish.");
+  };
+  return {storage, scope, fold, all, read: () => readOrdinaryCheckpoint(storage, scope)};
+}
+/** The projection and full state of the note's base and its first `typed` keystrokes, replayed in one document. */
+function replayed(note: TypedRelayNote, typed: number) {
+  const doc = new Y.Doc({gc: false});
+  for (const update of [note.note.baseline, ...note.note.updates.slice(0, typed)]) Y.applyUpdate(doc, update);
+  const result = project({document: note.document, currentPath: note.path, checkpoint: Y.encodeStateAsUpdate(doc)});
+  doc.destroy();
+  if (result.kind !== "accepted") throw new Error("Invalid replay.");
+  return {projectedMarkdownSha256: result.evidence.projectedMarkdownSha256, projectedMarkdownByteLength: result.evidence.projectedMarkdownByteLength,
+    stateUpdateSha256: result.evidence.stateUpdateSha256};
+}
+const projection = ({projectedMarkdownSha256, projectedMarkdownByteLength}: {projectedMarkdownSha256: string; projectedMarkdownByteLength: number}) =>
+  ({projectedMarkdownSha256, projectedMarkdownByteLength});
+
+it("a typed note folds page by page to the state and projection one replay of it has", async () => {
+  const note = await seed(600), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  expect(await f.all()).toEqual({kind: "current"});
+  const checkpoint = f.read()!, end = replayed(note, 600);
+  expect(checkpoint.throughRelaySeq).toBe(note.capture.source.committedCursor);
+  expect(checkpoint.foldedEntries).toBe(601);
+  expect(checkpoint.stateSha256).toBe(end.stateUpdateSha256);
+  expect(checkpoint.projection).toEqual(projection(end));
+  expect(checkpoint.currentPath).toBe(note.path);
+  // The last page reached the cursor, so the rows a source may name keep the projection of the history through them.
+  expect(checkpoint.tail).toHaveLength(32);
+  expect(checkpoint.tail.at(-1)).toMatchObject({relaySeq: note.capture.source.committedCursor, originSeq: 601, ordinary: true, projection: projection(end)});
+  expect(checkpoint.tail.at(-2)!.projection).toEqual(projection(replayed(note, 599)));
+  expect(checkpoint.tail.every(row => row.projection !== null)).toBe(true);
+});
+
+it("a file moment ends a page, and the checkpoint keeps the projection the moment followed", async () => {
+  const longer = typedNote(100), note = await seed(50), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const before = replayed(note, 50);
+  const moment = note.appendMoment({momentId: "saved", path: note.path, operation: "write", payloadAfterPath: note.path, payloadAfterContentKind: "text",
+    payloadAfterBlobSha256: before.projectedMarkdownSha256, payloadAfterByteLength: before.projectedMarkdownByteLength});
+  for (const update of longer.updates.slice(50)) note.appendUpdate(update);
+  expect(await f.fold()).toMatchObject({kind: "folded", throughRelaySeq: moment - 1});
+  expect(f.read()!.moments).toEqual([]);
+  expect(await f.all()).toEqual({kind: "current"});
+  const checkpoint = f.read()!;
+  expect(checkpoint.moments).toEqual([{relaySeq: moment, operation: "write", ...projection(before),
+    write: {blobSha256: before.projectedMarkdownSha256, byteLength: before.projectedMarkdownByteLength, objectMoment: false}}]);
+  expect(checkpoint.stateSha256).toBe(replayed({...note, note: longer}, 100).stateUpdateSha256);
+});
+
+it("the fold stops before a row activation would refuse, and never folds past it", async () => {
+  const longer = typedNote(320), note = await seed(300), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const moved = note.appendUpdate(longer.updates[300]!, {path: "notes/elsewhere.md"});
+  for (const update of longer.updates.slice(301)) note.appendUpdate(update);
+  expect(await f.all()).toEqual({kind: "blocked", relaySeq: moved});
+  expect(f.read()!.throughRelaySeq).toBe(moved - 1);
+  expect(await f.fold()).toEqual({kind: "blocked", relaySeq: moved});
+  expect(f.read()!.throughRelaySeq).toBe(moved - 1);
+});
+
+it("a page validation refuses saves nothing, and the next fold refuses it again", async () => {
+  const note = await seed(200), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  expect(await f.fold()).toMatchObject({kind: "folded"});
+  const saved = f.read()!;
+  note.appendUpdate(new Uint8Array([1, 2, 3]));
+  expect(await f.all()).toEqual({kind: "refused", message: "Ordinary activation history is not a valid live document."});
+  // The page holding the refused row is the one that refuses, so the checkpoint stays where the last accepted page left it.
+  expect(f.read()).toEqual(saved);
+  expect(saved.foldedEntries).toBe(129);
+  expect(await f.fold()).toMatchObject({kind: "refused"});
+});
+
+it("a fold another fold overtook saves nothing", async () => {
+  const note = await seed(150);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const f = folding(note, {pageRows: 64, pageBytes: ACTIVATION.maxBytesPerDrain}, async work => {await gate; return validateOrdinaryActivation(work, ACTIVATION.validation);});
+  const first = f.fold(), second = f.fold();
+  release();
+  expect(await first).toMatchObject({kind: "folded"});
+  expect(await second).toEqual({kind: "lost"});
+  expect(f.read()!.foldedEntries).toBe(65);
+});
+
+it("each page of a long note validates in at most 250 ms and saves in at most 10 ms of lock", {timeout: 600_000}, async () => {
+  const note = await seed(10_000), timed: number[] = [], locks: number[] = [];
+  const f = folding(note, {pageRows: 1_024, pageBytes: ACTIVATION.maxBytesPerDrain}, async work => {
+    const start = performance.now();
+    try {return validateOrdinaryActivation(work, ACTIVATION.validation);} finally {timed.push(performance.now() - start);}
+  });
+  const tx = f.storage.tx.bind(f.storage);
+  f.storage.tx = run => {const start = performance.now(); try {return tx(run);} finally {locks.push(performance.now() - start);}};
+  expect(await f.all()).toEqual({kind: "current"});
+  expect(f.read()!.stateSha256).toBe(replayed(note, 10_000).stateUpdateSha256);
+  expect(Math.max(...timed), "slowest page").toBeLessThanOrEqual(PAGE_MS);
+  expect(Math.max(...locks), "longest save").toBeLessThanOrEqual(LOCK_MS);
+});
