@@ -139,7 +139,10 @@ async fn pristine_cycles(sync: bool, edit: bool) -> ScratchDir {
         } else {
             assert_eq!(state.seed_content.as_deref(), Some(SOURCE));
             let doc = Ydoc::wire();
-            let seed = doc.richdoc_append_paragraph("seed");
+            // A real editor seed names its schema version, as `markdownToYDoc` writes it.
+            let seed = doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, "seed")
+                .unwrap();
             record(&actor, &state, seed, true).await;
             doc
         };

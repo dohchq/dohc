@@ -40,9 +40,9 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in and the owner open everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open and the New page Edit link everywhere and the pixel baseline on Windows", () => {
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
-  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open"];
+  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
     selected: [...everywhere, "@states-page"],
     required: [...everywhere, "@states-baselines"],

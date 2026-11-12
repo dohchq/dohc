@@ -22,6 +22,7 @@ import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
 import { momentTextsForPath, readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
+import { reserveRelayPort, type SyncRelayLinkBoundary } from "./syncRelay";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -31,10 +32,12 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * live service with the native engine. `trustEnv` is the environment a desktop
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
  * for an HTTPS loopback relay. `refuse` answers matching requests with 503
- * before they reach a service.
+ * before they reach a service. `linkBoundary` points the live stack's share
+ * links at a test share-web, which reaches the relay at `relayInnerUrl` as the
+ * self-host share-web does.
  */
 export async function startSelfHostOnboardingStack(directory: string, options: {
-  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean;
+  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean; linkBoundary?: SyncRelayLinkBoundary;
 }) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
@@ -53,13 +56,16 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     // The account server applies the migrations whose tables the relay reads as it starts.
     account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
     proxy.routeAuthTo(account.listenOrigin);
-    relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
+    const port = ca && options.linkBoundary ? await reserveRelayPort() : 0;
+    const link = ca && options.linkBoundary ? { ...options.linkBoundary, innerHost: `127.0.0.1:${port}` } : undefined;
+    relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {}, port);
     proxy.routeRelayTo(relay.url);
     return {
       account,
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      relayInnerUrl: relay.url,
       pause: () => proxy.pause(),
       resume: () => proxy.resume(),
       outageState: () => proxy.outageState(),
@@ -620,7 +626,7 @@ function livePublication(directory: string, workspaceId: string, path: string) {
 
 // The supported self-host profile: an initialized deployment whose service
 // host runs the native engine and replicates through the public HTTPS origin.
-function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
+function selfHostLiveEnv(directory: string, origin: string, link?: SyncRelayLinkBoundary & { innerHost: string }): NodeJS.ProcessEnv {
   const deployment = join(directory, "relay-deployment");
   execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
     "--config", join(deployment, "deployment.json"), "--database", join(directory, "relay-data", "relay.sqlite"), "--continuity-directory", join(deployment, "continuity")],
@@ -638,15 +644,16 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
-    DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
-    DOHC_RELAY_SHARE_WEB_URL: origin,
-    DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(origin).host,
-    DOHC_RELAY_LINK_KEY: randomBytes(32).toString("hex"),
-    DOHC_RELAY_EXCHANGE_KEY: randomBytes(32).toString("hex"),
+    DOHC_RELAY_SHARE_WEB_ORIGIN: link?.publicViewerOrigin ?? origin,
+    DOHC_RELAY_SHARE_WEB_URL: link?.publicViewerOrigin ?? origin,
+    // Like the self-host compose file, the relay's inner host serves share-web's live routes.
+    DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(origin).host, ...(link ? [link.innerHost] : [])].join(","),
+    DOHC_RELAY_LINK_KEY: link?.linkKey ?? randomBytes(32).toString("hex"),
+    DOHC_RELAY_EXCHANGE_KEY: link?.relayExchangeKey ?? randomBytes(32).toString("hex"),
   };
 }
 
-async function startAuthenticatedRelay(directory: string, authUrl: string, liveEnv: NodeJS.ProcessEnv) {
+async function startAuthenticatedRelay(directory: string, authUrl: string, liveEnv: NodeJS.ProcessEnv, port = 0) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
@@ -662,7 +669,7 @@ async function startAuthenticatedRelay(directory: string, authUrl: string, liveE
     DOHC_PUBLIC_EDIT_RELEASE: undefined,
     DOHC_RELAY_APP_PUBLICATIONS: undefined,
     DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: undefined,
-    SYNC_RELAY_PORT: "0",
+    SYNC_RELAY_PORT: String(port),
     SYNC_RELAY_BIND: "127.0.0.1",
     SYNC_RELAY_DB_PATH: join(directory, "onboarding-relay.sqlite"),
     SYNC_RELAY_AUTH_BASE_URL: authUrl,

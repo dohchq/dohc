@@ -197,7 +197,7 @@ export async function spawnSyncRelay(input: {
   };
 }
 
-async function reserveRelayPort(): Promise<number> {
+export async function reserveRelayPort(): Promise<number> {
   const listener = createServer();
   await new Promise<void>((resolve, reject) => {
     listener.once("error", reject);

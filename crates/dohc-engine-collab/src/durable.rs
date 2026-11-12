@@ -2341,11 +2341,7 @@ pub fn record_update_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
-    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
-    crate::live_update_application::require_restore_open(tx, key)?;
-    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
-        return Err(CollabError::OwnerOutboxFrozen);
-    }
+    require_ordinary_local_write(tx, key)?;
     record_authorized_update_in_tx(
         tx,
         key,
@@ -2356,6 +2352,16 @@ pub fn record_update_in_tx(
         false,
         now_ms,
     )
+}
+
+/// The checks every ordinary local write passes before it appends.
+fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+    crate::live_update_application::require_restore_open(tx, key)?;
+    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
+        return Err(CollabError::OwnerOutboxFrozen);
+    }
+    Ok(())
 }
 
 pub(crate) type CreditedUpdate = ((Option<String>, Option<ChangeAttribution>), Vec<u8>);
@@ -2609,6 +2615,44 @@ pub(crate) fn record_authorized_update_in_tx(
         authors_admitted,
         now_ms,
     )
+}
+
+/// Give an unclaimed rich document the schema version it lacks, in the
+/// caller's claim transaction, so the first version it claims passes public
+/// validation (#3790). Nothing seeds a New page note, and its editor writes
+/// the first update without the version.
+///
+/// `false` means an owner binding or a restore holds the document, so the
+/// write would be refused and the caller does not claim it. A document that
+/// needs no write, or that is missing updates, answers `true` without one.
+pub fn add_missing_schema_version_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.content_kind != ContentKind::Richdoc
+        || marker.lineage_claim_status.has_claimed_base()
+        || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
+    {
+        return Ok(true);
+    }
+    let doc = load_doc_in(tx, key)?;
+    if doc.has_missing_updates() {
+        return Ok(true);
+    }
+    let Some(update) = doc.missing_schema_version_update(key)? else {
+        return Ok(true);
+    };
+    match require_ordinary_local_write(tx, key) {
+        Ok(()) => {}
+        Err(CollabError::OwnerOutboxFrozen | CollabError::RestoreFenced) => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    // Nobody wrote the version, so it adds no author coverage: the next
+    // settlement names only the people who typed.
+    record_authorized_update_in_tx(tx, key, &update, true, None, None, true, now_ms)?;
+    Ok(true)
 }
 
 /// Encode the base bytes (and their state vector) that originate `key`'s

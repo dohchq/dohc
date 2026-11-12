@@ -70,8 +70,8 @@ export function desktopProofTags({platform = process.platform} = {}) {
   const gallery = platform === "win32";
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   return {
-    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", ...(gallery ? ["@states-page"] : [])],
-    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", ...(gallery ? ["@states-baselines"] : [])],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link", ...(gallery ? ["@states-page"] : [])],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link", ...(gallery ? ["@states-baselines"] : [])],
   };
 }
 
