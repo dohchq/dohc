@@ -224,7 +224,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // --- The relation target: a small "clients" collection with one record.
+    // --- The relation target: a small "clients" collection.
     await newCollectionFromFileMenu(desktop);
     const newCollection = page.getByTestId("new-collection-dialog");
     await expect(newCollection).toBeVisible();
@@ -244,6 +244,19 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
     await expect(fieldCell(recordRows(page).first(), 0)).toContainText("Acme", { timeout: 30_000 });
     await expect(page.getByTestId(editorTabTestId("clients/Acme.md"))).toHaveCount(0);
+
+    // Three more records typed with no pause: each Enter saves its row, and
+    // the first key after it is typed in the next row. Every one is made.
+    await page.getByTestId("collection-new-record").click();
+    await expect(page.locator("[data-cell-editor] input")).toBeFocused();
+    for (const name of ["Birch", "Cedar", "Dune"]) {
+      await page.keyboard.type(name);
+      await page.keyboard.press("Enter");
+    }
+    await expect(recordRows(page)).toHaveCount(4, { timeout: 30_000 });
+    for (const name of ["Acme", "Birch", "Cedar", "Dune"]) {
+      await expect(page.getByRole("grid").getByRole("button", { name: `Open ${name}`, exact: true })).toBeVisible({ timeout: 30_000 });
+    }
 
     // --- The main "projects" collection.
     await newCollectionFromFileMenu(desktop);

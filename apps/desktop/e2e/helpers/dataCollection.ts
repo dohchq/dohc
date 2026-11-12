@@ -40,14 +40,28 @@ export async function editCell(collection: Locator, cell: Locator, value: string
 /**
  * Adds a record from the table's new row. New record starts the row with
  * the editor of its first field open. The text goes there, and Enter saves
- * the record with one create. Once the Collection confirms it, the next
- * new row starts, empty, and goes when the cursor leaves it.
+ * the record with one create. The row leaves the table at once, and the
+ * next new row starts, empty, which goes when the cursor leaves it.
  */
 export async function createRecord(collection: Locator, firstField: string): Promise<void> {
   await collection.getByRole("button", { name: "New record", exact: true }).first().click();
   const input = collection.locator("[data-cell-editor] input");
   await input.fill(firstField);
   await input.press("Enter");
+}
+
+/**
+ * Types records into the table's new row one after another, each saved with
+ * Enter, with no wait between them: the first key after each Enter is typed
+ * in the next row.
+ */
+export async function typeRecords(collection: Locator, firstFields: readonly string[]): Promise<void> {
+  await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+  await expect(collection.locator("[data-cell-editor] input")).toBeFocused();
+  for (const firstField of firstFields) {
+    await collection.page().keyboard.type(firstField);
+    await collection.page().keyboard.press("Enter");
+  }
 }
 
 /**

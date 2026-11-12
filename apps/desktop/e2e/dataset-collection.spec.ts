@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetSchemaChange } from "../src/workspaces/datasetSchemaChanges";
-import { collectionCommand, createRecord, editCell, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, createRecord, editCell, fieldCells, typeRecords } from "./helpers/dataCollection";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
@@ -225,6 +225,10 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
       await createRecord(collection, name);
       await expect((await fieldCells(collection, "Name")).filter({ hasText: name })).toBeVisible();
     }
+    // Three records typed with no pause: each Enter saves its row, and the Collection makes all three.
+    await typeRecords(collection, ["Hedy", "Joan", "Katherine"]);
+    for (const name of ["Hedy", "Joan", "Katherine"]) await expect((await fieldCells(collection, "Name")).filter({ hasText: name })).toBeVisible();
+    await expect(await fieldCells(collection, "Name")).toHaveCount(5);
     const listed = async () => {
       const result = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
       if (result.kind !== "list") throw Error("Expected the Collections list.");
