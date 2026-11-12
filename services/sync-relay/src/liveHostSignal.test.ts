@@ -1,6 +1,11 @@
 import {getEventListeners} from "node:events";
+import {setFlagsFromString} from "node:v8";
+import {runInNewContext} from "node:vm";
 import {describe, expect, it} from "vitest";
-import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal";
+import {liveHostSignal, withDeadline, withLiveHostSignal} from "./liveHostSignal";
+
+setFlagsFromString("--expose-gc");
+const gc = runInNewContext("gc") as () => void;
 
 describe("live host cancellation lifetime", () => {
   it.each([false, true])("releases every request source after completion, failure=%s", async fail => {
@@ -50,5 +55,30 @@ describe("live host cancellation lifetime", () => {
     await expect(pending).rejects.toBe("host retired");
     release();
     expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
+  });
+
+  it.each(["ends early", "completes"] as const)("holds no deadline signal over passes that %s", async shape => {
+    const host = new AbortController(), connection = new AbortController(), signals: WeakRef<AbortSignal>[] = [], held: number[] = [];
+    const pass = () => withDeadline(host.signal, 60_000, async signal => {
+      signals.push(new WeakRef(signal));
+      // A completing pass first runs work that listens to its signal directly.
+      if (shape === "completes") await withLiveHostSignal(signal, new AbortController().signal, async () => undefined);
+      // Hosted replication derives its own signal from the pass's.
+      AbortSignal.any([connection.signal, signal]);
+    });
+    for (let batch = 0; batch < 2; batch++) {
+      for (let i = 0; i < 50; i++) await pass();
+      await new Promise(setImmediate); gc();
+      held.push(signals.filter(signal => signal.deref() !== undefined).length);
+    }
+    // A held signal would add 50 a batch. V8 can keep one briefly reachable, which a later collection frees.
+    expect(held.every(count => count < 5), `held ${held.join(", ")}`).toBe(true);
+    expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
+  });
+
+  it("aborts at the deadline with a timeout reason", async () => {
+    const work = withDeadline(new AbortController().signal, 1, signal =>
+      new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true})));
+    await expect(work).rejects.toMatchObject({name: "TimeoutError"});
   });
 });
