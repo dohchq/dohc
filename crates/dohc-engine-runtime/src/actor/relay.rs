@@ -3505,6 +3505,12 @@ fn park_departed_hosted(
         {
             continue;
         }
+        if let Err(error) =
+            end_departed_writes(store, workspace_id, root, &document, &active, now_ms)
+        {
+            unwritten.get_or_insert(error);
+            continue;
+        }
         for key in &keys {
             if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
                 continue 'departed;
@@ -3576,6 +3582,98 @@ fn park_departed_hosted(
         (None, Some(error)) => Err(error),
         (None, None) => Ok(parked),
     }
+}
+
+/// End the file writes still pending at each of `document`'s paths in
+/// `active`, the version the root holds, where the file already holds its
+/// head. A pull's projection of a Y.Doc update queues its own write of the
+/// file, and the pull's page then writes the file itself. Only a session's
+/// settlement or a restart replayed the queued writes, so a document no
+/// session opened waited at the unload check for the next restart (#3793).
+///
+/// A queued write of an earlier state is cancelled: the head replaced it,
+/// and a replay would find the file changed and keep that state beside it
+/// as a conflict file. The write of the head itself is replayed, which only
+/// records that the file holds it. The store keeps every state as a moment,
+/// so nothing is lost. A file that holds anything else keeps its writes
+/// pending, and the unload check holds the document as before.
+fn end_departed_writes(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    root: &std::path::Path,
+    document: &dohc_engine_sync::DepartedDocument,
+    active: &str,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    use dohc_engine_files::ProjectionTargetState as File;
+    use dohc_engine_storage::StorageError;
+    let mut head_writes = std::collections::HashSet::new();
+    for head in document
+        .heads
+        .iter()
+        .filter(|head| head.version_id == active)
+    {
+        if !matches!(
+            dohc_engine_files::probe_projection_target(
+                root,
+                &head.path,
+                dohc_engine_files::ProjectionTargetKind::Plaintext,
+            ),
+            File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256
+        ) {
+            continue;
+        }
+        let outcome = store.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?4 \
+                 WHERE status='pending' AND operation='write' AND target_path=?2 \
+                   AND (workspace_id=?1 OR workspace_id='') AND content_sha256<>?3",
+                rusqlite::params![workspace_id, head.path, head.sha256, now_ms],
+            )
+            .map_err(StorageError::persist_public)?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT job_id FROM materialization_jobs \
+                     WHERE status='pending' AND operation='write' AND target_path=?2 \
+                       AND (workspace_id=?1 OR workspace_id='') AND content_sha256=?3",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let jobs = statement
+                .query_map(
+                    rusqlite::params![workspace_id, head.path, head.sha256],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(StorageError::corrupt_public)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::corrupt_public)?;
+            Ok::<_, StorageError>(jobs)
+        })?;
+        match outcome {
+            TxnOutcome::Committed(jobs) => head_writes.extend(jobs),
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    }
+    if head_writes.is_empty() {
+        return Ok(());
+    }
+    super::materialization::replay_pending_materializations(
+        store,
+        root,
+        super::materialization::MaterializationReplayScope {
+            holds: None,
+            workspace_id,
+            self_writes: None,
+            progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
+            planned_against_active_heads: false,
+        },
+        now_ms,
+        &NoFaults,
+        Some(&head_writes),
+        false,
+    )?;
+    Ok(())
 }
 
 /// Remove each retired file that still holds its document's head, and free
@@ -4457,6 +4555,136 @@ mod hosted_refusal_tests {
         assert!(pass(&mut store).unwrap());
         assert!(departed(&store).is_empty());
         assert!(!a.exists());
+    }
+
+    /// #3793: each pull's projection of a Y.Doc update queues a write of
+    /// the note's file, and the pull's page writes the file itself. Nothing
+    /// replayed the queued writes for a note no session opened, so they
+    /// stayed pending past the note's departure. Parking ends them first:
+    /// the write of an earlier state is cancelled and leaves no conflict
+    /// file, and the write of the head is recorded as on disk.
+    #[test]
+    fn parking_ends_the_writes_a_departed_document_left_pending() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "doc-a".to_owned(),
+                    path: "doc-a.md".to_owned(),
+                    text: "hosted doc-a".to_owned(),
+                    moment_id: "moment-1".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_001,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        // Two projections each queued a write, the second over the first's
+        // content. The page wrote the file, and the document left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                let earlier = dohc_engine_storage::put_binary_blob(tx, b"earlier doc-a")?;
+                let head = dohc_engine_storage::put_binary_blob(tx, b"hosted doc-a")?;
+                for (job_id, content, preimage, generation) in [
+                    (
+                        "ydoc-mat_moment-0",
+                        earlier.clone(),
+                        dohc_engine_storage::Preimage::Absent,
+                        0,
+                    ),
+                    (
+                        "ydoc-mat_moment-1",
+                        head,
+                        dohc_engine_storage::Preimage::Present(earlier.clone()),
+                        1,
+                    ),
+                ] {
+                    dohc_engine_storage::enqueue_job(
+                        tx,
+                        &dohc_engine_storage::MaterializationJobSpec {
+                            job_id: job_id.to_owned(),
+                            workspace_id: "ws".to_owned(),
+                            target_path: "doc-a.md".to_owned(),
+                            content_sha256: content,
+                            preimage,
+                            target_generation: generation,
+                            now_ms: 1_001,
+                        },
+                    )?;
+                }
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation) \
+                     VALUES ('ws','doc-a','doc-a.md','ready',1)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        let file = root.path().join("doc-a.md");
+        std::fs::write(&file, "hosted doc-a").unwrap();
+
+        assert!(
+            park_departed_hosted(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+            .unwrap()
+        );
+        let status = |job_id: &str| {
+            store
+                .load_materialization_job(job_id)
+                .unwrap()
+                .unwrap()
+                .status
+        };
+        assert_eq!(
+            status("ydoc-mat_moment-0"),
+            dohc_engine_storage::JobStatus::Cancelled
+        );
+        assert_eq!(
+            status("ydoc-mat_moment-1"),
+            dohc_engine_storage::JobStatus::Complete
+        );
+        let left = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("doc-a"))
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!file.exists());
     }
 }
 
