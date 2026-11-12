@@ -2872,6 +2872,7 @@ describe("the automation replicas", () => {
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
       expect(sends()).toBe(0);
       expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
+      expect(errors.filter((error) => !(error instanceof Error && error.message === "the engine is busy")), `moved: ${moved}; no other setup error`).toEqual([]);
       engine.receipts(new Map());
 
       // A visit's sync fails before it pulls, while the relay may have moved the page to a secret path.
@@ -2915,6 +2916,7 @@ describe("the automation replicas", () => {
       const errors: unknown[] = [];
       const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
       expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
+      expect(errors.filter((error) => !(error instanceof Error && error.message === "the engine is busy")), `moved: ${moved}; no other setup error`).toEqual([]);
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
       engine.receipts(new Map());
 
@@ -2958,6 +2960,7 @@ describe("the automation replicas", () => {
       const errors: unknown[] = [];
       const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
       expect(errors, `moved: ${moved}; the setup's unread receipts`).toContainEqual(new Error("the engine is busy"));
+      expect(errors.filter((error) => !(error instanceof Error && error.message === "the engine is busy")), `moved: ${moved}; no other setup error`).toEqual([]);
       const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
 
       // The next pass's replay starts while the copy is current, and waits on its receipt read.

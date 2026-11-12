@@ -684,7 +684,7 @@ describe("an answer whose decision the engine refused", () => {
     expect(await f.run(reply("op-other", "thread-stay"))).toMatchObject({ ok: true, state: "pending" });
     expect(resolves(f)).toBe(1);
 
-    // A restart, then a retry, while the engine would take the decision now: neither asks for it.
+    // A background replay, then a retry, while the engine would take the decision now: neither asks for it.
     f.engine.failing.clear();
     expect(await replay()).toBe(true);
     expect(resolves(f)).toBe(1);
