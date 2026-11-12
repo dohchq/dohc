@@ -3571,6 +3571,25 @@ describe("what a change that did not save leaves for the person", () => {
     expect(strip()).toBeNull();
   });
 
+  it("keeps a new record the Collection refused in the list, and opens no panel for it, while the ⚡ panel holds the side panel", async () => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
+    const view = setup({ invoke });
+    await screen.findByText("Alice");
+    typeNewRow("Bob");
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
+    // The page closes with the create out, and opens again with the ⚡ panel open.
+    view.unmount();
+    render(<TransactionalCollectionPage {...view.props} automations={{ open: true, count: 1, onToggle: vi.fn(), close: vi.fn() }} panel={<aside aria-label="Automations" />} />);
+    await screen.findByText("Alice");
+    await act(async () => answer.reject(refusal("Name is taken.")));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
+    // The ⚡ panel stays where it was, and nothing took its place.
+    expect(noDraftPanel()).toBe(true);
+    expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Automations"]);
+  });
+
   it("lets the row a failure left in Notices send the change again after its page closed, and names the Collection", async () => {
     const answer = deferred<{ result: AppBackendJson }>();
     let fail = true;

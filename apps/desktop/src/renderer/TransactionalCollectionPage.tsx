@@ -592,10 +592,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
    */
   function showRead(shows: number, rows: readonly TransactionalRow[]): void {
     const key = openKeyRef.current;
-    if (key !== null && !rows.some(row => JSON.stringify(row.id) === key)) {
-      const { values, version } = view.confirmed(shows, key);
-      if (version !== undefined || Object.keys(values).length > 0) {
-        setDetails(last => last && JSON.stringify(last.id) === key ? { ...last, version: version ?? last.version, values: { ...last.values, ...values } } : last);
+    const shown = detailsRef.current;
+    if (key !== null && shown !== null && JSON.stringify(shown.id) === key && !rows.some(row => JSON.stringify(row.id) === key)) {
+      // The version moves on from the one this copy of the record showed, by the receipts that follow it.
+      const { values, version } = view.confirmed(shows, key, shown.version);
+      if (version !== shown.version || Object.keys(values).length > 0) {
+        setDetails(last => last && JSON.stringify(last.id) === key ? { ...last, version: last.version === shown.version ? version : last.version, values: { ...last.values, ...values } } : last);
       }
     }
     view.readShown(shows, rows);
@@ -727,7 +729,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const typable = (refused || !write.request) && !write.doubted;
     if (awaitingRef.current !== write.id) {
       // A new record the Collection refused, with no panel left to show it, opens in the panel with what was typed and why, while the panel holds no other.
-      if (!typable || !refused || write.kind !== "create" || editor !== null || !create || !canCreate) return false;
+      // The ⚡ panel holds the side panel while it is open, and may hold a draft of its own, so the record stays in the page's list then.
+      if (!typable || !refused || write.kind !== "create" || editor !== null || !create || !canCreate || props.automations?.open) return false;
       trigger.current = null; setDraft({ ...write.values }); setInvalid({}); setFormRefusal(reason); setEditor({ operation: create });
       return true;
     }

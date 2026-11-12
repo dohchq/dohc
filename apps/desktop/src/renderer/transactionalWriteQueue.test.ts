@@ -108,6 +108,33 @@ describe("the version a record's next change goes with", () => {
     expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 2, values: { amount: 9 } });
   });
 
+  it("is its own page's when someone else's change came between and only another page showed it, even after that page's change is confirmed", async () => {
+    const rules = host(), first = open(rules), second = open(host());
+    // Both pages show version 1. Someone else changes the record, and only the first page reads it, at version 2.
+    first.page.readShown(first.page.readStarted(), [row(1, 2)]);
+    first.queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // The second page shows the confirmed name, and the rest of the record as it was at version 1.
+    second.queue.enqueue(edit(row(1, 1), amount, 9));
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 1, values: { amount: 9 } });
+  });
+
+  it("follows the queue's own changes to a record one after another, from the version each change's page showed", async () => {
+    const rules = host(), first = open(rules), second = open(host());
+    first.queue.enqueue(edit(row(1, 1), name, "Alicia"));
+    first.queue.enqueue(edit(row(1, 1), amount, 9));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 2 } });
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    rules.calls[1]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(first.queue.size).toBe(0));
+    // The other page has shown neither read. Its row is at version 1, and nobody else changed the record.
+    second.queue.enqueue(edit(row(1, 1), name, "Alice"));
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(3));
+    expect(rules.inputs("edit").map(input => (input as { expectedVersion: number }).expectedVersion)).toEqual([1, 2, 3]);
+  });
+
   it("is the one its last receipt gave for a change made before a read showed the record changed since", async () => {
     const rules = host(), { queue, page } = open(rules);
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
@@ -216,12 +243,12 @@ describe("a confirmed value a page's records do not show yet", () => {
     // record 2 elsewhere takes what the Collection confirmed for it before the read is shown.
     const started = page.readStarted();
     expect(page.statuses.get("2", "name")).toMatchObject({ state: "pending", value: "Beatrice" });
-    expect(page.confirmed(started, "2")).toEqual({ values: { name: "Beatrice" }, version: 5 });
+    expect(page.confirmed(started, "2", 4)).toEqual({ values: { name: "Beatrice" }, version: 5 });
     page.readShown(started, [row(1, 3)]);
     expect(state(page, 1, name)).toBeUndefined();
     // The page keeps nothing for a record its reads do not return.
     expect(state(page, 2, name)).toBeUndefined();
-    expect(page.confirmed(started, "2").values).toEqual({});
+    expect(page.confirmed(started, "2", 4)).toEqual({ values: {}, version: 4 });
   });
 
   it("is given with the version its receipt gave, not one another page's later read of the record found", async () => {
@@ -231,7 +258,9 @@ describe("a confirmed value a page's records do not show yet", () => {
     await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
     // The other page reads the record after someone else changed it, which this page has not shown.
     other.page.readShown(other.page.readStarted(), [row(2, 6)]);
-    expect(page.confirmed(page.readStarted(), "2")).toEqual({ values: { name: "Beatrice" }, version: 5 });
+    expect(page.confirmed(page.readStarted(), "2", 4)).toEqual({ values: { name: "Beatrice" }, version: 5 });
+    // A copy of the record that showed another version did not see what the change was made over, and keeps its own.
+    expect(page.confirmed(page.readStarted(), "2", 3)).toEqual({ values: { name: "Beatrice" }, version: 3 });
   });
 
   it("stays through a read of its record that started before the change was confirmed", async () => {
@@ -240,7 +269,7 @@ describe("a confirmed value a page's records do not show yet", () => {
     queue.enqueue(edit(row(2, 4), name, "Beatrice"));
     rules.calls[0]!.answer.resolve({ result: { id: 2, version: 5 } });
     await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
-    expect(page.confirmed(before, "2")).toEqual({ values: {} });
+    expect(page.confirmed(before, "2", 4)).toEqual({ values: {}, version: 4 });
     page.readShown(before, [row(2, 4)]);
     expect(state(page, 2, name)).toBe("pending");
     page.readShown(page.readStarted(), [row(2, 5)]);

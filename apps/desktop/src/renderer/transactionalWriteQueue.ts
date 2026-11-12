@@ -24,6 +24,8 @@ export interface QueuedWrite {
   readonly values: Readonly<Record<string, Typed>>;
   /** The record's version when the person made the change. */
   readonly baseVersion: number;
+  /** The version the change was sent with. */
+  sent?: number;
   readonly key: string;
   /** What a notice says once the change saved with no page open. */
   readonly label: string;
@@ -97,11 +99,12 @@ export interface WriteQueuePage {
   readStarted(): number;
   /**
    * What the Collection confirmed for a record and a read that started at `token` would show: its changed
-   * values, and the version the last of their receipts gave, when it gave one. That is the version the
-   * values were confirmed at, never one a later read of the record found. A page takes them for a record
-   * it shows that the read left out, before `readShown` ends their time on the cells.
+   * values, and the version they leave a copy of the record that showed version `shown`. The version moves
+   * on only by the receipts of changes sent with the version the copy showed, one after another: a copy that
+   * never showed what someone else did to the record keeps its own version, and its next change is refused.
+   * A page takes them for a record it shows that the read left out, before `readShown` ends their time on the cells.
    */
-  confirmed(token: number, recordKey: string): { values: Record<string, AppBackendJson>; version?: number };
+  confirmed(token: number, recordKey: string, shown: number): { values: Record<string, AppBackendJson>; version: number };
   /** The page shows the records a read returned. */
   readShown(token: number, rows: readonly TransactionalRow[]): void;
 }
@@ -143,8 +146,19 @@ function reminderWords(tableName: string, items: readonly WriteAttention[]): str
 /** `uncertain`: the change was sent and the host did not answer that it ran nothing, so it may have saved. */
 type Held = { id: number; recordId: string | number; fieldName: string; value: AppBackendJson; reason: string; uncertain?: true };
 type Deletion = { id: number; recordKey: string; recordId: string | number; name: string; reason: string };
-/** A confirmed value. `version`: what its receipt gave for the record, which no later read replaces. */
-type Settled = { id: number; seq: number; version: number | null; status: TableCellStatus };
+/** A confirmed value. Its change was sent with the version `sent`, and its receipt gave `version` for the record, which no later read replaces. */
+type Settled = { id: number; seq: number; sent: number | undefined; version: number | null; status: TableCellStatus };
+/**
+ * What the queue knows of a record's version: the latest one, and each step that led to it, from the version a
+ * change was sent with to the version that change left. A step is one of the queue's own confirmed changes, or a
+ * read the queue waited for after a receipt that gave no version.
+ */
+type Known = { version: number; seq: number; steps: Map<number, number> };
+/** The version `steps` lead to from `version`: the record as the queue's own changes left it, and no further. */
+function after(steps: ReadonlyMap<number, number> | undefined, version: number): number {
+  for (let next = steps?.get(version); next !== undefined && next > version; next = steps!.get(version)) version = next;
+  return version;
+}
 type Shown = { signature: string; status: TableCellStatus };
 /** The one request in flight: a change, or a read of one record for its version. */
 type Flight = { abort: AbortController; revisionSha256: string; write?: QueuedWrite };
@@ -221,7 +235,7 @@ export class WriteQueue {
   /** Rises with each outcome. A read that starts at or after an outcome's number shows it. */
   private seq = 0;
   /** The newest version the queue knows of a record, from a receipt or a read, for the record's next change. */
-  private readonly versions = new Map<string, { version: number; seq: number }>();
+  private readonly versions = new Map<string, Known>();
   /** Records changed with no version reported, whose next change waits for a read. */
   private readonly unknown = new Map<string, Unknown>();
   /** Values dohc did not save, kept for the person until they dismiss them. */
@@ -300,15 +314,14 @@ export class WriteQueue {
         };
       },
       readStarted: () => page.host?.offline ? -1 : this.seq,
-      confirmed: (token, recordKey) => {
-        const values: Record<string, AppBackendJson> = {};
-        let last: Settled | undefined;
+      confirmed: (token, recordKey, shown) => {
+        const values: Record<string, AppBackendJson> = {}, steps = new Map<number, number>();
         for (const [fieldId, settled] of page.settled.get(recordKey) ?? []) {
           if (settled.seq > token) continue;
           values[fieldId] = settled.status.value as AppBackendJson;
-          if (!last || settled.seq > last.seq) last = settled;
+          if (settled.sent !== undefined && settled.version !== null) steps.set(settled.sent, settled.version);
         }
-        return last && last.version !== null ? { values, version: last.version } : { values };
+        return { values, version: after(steps, shown) };
       },
       readShown: (token, rows) => {
         page.readAsked = false;
@@ -321,7 +334,7 @@ export class WriteQueue {
           if (pending.seq > token) continue;
           const row = rows.find(candidate => JSON.stringify(candidate.id) === recordKey);
           // The read shows the record after the change that reported no version. A read that leaves the record out says nothing of it.
-          if (row) { this.unknown.delete(recordKey); this.versions.set(recordKey, { version: row.version, seq: pending.seq }); }
+          if (row) { this.unknown.delete(recordKey); this.versions.set(recordKey, this.read(recordKey, row.version, pending.seq)); }
           else { pending.lookup = true; pending.stuck = false; }
         }
         if (page.unread !== null && page.unread <= token) page.unread = null;
@@ -550,10 +563,12 @@ export class WriteQueue {
         const now = rules.fields.find(field => field.fieldId === fieldId)!;
         return [fieldId, isEmptyValue(typed.value) && fieldShape(now) !== fieldShape(typed.under) ? emptyValue(now) : typed.value];
       }));
-      // A change goes with the newer of two versions: the one its page showed when it was made, and the one the
-      // record's last receipt gave. No read raises it. A change made before its page showed what someone else did
-      // to the record is then refused, and never sent over a value the person did not see.
-      const expectedVersion = write.record ? Math.max(write.baseVersion, this.versions.get(write.record.key)?.version ?? 0) : 0;
+      // A change goes with the version its page showed when it was made, moved on by the queue's own confirmed
+      // changes to the record, one after another from that version, and by nothing else. Where someone else changed
+      // the record and the change's page had not shown it, no step starts at the page's version: the change goes
+      // with that version, and the Collection refuses it over a value the person did not see.
+      const expectedVersion = write.record ? after(this.versions.get(write.record.key)?.steps, write.baseVersion) : 0;
+      write.sent = expectedVersion;
       const input: AppBackendJson = write.kind === "create" ? { values } : write.kind === "delete" ? { id: write.record!.id, expectedVersion } : { id: write.record!.id, expectedVersion, values };
       write.request = { workspaceId: rules.workspaceId, datasetId: rules.datasetId, revision: rules.revision, revisionSha256: rules.revisionSha256, operationId: write.operationId, input, idempotencyKey: write.key };
     }
@@ -605,7 +620,7 @@ export class WriteQueue {
       try { rows = parsePage(response.result, read.fieldIds).rows; } catch (cause) { failed(cause); return; }
       const row = rows.find(candidate => JSON.stringify(candidate.id) === record.key);
       this.unknown.delete(record.key);
-      if (row) { this.versions.set(record.key, { version: row.version, seq: this.seq }); return; }
+      if (row) { this.versions.set(record.key, this.read(record.key, row.version, this.seq)); return; }
       // The record is gone, so nothing queued for it can save.
       for (const write of this.writes.filter(candidate => candidate.record?.key === record.key)) this.dropUnsent(write, RECORD_GONE, rules);
     }), cause => ended(() => failed(cause)));
@@ -649,11 +664,15 @@ export class WriteQueue {
     this.outcome();
     if (write.record) {
       const version = receiptVersion(write, receipt);
-      if (version !== null) this.versions.set(write.record.key, { version, seq: this.seq });
-      else if (write.kind === "edit") this.forget(write.record.key);
+      if (version !== null) {
+        // The receipt's version follows the one the change was sent with, and joins the steps that led there.
+        const steps = new Map(this.versions.get(write.record.key)?.steps);
+        if (write.sent !== undefined) steps.set(write.sent, version);
+        this.versions.set(write.record.key, { version, seq: this.seq, steps });
+      } else if (write.kind === "edit") this.forget(write.record.key);
       else this.versions.delete(write.record.key);
       for (const page of this.pages) for (const [fieldId, typed] of Object.entries(write.values)) {
-        put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, version, status: { state: "pending", value: typed.value as CollectionValue } });
+        put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, sent: write.sent, version, status: { state: "pending", value: typed.value as CollectionValue } });
       }
     }
     // An open page shows its table's change. With none open, a notice in the workspace's open shell says the change saved, and in which Collection.
@@ -696,6 +715,14 @@ export class WriteQueue {
     }
     this.changed();
     this.pump();
+  }
+
+  /**
+   * A record's version as a read gave it, after a receipt that gave none. The changes that waited for that read
+   * go with it, whatever version their pages showed: nothing else says what the record's version is.
+   */
+  private read(recordKey: string, version: number, seq: number): Known {
+    return { version, seq, steps: new Map(this.writes.filter(write => write.record?.key === recordKey).map(write => [write.baseVersion, version])) };
   }
 
   /** Drops a change that was never sent, and says so when no page is open to show why. */
