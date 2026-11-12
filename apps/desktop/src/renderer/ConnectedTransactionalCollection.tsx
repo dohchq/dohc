@@ -287,6 +287,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     initialRecordPanelWidth={initialRecordPanelWidth}
     onRecordPanelWidthChange={onRecordPanelWidthChange}
     fieldMarks={automations.fieldMarks}
+    onNotice={message => onNotice?.(message)}
     activeView={views?.active ?? null}
     views={views ?? undefined}
     onOpenSource={() => onOpenFile(datasetPath)}

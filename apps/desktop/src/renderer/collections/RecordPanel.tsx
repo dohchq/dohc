@@ -93,6 +93,11 @@ export interface RecordPanelProps {
   body?: ReactNode;
   /** One quiet line at the bottom. */
   footer?: ReactNode;
+  /**
+   * What ends the panel's work, at the bottom, as Cancel and the primary
+   * of a record that does not exist yet, under why its last try failed.
+   */
+  actions?: ReactNode;
   width: number;
   /** Receives the width once a resize ends. */
   onWidthChange: (width: number) => void;
@@ -346,6 +351,7 @@ export function RecordPanel(props: RecordPanelProps) {
             )}
           </div>
           {props.footer ? <footer className="shrink-0 border-t border-line px-3 py-2 text-[12px] text-muted">{props.footer}</footer> : null}
+          {props.actions ? <div data-record-actions="" className="flex shrink-0 flex-col gap-2 border-t border-line px-3 py-3">{props.actions}</div> : null}
         </>
       )}
     </aside>

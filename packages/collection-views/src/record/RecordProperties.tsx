@@ -53,6 +53,12 @@ export interface RecordPropertiesProps
   record: CollectionRecord;
   /** Fields the rows leave out, such as the one a panel shows as the record's heading. */
   omitFields?: readonly string[];
+  /**
+   * What is wrong with a field's value, by field key, for a host that
+   * checks values before it saves them, as for a record that does not
+   * exist yet. The row says it under the value.
+   */
+  problems?: ReadonlyMap<string, string>;
 }
 
 /** The room a field's name gets before its value. */
@@ -126,9 +132,11 @@ function isEmpty(value: unknown): boolean {
   return value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
 }
 
-interface RowProps extends Omit<RecordPropertiesProps, "schema" | "visibleFields" | "omitFields" | "hostCells" | "fieldMarks" | "cellStatuses"> {
+interface RowProps extends Omit<RecordPropertiesProps, "schema" | "visibleFields" | "omitFields" | "hostCells" | "fieldMarks" | "cellStatuses" | "problems"> {
   field: FieldDefinition;
   label: string;
+  /** What is wrong with the value, if the host says anything is. */
+  problem: string | undefined;
   statuses: TableCellStatuses;
   host: TableHostCell | undefined;
   mark: TableFieldMark | undefined;
@@ -146,6 +154,7 @@ interface RowProps extends Omit<RecordPropertiesProps, "schema" | "visibleFields
 function PropertyRow(props: RowProps) {
   const { field, label, record, statuses, host, mark, editing, onCellChange, editingDisabled = false, relationExecutor, people } = props;
   const labelId = useId();
+  const problemId = useId();
   const tooltip = useTooltip();
   const status = useSyncExternalStore(statuses.subscribe, () => statuses.get(record.id, field.name));
   const stored = record.values.find((entry) => entry.field === field.name);
@@ -187,7 +196,9 @@ function PropertyRow(props: RowProps) {
     <div
       role="group"
       aria-labelledby={labelId}
+      aria-describedby={props.problem === undefined ? undefined : problemId}
       data-property={field.name}
+      data-invalid={props.problem === undefined ? undefined : ""}
       className="grid items-start gap-x-2"
       style={{ gridTemplateColumns: `${LABEL_WIDTH}px minmax(0, 1fr)` }}
     >
@@ -281,13 +292,21 @@ function PropertyRow(props: RowProps) {
           </fieldset>
         ) : null}
         {status && status.state !== "pending" ? <StatusNote status={status} onAct={props.onFocusValue} /> : null}
+        {props.problem === undefined ? null : (
+          <p id={problemId} role="alert" className="m-0 flex items-start gap-1 px-2 pb-1 text-[12px] text-danger">
+            <span aria-hidden className="flex h-lh shrink-0 items-center">
+              <CircleAlert size={12} strokeWidth={1.9} />
+            </span>
+            {props.problem}
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
 export function RecordProperties(props: RecordPropertiesProps) {
-  const { schema, visibleFields, omitFields, hostCells, fieldMarks, cellStatuses, ...shared } = props;
+  const { schema, visibleFields, omitFields, hostCells, fieldMarks, cellStatuses, problems, ...shared } = props;
   const { record, fieldLabel, subscribeToDiscardedWrites } = props;
   const fields = deriveColumns(schema, visibleFields).filter((field) => !omitFields?.includes(field.name));
   // One editor at a time: the row it is on, and the character that opened it, if one did. It belongs to
@@ -343,6 +362,7 @@ export function RecordProperties(props: RecordPropertiesProps) {
           statuses={cellStatuses ?? NO_STATUSES}
           host={hostCells?.get(field.name)}
           mark={fieldMarks?.get(field.name)}
+          problem={problems?.get(field.name)}
           editing={editing?.field === field.name ? editing : null}
           // By record and field, as the table keeps them, so another record in the same place starts from its own picks.
           carried={field.type === "multi-select" ? carried(JSON.stringify([record.id, field.name])) : undefined}
