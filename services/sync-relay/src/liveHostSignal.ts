@@ -26,8 +26,8 @@ export async function withLiveHostSignal<T>(host: AbortSignal, caller: AbortSign
 
 /**
  * Runs work until its source aborts or the deadline passes. Not AbortSignal.timeout: once AbortSignal.any derives
- * from a signal that has a timeout among its sources, Node holds that signal until it aborts itself, which a
- * finished pass never does.
+ * from a signal that has a timeout among its sources, Node holds that signal until Node aborts it directly or its
+ * last abort listener is removed. The timeout firing does neither.
  */
 export async function withDeadline<T>(source: AbortSignal, ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const deadline = new AbortController();
