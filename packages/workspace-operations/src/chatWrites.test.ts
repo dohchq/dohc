@@ -81,6 +81,14 @@ describe("post and send", () => {
       { start: { channelId: "channel-trip", lane: "posts", body: "Hello" } },
     ]);
   });
+
+  it("counts choices apart as the engine does: U+FEFF stays, so these two differ", async () => {
+    const { host, commands } = trip();
+    await postToGroup(host, { channelId: "channel-trip", body: "When?", options: ["Monday", "﻿Monday"] });
+    expect(commands).toEqual([{ start: { channelId: "channel-trip", lane: "posts", body: "When?", options: ["Monday", "﻿Monday"] } }]);
+    await expect(postToGroup(host, { channelId: "channel-trip", body: "When?", options: ["Monday", "Monday\u0085"] }))
+      .rejects.toThrow("Each choice appears once.");
+  });
 });
 
 describe("reply", () => {
@@ -182,6 +190,16 @@ describe("answer", () => {
     })).rejects.toThrow(reason);
     expect(store.log).toEqual(["admit", "listThreadDecisions"]);
     expect(store.messages.get("thread-plan")).toHaveLength(1);
+  });
+
+  // The engine trims with Rust's str::trim, Unicode White_Space only: it keeps U+FEFF and strips U+0085.
+  it("trims a choice as the engine does, so a choice it stored with U+FEFF still answers", async () => {
+    const { store, host } = trip();
+    asked(store, ["﻿Monday", "Tuesday"]);
+    const outcome = await answerDecision(host, {
+      threadId: "thread-plan", body: "Monday", resolves: { messageId: "question", chosenOption: "﻿Monday\u0085" },
+    });
+    expect(outcome).toMatchObject({ state: "resolved", decision: { chosenOption: "﻿Monday" } });
   });
 
   it("refuses a question the thread doesn't have before the reply", async () => {
