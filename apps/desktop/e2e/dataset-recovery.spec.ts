@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
-import { collectionCommand, editCell, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, editCell, fieldCells, fillNewRecordField, newRecordPanel } from "./helpers/dataCollection";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
@@ -29,15 +29,22 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await create.getByRole("button", { name: "Add field", exact: true }).click();
     await create.getByLabel("Field name", { exact: true }).last().fill("Receipt");
     await create.getByLabel("Field type", { exact: true }).last().selectOption("attachment");
+    // A table's new row takes no file. Requiring the file takes New record to the panel, where one create carries it.
+    await create.getByLabel("Require Receipt").check();
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Recovery proof", exact: true });
     await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    const newRecord = collection.getByRole("form", { name: "New record" });
-    await newRecord.getByLabel("Name", { exact: true }).fill("Before agent edit");
-    await newRecord.getByLabel("Receipt", { exact: true }).setInputFiles({ name: "receipt.txt", mimeType: "text/plain", buffer: receipt });
-    await expect(newRecord.getByText(/receipt\.txt.*Save to attach/)).toBeVisible();
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    const newRecord = newRecordPanel(collection);
+    await fillNewRecordField(newRecord, "Name", "Before agent edit");
+    // The file's editor is the cell's: choose the file, wait for its upload, then Save puts it in the new record.
+    await newRecord.getByRole("button", { name: "Add Receipt", exact: true }).click();
+    const fileEditor = newRecord.locator("[data-cell-editor]");
+    await fileEditor.getByLabel("Receipt", { exact: true }).setInputFiles({ name: "receipt.txt", mimeType: "text/plain", buffer: receipt });
+    await expect(fileEditor.getByText(/receipt\.txt.*Save to attach/)).toBeVisible();
+    await fileEditor.getByRole("button", { name: "Save", exact: true }).click();
+    await newRecord.getByRole("button", { name: "Create record", exact: true }).click();
+    await expect(newRecord).toHaveCount(0);
     await expect(await fieldCells(collection, "Name")).toHaveText("Before agent edit");
 
     const listed = await dataset(page, { action: "list", workspaceId });

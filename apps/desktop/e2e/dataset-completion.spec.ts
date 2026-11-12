@@ -1,4 +1,4 @@
-import { collectionCommand, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { test, expect, type Page, type Locator } from "@playwright/test";
@@ -56,9 +56,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    await createRecord(collection, "Before sharing");
     await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
     // Add a real authored rule through the normal reviewed source-change path.
     const definition = JSON.parse(await readFile(join(workspace.rootPath, "Registrations/dataset.json"), "utf8")) as DatasetDefinition;
@@ -243,9 +241,7 @@ test("@dataset-completion history reverses an authored rule against current reco
       operationId: definition.operations.find(operation => operation.kind === "create")!.operationId, input: { values: { [nameField.fieldId]: "Blocked participant" } }, idempotencyKey: "blocked-before-reversal" };
     const refused = await page.evaluate(async request => window.dohcDesktop!.dataset(request), invoke);
     expect(refused).toMatchObject({ kind: "refused", code: "registration_closed" });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    await createRecord(collection, "Registered after rule change");
     await expect(await fieldCells(collection, "Name")).toHaveText("Registered after rule change");
     await (await collectionCommand(collection, "History")).click();
     const history = page.getByRole("dialog", { name: "Collection history", exact: true });

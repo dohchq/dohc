@@ -40,11 +40,14 @@ async function newCollectionFromFileMenu(desktop: Desktop): Promise<void> {
   });
 }
 
-async function closeTab(page: Page, path: string): Promise<void> {
-  const tab = page.getByTestId(editorTabTestId(path));
-  await tab.hover();
-  await tab.getByRole("button", { name: /^Close / }).click();
-  await expect(tab).toHaveCount(0);
+// New record starts a row in place, with the editor of its first field,
+// Name, open. Enter saves the record, whose file takes that name, and no
+// file tab opens.
+async function newRecordNamed(page: Page, name: string): Promise<void> {
+  await page.getByTestId("collection-new-record").click();
+  const input = page.locator("[data-cell-editor] input");
+  await input.fill(name);
+  await input.press("Enter");
 }
 
 // A data row in the table view (the header row carries no data-index).
@@ -236,16 +239,11 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // New record creates and opens the record's file tab; the walkthrough
-    // returns to the collection to edit it inline.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("clients/Untitled.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "clients/Untitled.md");
-    await page.getByTestId(CLIENTS_TAB).click();
+    // New record adds the record in the table, named as it is typed.
+    await newRecordNamed(page, "Acme");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
-    await editInputCell(recordRows(page).first(), 0, "Acme");
+    await expect(fieldCell(recordRows(page).first(), 0)).toContainText("Acme", { timeout: 30_000 });
+    await expect(page.getByTestId(editorTabTestId("clients/Acme.md"))).toHaveCount(0);
 
     // --- The main "projects" collection.
     await newCollectionFromFileMenu(desktop);
@@ -258,14 +256,12 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // The first record comes before the schema takes shape.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "projects/Untitled.md");
-    await page.getByTestId(PROJECTS_TAB).click();
+    // The first record comes before the schema takes shape. Its file is
+    // named Web.md for the name it starts with, and keeps that name when
+    // the walkthrough renames the record in its cell below.
+    await newRecordNamed(page, "Web");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
     // --- Every v1 field type, added through the Fields dialog (Name/text
     // came from the New collection dialog).
@@ -337,15 +333,8 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
     // --- A second record: the board's target column and the calendar's
     // second-date-field proof.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled 2.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "projects/Untitled 2.md");
-    await page.getByTestId(PROJECTS_TAB).click();
+    await newRecordNamed(page, "Launch");
     await expect(recordRows(page)).toHaveCount(2, { timeout: 30_000 });
-    const row2 = recordRows(page).filter({ hasNotText: "Website" });
-    await editInputCell(row2, 0, "Launch");
     const launchRow = recordRows(page).filter({ hasText: "Launch" });
     await editSelectCell(launchRow, 5, "Doing");
     await editDateCell(launchRow, 4, 20);
@@ -396,7 +385,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
         async () => {
           try {
             const text = await readFile(
-              join(temp.rootPath, "projects", "Untitled.md"),
+              join(temp.rootPath, "projects", "Web.md"),
               "utf8",
             );
             return /Status:\s*Doing/.test(text);
@@ -408,7 +397,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       )
       .toBe(true);
     // A completed drag is not a click: the record tab must not have opened.
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toHaveCount(0);
+    await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed
     // to Started only Launch renders (day 20). The events moved with the key.

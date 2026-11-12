@@ -36,3 +36,33 @@ export async function editCell(collection: Locator, cell: Locator, value: string
   await input.fill(value);
   await input.press("Enter");
 }
+
+/**
+ * Adds a record from the table's new row. New record starts the row with
+ * the editor of its first field open. The text goes there, and Enter saves
+ * the record with one create. Once the Collection confirms it, the next
+ * new row starts, empty, and goes when the cursor leaves it.
+ */
+export async function createRecord(collection: Locator, firstField: string): Promise<void> {
+  await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+  const input = collection.locator("[data-cell-editor] input");
+  await input.fill(firstField);
+  await input.press("Enter");
+}
+
+/**
+ * The panel of a record that does not exist yet. New record opens it in
+ * place of a row where the Collection's create needs a field no cell can
+ * take, such as a required file.
+ */
+export function newRecordPanel(collection: Locator): Locator {
+  return collection.getByRole("complementary", { name: "New record", exact: true });
+}
+
+/** Types a value into one text field of the new record in the panel, and saves the field with Enter. */
+export async function fillNewRecordField(panel: Locator, field: string, value: string): Promise<void> {
+  await panel.getByRole("group", { name: field, exact: true }).getByRole("button").first().click();
+  const input = panel.locator("[data-cell-editor] input");
+  await input.fill(value);
+  await input.press("Enter");
+}

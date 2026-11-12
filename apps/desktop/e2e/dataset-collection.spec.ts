@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetSchemaChange } from "../src/workspaces/datasetSchemaChanges";
-import { collectionCommand, editCell, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, createRecord, editCell, fieldCells } from "./helpers/dataCollection";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
@@ -117,9 +117,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Equipment", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Camera");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    await createRecord(collection, "Camera");
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
     await collection.getByRole("button", { name: "Open Camera", exact: true }).click();
     // The record opens in a panel beside the table, which stays where it was.
@@ -224,9 +222,7 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registration", exact: true });
     for (const name of ["Ada", "Grace"]) {
-      await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-      await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill(name);
-      await collection.getByRole("button", { name: "Create record", exact: true }).click();
+      await createRecord(collection, name);
       await expect((await fieldCells(collection, "Name")).filter({ hasText: name })).toBeVisible();
     }
     const listed = async () => {

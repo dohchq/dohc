@@ -1,4 +1,4 @@
-import { collectionCommand, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { editorTabTestId } from "../src/testPins";
 import { test, expect } from "@playwright/test";
@@ -42,9 +42,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    await createRecord(collection, "Before sharing");
     await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
     await (await collectionCommand(collection, "Create form")).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");

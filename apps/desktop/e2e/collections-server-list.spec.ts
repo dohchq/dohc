@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetSources } from "../src/workspaces/datasetGenerator";
-import { collectionCommand, fieldCells } from "./helpers/dataCollection";
+import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
@@ -140,9 +140,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     // The Collection opens and takes a record through the server.
     await section.getByRole("button", { name: "Registrations", exact: true }).click();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("From the other computer");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
+    await createRecord(collection, "From the other computer");
     await expect(await fieldCells(collection, "Name")).toHaveText("From the other computer");
     const read = await fetch(`${relay.baseUrl}/sync/${workspaceId}/datasets/${definition.datasetId}/invoke`, { method: "POST", headers: owner,
       body: JSON.stringify({ revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { limit: 50 }, idempotencyKey: "read-from-test" }) });
