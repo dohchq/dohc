@@ -7,6 +7,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openRecordAsPage,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   writeWorkspaceFiles,
@@ -56,12 +57,16 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
     ).toBeVisible();
     await page.getByTestId("collection-page").getByRole("checkbox").click();
     // A person may open the record while the edit saves. The edit still saves.
+    // The record opens in the panel beside the table, with its live document as its body.
     await page.getByRole("button", { name: "Open Launch plan" }).click();
+    const record = page.getByTestId("collection-record-panel");
+    await expect(record.getByRole("heading", { name: "Launch plan" })).toBeVisible();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
     await expect(page.getByTestId("collection-write-failures")).toHaveCount(0);
-    await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
+    await record.getByRole("button", { name: "Close record" }).click();
+    await expect(record).toHaveCount(0);
     await page.getByRole("button", { name: "Board", exact: true }).click();
     await folder.press("F2");
     const rename = page.getByRole("textbox", { name: "New name" });
@@ -95,20 +100,25 @@ test("a cell edit saves while its record is open in another editor group", async
     // The Collection in group 1, and its record live in group 2.
     await explorerRow(page, "tasks").click();
     await expect(page.getByTestId(editorTabTestId("tab://collection/tasks"))).toBeVisible();
-    await page.getByRole("button", { name: "Open Launch plan" }).click();
+    await openRecordAsPage(page, "Launch plan");
     await expect(page.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
     await page.getByTestId("create-editor-group-right").click();
     await expect(group(2).getByTestId(editorTabTestId("tasks/plan.md"))).toBeVisible();
     await group(1).getByTestId(editorTabTestId("tab://collection/tasks")).click();
     await expect(group(1).getByTestId("collection-page")).toBeVisible();
     await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
+    // The Collection's tab kept its open record, so the same record shows in group 1's panel and in group 2's tab.
+    const record = group(1).getByTestId("collection-record-panel");
+    await expect(record.getByRole("heading", { name: "Launch plan" })).toBeVisible();
 
-    await group(1).getByTestId("collection-page").getByRole("checkbox").click();
+    await group(1).getByRole("grid").getByRole("checkbox").click();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
     await expect(page.getByTestId("collection-write-failures")).toHaveCount(0);
     await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
+    // The panel's field follows the table's cell.
+    await expect(record.getByRole("checkbox")).toBeChecked();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -119,8 +119,10 @@ test("@two-client shared Buttons use host identity and show the named presser in
     const history = await owner.page.evaluate(async input => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.getCollectionRecordHistory(input), { workspaceId, collectionPath: COLLECTION, recordId: RECORD });
     expect(history.entries).toContainEqual(expect.objectContaining({ author: expect.objectContaining({ kind: "automation", name: "Finish", person: "e2e-recipient@dohc.test" }) }));
     await openTable(owner.page);
+    // The record opens in the panel, whose menu holds its History.
     await owner.page.getByRole("button", { name: "Open Shared first", exact: true }).click();
-    await owner.page.getByTestId("record-history-open").click();
+    await owner.page.getByTestId("collection-record-panel").getByRole("button", { name: "Record actions", exact: true }).click();
+    await owner.page.getByRole("menuitem", { name: "History", exact: true }).click();
     await expect(owner.page.getByTestId("record-history-automation")).toContainText("for e2e-recipient@dohc.test");
     for (const theme of ["light", "dark"]) {
       await owner.page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);

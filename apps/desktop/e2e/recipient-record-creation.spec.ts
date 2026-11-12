@@ -11,7 +11,7 @@ import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials,
+import { createTempWorkspace, openRecordAsPage, openWorkspaceFromFirstRun, seedCloudCredentials,
   seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
@@ -332,7 +332,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(2);
     for (const record of created) await expectOnlyRecipientChanged(fixture.owner.page, record.path);
-    await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(fixture.owner.page, "Untitled");
     const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
     await expect(status).toBeEnabled({ timeout: 120_000 });
     // The Source button shows only on the engine's live document or an ended share's read-only copy. File editing shows Edit.
@@ -381,7 +381,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     await fixture.restartOwner();
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created[0]!.id]);
-    await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(fixture.owner.page, "Untitled");
     await expect(fixture.owner.page.getByLabel("Property Status value", { exact: true })).toHaveValue("Owner text KEEP", { timeout: 120_000 });
     const undo = await fixture.owner.page.evaluate(async ({ workspaceId, ids }) =>
       (window as unknown as { dohcDesktop: Api }).dohcDesktop.undoStopAndRestore({ workspaceId, restoredMomentIds: ids }),
@@ -433,7 +433,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     expect(responses.filter(response => response.receipt.created === true)).toHaveLength(1);
-    await page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(page, "Untitled");
     await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
     await page.getByTestId("property-add").click();
     await page.getByTestId("property-key").last().fill("Task");
