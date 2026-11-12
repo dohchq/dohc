@@ -44,9 +44,11 @@ export function selfHostLiveProfile() {
       // typed; the owner outbox drain pages maxEntriesPerDrain at a time.
       activation: {validation, maxCaptureBytes: 4 * MiB, maxActivationHistoryEntries: 2_000, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000,
-        // An idle host visits every awake document at least this often, and runs a pass at least this often.
-        // A change no signal announced, such as a Pause, a Stop or a revocation another process wrote to the
-        // relay database, waits no longer than this for the pass that visits its document.
+        // An idle host runs a pass at least this often, and each pass checks every hosted document's authority:
+        // a Pause, a Stop or a revocation another process wrote to the relay database, which no signal
+        // announces, waits no longer than this for that pass. While the same documents stay awake, an idle host
+        // also visits each of them at least this often. When more wake during a long pause, a document waits
+        // for its visit at most this much longer than on a host that never slows down.
         idlePollIntervalMs: 2_000},
       // Copying and migrating an earlier store for its owner's recovery copy
       // may take this long, the longest the engine answers a request.

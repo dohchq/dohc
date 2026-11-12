@@ -1695,9 +1695,12 @@ export async function startServiceLiveHost(options: {
       // no idle sweep ran, it sent the engine nothing but what an idle pass sends, nothing asked for a pass since
       // the last one ended, and nothing is left to do. Once idle passes have visited every document, each pause
       // lasts twice the one before, and ends by the next recovery probe. A pass visits maxDocumentsPerPass awake
-      // documents, so the longest pause is idlePollIntervalMs divided by the passes that visit them all: an idle
-      // host then visits each within idlePollIntervalMs, apart from the passes' own time. Any other pass puts the
-      // pause back to pollIntervalMs. No pause is shorter than that.
+      // documents, so the longest pause is idlePollIntervalMs divided by the passes that visit them all: while the
+      // same documents stay awake, an idle host visits each within idlePollIntervalMs, apart from the passes' own
+      // time. Any other pass puts the pause back to pollIntervalMs, and the pause grows again only after that many
+      // idle passes in a row. So when documents wake during a long pause, the rotation that follows runs at
+      // pollIntervalMs, and a document waits for its visit at most idlePollIntervalMs longer than it would with
+      // every pause at pollIntervalMs. No pause is shorter than that.
       let rest=config.activation.pollIntervalMs,doubled=rest,idlePasses=0;
       const judge=(clean:boolean)=>{
         const bounds=config.activation!,idle=clean && !stirred && settled();
