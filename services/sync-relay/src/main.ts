@@ -69,8 +69,9 @@ import type {NamedFrameNativeHost} from "./namedLiveFrameHost";
 import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots, selfHostedLiveHostId} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
+import {createPersonalLiveDocumentRoute, PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES, PERSONAL_LIVE_DOCUMENT_PATH} from "./personalLiveDocumentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
 import {TokenBucketLimiter} from "@dohc/service-http";
@@ -454,11 +455,13 @@ let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
+let personalLiveDocument: ReturnType<typeof createPersonalLiveDocumentRoute> | undefined;
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isServiceHostEnrollmentPath(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (path === PERSONAL_LIVE_DOCUMENT_PATH) return personalLiveDocument?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -587,6 +590,7 @@ const server = serveFetchHandler({
   streamBody: streamsRequestBody,
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     isServiceHostEnrollmentPath(url.pathname) ? 16 * 1024 :
+    url.pathname === PERSONAL_LIVE_DOCUMENT_PATH ? PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     isAccountWorkspacePath(url.pathname) ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES :
@@ -674,6 +678,10 @@ const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
 const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
   storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document) : undefined;
 if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
+// Every relay answers a personal open. Only one running the self-hosted live host hosts it.
+personalLiveDocument = createPersonalLiveDocumentRoute({storage, linkAuthority: relayApplication.linkAuthority, personalAgents: relayApplication.personalAgents,
+  limiter: relayApplication.personalLimiter, nowMs: () => Date.now(),
+  ...(selfHost && deployment ? {live: {host: selfHost, history: deployment.history, hostId: selfHostedLiveHostId(deployment.history.namespace)}} : {})});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
