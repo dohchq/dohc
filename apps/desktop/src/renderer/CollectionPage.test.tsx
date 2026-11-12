@@ -3336,6 +3336,33 @@ describe("a new record in the table", () => {
     expect(onNewRecord).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["with a typed title", "Milk", { title: "Milk", estimate: "abc" }],
+    ["alone", null, { estimate: "abc" }],
+  ] as const)("keeps text its field cannot take in the kept row, under its field, %s", async (_with, title, kept) => {
+    const schema: CollectionSchema = { ...SCHEMA, fields: [{ name: "title", type: "text" }, { name: "estimate", type: "number" }] };
+    const bridge = makeBridge([], schema);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onError = vi.fn();
+    const view = renderPage(bridge, onNewRecord, undefined, { onError });
+    await screen.findByRole("grid");
+    fireEvent.click(screen.getByTestId("collection-new-record"));
+    if (title !== null) fireEvent.change(editorInput(), { target: { value: title } });
+    fireEvent.keyDown(editorInput(), { key: "Tab" });
+    // A word in the number field, still in its open editor when the window shows another workspace.
+    fireEvent.keyDown(grid(), { key: "a" });
+    fireEvent.change(editorInput(), { target: { value: "abc" } });
+    closeCollectionChangeShellsForTests();
+    view.unmount();
+    await Promise.resolve();
+    expect(onNewRecord).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    // The kept row holds everything typed, the word included.
+    expect(collectionWriteFailures().map((failure) => [failure.change.field, failure.change.value, failure.message])).toEqual([
+      ["New record", kept, "dohc did not create this record. Enter a value estimate can take. Copy what you typed before discarding it."],
+    ]);
+  });
+
   it("names the file Untitled when the row has no title or name", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();

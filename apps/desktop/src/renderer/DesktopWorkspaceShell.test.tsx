@@ -476,6 +476,69 @@ describe("collection folders", () => {
     resetCollectionFieldWritesForTests();
   });
 
+  it("keeps a creation that stopped part way as that record's when its resume fails: the row takes no typing and makes no second file", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    bridge.createCollectionRecord
+      .mockResolvedValueOnce({ kind: "partial", created: ["tasks/Milk.md"], failedStage: "index", reason: "index unavailable",
+        retry: { mode: "resume", recordId, instruction: "Try again to finish this record." } })
+      .mockRejectedValueOnce(new Error("tasks/Milk.md already exists. Choose another record name."))
+      .mockRejectedValueOnce(new Error("The shared file session changed. Open the Collection again."));
+    const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
+    await typeRow("Milk", "Enter");
+    const note = () => document.querySelector<HTMLElement>("[data-new-record-status]:not([data-new-record-status='pending'])");
+    await waitFor(() => expect(note()?.textContent).toContain("dohc created the record file but could not finish the record."));
+    // The resume itself fails. The record still exists in part, so the row is still that record's.
+    fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(note()?.textContent).toContain("already exists"));
+    expect(note()!.getAttribute("data-new-record-status")).toBe("unconfirmed");
+    expect(within(note()!).getByRole("button", { name: "Discard" })).toBeTruthy();
+    // It takes no typing, and Enter starts no creation beside the unfinished one.
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-new-record]")!).getAllByRole("gridcell")[1]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("grid"), { key: "Enter" });
+    expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
+    // Its one retry is the same resume, for the same record, however often that fails.
+    fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(note()?.textContent).toContain("The shared file session changed."));
+    expect(note()!.getAttribute("data-new-record-status")).toBe("unconfirmed");
+    expect(bridge.createCollectionRecord.mock.calls.slice(1).map(([payload]) => [payload.name, payload.recordId])).toEqual([["Milk", recordId], ["Milk", recordId]]);
+    resetCollectionFieldWritesForTests();
+  });
+
+  it("keeps a new row the relay refused when the window switches workspaces before the file listing answers", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    let view!: ReturnType<typeof renderShell>;
+    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
+    const listing = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    // The record's file is kept on this computer as a draft the relay refused, and the listing that follows waits.
+    const refused = { path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz", delivery: "refused" as const, reason: "The owner's server did not accept this record." };
+    bridge.createCollectionRecord.mockImplementationOnce(async () => {
+      let first = true;
+      bridge.listWorkspaceFiles = vi.fn(async () => {
+        if (!first) return { visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] };
+        first = false;
+        return listing.promise;
+      });
+      return refused;
+    });
+    await typeRow("Milk", "Enter");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
+    // The root mounts a new shell for the workspace switched to, and only then does the listing answer.
+    view.rerender(otherWorkspaceShell(bridge));
+    await act(async () => listing.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
+    // The refusal still reaches what kept the row: its own workspace's list has it, with why and what was typed.
+    await waitFor(() => expect(collectionWriteFailures().map((failure) => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value]))
+      .toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]));
+    expect(collectionWriteFailures()[0]!.message).toContain("The owner's server did not accept this record.");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    resetCollectionFieldWritesForTests();
+  });
+
   it("still writes the typed values of a record made as the window switched workspaces, for its own workspace", async () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));

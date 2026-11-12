@@ -160,6 +160,8 @@ export interface NewRecordOptions {
     retry: (() => void) | null;
     /** The record's file exists and the record is not finished. `retry` finishes that same creation. */
     partial?: boolean;
+    /** The record a failed resume belongs to. Its only retry is that resume. */
+    recordId?: string;
   }): boolean;
 }
 
@@ -622,11 +624,12 @@ export function CollectionPage({
      * workspace, and once it shows another, the list of unsaved Collection
      * changes, which outlives the shell and keeps entries by workspace.
      */
-    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null) => {
+    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null, left?: { field: string; text: string }) => {
       if (collectionChangeShell(workspaceId)) {
         const message = `dohc did not create a record in ${rowHost.current.collectionName}. ${reason} You typed: ${typed}`;
         rowHost.current.onError(message, new TextNotSavedError(message, typed), retry);
-      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, values, `dohc did not create this record. ${reason}`);
+        // The kept row holds everything typed: its values, and text an editor held that its field cannot take, under that field.
+      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, left ? { ...values, [left.field]: left.text } : values, `dohc did not create this record. ${reason}`);
     };
     const save: TableNewRecord["save"] = (values, report) => {
       const now = rowHost.current;
@@ -694,7 +697,7 @@ export function CollectionPage({
       onUnsaved: (row) => {
         const typed = [...Object.entries(row.values).map(([field, value]) => `${field}: ${text(value)}`), ...(row.text ? [`${row.text.field}: ${row.text.text}`] : [])].join(", ");
         const field = Object.keys(row.values)[0] ?? "";
-        if (row.why === "closed") return keep(row.values, typed, `Enter a value ${row.text?.field ?? "the field"} can take.`, null);
+        if (row.why === "closed") return keep(row.values, typed, `Enter a value ${row.text?.field ?? "the field"} can take.`, null, row.text);
         const why = mayNotWrite.current() ?? "The field changed, or this view no longer shows it.";
         const message = `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${typed}`;
         rowHost.current.onError(message, new TextNotSavedError(message, typed));
