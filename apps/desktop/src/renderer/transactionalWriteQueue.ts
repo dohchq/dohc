@@ -3,7 +3,7 @@ import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { TableCellStatus, TableCellStatuses } from "@dohc/collection-views/table";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts";
 import { isCollectionRulesReplaced } from "../ipc/errorWords";
-import { closeCollectionChangeShellsForTests, collectionChangeShell, onCollectionChangesResumed, type CollectionChangeReports } from "./collectionChangeShells";
+import { closeCollectionChangeShellsForTests, collectionChangeShell, collectionChangesAdmitted, onCollectionChangesResumed, type CollectionChangeReports } from "./collectionChangeShells";
 import { cannotTake, emptyValue, fieldShape, isEmptyValue, object, parsePage, type TransactionalField, type TransactionalRow } from "./transactionalCollectionModel";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
 
@@ -17,6 +17,8 @@ export interface QueuedWrite {
   readonly kind: "edit" | "create" | "delete";
   /** The record changed. A new record has none yet. */
   readonly record: { readonly id: string | number; readonly key: string } | null;
+  /** What the person calls the record, for a deletion that does not happen. */
+  readonly name?: string;
   readonly operationId: string;
   /** What each field gets, by field id. A delete has none. */
   readonly values: Readonly<Record<string, Typed>>;
@@ -72,7 +74,8 @@ export type WriteAttention =
   | { kind: "unconfirmed"; write: QueuedWrite }
   | { kind: "waiting"; write: QueuedWrite; reason: string }
   | { kind: "held"; recordKey: string; recordId: string | number; fieldId: string; fieldName: string; value: AppBackendJson; reason: string }
-  | { kind: "record"; id: number; values: Readonly<Record<string, Typed>>; reason: string };
+  | { kind: "record"; id: number; values: Readonly<Record<string, Typed>>; reason: string }
+  | { kind: "deletion"; id: number; recordId: string | number; name: string; reason: string };
 
 /** One open page's view of its table's queue. */
 export interface WriteQueuePage {
@@ -106,7 +109,28 @@ const RULES_CHANGED = "The Collection's rules changed before dohc confirmed this
 const RECORD_GONE = "This record is no longer in the Collection, so dohc did not save this change.";
 const DISCARDED = "dohc could not confirm this change, and you discarded it. Check the record before you make the change again.";
 
+/** What a table's row in Notices says of the changes that need the person: how many dohc could not confirm, did not save and did not delete, and how many wait. */
+function reminderWords(tableName: string, items: readonly WriteAttention[]): string {
+  const of = (kind: WriteAttention["kind"]) => items.filter(item => item.kind === kind).length;
+  const unconfirmed = of("unconfirmed"), waiting = of("waiting"), unsaved = of("held") + of("record");
+  const deleted = items.flatMap(item => item.kind === "deletion" ? [item.name] : []);
+  const changes = (count: number) => count === 1 ? "a change" : `${count} changes`;
+  const did: string[] = [];
+  if (unconfirmed > 0) did.push(`could not confirm ${changes(unconfirmed)} to ${tableName}`);
+  if (unsaved > 0) did.push(did.length > 0 ? `did not save ${unsaved} more` : `did not save ${changes(unsaved)} to ${tableName}`);
+  if (deleted.length > 0) {
+    const others = deleted.length - 1;
+    did.push(`did not delete ${deleted[0]}${others === 0 ? "" : ` and ${others} other ${others === 1 ? "record" : "records"}`}${did.length > 0 ? "" : ` from ${tableName}`}`);
+  }
+  const sentences = did.length === 0 ? [] : [`dohc ${did.length < 3 ? did.join(", and ") : `${did.slice(0, -1).join(", ")}, and ${did.at(-1)}`}.`];
+  // A change that waits was not refused and did not fail, so the row says that it waits.
+  if (waiting > 0) sentences.push(did.length > 0 ? `${waiting === 1 ? "Another change is" : `${waiting} other changes are`} waiting.`
+    : `${waiting === 1 ? "A change" : `${waiting} changes`} to ${tableName} ${waiting === 1 ? "is" : "are"} waiting.`);
+  return `${sentences.join(" ")} Open it to check its records.`;
+}
+
 type Held = { id: number; recordId: string | number; fieldName: string; value: AppBackendJson; reason: string };
+type Deletion = { id: number; recordKey: string; recordId: string | number; name: string; reason: string };
 type Settled = { id: number; seq: number; status: TableCellStatus };
 type Shown = { signature: string; status: TableCellStatus };
 /** The one request in flight: a change, or a read of one record for its version. */
@@ -157,9 +181,10 @@ function receiptVersion(write: QueuedWrite, raw: AppBackendJson): number | null 
  * version a read returns when the receipt reports none.
  *
  * With no page open, an outcome goes to the toast and Notices of the
- * workspace's open shell. While the window shows another workspace the
- * queue sends nothing, and goes on when its workspace's shell opens again.
- * Changes still unsent or unconfirmed when dohc quits are lost.
+ * workspace's open shell. The queue sends only while main takes its
+ * workspace's requests: from when main admits the session of that shell
+ * until the shell closes. Until then its changes wait unsent, and none
+ * fails. Changes still unsent or unconfirmed when dohc quits are lost.
  */
 export class WriteQueue {
   private readonly writes: QueuedWrite[] = [];
@@ -170,8 +195,14 @@ export class WriteQueue {
   private rulesFrom: Page | null = null;
   /** The page that made each change, which hears first what became of it. */
   private readonly madeBy = new WeakMap<QueuedWrite, WriteQueuePage>();
-  /** Whether Notices holds this queue's row for the changes that need the person. */
-  private reminded = false;
+  /** The table's row in Notices for the changes that need the person, as its words and whether it offers Try again. Null while Notices holds none. */
+  private reminded: string | null = null;
+  /** The shell whose Notices hold that row and the rows below. A shell that opens later starts with none. */
+  private filedIn: CollectionChangeReports | undefined;
+  /** The changes dohc could not confirm that have a row of their own there, which the table's row leaves out. */
+  private ownRows = new WeakSet<QueuedWrite>();
+  /** The records with a row there for a read that failed or can't run, by key. */
+  private readonly unreadRows = new Set<string>();
   private readonly pages = new Set<Page>();
   private nextId = 1;
   /** Rises with each outcome. A read that starts at or after an outcome's number shows it. */
@@ -184,6 +215,8 @@ export class WriteQueue {
   private readonly held: CellMap<Held> = new Map();
   /** New records dohc did not save, kept the same way. */
   private readonly records: Array<{ id: number; values: Readonly<Record<string, Typed>>; reason: string }> = [];
+  /** Deletions that did not happen, kept the same way. A deletion has no value to keep, so this is its only trace. */
+  private deletions: Deletion[] = [];
   private shown: CellMap<Shown> = new Map();
   /** Why each change that waits does, by its id. */
   private waits = new Map<number, string>();
@@ -246,6 +279,8 @@ export class WriteQueue {
         return () => {
           this.pages.delete(page);
           page.settled.clear(); page.unread = null; page.readAsked = false;
+          // No page is left to show that a record's changes wait for a read, so the queue tries that read again, and Notices says so if it can't.
+          if (this.pages.size === 0) for (const pending of this.unknown.values()) pending.stuck = false;
           this.changed();
           // What waited for this page's read goes on without it.
           this.pump();
@@ -276,13 +311,15 @@ export class WriteQueue {
   }
 
   /** Adds a change after every change made before it. `from`: the page that made it. */
-  enqueue(change: { kind: QueuedWrite["kind"]; record: Pick<TransactionalRow, "id" | "version"> | null; operationId: string; values?: Record<string, Typed>; label: string; undo?: boolean }, from?: WriteQueuePage): number {
+  enqueue(change: { kind: QueuedWrite["kind"]; record: Pick<TransactionalRow, "id" | "version"> | null; name?: string; operationId: string; values?: Record<string, Typed>; label: string; undo?: boolean }, from?: WriteQueuePage): number {
     const record = change.record ? { id: change.record.id, key: JSON.stringify(change.record.id) } : null;
-    const write: QueuedWrite = { id: this.nextId++, kind: change.kind, record, operationId: change.operationId, values: change.values ?? {}, baseVersion: change.record?.version ?? 0,
+    const write: QueuedWrite = { id: this.nextId++, kind: change.kind, record, name: change.name, operationId: change.operationId, values: change.values ?? {}, baseVersion: change.record?.version ?? 0,
       key: crypto.randomUUID(), label: change.label, undo: change.undo ?? false, state: "queued" };
     if (from) this.madeBy.set(write, from);
     // A new change to a cell replaces the value dohc did not save there.
     if (record) for (const fieldId of Object.keys(write.values)) take(this.held, record.key, fieldId);
+    // A new deletion of a record replaces the one that did not happen.
+    if (record && write.kind === "delete") this.deletions = this.deletions.filter(kept => kept.recordKey !== record.key);
     this.writes.push(write);
     this.retain();
     this.changed();
@@ -310,6 +347,11 @@ export class WriteQueue {
     if (at >= 0) this.records.splice(at, 1);
     this.changed();
   }
+  /** Lets go of a deletion that did not happen. */
+  dismissDeletion(id: number): void {
+    this.deletions = this.deletions.filter(kept => kept.id !== id);
+    this.changed();
+  }
   /** Sends a change dohc could not confirm again, with the same request, while it still waits. An offline copy sends nothing, so the change keeps its Try again. */
   retry(id: number): void {
     const write = this.find(id);
@@ -332,7 +374,7 @@ export class WriteQueue {
     this.changed();
     this.pump();
   }
-  /** The changes that need the person: those dohc could not confirm, those that wait, and the values and new records it did not save. */
+  /** The changes that need the person: those dohc could not confirm, those that wait, the values and new records it did not save, and the deletions that did not happen. */
   attention(): WriteAttention[] {
     const waiting: WriteAttention[] = [];
     for (const write of this.writes) {
@@ -342,35 +384,53 @@ export class WriteQueue {
     }
     for (const [recordKey, fields] of this.held) for (const [fieldId, held] of fields) waiting.push({ kind: "held", recordKey, fieldId, recordId: held.recordId, fieldName: held.fieldName, value: held.value, reason: held.reason });
     for (const record of this.records) waiting.push({ kind: "record", ...record });
+    for (const { id, recordId, name, reason } of this.deletions) waiting.push({ kind: "deletion", id, recordId, name, reason });
     return waiting;
   }
 
   /**
-   * The shell of the queue's workspace opened, so the window shows that
-   * workspace again. One row in Notices says what here needs the person,
-   * since no page may be open to show it, and the changes not sent yet go on.
+   * Main admitted the session of the queue's workspace, so it takes the
+   * workspace's requests again. One row in Notices says what here needs the
+   * person, since no page may be open to show it, and the changes not sent
+   * yet go on.
    */
   resume(workspaceId: string): void {
-    const rules = this.rules, shell = collectionChangeShell(workspaceId);
-    if (!rules || rules.workspaceId !== workspaceId || !shell) return;
-    const waiting = this.attention();
-    if (waiting.length > 0) {
-      const unconfirmed = waiting.filter(item => item.kind === "unconfirmed").length, unsaved = waiting.length - unconfirmed;
-      const count = (changes: number) => changes === 1 ? "a change" : `${changes} changes`;
-      const words = `${unconfirmed === 0 ? `dohc did not save ${count(unsaved)} to ${rules.tableName}`
-        : unsaved === 0 ? `dohc could not confirm ${count(unconfirmed)} to ${rules.tableName}`
-        : `dohc could not confirm ${count(unconfirmed)} to ${rules.tableName}, and did not save ${unsaved} more`}. Open it to check its records.`;
-      // Try again sends what dohc could not confirm, and reads again the records it could not read.
-      const again = !rules.offline && waiting.some(item => item.kind === "unconfirmed" || (item.kind === "waiting" && item.reason === WAITING_READ));
-      this.reminded = true;
-      shell.onError(words, new Error(words), again ? () => {
-        for (const pending of this.unknown.values()) pending.stuck = false;
-        for (const write of [...this.writes]) this.retry(write.id);
-        this.changed();
-        this.pump();
-      } : null, this.reminder());
-    }
+    if (this.rules?.workspaceId !== workspaceId) return;
+    this.remind(true);
     this.pump();
+  }
+  /**
+   * Keeps the table's row in Notices to what still needs the person. `first`
+   * files the row, with its toast. After that the row changes where it
+   * stands, and goes once nothing needs the person.
+   */
+  private remind(first = false): void {
+    const rules = this.rules, shell = this.shell();
+    if (!rules || !shell || (!first && this.reminded === null)) return;
+    // A change or a record with a row of its own in these Notices is not said twice.
+    const items = this.attention().filter(item => item.kind === "unconfirmed" ? !this.ownRows.has(item.write)
+      : item.kind !== "waiting" || item.reason !== WAITING_READ || !this.unreadRows.has(item.write.record!.key));
+    if (items.length === 0) {
+      if (this.reminded !== null) { this.reminded = null; shell.onSettled?.(this.reminder()); }
+      return;
+    }
+    const words = reminderWords(rules.tableName, items);
+    // Try again sends what dohc could not confirm, and reads again the records it could not read, where the table's read can find one by its key.
+    const reads = this.keyRead(rules) !== null;
+    const again = !rules.offline && items.some(item => item.kind === "unconfirmed" || (reads && item.kind === "waiting" && item.reason === WAITING_READ));
+    const row = JSON.stringify([words, again]);
+    if (!first && row === this.reminded) return;
+    this.reminded = row;
+    const retry = again ? () => {
+      // The shell takes a row away as its Try again runs, so the row is filed again below while anything still needs the person.
+      this.reminded = "";
+      if (reads) for (const pending of this.unknown.values()) pending.stuck = false;
+      for (const write of [...this.writes]) this.retry(write.id);
+      this.changed();
+      this.pump();
+    } : null;
+    if (first) shell.onError(words, new Error(words), retry, this.reminder());
+    else shell.onError(words, new Error(words), retry, this.reminder(), true);
   }
   private reminder(): string { return `collection-changes:${this.scope}`; }
 
@@ -398,16 +458,23 @@ export class WriteQueue {
     this.pump();
   }
 
+  /** The open shell of the queue's workspace. One that opened since the queue last looked holds none of the queue's rows. */
+  private shell(): CollectionChangeReports | undefined {
+    const shell = this.rules ? collectionChangeShell(this.rules.workspaceId) : undefined;
+    if (shell !== this.filedIn) { this.filedIn = shell; this.reminded = null; this.ownRows = new WeakSet(); this.unreadRows.clear(); }
+    return shell;
+  }
   /** Where an outcome is reported: an open page, or with none open the shell of the queue's workspace while that is open. */
   private reports(): Pick<CollectionChangeReports, "onError" | "onSettled"> | undefined {
+    const shell = this.shell();
     for (const page of this.pages) if (page.host) return page.host;
-    return this.rules ? collectionChangeShell(this.rules.workspaceId) : undefined;
+    return shell;
   }
 
   private pump(): void {
     const rules = this.rules;
-    // While the window shows another workspace, main refuses this one's changes, so they wait unsent.
-    if (!rules || this.flight || rules.offline || !collectionChangeShell(rules.workspaceId)) return;
+    // Until main has admitted this workspace's session, it refuses the workspace's changes, so they wait unsent.
+    if (!rules || this.flight || rules.offline || !collectionChangesAdmitted(rules.workspaceId)) return;
     let waitsForRead = false, stuck = false;
     const blocked = new Set<string>();
     for (const write of [...this.writes]) {
@@ -422,6 +489,13 @@ export class WriteQueue {
         if (!pending.lookup && this.pages.size > 0) { waitsForRead = true; continue; }
         if (this.lookup(write.record!, pending, rules)) return;
         stuck = pending.stuck = true;
+        // No page is open to show that the record's changes wait, and only a page's read can return the record, so Notices says so.
+        const shell = this.pages.size === 0 ? this.shell() : undefined;
+        if (shell) {
+          const words = `dohc could not look up record ${String(write.record!.id)} in ${rules.tableName}, so its changes are waiting. Open ${rules.tableName} and find the record.`;
+          this.unreadRows.add(key!);
+          shell.onError(words, new Error(words), null, this.recordRow(key!));
+        }
         continue;
       }
       if (this.send(write, rules)) return;
@@ -474,20 +548,22 @@ export class WriteQueue {
    * record by its key.
    */
   private lookup(record: NonNullable<QueuedWrite["record"]>, pending: Unknown, rules: WriteQueueRules): boolean {
-    const key = rules.primaryKeyFieldId;
-    const read = rules.operations.find(operation => operation.kind === "read" && operation.readOnly);
-    if (key === undefined || !read?.fieldIds.includes(key)) return false;
+    const found = this.keyRead(rules);
+    if (!found) return false;
+    const { read, key } = found;
     const flight: Flight = { abort: new AbortController(), revisionSha256: rules.revisionSha256 };
     this.flight = flight;
     const request: TransactionalInvoke = { workspaceId: rules.workspaceId, datasetId: rules.datasetId, revision: rules.revision, revisionSha256: rules.revisionSha256, operationId: read.operationId,
       input: { limit: 1, filters: [{ fieldId: key, value: record.id }] }, idempotencyKey: crypto.randomUUID() };
     const failed = (cause: unknown) => {
       pending.stuck = true;
+      const reports = this.reports();
+      if (reports) this.unreadRows.add(record.key);
       // Try again reads the record once more, while its changes still wait for it.
-      this.reports()?.onError(`dohc could not read record ${String(record.id)} in ${rules.tableName}, so its changes are waiting.`, cause, () => {
+      reports?.onError(`dohc could not read record ${String(record.id)} in ${rules.tableName}, so its changes are waiting.`, cause, () => {
         if (this.unknown.get(record.key) !== pending) return;
         pending.stuck = false; this.changed(); this.pump();
-      }, `collection-record:${this.scope}:${record.key}`);
+      }, this.recordRow(record.key));
     };
     const ended = (run: () => void) => {
       if (this.flight !== flight) return;
@@ -511,7 +587,16 @@ export class WriteQueue {
     return true;
   }
 
+  /** The table's read and its key field, when that read can find one record by its key. */
+  private keyRead(rules: WriteQueueRules): { read: DatasetOperation; key: string } | null {
+    const key = rules.primaryKeyFieldId;
+    const read = rules.operations.find(operation => operation.kind === "read" && operation.readOnly);
+    return key !== undefined && read?.fieldIds.includes(key) ? { read, key } : null;
+  }
+
   private identity(write: QueuedWrite): string { return `collection-change:${this.scope}:${write.key}`; }
+  /** The row in Notices for a record the queue could not read. */
+  private recordRow(recordKey: string): string { return `collection-record:${this.scope}:${recordKey}`; }
 
   /**
    * A change was confirmed, refused, or dropped, so each page's records are
@@ -570,11 +655,12 @@ export class WriteQueue {
       // The host ran nothing: the request names rules it has replaced, so the same request can never save.
       this.outcome();
       if (write.record) this.forget(write.record.key);
-      this.drop(write, RULES_CHANGED);
+      this.drop(write, RULES_CHANGED, false, true);
       reports?.onError(open ? "The Collection's rules changed. Check the records before making another change." : `The rules of ${rules.tableName} changed, so dohc did not save the change. Open it to check its records.`, cause, null);
       for (const page of this.pages) page.host?.describe();
     } else {
       write.state = "unconfirmed";
+      if (reports) this.ownRows.add(write);
       for (const page of this.pages) page.host?.unconfirmed(write);
       // Try again sends the change only while it still waits, so a row left in Notices can't send it twice.
       reports?.onError(open ? NOT_CONFIRMED : `dohc could not confirm the change to ${rules.tableName}. Open it to check its records.`, cause, () => this.retry(write.id), this.identity(write));
@@ -591,10 +677,11 @@ export class WriteQueue {
 
   /**
    * Takes a change out for good. What the person gave stays for them: in a
-   * page's form that shows why, on its cells, or, for a new record, in the
-   * page's list.
+   * page's form that shows why, on its cells, or, for a new record or a
+   * deletion, in the page's list. `ranNothing`: the host answered that it
+   * did not run the change.
    */
-  private drop(write: QueuedWrite, reason: string, refused = false): void {
+  private drop(write: QueuedWrite, reason: string, refused = false, ranNothing = refused): void {
     const at = this.writes.indexOf(write);
     if (at >= 0) this.writes.splice(at, 1);
     this.retire(write.id);
@@ -603,6 +690,13 @@ export class WriteQueue {
     // The page that made the change shows how it ended. Another page takes it, as by opening a new record's form again, only once that page has closed.
     const from = this.madeBy.get(write), maker = from && [...this.pages].find(page => page.view === from);
     if (maker ? maker.host?.dropped(write, reason, refused) : [...this.pages].some(page => page.host?.dropped(write, reason, refused))) return;
+    if (write.kind === "delete") {
+      // A deletion leaves no value behind, so one that did not happen stays for the person: one never sent, or one the host did not run.
+      // One that may have happened does not stay, and neither does one whose record is gone, as the person asked.
+      const { key, id } = write.record!;
+      if ((ranNothing || !write.request) && reason !== RECORD_GONE) this.deletions = [...this.deletions.filter(kept => kept.recordKey !== key), { id: write.id, recordKey: key, recordId: id, name: write.name ?? `record ${String(id)}`, reason }];
+      return;
+    }
     const fields = Object.entries(write.values);
     if (fields.length === 0) return;
     if (!write.record) { this.records.push({ id: write.id, values: write.values, reason }); return; }
@@ -650,11 +744,17 @@ export class WriteQueue {
     this.shown = next;
     this.waits = waits;
     this.changes++;
-    // The row Notices holds for the changes that needed the person goes once none does.
-    if (this.reminded && this.attention().length === 0) { this.reminded = false; this.reports()?.onSettled?.(this.reminder()); }
+    // A record that was read, or has no change left to wait for it, takes back the row its read left in Notices.
+    const reports = this.reports();
+    for (const key of [...this.unreadRows]) {
+      if (this.unknown.get(key)?.stuck && this.writes.some(write => write.record?.key === key)) continue;
+      this.unreadRows.delete(key);
+      reports?.onSettled?.(this.recordRow(key));
+    }
+    this.remind();
     for (const listener of [...this.listeners]) listener();
     // A queue with no page open and nothing left to keep goes.
-    if (this.pages.size === 0 && this.flight === null && this.writes.length === 0 && this.held.size === 0 && this.records.length === 0 && queues.get(this.scope) === this) queues.delete(this.scope);
+    if (this.pages.size === 0 && this.flight === null && this.writes.length === 0 && this.held.size === 0 && this.records.length === 0 && this.deletions.length === 0 && queues.get(this.scope) === this) queues.delete(this.scope);
   }
 
   /** Stays in the list while a page is open or it holds anything. */
@@ -679,7 +779,7 @@ export function writeQueueFor(scope: string): WriteQueue {
 export function hasWriteQueueForTests(scope: string): boolean {
   return queues.has(scope);
 }
-// A workspace's shell can list notices: its tables' queues say what needs the person, and send what waited.
+// Main takes a workspace's requests again: its tables' queues say what needs the person, and send what waited.
 onCollectionChangesResumed(workspaceId => { for (const queue of [...queues.values()]) queue.resume(workspaceId); });
 /** Tests start without changes an earlier test's page kept, and with no shell open. */
 export function resetWriteQueuesForTests(): void {

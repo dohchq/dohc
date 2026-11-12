@@ -6,7 +6,7 @@ import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
-import { openCollectionChangeShell } from "./collectionChangeShells";
+import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 vi.mock("@dohc/collection-views",()=>({
   BoardView: (props:BoardViewProps)=><div data-testid="board" data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
   CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
@@ -24,8 +24,9 @@ const calendar:CollectionTableView={...board,viewId:"calendar",name:"Calendar",k
 const empty={rows:[],nextCursor:null};
 function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<{result:AppBackendJson}>,view=board) {
   const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onSettled:vi.fn(),onNotice:vi.fn(),activeView:view};
-  // The window shows the page's workspace, so its changes send.
+  // The window shows the page's workspace and main has admitted it, so its changes send.
   openCollectionChangeShell(props.workspaceId,props);
+  admitCollectionChanges(props.workspaceId);
   return {...render(<TransactionalCollectionPage {...props}/>),props};
 }
 // The table's virtualizer reads offsetWidth and offsetHeight, which jsdom reports as 0, so every element

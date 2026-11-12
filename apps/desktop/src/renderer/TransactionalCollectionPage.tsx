@@ -162,16 +162,19 @@ const recordText = (values: Readonly<Record<string, Typed>>) => Object.values(va
 /**
  * The changes that need the person and that no cell on screen shows: a
  * change dohc could not confirm, with Try again and Discard, a change that
- * waits, and a value or a new record dohc did not save, with a copy of it
- * and the control that clears it.
+ * waits, a value or a new record dohc did not save, with a copy of it
+ * and the control that clears it, and a deletion that did not happen, with
+ * why and Dismiss.
  */
-function UnshownChanges({ items, onRetry, onDiscard, onClear, onClearRecord }: { items: readonly WriteAttention[]; onRetry(id: number): void; onDiscard(id: number): void; onClear(recordKey: string, fieldId: string): void; onClearRecord(id: number): void }) {
+function UnshownChanges({ items, onRetry, onDiscard, onClear, onClearRecord, onDismissDeletion }: { items: readonly WriteAttention[]; onRetry(id: number): void; onDiscard(id: number): void; onClear(recordKey: string, fieldId: string): void; onClearRecord(id: number): void; onDismissDeletion(id: number): void }) {
   const ids = useId();
   return <div role="group" aria-label="Changes dohc did not confirm" className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3 text-[12px] text-muted">
     {items.map((item, index) => item.kind === "unconfirmed"
       ? <div key={`change:${item.write.id}`} className="flex flex-wrap items-center gap-2"><span>{unconfirmedWords(item.write)}</span>
         <SecondaryButton size="row" onClick={() => onRetry(item.write.id)}>Try again</SecondaryButton><SecondaryButton size="row" title={DISCARD_HINT} onClick={() => onDiscard(item.write.id)}>Discard</SecondaryButton></div>
       : item.kind === "waiting" ? <span key={`waiting:${item.write.id}`}>{waitingWords(item.write, item.reason)}</span>
+      : item.kind === "deletion" ? <div key={`deletion:${item.id}`} className="flex flex-wrap items-center gap-2"><span>dohc did not delete {item.name}. {item.reason}</span>
+        <SecondaryButton size="row" onClick={() => onDismissDeletion(item.id)}>Dismiss</SecondaryButton></div>
       : item.kind === "held" ? <div key={`value:${item.recordKey}:${item.fieldId}`} className="flex flex-col gap-1">
         <span>{item.fieldName} of record {String(item.recordId)}</span>
         <ChangedValue name={item.fieldName} value={item.value} disabled={false} describedBy={`${ids}-${index}`} onClear={() => onClear(item.recordKey, item.fieldId)} />
@@ -657,7 +660,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || !confirmed) return;
       setDetails(null);
       // The deletion follows the record's changes still queued, at the version they leave it.
-      queue.enqueue({ kind: "delete", record: row, operationId: remove.operationId, label: "Deleted the record" }, view);
+      queue.enqueue({ kind: "delete", record: row, name: recordName(row, fields), operationId: remove.operationId, label: "Deleted the record" }, view);
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { asking.current = false; }
   }
@@ -825,7 +828,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const cellShows = (write: QueuedWrite, state: "unconfirmed" | "waiting") => write.record !== null &&
     Object.keys(write.values).some(fieldId => inCell(write.record!.key, fieldId) && view.statuses.get(write.record!.key, fieldId)?.state === state);
   const unshown = queue.attention().filter(item => item.kind === "unconfirmed" || item.kind === "waiting" ? item.write.id !== awaiting && !cellShows(item.write, item.kind)
-    : item.kind === "record" || !(inCell(item.recordKey, item.fieldId) && editableIds.includes(item.fieldId)));
+    : item.kind !== "held" || !(inCell(item.recordKey, item.fieldId) && editableIds.includes(item.fieldId)));
   const problem = (entry: FormField) => entry.changed ? VALUE_CHANGED : invalid[entry.field.fieldId];
   const errorId = (entry: FormField) => problem(entry) === undefined ? undefined : `${errorIds}-${encodeURIComponent(entry.field.fieldId)}`;
   const fieldError = (entry: FormField) => problem(entry) === undefined ? null : <FieldError id={errorId(entry)!}>{problem(entry)}</FieldError>;
@@ -904,7 +907,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </div>
     {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
       : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
-    {unshown.length > 0 ? <UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} /> : null}
+    {unshown.length > 0 ? <UnshownChanges items={unshown} onRetry={id => queue.retry(id)} onDiscard={id => queue.discard(id)} onClear={(recordKey, fieldId) => queue.dismiss(recordKey, fieldId)} onClearRecord={id => queue.dismissRecord(id)} onDismissDeletion={id => queue.dismissDeletion(id)} /> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? page ? <p role="status" className="m-0 text-[12px] text-muted">Loading records…</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />

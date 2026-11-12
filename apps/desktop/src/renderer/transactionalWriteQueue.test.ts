@@ -4,7 +4,7 @@ import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import { deferred, type Deferred } from "../testing/deferred";
 import type { TransactionalField } from "./transactionalCollectionModel";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
-import { openCollectionChangeShell, resumeCollectionChanges } from "./collectionChangeShells";
+import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 import { hasWriteQueueForTests, resetWriteQueuesForTests, writeQueueFor, type WriteQueueHost } from "./transactionalWriteQueue";
 
 const scope = "workspace/collection/table";
@@ -31,11 +31,16 @@ function host(overrides: Rules = {}) {
 }
 /** The toast and Notices of a workspace's open shell. */
 const shellReports = () => ({ onError: vi.fn(), onSettled: vi.fn(), onNotice: vi.fn() });
-/** Opens the workspace's shell, as the window does when it shows the workspace. Returns its reports and what closes it. */
-function openShell(workspaceId = "workspace") {
+/** Opens the workspace's shell, as the window does when it shows the workspace. Main has not admitted its session yet. Returns its reports, what admits it, and what closes it. */
+function mountShell(workspaceId = "workspace") {
   const reports = shellReports(), close = openCollectionChangeShell(workspaceId, reports);
-  resumeCollectionChanges(workspaceId);
-  return { ...reports, close };
+  return { ...reports, admit: () => admitCollectionChanges(workspaceId), close };
+}
+/** Opens the workspace's shell and admits its session, as the window does once main has opened the workspace. */
+function openShell(workspaceId = "workspace") {
+  const mounted = mountShell(workspaceId);
+  mounted.admit();
+  return mounted;
 }
 // The window shows the pages' workspace unless a test closes its shell.
 let shell: ReturnType<typeof openShell>;
@@ -537,7 +542,7 @@ describe("while the window shows another workspace", () => {
     expect(shell.onError).not.toHaveBeenCalled();
     // The workspace's shell opens again: one row for the table, for the change dohc could not confirm and the one that waits behind it.
     const back = openShell();
-    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People. Another change is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
     const [, , retry, identity] = back.onError.mock.calls[0]!;
     // Try again sends the exact request, and the row goes once nothing needs the person.
     (retry as () => void)();
@@ -575,6 +580,273 @@ describe("while the window shows another workspace", () => {
     expect(rules.calls).toHaveLength(0);
     const back = openShell();
     expect(back.onError).not.toHaveBeenCalled();
+    expect(rules.calls).toHaveLength(1);
+  });
+
+  it("keeps the table's row in Notices after its Try again, for the value dohc did not save, until the person clears that value", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const lost = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.hold(row(2, 4), name, "typed", "This edit was still open, so dohc did not save it.");
+    shell.close();
+    close();
+    rules.calls[0]!.answer.reject(new Error("Collection changes stopped because this window changed workspaces."));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    const [, , retry, identity] = back.onError.mock.calls[0]!;
+    // Try again sends the change. The row stays, changed where it stands, for the value that still needs the person.
+    (retry as () => void)();
+    expect(rules.calls[1]!.request).toEqual(rules.calls[0]!.request);
+    expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People. Open it to check its records.", expect.any(Error), null, identity, true);
+    rules.calls[1]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(back.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
+    expect(back.onError).toHaveBeenCalledTimes(2);
+    expect(back.onSettled).not.toHaveBeenCalledWith(identity);
+    // The row goes once nothing needs the person.
+    queue.dismiss("2", "name");
+    expect(back.onSettled).toHaveBeenCalledWith(identity);
+  });
+
+  it("leaves a change out of the table's row once it has a row of its own, so a change that fails again is said once", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const lost = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.hold(row(2, 4), name, "typed", "This edit was still open, so dohc did not save it.");
+    shell.close();
+    close();
+    rules.calls[0]!.answer.reject(new Error("Collection changes stopped because this window changed workspaces."));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    const back = openShell();
+    (back.onError.mock.calls[0]![2] as () => void)();
+    rules.calls[1]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    // The change has its own row, with Try again. The table's row still counts only the value.
+    expect(back.onError.mock.calls.map(([words]) => words)).toEqual([
+      "dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.",
+      "dohc did not save a change to People. Open it to check its records.",
+      "dohc could not confirm the change to People. Open it to check its records.",
+    ]);
+  });
+});
+
+describe("until main has admitted the workspace's session", () => {
+  it("sends nothing while the workspace's shell is open, marks nothing unconfirmed, and sends with no page open once main admits it", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    const waiting = queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    shell.close();
+    close();
+    // The window shows the workspace again. Its shell is open, and main still holds the other workspace's session.
+    const back = mountShell();
+    // The change that was in flight is confirmed meanwhile. The next one stays unsent, and is no failure.
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(queue.size).toBe(1));
+    expect(rules.calls).toHaveLength(1);
+    expect(queue.find(waiting)?.state).toBe("queued");
+    expect(queue.attention()).toEqual([]);
+    expect(back.onError).not.toHaveBeenCalled();
+    // Main admits the session, and the change goes.
+    back.admit();
+    expect(rules.calls[1]!.request.input).toEqual({ id: 2, expectedVersion: 4, values: { name: "Beatrice" } });
+    expect(back.onError).not.toHaveBeenCalled();
+  });
+
+  it("admits only the open shell, when the shell's effects run twice as in development, and stops sending when the admission ends", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    shell.close();
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    close();
+    // The shell opens, closes, and opens again. The first one's close runs once more, late.
+    const first = mountShell();
+    first.close();
+    const second = mountShell();
+    first.close();
+    // An admission of the shell that closed admits nothing.
+    expect(rules.calls).toHaveLength(0);
+    const end = second.admit();
+    expect(rules.calls).toHaveLength(1);
+    expect(second.onError).not.toHaveBeenCalled();
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
+    // The admission ends, as when the shell opens the workspace again, and a change made then waits.
+    end();
+    const next = writeQueueFor(scope), page = next.page();
+    page.sync(rules);
+    const closeNext = page.open();
+    next.enqueue(edit(row(2, 4), name, "Beatrice"));
+    closeNext();
+    expect(rules.calls).toHaveLength(1);
+    second.admit();
+    expect(rules.calls).toHaveLength(2);
+    expect(first.onError).not.toHaveBeenCalled();
+    expect(second.onError).not.toHaveBeenCalled();
+  });
+});
+
+describe("a record the queue can't read by a key", () => {
+  const LOOK_UP = "dohc could not look up record 1 in People, so its changes are waiting. Open People and find the record.";
+
+  it("says in Notices that the record's changes wait, when main admits the workspace with no page open", async () => {
+    const rules = host({ primaryKeyFieldId: undefined }), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    shell.close();
+    close();
+    // The first change's receipt reports no version while the window shows another workspace.
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(queue.size).toBe(1));
+    const back = openShell();
+    expect(rules.calls).toHaveLength(1);
+    // No Try again: only a page's read can return the record.
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith(LOOK_UP, expect.any(Error), null, expect.any(String));
+    expect(queue.attention()).toEqual([expect.objectContaining({ kind: "waiting", reason: "Waiting for dohc to read this record again" })]);
+    // A page opens and its read returns the record. The change goes, and the row goes.
+    const again = open(rules);
+    again.page.readShown(again.page.readStarted(), [row(1, 6)]);
+    expect(rules.calls[1]!.request.input).toEqual({ id: 1, expectedVersion: 6, values: { amount: 9 } });
+    expect(rules.onSettled).toHaveBeenCalledWith(back.onError.mock.calls[0]![3]);
+  });
+
+  it("says so too when a receipt reports no version after the table's page closed", async () => {
+    const rules = host({ primaryKeyFieldId: undefined }), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    close();
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledOnce());
+    expect(shell.onError.mock.calls[0]).toEqual([LOOK_UP, expect.any(Error), null, expect.any(String)]);
+    expect(rules.calls).toHaveLength(1);
+  });
+
+  it("says so in Notices when the page that showed the record's changes waiting closes", async () => {
+    const rules = host({ primaryKeyFieldId: undefined }), { queue, page, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalledOnce());
+    // The page's read leaves the record out, and the page shows that its change waits.
+    page.readShown(page.readStarted(), []);
+    expect(state(page, 1, amount)).toBe("waiting");
+    expect([rules.onError, shell.onError].map(report => report.mock.calls.length)).toEqual([0, 0]);
+    close();
+    expect(shell.onError).toHaveBeenCalledExactlyOnceWith(LOOK_UP, expect.any(Error), null, expect.any(String));
+  });
+
+  it("counts a record whose read failed while the window showed another workspace in the table's row, with Try again", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), amount, 9));
+    close();
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(rules.inputs("read")).toHaveLength(1));
+    // The window leaves the workspace, and main refuses the read in flight.
+    shell.close();
+    rules.calls[1]!.answer.reject(new Error("Collection changes stopped because this window changed workspaces."));
+    await vi.waitFor(() => expect(queue.attention()).toHaveLength(1));
+    expect(shell.onError).not.toHaveBeenCalled();
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("A change to People is waiting. Open it to check its records.", expect.any(Error), expect.any(Function), expect.any(String));
+    (back.onError.mock.calls[0]![2] as () => void)();
+    rules.calls[2]!.answer.resolve({ result: { rows: [row(1, 8)], nextCursor: null } });
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 8, values: { amount: 9 } });
+    expect(back.onSettled).toHaveBeenCalledWith(back.onError.mock.calls[0]![3]);
+  });
+});
+
+describe("a deletion that did not happen", () => {
+  const RULES_CHANGED = "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.";
+  const replaced = () => new Error("Error invoking remote method 'desktop:dataset': DatasetHostError [conflict]: The Collection's rules changed. Its owner must approve this access again.");
+
+  it.each([
+    ["the Collection refuses it", () => refusal("Paid records stay."), "The Collection refused this change. Paid records stay."],
+    ["its host refuses it for replaced rules", replaced, RULES_CHANGED],
+  ])("is kept when %s with no page and no shell open, and the table's row counts and names it when the window returns", async (_when, cause, reason) => {
+    const rules = host(), { queue, close } = open(rules);
+    const gone = queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    shell.close();
+    close();
+    rules.calls[0]!.answer.reject(cause());
+    await vi.waitFor(() => expect(queue.attention()).toEqual([{ kind: "deletion", id: gone, recordId: 1, name: "Alice", reason }]));
+    expect(shell.onError).not.toHaveBeenCalled();
+    expect(writeQueueFor(scope)).toBe(queue);
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not delete Alice from People. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    // Dismiss lets it go, and the row and the queue with it.
+    queue.dismissDeletion(gone);
+    expect(back.onSettled).toHaveBeenCalledExactlyOnceWith(back.onError.mock.calls[0]![3]);
+    expect(hasWriteQueueForTests(scope)).toBe(false);
+  });
+
+  it("is named by its record's id when the page gave no name, counted with the others, and replaced by a new deletion of its record", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    queue.enqueue({ kind: "delete", record: row(2, 4), operationId: "delete", label: "Deleted the record" });
+    queue.hold(row(3, 1), name, "typed", "This edit was still open, so dohc did not save it.");
+    shell.close();
+    close();
+    rules.calls[0]!.answer.reject(refusal("No."));
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(queue.attention().filter(item => item.kind === "deletion")).toHaveLength(1));
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledExactlyOnceWith("dohc did not save a change to People, and did not delete Alice. Open it to check its records.", expect.any(Error), null, expect.any(String));
+    rules.calls[1]!.answer.reject(refusal("No."));
+    await vi.waitFor(() => expect(back.onError).toHaveBeenLastCalledWith("dohc did not save a change to People, and did not delete Alice and 1 other record. Open it to check its records.", expect.any(Error), null, back.onError.mock.calls[0]![3], true));
+    expect(queue.attention().filter(item => item.kind === "deletion").map(item => item.name)).toEqual(["Alice", "record 2"]);
+    // The person deletes the first record again, and that deletion is no longer one that did not happen.
+    queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    expect(queue.attention().filter(item => item.kind === "deletion").map(item => item.name)).toEqual(["record 2"]);
+  });
+
+  it("keeps a deletion the rules stopped allowing before it was sent, and nothing of one sent before them, which may have happened", () => {
+    const rules = host(), { queue, page } = open(rules);
+    // The first deletion is with the host. The second is not sent yet.
+    const sent = queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    const unsent = queue.enqueue({ kind: "delete", record: row(2, 4), name: "Bea", operationId: "delete", label: "Deleted the record" });
+    // New rules take the delete operation away.
+    page.sync({ ...rules, revision: 2, revisionSha256: "b".repeat(64), operations: operations.filter(candidate => candidate.kind !== "delete") });
+    queue.rulesChanged();
+    expect([queue.find(sent), queue.find(unsent)]).toEqual([undefined, undefined]);
+    expect(queue.attention()).toEqual([{ kind: "deletion", id: unsent, recordId: 2, name: "Bea", reason: "The Collection's rules no longer allow this change, so dohc did not save it." }]);
+  });
+
+  it("keeps nothing of a deletion dohc could not confirm once the person discards it, since it may have happened", async () => {
+    const rules = host(), { queue } = open(rules);
+    const lost = queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    queue.discard(lost);
+    expect(queue.attention()).toEqual([]);
+  });
+
+  it("keeps nothing of a deletion whose record is already gone", async () => {
+    const rules = host(), { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    page.readShown(page.readStarted(), []);
+    rules.calls[1]!.answer.resolve({ result: { rows: [], nextCursor: null } });
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    expect(queue.attention()).toEqual([]);
+  });
+});
+
+describe("a Collection whose folder moved while its page was closed", () => {
+  it("tells the person that the change sent through the closed page failed, and sends it through a page opened at the new folder", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const moved = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    close();
+    // The closed page's request names the folder the Collection was in, where main finds none.
+    rules.calls[0]!.answer.reject(new Error("Error invoking remote method 'desktop:dataset': Error: Collection reference broken: budget/dataset.json. Choose its current dataset.json path."));
+    await vi.waitFor(() => expect(shell.onError).toHaveBeenCalledOnce());
+    expect(shell.onError.mock.calls[0]).toEqual(["dohc could not confirm the change to People. Open it to check its records.",
+      expect.objectContaining({ message: expect.stringContaining("Collection reference broken: budget/dataset.json.") }), expect.any(Function), expect.any(String)]);
+    expect(queue.find(moved)?.state).toBe("unconfirmed");
+    // The Collection opens at its new folder. That page's requests reach it, and Try again sends the change through them.
+    const reopened = host();
+    open(reopened);
+    queue.retry(moved);
+    expect(reopened.calls[0]!.request).toEqual(rules.calls[0]!.request);
     expect(rules.calls).toHaveLength(1);
   });
 });

@@ -7,7 +7,7 @@ import { describeApprovedDataset, parseDatasetDescription } from "@dohc/security
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetDefinitionFromDrafts } from "./collections/datasetDefinitionFromDrafts";
 import { transactionalDescription } from "./transactionalCollectionModel";
-import { openCollectionChangeShell } from "./collectionChangeShells";
+import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -34,8 +34,9 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
   const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page() : request.operationId === edit ? receipt() : { id: 1, version: 1 } }));
   const onError = vi.fn(), onNotice = vi.fn();
   const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError, onNotice, ...overrides };
-  // The window shows the page's workspace, so its changes send, and report to its shell once the page has closed.
+  // The window shows the page's workspace and main has admitted it, so its changes send, and report to its shell once the page has closed.
   openCollectionChangeShell(props.workspaceId, { onError: props.onError, onSettled: props.onSettled, onNotice: props.onNotice });
+  admitCollectionChanges(props.workspaceId);
   return { invoke, onError, onNotice, props, ...render(<TransactionalCollectionPage {...props} />) };
 }
 type Invoke = { mock: { calls: Array<[TransactionalInvoke, ...unknown[]]> } };
@@ -1853,6 +1854,7 @@ describe("one queue for a table's changes", () => {
       : answers[sent(invoke, edit).length - 1]!.promise);
     const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError: vi.fn(), onNotice: vi.fn() };
     openCollectionChangeShell(props.workspaceId, props);
+    admitCollectionChanges(props.workspaceId);
     const left = <div key="left" data-testid="left"><TransactionalCollectionPage {...props} /></div>;
     const right = <div key="right" data-testid="right"><TransactionalCollectionPage {...props} /></div>;
     const view = render(<>{left}{right}</>);
@@ -2041,6 +2043,63 @@ describe("what a change that did not save leaves for the person", () => {
     fireEvent.keyDown(editorInput(), { key: "Enter" });
     await waitFor(() => expect(sent(view.invoke, edit)).toHaveLength(1));
     expect(sent(view.invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Bob" } });
+  });
+
+  it("sends nothing when its page closes under a focused cell editor, where the browser blurs the input as it removes it, and keeps the text on its cell", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    const input = editorInput();
+    fireEvent.change(input, { target: { value: "Bob" } });
+    expect(document.activeElement).toBe(input);
+    // Chromium has blurred a focused element as it left the page. jsdom does not, so the test does it for jsdom.
+    const blurred = vi.fn();
+    input.addEventListener("focusout", blurred);
+    const removeChild = Node.prototype.removeChild;
+    const removal = vi.spyOn(Node.prototype, "removeChild").mockImplementation(function (this: Node, child: Node) {
+      if (input.isConnected && child.contains(input)) fireEvent.blur(input);
+      return removeChild.call(this, child);
+    } as typeof Node.prototype.removeChild);
+    view.unmount();
+    removal.mockRestore();
+    expect(blurred).toHaveBeenCalled();
+    expect(sent(view.invoke, edit)).toHaveLength(0);
+    render(<TransactionalCollectionPage {...view.props} />);
+    await screen.findByText("Bob");
+    expect([mark("Name"), why("Name")]).toEqual(["refused", NOT_FINISHED]);
+    expect(sent(view.invoke, edit)).toHaveLength(0);
+  });
+
+  it("saves the text of a cell editor that focus left while its page was open, as a press on another control does, before the page closes", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    fireEvent.click(cell("Name"));
+    fireEvent.change(editorInput(), { target: { value: "Bob" } });
+    fireEvent.blur(editorInput());
+    view.unmount();
+    await waitFor(() => expect(sent(view.invoke, edit)).toHaveLength(1));
+    expect(sent(view.invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Bob" } });
+  });
+
+  it("lists a deletion the Collection refused, by the record's name and with why, until the person dismisses it", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === remove) throw refusal("Paid records stay.");
+      return { result: page() };
+    });
+    const view = setup({ invoke, confirmDelete: async () => true });
+    await screen.findByText("Alice");
+    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    const words = "dohc did not delete Alice. The Collection refused this change. Paid records stay.";
+    const line = await screen.findByText(words);
+    expect(strip()!.contains(line)).toBe(true);
+    // It stays after the page closes and opens again, since a deletion leaves no value on a cell.
+    view.unmount();
+    render(<TransactionalCollectionPage {...view.props} />);
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText(words)).toBeTruthy();
+    fireEvent.click(list.getByRole("button", { name: "Dismiss" }));
+    expect(strip()).toBeNull();
+    expect(sent(invoke, remove)).toHaveLength(1);
   });
 
   it("keeps text typed in a cell and not saved on its record and field when the records are sorted another way", async () => {
