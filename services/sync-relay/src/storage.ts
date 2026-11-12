@@ -127,6 +127,7 @@ import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
+import * as operationRecordStorage from "./storage/operationRecords";
 import * as accountFeedStorage from "./storage/accountFeed";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
@@ -922,6 +923,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   endAccountReasonsOfHiddenOrDisownedCopies() {
     accountWorkspaceStorage.endAccountReasonsOfHiddenOrDisownedCopies(this);
+  }
+
+  recordAccountOperation(input: operationRecordStorage.RecordOperationInput) {
+    return operationRecordStorage.recordOperation(this, input);
+  }
+
+  lookupAccountOperation(input: { accountId: string; operationId: string; binding: operationRecordStorage.OperationBinding }) {
+    return operationRecordStorage.lookupOperation(this, input);
+  }
+
+  advanceAccountOperation(input: operationRecordStorage.AdvanceOperationInput) {
+    return operationRecordStorage.advanceOperation(this, input);
+  }
+
+  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation: number }) {
+    return operationRecordStorage.listUnfinishedOperations(this, input);
+  }
+
+  tombstoneSettledAccountOperations(nowMs: number) {
+    return operationRecordStorage.tombstoneSettledOperations(this, nowMs);
   }
 
   accountFeedStanding(workspaceId: string) {

@@ -739,6 +739,11 @@ export interface SyncRelayStorage {
   showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
   endAccountReasonsOfHiddenOrDisownedCopies(): void;
+  recordAccountOperation(input: import("./operationRecords").RecordOperationInput): import("./operationRecords").OperationClaim;
+  lookupAccountOperation(input: { accountId: string; operationId: string; binding: import("./operationRecords").OperationBinding }): import("./operationRecords").OperationLookup;
+  advanceAccountOperation(input: import("./operationRecords").AdvanceOperationInput): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
+  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation: number }): import("./operationRecords").OperationRecord[];
+  tombstoneSettledAccountOperations(nowMs: number): number;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
   accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;
