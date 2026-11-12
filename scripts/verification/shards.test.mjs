@@ -3,7 +3,7 @@ import test from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
+import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks, preparedArtifactPaths } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
 import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
@@ -88,7 +88,7 @@ test("prepared artifact references keep tests and their helpers behind restorati
   const workflow = readFileSync(resolve(".github/workflows/pr-checks.yml"), "utf8");
   const pack = workflow.match(/- name: Pack prepared artifacts\s+run: >-\s+([\s\S]*?)(?=\r?\n      -)/u)[1];
   const paths = pack.trim().split(/\s+/u).slice(pack.trim().split(/\s+/u).indexOf("/tmp/javascript-prepared.tar.zst") + 1);
-  assert.ok(paths.length > 0);
+  assert.deepEqual(new Set(paths), new Set(preparedArtifactPaths));
   const expected = [];
   for (const [index, path] of paths.entries()) {
     for (const [style, expression] of Object.entries({

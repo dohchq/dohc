@@ -75,7 +75,7 @@ function sourceDependencies(file, source = readFileSync(file, "utf8")) {
   return result;
 }
 
-const preparedArtifactPaths = [
+export const preparedArtifactPaths = [
   ".dohc-dev/verification/build.json", "target/debug/dohc-workspace-engine", "apps/desktop/target/debug/dohc-workspace-engine",
   "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime",
   "apps/desktop/resources/app-compiler", "apps/desktop/resources/engine-reader", "services/share-web/viewer/dist", "services/sync-relay/dist",
