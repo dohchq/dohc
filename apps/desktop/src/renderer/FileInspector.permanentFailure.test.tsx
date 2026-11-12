@@ -86,5 +86,5 @@ it("says why editing is off once the person dismisses the row", async () => {
   expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(NOT_SAVED_REASON);
   await user.click(screen.getByTestId("markdown-source-toggle"));
   expect((await screen.findByTestId("view-markdown-source")).querySelector("span")?.textContent).toBe(NOT_SAVED_REASON);
-  expect(NOT_SAVED_REASON).toBe("dohc could not save this document. Close every tab showing it, then reopen it to edit.");
+  expect(NOT_SAVED_REASON).toBe("dohc could not save this page. Close every tab showing it, then reopen it to edit.");
 });
