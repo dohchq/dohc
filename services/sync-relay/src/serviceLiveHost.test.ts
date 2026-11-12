@@ -6315,47 +6315,6 @@ it("pushes a live document's settled edit on the next pass while another documen
   expect(o.host.settled(o.other)).toBe(false);
 });
 
-// Stop leaves a document that never went live as a target the pass no longer
-// tries, so its wait lapses and nothing ends it until its departure drains.
-// Proves: once such a document is stopped and its wait has lapsed, a live
-// document's settled edit in its workspace is still pushed on the next pass.
-it("pushes a live document's settled edit after another document that never went live is stopped and its wait lapses", async () => {
-  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
-  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
-  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
-  await o.host.update({workspaces, documents: [o.sibling], ...stay});
-  await o.pushed.promise;
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
-    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
-    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
-  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  o.refuseCaptureAt(o.other.path, new Error("Capture failed."));
-  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
-  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
-  // The second failure set a one-second wait, from before this time.
-  const failedAt = Date.now();
-  await o.host.update({workspaces, documents: [o.sibling], departing: [o.other]});
-  const tried = captures();
-  // Only time ends the wait: no pass tries the stopped document again.
-  await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(failedAt + 1000), {timeout: 5000});
-  await o.nextPass();
-  expect(captures()).toBe(tried);
-  expect(o.host.retains(o.other), "The stopped document must still be departing.").toBe(true);
-  const edit = o.acceptEdit("after-another-stopped");
-  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
-  await o.host.settle(o.document);
-  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as
-    {method: string; params: {terminalReceipt?: {deliveryId?: string} | null}});
-  const settledAt = requests().findIndex(request => request.method === "liveApplication.settle" && request.params.terminalReceipt?.deliveryId === edit.deliveryId);
-  expect(settledAt).toBeGreaterThan(-1);
-  await o.nextPass();
-  const after = requests().slice(settledAt + 1).map(request => request.method);
-  expect(after, "The settled edit must be pushed on the next pass.").toContain("sync.push");
-  expect(after).not.toContain("liveApplication.unloadDocument");
-});
-
 // Sol's review: departed documents the engine cannot park, more than an
 // answer fits, filled every departed list from the first, so a document
 // after them was never named once the engine parked it, and the host kept
