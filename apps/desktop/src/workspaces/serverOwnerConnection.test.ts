@@ -225,3 +225,27 @@ it("keeps the credential account when discovery contains a client-selected accou
   await session.documents(new AbortController().signal);
   expect(session).toMatchObject({bearer: "secret", accountId: "owner"});
 });
+
+// Proves: the owner's open names only the path. A ready or starting document
+// is hosted; a Stopped or unavailable one, or a refused request, is a
+// terminal answer. The next list is read fresh.
+it("asks the owner route to host an opened document, and reads a Stop or refusal as a terminal answer", async () => {
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  const signal = new AbortController().signal;
+  const answer = (status: string) => new Response(JSON.stringify({ok: true, path: "docs/a.md", objectId: "object", changed: false, status}), {status: 202});
+  const refusal = (status: number, code: string) => new Response(JSON.stringify({ok: false, code, error: "x"}), {status});
+  for (const [response, expected] of [[answer("ready"), "hosted"], [answer("preparing"), "hosted"], [answer("paused"), "refused"],
+    [answer("unavailable"), "refused"], [refusal(404, "not_found"), "refused"], [refusal(409, "conflict"), "refused"],
+    [refusal(413, "quota_exceeded"), "refused"]] as const) {
+    await session.documents(signal);
+    const calls = f.fetch.mock.calls.length;
+    f.fetch.mockResolvedValueOnce(response);
+    expect(await session.open("docs/a.md", signal)).toBe(expected);
+    expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host", expect.objectContaining({method: "POST",
+      headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({path: "docs/a.md", open: true}), redirect: "error"}));
+    await session.documents(signal);
+    expect(f.fetch).toHaveBeenCalledTimes(calls + 2);
+  }
+  f.fetch.mockResolvedValueOnce(new Response("{}", {status: 500}));
+  await expect(session.open("docs/a.md", signal)).rejects.toThrow("Owner live open failed.");
+});

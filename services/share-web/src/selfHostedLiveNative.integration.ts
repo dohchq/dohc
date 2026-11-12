@@ -1381,6 +1381,43 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   return {attemptsBeforeResume: before, reports: proof.reports};
 }), 120000);
 
+// Deleting the last Edit share retires a document without a Stop. Its owner's
+// edits made afterwards wait for no session host, and nothing hosts it again
+// until the owner's desktop opens it. That open enrolls it again, and a
+// successor holds the edits.
+it("hosts a document retired without a Stop only once its owner's desktop opens it, as a successor that holds the edits made meanwhile", () => withSelfHostProof("self-host-owner-open", async proof => {
+  const saved = proof.activation()!;
+  expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({retired: true, ownerStop: null, hostDrainedAtMs: expect.any(Number)});
+  }, {timeout: 30000});
+  // The owner keeps editing on their device, where no session host admits the edit.
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileRetired", "ordinary-owner"));
+  const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
+  // Until asked, passes capture nothing while its workspace keeps pulling. Each
+  // pass pulls once and waits 250 ms, so twelve outlast a two-second reconciliation.
+  const pulls = harness.pulls.length;
+  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  expect(attempts()).toBe(before);
+  expect(await proof.documents()).toEqual([]);
+  expect(proof.hosted()?.state).toBe("parked");
+  // The desktop's owner open enrolls it again, as the owner's demand.
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true});
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  // One capture starts a successor holding the edit.
+  expect(attempts()).toBe(before + 1);
+  expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileRetired: ordinary-owner\n---\n\nHello\n";
+  expect((await proof.hostState()).markdown).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  return {attemptsBeforeOpen: before, reports: proof.reports};
+}), 120000);
+
 // Pause fences live admission and retires the document's activation at once,
 // at its seed, before the document parks. Its owner's ordinary edit made while
 // paused then waits for no activation to admit it. Resume through the

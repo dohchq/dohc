@@ -9,7 +9,7 @@ import {readServiceActivationRetirement, type RetirableServiceActivation} from "
 import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
+import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments, isServiceHostEnrollmentPath, serviceHostReadiness} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {relayError} from "./errors";
@@ -416,6 +416,35 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: readiness reads only an activation's metadata, and answers as the
+// full read of its bytes does, with no activation and with a pending, a
+// completed and a ready one.
+it("answers readiness from activation metadata as the full read does, for pending, completed and ready activations", async () => {
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
+  const store = f.storage.createServiceActivationStore(f.history);
+  const fullRead = {readiness(workspaceId: string, path: string, objectId?: string) {
+    const full = store.read(workspaceId, path, 1_000_000, objectId);
+    return full && {activationId: full.activationId, objectId: full.source.objectId, lineageClaimId: full.source.lineageClaimId, completed: full.completed, binding: full.binding};
+  }};
+  const answer = (activation: Parameters<typeof serviceHostReadiness>[0]["activation"]) =>
+    serviceHostReadiness({storage: f.storage, history: f.history, host: f.host, activation}).state(enrolled);
+  const same = () => {
+    expect(store.readiness(scope.workspaceId, binding.currentPath, binding.objectId)).toEqual(fullRead.readiness(scope.workspaceId, binding.currentPath, binding.objectId));
+    const metadata = answer(store);
+    expect(metadata).toEqual(answer(fullRead));
+    return metadata.status;
+  };
+  expect(same()).toBe("preparing");
+  retainServiceActivation(f.raw, namespace);
+  expect(store.readiness(scope.workspaceId, binding.currentPath)).toMatchObject({completed: false});
+  expect(same()).toBe("preparing");
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  expect(store.readiness(scope.workspaceId, binding.currentPath)).toMatchObject({completed: true});
+  expect(same()).toBe("preparing");
+  f.host.ready.mockReturnValue(true);
+  expect(same()).toBe("ready");
 });
 
 // Proves: a damaged stored activation binding makes its own row unavailable

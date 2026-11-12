@@ -3,7 +3,7 @@ import {afterEach, expect, it} from "vitest";
 import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
-import {LATEST_RESTORE, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
+import {LATEST_RESTORE, LiveHostingRefusal, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
   serviceHostOwnerRetains, type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "./accountDeletion";
@@ -1081,4 +1081,112 @@ it("retires a prepared activation only with its host's preparation and replays t
   // A repeated Stop, as after a lost reply, replays the open retirement without a preparation.
   expect(retire()).toMatchObject({retired: true, acceptedCursor: fence.acceptedThrough});
   expect(f.storage.serviceActivationRetirement(enrolled)).toEqual(fence);
+});
+
+// The owner's open of the fixture's document, as their desktop sends it, and the refusal it answers.
+const ownerOpen = (f: Awaited<ReturnType<typeof fixture>>, nowMs = 30) => f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs});
+function refusal(run: () => unknown): string | undefined {
+  try {run();} catch (error) {if (error instanceof LiveHostingRefusal) return error.reason; throw error;}
+  return undefined;
+}
+/** Its last Edit grant ends and the host releases it, so it retires without a Stop, as a reclaim would leave it. */
+function retireWithoutStop(f: Awaited<ReturnType<typeof fixture>>) {
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  expect(f.release()).toMatchObject({enabled: false, retired: true, ownerStop: null});
+}
+
+// Proves: only the owner's Resume undoes their Stop. Their open of a Stopped
+// document writes nothing and hears `paused`.
+it("keeps a Stopped document stopped when its owner opens it, and hosts it when they Resume", async () => {
+  const f = await fixture(); f.enroll();
+  const stopped = f.stop();
+  expect(stopped).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(refusal(() => ownerOpen(f))).toBe("paused");
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toEqual(stopped);
+  expect(f.resume({nowMs: 40})).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, demandAtMs: 40});
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+});
+
+// Proves: the owner's open and their Stop end Stopped whichever commits first.
+it.each(["the open", "the Stop"] as const)("ends Stopped when the owner's open and Stop race and %s commits first", async first => {
+  const f = await fixture(); f.enroll();
+  retireWithoutStop(f);
+  const stop = () => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 30});
+  if (first === "the open") {
+    expect(ownerOpen(f)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    stop();
+  } else {
+    stop();
+    expect(refusal(() => ownerOpen(f))).toBe("paused");
+  }
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+  // The next open still hears the Stop.
+  expect(refusal(() => ownerOpen(f, 40))).toBe("paused");
+});
+
+// Proves: with no Stop, the owner's open hosts a document that retired
+// without one. Its demand keeps it hosted though no share covers it.
+it("hosts a document retired without a Stop again when its owner opens it", async () => {
+  const f = await fixture(), first = f.enroll();
+  retireWithoutStop(f);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+  const heard: boolean[] = [];
+  expect(f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs: 30, changed: value => {heard.push(value);}}))
+    .toEqual({...first, enabled: true, retired: false, ownerStop: null, ownerDemand: true, demandAtMs: 30, runToken: expect.any(Number), updatedAtMs: 30});
+  expect(heard).toEqual([true]);
+  expect(f.storage.serviceHostEnrollmentCovered(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!)).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+  expect(f.release()).toBeNull();
+});
+
+// Proves: an owner intent acts only on a document hosted before. Its open of
+// one with no row writes nothing.
+it("refuses the owner's open and Resume of a document never hosted", async () => {
+  const f = await fixture();
+  expect(() => ownerOpen(f)).toThrow("not found");
+  expect(() => f.resume()).toThrow("not found");
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBeNull();
+  // The share enrolls it, and the owner's open then renews its demand without changing it.
+  f.enroll();
+  const heard: boolean[] = [];
+  expect(f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs: 30, changed: value => {heard.push(value);}}))
+    .toMatchObject({enabled: true, ownerDemand: true, demandAtMs: 30});
+  expect(heard).toEqual([false]);
+});
+
+// Proves: an owner's open and Resume record demand and the owner's, and a
+// share records neither. Demand only moves forward.
+it("records the owner's demand for an open and a Resume, and none for a share", async () => {
+  const f = await fixture();
+  expect(f.enroll()).toMatchObject({ownerDemand: false, demandAtMs: null});
+  expect(ownerOpen(f, 30)).toMatchObject({ownerDemand: true, demandAtMs: 30});
+  expect(f.enroll({nowMs: 40})).toMatchObject({ownerDemand: true, demandAtMs: 30});
+  expect(ownerOpen(f, 25)).toMatchObject({demandAtMs: 30});
+  f.setEnabled(false);
+  expect(f.resume({nowMs: 50})).toMatchObject({ownerStop: null, ownerDemand: true, demandAtMs: 50});
+  // Stop leaves the demand it ended, and only Resume hosts the document again.
+  expect(f.stop()).toMatchObject({retired: true, ownerStop: "retire", ownerDemand: true, demandAtMs: 50});
+});
+
+// Proves: a personal session's close renews its document's demand, and
+// leaves a paused, stopped or retired document as it is.
+it("renews demand when a personal session closes, but not for a paused, stopped or retired document", async () => {
+  const f = await fixture(); f.enroll();
+  const renew = (nowMs: number) => f.storage.renewPersonalSessionDemand({workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs});
+  const read = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
+  expect(renew(30)).toBe(true);
+  expect(read()).toMatchObject({ownerDemand: false, demandAtMs: 30});
+  expect(renew(20)).toBe(true);
+  expect(read().demandAtMs).toBe(30);
+  f.setEnabled(false);
+  expect(renew(40)).toBe(false);
+  expect(read()).toMatchObject({ownerStop: "pause", demandAtMs: 30});
+  f.resume({nowMs: 50});
+  expect(renew(60)).toBe(true);
+  expect(read().demandAtMs).toBe(60);
+  f.stop();
+  expect(renew(70)).toBe(false);
+  expect(read()).toMatchObject({ownerStop: "retire", demandAtMs: 60});
+  expect(f.storage.renewPersonalSessionDemand({workspaceId: scope.workspaceId, objectId: "another-object", nowMs: 80})).toBe(false);
 });

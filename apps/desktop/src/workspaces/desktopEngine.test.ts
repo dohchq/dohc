@@ -1341,6 +1341,64 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
   });
 
+  // Proves: a pass asks the server to host a document the owner holds edits
+  // for at most once. After a terminal answer no pass asks again, until the
+  // owner opens the document here.
+  it("asks the server once to host a document with owner edits, and again only when its owner opens it", async () => {
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "refused");
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open});
+    f.dependencies.ownerPendingPaths = () => ["notes/plan.md", "notes/draft.md"];
+    // The engine holds an owner binding for the opened document.
+    const drafts = vi.spyOn(EngineClient.prototype, "ownerYDocListDrafts").mockImplementation(async () =>
+      ({drafts: [{binding: {mainVersionId: "main", currentPath: "notes/draft.md"}} as never], next: null}));
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    const passes = async (count: number) => {
+      for (let pass = 0; pass < count; pass++) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      }
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The listed document is live already, so only the other is asked for.
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/draft.md"]);
+      await passes(3);
+      expect(open).toHaveBeenCalledTimes(1);
+      f.engine.ownerOpenedLiveDocument("owner", "notes/draft.md");
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+      await passes(3);
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/draft.md", "notes/draft.md"]);
+    } finally {credentials.abort(); drafts.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: an open's answer counts only for the session that asked. One
+  // that ended meanwhile records nothing, so the next session asks again.
+  it("drops an owner open's answer when its session ended meanwhile, and asks again in the next session", async () => {
+    let ended = false;
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => {
+      if (open.mock.calls.length === 1) ended = true;
+      return "refused";
+    });
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open,
+      assertCurrent: () => {if (ended) throw new Error("This live editing session ended.");}, onConnect: () => {ended = false;}});
+    f.dependencies.ownerPendingPaths = () => ["notes/draft.md"];
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      expect(open).toHaveBeenCalledTimes(2);
+      const before = ownerDeliveryMock.pass.mock.calls.length;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {credentials.abort(); errors.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
   it("reads a new refusal of the current queue beside its save-only queue", async () => {
     const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
     const retained = {objectId: "object", path: "notes/plan.md", reason: "restore-fenced", outboxId: "old-queue",
