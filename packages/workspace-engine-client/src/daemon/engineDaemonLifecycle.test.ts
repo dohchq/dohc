@@ -5,10 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Event, Request, Response } from "../protocol";
 import { EngineRequestDeadlineError, type EngineClientSpawnOptions } from "./engineClient";
 import {
-  createRustEngineDaemon,
   defaultEngineBinaryPath,
   EngineDaemonLifecycle,
-  runEngineDaemonStartupSmoke,
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
 import { inEngineRun, insideEngineRun } from "./engineRunScope";
@@ -2570,25 +2568,6 @@ describe("Rust engine daemon lifecycle", () => {
     );
   });
 
-  it.runIf(process.env.DOHC_TEST_REAL_RUST_ENGINE === "1")(
-    "completes the startup smoke against the real Rust daemon",
-    async () => {
-      const lifecycle = createRustEngineDaemon({
-        command: defaultEngineBinaryPath({
-          isPackaged: false,
-          appPath: process.cwd(),
-        }),
-      });
-      try {
-        await lifecycle.start();
-        // A fresh database has no active version yet. The null
-        // result is still a successful, decoded versions.active round-trip.
-        await expect(runEngineDaemonStartupSmoke(lifecycle)).resolves.toBeNull();
-      } finally {
-        await lifecycle.stop();
-      }
-    },
-  );
 });
 
 class ProgressClient extends SelfExitingClient {

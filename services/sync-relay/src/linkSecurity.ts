@@ -1,6 +1,9 @@
 import {
   createHash,
   createHmac,
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
   randomBytes,
   timingSafeEqual,
   type BinaryLike,
@@ -11,6 +14,8 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import type {
   SyncRelayLinkSessionRow,
   SyncRelayStorage,
+  SyncRelayLinkCredentialRow,
+  SyncRelayShareGrantRow,
 } from "./storage";
 
 export const LINK_BEARER_BYTES = 32;
@@ -60,6 +65,50 @@ export function mintLinkHandoffCode(random: typeof randomBytes = randomBytes): s
 
 export function hashLinkBearer(secret: string, key: BinaryLike): string {
   return createHmac("sha256", key).update(secret).digest("base64url");
+}
+
+// The relay holds one link key, so its sealing key is derived once.
+let sealingKeyFor: { key: string | Uint8Array; derived: Buffer } | null = null;
+function linkSealingKey(key: string | Uint8Array): Buffer {
+  if (sealingKeyFor?.key !== key) {
+    sealingKeyFor = { key, derived: Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), "dohc-link-url-seal-v1", 32)) };
+  }
+  return sealingKeyFor.derived;
+}
+
+export function sealLinkBearer(secret: string, key: string | Uint8Array, credentialId: string, grantId: string): string {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", linkSealingKey(key), nonce);
+  cipher.setAAD(Buffer.from(JSON.stringify([credentialId, grantId])));
+  const sealed = Buffer.concat([cipher.update(secret, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  return `v1.${nonce.toString("base64url")}.${sealed.toString("base64url")}`;
+}
+
+export function unsealLinkBearer(sealed: string, key: string | Uint8Array, credentialId: string, grantId: string): string | null {
+  try {
+    const parts = sealed.split(".");
+    if (parts.length !== 3 || parts[0] !== "v1" || !parts.slice(1).every(part => /^[A-Za-z0-9_-]+$/u.test(part))) return null;
+    const nonce = Buffer.from(parts[1]!, "base64url");
+    const encrypted = Buffer.from(parts[2]!, "base64url");
+    if (nonce.length !== 12 || encrypted.length <= 16) return null;
+    const decipher = createDecipheriv("aes-256-gcm", linkSealingKey(key), nonce);
+    decipher.setAAD(Buffer.from(JSON.stringify([credentialId, grantId])));
+    decipher.setAuthTag(encrypted.subarray(-16));
+    return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+export function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
+  return `${shareWebOrigin}/s/#${secret}`;
+}
+
+export function recoverPublicLinkUrl(grant: SyncRelayShareGrantRow | null, credential: SyncRelayLinkCredentialRow | null, key: string | Uint8Array | undefined, shareWebOrigin: string | undefined): string | null {
+  if (!key || !shareWebOrigin || !grant || grant.principalKind !== "link" || grant.status !== "active" || grant.revokedAtMs !== null ||
+    !credential || credential.grantId !== grant.grantId || credential.generation !== grant.generation || credential.retiredAtMs !== null || !credential.secretSealed) return null;
+  const secret = unsealLinkBearer(credential.secretSealed, key, credential.credentialId, grant.grantId);
+  return secret === null ? null : composePublicLinkUrl(shareWebOrigin, secret);
 }
 
 export function hashLinkProfileSecret(secret: string, key: BinaryLike): string {

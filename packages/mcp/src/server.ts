@@ -52,6 +52,7 @@ import {
   listFileChats,
   readChat,
   replyToChat,
+  reportNothing,
   startGroupChat,
   startFileChat,
   reportedAgent,
@@ -813,16 +814,30 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
         resolve: z.string().min(1).max(200).optional(),
         choose: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
+        body: chatWriteInput.body.optional(),
+        nothingToReport: z.literal(true).optional(),
       },
     },
-    async ({ model, ...args }) => text(await replyToChat(ctx, args, agentName(), reported(model))),
+    async ({ model, body, nothingToReport, ...args }) => {
+      if (nothingToReport) {
+        // An empty list or a false flag sends nothing.
+        const { threadId, runId, ...message } = args;
+        const sent = Object.values(message).some((value) =>
+          value !== undefined && value !== false && !(Array.isArray(value) && value.length === 0));
+        return text(body !== undefined || sent
+          ? { ok: false as const, reason: "nothingToReport posts no message. Send it with only threadId and runId." }
+          : await reportNothing(ctx, { threadId, ...(runId !== undefined ? { runId } : {}) }));
+      }
+      if (body === undefined) return text({ ok: false as const, reason: "Send a body, or nothingToReport to end an automation's run with no message." });
+      return text(await replyToChat(ctx, { ...args, body }, agentName(), reported(model)));
+    },
   );
 
   register(

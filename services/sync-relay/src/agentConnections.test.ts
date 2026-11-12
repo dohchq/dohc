@@ -504,7 +504,7 @@ describe("agent sign-in for share links", () => {
       rotatedAtMs: atMs,
       expectedDependentGrantIds: [],
       guard: () => {},
-      mintCredential: () => ({ credentialId: "raced-credential", secretHash: "raced-secret-hash" }),
+      mintCredential: () => ({ credentialId: "raced-credential", secretSealed: null, secretHash: "raced-secret-hash" }),
     })],
     ["End link", endLink, (storage, link, atMs) =>
       storage.revokeShareGrant({ shareId: link.shareId, grantId: link.grantId, revokedAtMs: atMs })],

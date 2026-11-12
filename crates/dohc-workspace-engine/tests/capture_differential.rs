@@ -13,7 +13,7 @@
 //! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;
@@ -326,8 +326,8 @@ async fn drive_step_to_visibility(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rust_capture_matches_the_typescript_oracle_goldens() {
+#[test]
+fn capture_oracles_are_frozen_and_each_scenario_is_scheduled() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
@@ -387,62 +387,105 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
         "capture-fixtures.json and capture-goldens.json cover different scenarios"
     );
 
-    for scenario in &fixtures.scenarios {
-        let golden = goldens
-            .scenarios
-            .get(&scenario.name)
-            .unwrap_or_else(|| panic!("no golden for {}", scenario.name));
+    let scheduled: BTreeSet<&str> = CAPTURE_SCENARIOS.iter().copied().collect();
+    assert_eq!(
+        scheduled.len(),
+        CAPTURE_SCENARIOS.len(),
+        "duplicate scheduled capture scenarios"
+    );
+    assert_eq!(
+        fixture_names, scheduled,
+        "capture scenarios must each have a scheduled test"
+    );
+}
 
-        let scratch = ScratchDir::new().expect("scratch");
-        let db = engine_db_path(&scratch).expect("db path");
-        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-        let mut id: u64 = 1;
-        let mut handle = open_workspace(&transport, scratch.path(), id).await;
+async fn run_capture_scenario(name: &str) {
+    let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
+    let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
+    let scenario = fixtures
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.name == name)
+        .unwrap_or_else(|| panic!("no capture scenario {name}"));
+    let golden = goldens
+        .scenarios
+        .get(&scenario.name)
+        .unwrap_or_else(|| panic!("no golden for {}", scenario.name));
 
-        for step in &scenario.steps {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db path");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id: u64 = 1;
+    let mut handle = open_workspace(&transport, scratch.path(), id).await;
+
+    for step in &scenario.steps {
+        apply_to_disk(scratch.path(), step);
+        drive_step_to_visibility(&transport, &handle, &db, step, &mut id, &scenario.name).await;
+    }
+    id += 1;
+    close_workspace(&transport, handle.clone(), id).await;
+
+    if !scenario.offline.is_empty() {
+        for step in &scenario.offline {
             apply_to_disk(scratch.path(), step);
-            drive_step_to_visibility(&transport, &handle, &db, step, &mut id, &scenario.name).await;
+        }
+        // Reopen: the rehydration seed + startup baseline reconcile the
+        // offline window — the same contract the TS oracle exercises with
+        // a fresh engine's startup pass.
+        id += 1;
+        handle = open_workspace(&transport, scratch.path(), id).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            id += 1;
+            if flush(&transport, &handle, id).await {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] post-offline flush never settled",
+                scenario.name
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         id += 1;
         close_workspace(&transport, handle.clone(), id).await;
-
-        if !scenario.offline.is_empty() {
-            for step in &scenario.offline {
-                apply_to_disk(scratch.path(), step);
-            }
-            // Reopen: the rehydration seed + startup baseline reconcile the
-            // offline window — the same contract the TS oracle exercises with
-            // a fresh engine's startup pass.
-            id += 1;
-            handle = open_workspace(&transport, scratch.path(), id).await;
-            let deadline = tokio::time::Instant::now() + WAIT;
-            loop {
-                id += 1;
-                if flush(&transport, &handle, id).await {
-                    break;
-                }
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "[{}] post-offline flush never settled",
-                    scenario.name
-                );
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            id += 1;
-            close_workspace(&transport, handle.clone(), id).await;
-        }
-
-        // The DIFFERENTIAL: normalized persisted state vs the TS golden.
-        for path in &scenario.watch {
-            let produced = project_path(&db, path);
-            let expected = golden
-                .get(path)
-                .unwrap_or_else(|| panic!("[{}] no golden for path {path}", scenario.name));
-            assert_eq!(
-                &produced, expected,
-                "[{}] divergence at {path}",
-                scenario.name
-            );
-        }
     }
+
+    // The DIFFERENTIAL: normalized persisted state vs the TS golden.
+    for path in &scenario.watch {
+        let produced = project_path(&db, path);
+        let expected = golden
+            .get(path)
+            .unwrap_or_else(|| panic!("[{}] no golden for path {path}", scenario.name));
+        assert_eq!(
+            &produced, expected,
+            "[{}] divergence at {path}",
+            scenario.name
+        );
+    }
+}
+
+macro_rules! capture_cases {
+    ($($test:ident => $name:literal),* $(,)?) => {
+        const CAPTURE_SCENARIOS: &[&str] = &[$($name),*];
+        $(
+            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            async fn $test() {
+                run_capture_scenario($name).await;
+            }
+        )*
+    };
+}
+
+capture_cases! {
+    basic_text => "basic-text",
+    update_coalesce => "update-coalesce",
+    write_then_delete => "write-then-delete",
+    never_tracked_control => "never-tracked-control",
+    binary_roundtrip => "binary-roundtrip",
+    secret_basic => "secret-basic",
+    nested_unicode => "nested-unicode",
+    offline_delete => "offline-delete",
+    offline_update => "offline-update",
+    mixed_workspace => "mixed-workspace",
 }

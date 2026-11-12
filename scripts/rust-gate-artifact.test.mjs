@@ -36,7 +36,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
-import { readerTestNode } from "../tools/rust-engine-program/reader-test-node.mjs";
+import { readerTestNode, stagesReaderNode } from "../tools/rust-engine-program/reader-test-node.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceHeadLog = () => execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
@@ -259,14 +259,15 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
-    // + 7 required + 2 optional. Endpoints alone would read 2, which is the
+    // + 8 required + 2 optional. Endpoints alone would read 2, which is the
     // shape that cannot see a tree that changes and changes back.
-    assert.match(run.evidence, /, 11 reads\)/);
+    assert.match(run.evidence, /, 12 reads\)/);
 
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
     assert.ok(commands.includes("packages/app-backend-runtime/scripts/build.mjs"));
-    assert.deepEqual(commands.filter((cmd) => /^(?:nextest|test|build) /u.test(cmd)), [
+    assert.deepEqual(commands.filter((cmd) => /^(?:nextest|test|build) /u.test(cmd)).map(command => command.replaceAll('"', "")), [
+      'nextest run --locked --workspace --run-ignored only --no-tests=fail -E binary_id(=dohc-engine-testkit::empty_store_image) & test(=prepare_empty_store_image)',
       "nextest run --locked --workspace --no-fail-fast",
       "test --locked --workspace --doc",
       "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
@@ -334,19 +335,19 @@ test("the caps and the scratch root reach every cargo child", () => {
   }
 });
 
-test("macOS reader tests run the staged pinned Node; other hosts keep node on PATH", () => {
+test("reader tests use a staged Node on targets with a desktop pin", () => {
   const stub = stubToolchain();
   try {
     runGate(stub);
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
-    const darwin = platform() === "darwin";
+    const posix = stagesReaderNode();
     const nextestRun = commands.indexOf("nextest run --locked --workspace --no-fail-fast");
     assert.ok(nextestRun > 0);
-    assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", darwin);
-    assert.equal(commands.includes("tools/rust-engine-program/reader-test-node.mjs"), darwin);
-    if (darwin) assert.ok(child.includes(`DOHC_READER_TEST_NODE=${readerTestNode()}`), child);
-    assert.equal(child.includes("DOHC_READER_TEST_NODE="), darwin);
+    assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", posix);
+    assert.equal(commands.includes("tools/rust-engine-program/reader-test-node.mjs"), posix);
+    if (posix) assert.ok(child.includes(`DOHC_READER_TEST_NODE=${readerTestNode()}`), child);
+    assert.equal(child.includes("DOHC_READER_TEST_NODE="), posix);
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }

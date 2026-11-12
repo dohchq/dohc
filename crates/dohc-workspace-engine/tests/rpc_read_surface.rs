@@ -3,7 +3,7 @@
 //! real write paths (RPC writes + autonomous capture) — never by seeding the
 //! DB directly, so the RPCs are proven against the daemon's own semantics.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_protocol::{

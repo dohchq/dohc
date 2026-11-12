@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::owner_outbox::release::{MAX_RELEASE_BYTES, MAX_RELEASE_ENTRIES};

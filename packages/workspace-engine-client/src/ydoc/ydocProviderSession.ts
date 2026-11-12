@@ -131,6 +131,8 @@ export interface EngineYdocProviderSession {
   readonly lineageClaimId?: string | null;
   // Whether this device claimed the lineage from its own unclaimed history.
   readonly lineageOriginatedHere?: boolean;
+  // Whether the engine holds an owner binding for this document.
+  readonly ownerBound?: boolean;
   readonly contentKind: YdocContentKind;
   readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
@@ -466,6 +468,7 @@ export async function openEngineYdocProviderSession(
     get lineageOriginatedHere() {
       return session.lineageOriginatedHere;
     },
+    get ownerBound() { return session.ownerDraft !== undefined; },
     contentKind: session.contentKind,
     get artifactAssets() {
       return session.artifactAssets;

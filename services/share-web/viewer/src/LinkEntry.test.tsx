@@ -2,13 +2,14 @@
 import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {expect, it, vi} from "vitest";
-import {LinkEntry} from "./LinkEntry";
+import {LinkAbout, LinkAgent} from "./LinkEntry";
 it("names the authorized link target with its access, without inventing a sharer", async () => {
   Object.assign(globalThis, {IS_REACT_ACT_ENVIRONMENT: true});
   const node = document.createElement("div"), root = createRoot(node);
   try {
-    await act(async () => root.render(<LinkEntry meta={{subjectName: "Trip", access: "view", effectiveSelector: {paths: ["trip"], versionId: null, access: "view"}, lastSettledAtMs: null, lastSettledKnown: false}} hasFiles={true} canEditFile={false}/>));
-    expect(node.textContent).toContain("Trip"); expect(node.textContent).toContain("You can read files and comments"); expect(node.textContent).not.toContain("dohc user");
+    await act(async () => root.render(<LinkAbout meta={{subjectName: "Trip", access: "view", effectiveSelector: {paths: ["trip"], versionId: null, access: "view"}, lastSettledAtMs: null, lastSettledKnown: false}} fileCount={2} updated=""/>));
+    expect(node.textContent).toContain("Trip"); expect(node.textContent).toContain("Anyone with this link can view"); expect(node.textContent).toContain("2 files in trip");
+    expect(node.textContent).not.toContain("dohc user");
   } finally {await act(async () => root.unmount());}
 });
 
@@ -18,7 +19,7 @@ it("shows the MCP address format and copies exactly that address", async () => {
   Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
   const node = document.createElement("div"), root = createRoot(node);
   try {
-    await act(async () => root.render(<LinkEntry meta={{access: "view", effectiveSelector: {paths: ["trip"], versionId: null, access: "view"}, lastSettledAtMs: null, lastSettledKnown: false}} hasFiles canEditFile={false}/>));
+    await act(async () => root.render(<LinkAgent/>));
     const section = node.querySelector('section[aria-labelledby="link-agent-title"]');
     expect(section).not.toBeNull();
     expect(section?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);

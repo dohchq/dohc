@@ -179,6 +179,11 @@ const replyArgsSchema = z
     agent: documentAgentNameSchema.optional(),
   })
   .strict();
+// An automation's run ends with nothing to report and posts nothing. MCP's
+// reply tool sends it; no CLI command does.
+const nothingToReportArgsSchema = z
+  .object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) })
+  .strict();
 const reactArgsSchema = z
   .object({
     ...argsBase,
@@ -389,6 +394,7 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+  "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help.",
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
 
@@ -645,6 +651,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("reply"), args: replyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("chatRetry"), args: chatRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
@@ -769,6 +776,7 @@ export const CLI_CAPABILITIES = {
   show: ["chat.show"],
   post: ["chat.post"],
   reply: ["chat.reply"],
+  nothingToReport: ["chat.reply"],
   chatRetry: ["agent.run.retry"],
   react: ["chat.react"],
   grep: ["chat.search"],
@@ -2040,6 +2048,7 @@ export const cliResultSchemas = {
   show: showResultSchema,
   post: postResultSchema,
   reply: replyResultSchema,
+  nothingToReport: z.object({ threadId: z.string().min(1), nothingToReport: z.literal(true) }).strict(),
   chatRetry: chatRetryResultSchema,
   react: reactResultSchema,
   grep: grepResultSchema,

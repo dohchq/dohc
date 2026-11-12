@@ -100,6 +100,7 @@ test("opens a real accountless share without exposing its bearer secret", async 
   const wrongSecretCopy = await refusalCopy(browser, stack.shareWebUrl, wrongSecret);
   await revokeLink(stack.relayUrl, seeded);
   const revokedLinkCopy = await refusalCopy(browser, stack.shareWebUrl, seeded.secret);
-  expect(wrongSecretCopy).toBe("This link isn't available.");
+  // The page says the same thing for a wrong secret and a revoked link, starting with this line.
+  expect(wrongSecretCopy.split("\n")[0]).toBe("This link isn't available.");
   expect(revokedLinkCopy).toBe(wrongSecretCopy);
 });

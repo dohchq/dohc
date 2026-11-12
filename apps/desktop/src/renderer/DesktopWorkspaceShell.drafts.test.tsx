@@ -34,7 +34,8 @@ async function openDirtyMarkdown(
   await user.click(row);
   await screen.findByTestId("view-markdown");
   const editor = await enterMarkdownSource(user);
-  await user.type(editor, "Draft!");
+  await user.click(editor);
+  await user.paste("Draft!");
   await waitFor(() =>
     expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
   );
@@ -3096,31 +3097,6 @@ describe("set-aside draft recovery", () => {
     );
   });
 
-  // The store no longer dies on reload, quit, update-restart or crash —
-  // a set-aside edit is written on capture and restored at launch. The #579
-  // lifetime disclosure ("they live only in this window") became false with
-  // it, and a false claim about durability is worse than none. The close
-  // warning is what names the drafts storage could not keep, at the moment
-  // that matters.
-  it("makes no claim that set-aside edits die with the window", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Kept!");
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const section = await screen.findByTestId("notice-set-aside-edits");
-    expect(section.textContent, "stale disclosure: put the sentence back. The panel then tells the user an edit that survives the next launch is about to be lost.").not.toContain("live only in this window");
-    // ...and it names both ways out, so the warning offers what it demands.
-    expect(section.textContent).toContain("Copy an edit to keep its text");
-    expect(section.textContent).toContain("Dismiss deletes it for good");
-  });
-
-  // Dropping the blanket disclosure was right for the rows that now
-  // survive a quit, and it left the rows that still do not — a secret path
-  // plaintext storage refuses, a write the quota refused — looking
-  // exactly like the durable ones. The lifetime moved onto the row.
   it("marks the set-aside edits that still die with the window", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -3130,7 +3106,10 @@ describe("set-aside draft recovery", () => {
     await screen.findByTestId("file-tree");
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
-    await screen.findByTestId("notice-set-aside-edits");
+    const section = await screen.findByTestId("notice-set-aside-edits");
+    expect(section.textContent).not.toContain("live only in this window");
+    expect(section.textContent).toContain("Copy an edit to keep its text");
+    expect(section.textContent).toContain("Dismiss deletes it for good");
     const marked = screen
       .getAllByTestId("recovery-list-row")
       .filter(

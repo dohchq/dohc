@@ -2356,7 +2356,7 @@ describe("relay capability reads", () => {
               guard: () => undefined,
               mintCredential: () => ({
                 credentialId: `raced-${failure}`,
-                secretHash: hashLinkBearer(rotatedSecret, LINK_KEY),
+                secretSealed: null, secretHash: hashLinkBearer(rotatedSecret, LINK_KEY),
               }),
             });
             expect(rotation.ok).toBe(true);
@@ -3059,7 +3059,7 @@ describe("relay capability reads", () => {
             guard: () => undefined,
             mintCredential: () => ({
               credentialId: "credential-owner-race-comment",
-              secretHash: hashLinkBearer("comment-owner-race-secret", LINK_KEY),
+              secretSealed: null, secretHash: hashLinkBearer("comment-owner-race-secret", LINK_KEY),
             }),
           }),
         ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });

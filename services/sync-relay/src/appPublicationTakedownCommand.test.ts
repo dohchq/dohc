@@ -74,7 +74,7 @@ it("takes down one publication through the running relay without adding a TCP li
   const token = "A".repeat(43), key = "test-key";
   try {
     storage.claimWorkspace({workspaceId: "w", ownerUserId: "owner", createdAtMs: 1});
-    expect(storage.createFileLinkShare({guard: () => {}, credential: {credentialId: "credential", grantId: "g", secretHash: digest("credential"), generation: 1, mintedAtMs: 1, retiredAtMs: null}, share: {shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({paths: ["app", "shared"], versionId: null}), createdAtMs: 1},
+    expect(storage.createFileLinkShare({guard: () => {}, credential: {credentialId: "credential", grantId: "g", secretSealed: null, secretHash: digest("credential"), generation: 1, mintedAtMs: 1, retiredAtMs: null}, share: {shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({paths: ["app", "shared"], versionId: null}), createdAtMs: 1},
       grant: {grantId: "g", shareId: "s", principalKind: "link", principalUserId: null, principalEmail: null, access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}})).toBe(true);
     publicationId = storage.publishAppPublication(request()).publicationId;
     otherId = storage.publishAppPublication({...request(), candidate: {...request().candidate, sourceRevision: digest("other revision")}}).publicationId;

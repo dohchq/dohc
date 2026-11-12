@@ -238,9 +238,11 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
       }
     };
 
-    // The reply arrives as a toast with its Open, before it fades.
-    const toastOpen = page.getByTestId("sent-notice-toast").filter({ hasText: "Nova" }).getByTestId("sent-notice-toast-open");
+    // The reply arrives as a toast with what it said and its Open, before it fades.
+    const toast = page.getByTestId("sent-notice-toast").filter({ hasText: "Nova" });
+    const toastOpen = toast.getByTestId("sent-notice-toast-open");
     await expect(toastOpen).toBeVisible();
+    await expect(toast.getByTestId("sent-notice-toast-body")).toHaveText(REPORT);
     await toastOpen.hover();
     await shots("notice-toast-open-hover");
     // The toast fades on its own; still here means the frames caught it.
@@ -255,9 +257,14 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     // The whole row is the target, with the pointer.
     expect(await row.evaluate((node) => getComputedStyle(node).cursor === "pointer"
       || getComputedStyle(node.querySelector("[data-notice-open]")!, "::after").cursor === "pointer")).toBe(true);
-    // The row's own Open is the toast's button.
-    await row.getByRole("button", { name: "Open", exact: true }).hover();
-    await shots("notice-row-open-hover");
+    // The row says what the reply said, and is its own Open.
+    await expect(row).toContainText(REPORT);
+    await expect(row.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
+    // At rest the row's corner shows when; the pointer on it shows its ×.
+    await expect(row.getByTestId(/-dismiss$/u)).toBeVisible();
+    await page.mouse.move(0, 0);
+    await expect(row.locator("time")).toBeVisible();
+    await shots("notice-row-rest");
     // The keyboard reaches the row through its one stop, and rings the row.
     await page.mouse.move(0, 0);
     await page.keyboard.press("ArrowDown");

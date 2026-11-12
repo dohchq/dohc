@@ -31,7 +31,7 @@ function harness() {
   } });
   const credentials = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" };
   const grant = { shareId: "s", grantId: "g", generation: 7, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null },
-    createdAtMs: 1, lastUsedAtMs: null, urlIssuedAtMs: null, dependents: [], access: "view" };
+    createdAtMs: 1, lastUsedAtMs: null, url: null, urlIssuedAtMs: null, dependents: [], access: "view" };
   const publicationId = "a".repeat(64);
   const relay = vi.fn(async (_credentials: typeof credentials, path: string, init?: RequestInit): Promise<unknown> => {
     if (path.endsWith("/shares/links")) return { ok: true, supportedLinkAccess: ["view", "comment"], links: [grant], independentGrants: [] };

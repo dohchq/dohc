@@ -97,11 +97,34 @@ function endedRunTitle(outcome: Exclude<RunOutcome, FailedOutcome>, agentName: s
   }[outcome];
 }
 
-// "Atlas didn't reply in "Plan day 2"". What happened comes first and the
-// thread last, so a clamp cuts only the thread's name.
-function runNoticeTitle(what: string, thread: string): string {
-  if (!thread) return what;
-  return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
+// "Atlas didn't reply in "Plan day 2"" or "Atlas replied in #trip". What
+// happened comes first and the place last, so a clamp cuts only its name.
+type RunPlace = { post: string } | { group: string } | null;
+function runNoticeTitle(what: string, place: RunPlace): string {
+  if (place === null) return what;
+  const room = NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length;
+  return "post" in place ? `${what} in "${cutText(place.post, room)}"` : `${what} in #${cutText(place.group, room)}`;
+}
+
+const REPLY_EXCERPT_MAX_CHARS = 160;
+const REPLY_EXCERPT_READ_CHARS = 2000;
+// The reply's opening words as one plain line, the body of its notice.
+// Markdown marks, code blocks and link targets go; their words stay, and
+// inline code stays as written. A heading ends with a colon, so "## Booked"
+// leads what follows it. Only the reply's start is read, so a long reply
+// costs no more than a short one.
+export function replyExcerpt(markdown: string): string {
+  const text = markdown
+    .slice(0, REPLY_EXCERPT_READ_CHARS)
+    .replace(/[\uD800-\uDBFF]$/, "")
+    .replace(/```[^\n]*\n?[\s\S]*?(?:```|$)/gu, " ")
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/gu, "$1")
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*?)[ \t#]*$/gmu, (_, heading: string) => /[.:!?]$/u.test(heading) ? heading : `${heading}:`)
+    .replace(/^[ \t]{0,3}(?:>[ \t]?|[-*+][ \t]+(?:\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gmu, "")
+    .replace(/(`+)([^\n]*?)\1|\*\*|__|~~|`/gu, (_, ticks?: string, code?: string) => ticks ? code ?? "" : "")
+    .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
+    .trim();
+  return cutText(text, REPLY_EXCERPT_MAX_CHARS);
 }
 
 // Why a run didn't reply, as one sentence: the notice's body and the second
@@ -255,6 +278,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   runNotices?: {
     post(input: PostNoticeInput): Promise<void>;
     owed: OwedRunNotices;
+    // Whether the workspace syncs now, rather than having its sync paused.
+    syncing(workspaceId: string): boolean;
   };
 }
 
@@ -293,7 +318,13 @@ interface LiveRun {
     | { kind: "fail"; exitCode?: number; reason: string }
     | null;
   terminalDurable: boolean;
+  // The automation's run said it has nothing to report, so an end with no
+  // reply is not a failure.
+  quiet: boolean;
 }
+
+// Why an automation's run cannot end with nothing to report.
+export type QuietRunRefusal = "not-running" | "other-thread" | "person";
 
 interface PendingPreRunFailure {
   workspace: ChatDispatchWorkspace;
@@ -385,6 +416,10 @@ function buildRunnerPrompt(
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
+  // Only an automation's run hears of it; a person who asked gets a reply.
+  const quiet = form === "mcp" && dohcTools === "reply"
+    ? " An automation started this run. If you have nothing to report, call the same tool with `nothingToReport: true` and no `body` instead of replying, and post nothing."
+    : "";
   const decisionInstruction = form === "mcp"
     ? "If blocked on the user, set `needsDecision`. To ask them to pick, list the choices in `options`; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc_reply_to_chat` are shown."
     : "If blocked on the user, reply with `--needs-decision`. To ask them to pick, add `--option \"<choice>\"` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc chat` are shown.";
@@ -392,7 +427,7 @@ function buildRunnerPrompt(
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${links}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${links}${replyInstruction}${quiet} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -693,6 +728,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(live.workspace);
     if (!live.terminalDurable) {
       let linkedMessages: string[] | null = null;
+      // A quiet run that posts nothing ends with no notice. Nothing is owed,
+      // so recovery after a crash finds nothing to mark failed.
+      let quietEnd = false;
       if (intent.kind === "complete") {
         try {
           linkedMessages = await dispatch.listRunMessages(
@@ -702,6 +740,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           );
         } catch (error) {
           reportError(error);
+          // Whether a quiet run posted decides its notice, and only this
+          // live run knows it was quiet, so it keeps its slot and reads again.
+          // A quit before then saves its end in stop().
+          if (intent.exitCode === 0 && live.quiet) {
+            scheduleRecoveryScan(live.workspace);
+            return false;
+          }
           if (intent.exitCode === 0) {
             pendingNoReplyChecks.set(
               runKey(live.workspace.workspaceId, live.claim.run.runId),
@@ -724,13 +769,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               { workspace: live.workspace, run: live.claim.run },
             );
             scheduleRecoveryScan(live.workspace);
+          } else if (live.quiet) {
+            quietEnd = true;
           } else {
             await markRunFailureHandled(live.workspace, live.claim.run).catch(reportError);
           }
         }
       }
       try {
-        await oweRunNotice(live.workspace, live.claim.run.runId);
+        if (!quietEnd) await oweRunNotice(live.workspace, live.claim.run.runId);
         if (intent.kind === "complete") {
           await dispatch.completeRun({
             runId: live.claim.run.runId,
@@ -747,7 +794,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         live.terminalDurable = true;
         notifyRunUpdated(live.workspace, live.claim.run.threadId);
-        await settleRunNotice(live.workspace, live.claim.run.runId);
+        if (!quietEnd) await settleRunNotice(live.workspace, live.claim.run.runId);
       } catch (error) {
         reportError(error);
         scheduleRecoveryScan(live.workspace);
@@ -762,6 +809,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     notifyRunUpdated(live.workspace, live.claim.run.threadId);
     await releaseLiveWorkspace(live);
     return true;
+  }
+
+  // An automation's run with nothing to report says so before it ends. A run
+  // a person's message started owes them a reply.
+  function endRunQuietly(workspaceId: string, runId: string, threadId: string): QuietRunRefusal | null {
+    const live = liveRuns.get(workspaceId);
+    if (!live || live.claim.run.runId !== runId || live.finalized) return "not-running";
+    if (live.claim.run.threadId !== threadId) return "other-thread";
+    if (live.claim.chainDepth === 0) return "person";
+    live.quiet = true;
+    return null;
   }
 
   async function timeOutLiveRun(live: LiveRun): Promise<void> {
@@ -888,9 +946,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const words: { lead: string; reason: string; nextStep?: ChatDispatchNextStep } = isFailedOutcome(outcome)
       ? await failureWords(workspace, run, outcome, agent)
       : { lead: endedRunTitle(outcome, agent?.name), reason: "" };
-    // The toast and Notices row end with the step under the message, worded
-    // for the chat it shows in. Only a very long agent name reaches the cut.
-    let body = words.reason;
+    // A reply's notice shows its opening words. The toast and Notices row of
+    // a failure end with the step under the message, worded for the chat it
+    // shows in. Only a very long agent name reaches the cut.
+    let body = reply === undefined ? words.reason : await replyBody(workspace, reply);
     if (words.nextStep) {
       try {
         const { channel } = await options.chatStoreFor(workspace).getThread({ workspaceId, threadId: run.threadId });
@@ -904,9 +963,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(words.lead, await threadTitle(workspace, run.threadId)),
+      title: runNoticeTitle(words.lead, await runPlace(workspace, run.threadId)),
       body,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
+      // While sync is paused, a run's notice and its reply's words stay on
+      // this computer.
+      ...(options.runNotices.syncing(workspaceId) ? {} : { onlyHere: true as const }),
     });
   }
 
@@ -956,16 +1018,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return { ...words, nextStep };
   }
 
-  // The thread's title, read from its own channel's threads. An empty title
-  // when that read fails or the thread has no channel: the notice still goes.
-  async function threadTitle(workspace: ChatDispatchWorkspace, threadId: string): Promise<string> {
+  // Where the run answered: a post by its title, a group's conversation by
+  // the group. The agent's own chat needs no place, since its name leads the
+  // title. Null when the read fails: the notice still goes.
+  async function runPlace(workspace: ChatDispatchWorkspace, threadId: string): Promise<RunPlace> {
     try {
-      const store = options.chatStoreFor(workspace);
-      const { workspaceId } = workspace;
-      const channelId = await store.findThreadChannelId({ workspaceId, threadId });
-      if (!channelId) return "";
-      const threads = await store.listChannelThreads({ workspaceId, channelId });
-      return threads.find((summary) => summary.thread.id === threadId)?.thread.title.replace(/\s+/gu, " ").trim() ?? "";
+      const { thread, channel } = await options.chatStoreFor(workspace).getThread({ workspaceId: workspace.workspaceId, threadId });
+      const title = thread.lane === "posts" ? thread.title.replace(/\s+/gu, " ").trim() : "";
+      if (title) return { post: title };
+      return channel?.kind === "channel" ? { group: channel.name.replace(/\s+/gu, " ").trim() } : null;
+    } catch (error) {
+      reportError(error);
+      return null;
+    }
+  }
+
+  // A reply's opening words. Empty when the read fails: the notice still goes.
+  async function replyBody(workspace: ChatDispatchWorkspace, messageId: string): Promise<string> {
+    try {
+      const message = await options.chatStoreFor(workspace).getMessage({ workspaceId: workspace.workspaceId, messageId });
+      return replyExcerpt(message.body);
     } catch (error) {
       reportError(error);
       return "";
@@ -1142,6 +1214,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         finalized: false,
         terminalIntent: null,
         terminalDurable: false,
+        quiet: false,
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
@@ -2234,6 +2307,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ),
       pumpAtStop?.catch(() => undefined) ?? Promise.resolve(),
     ]);
+    // A quiet run still waiting to read whether it posted is saved now, while
+    // dohc knows it was quiet. If the read fails again, it counts as no reply.
+    const quietEnds = await Promise.allSettled([...liveRuns.values()]
+      .filter((live) => live.quiet && !live.terminalDurable && live.terminalIntent?.kind === "complete" && live.terminalIntent.exitCode === 0)
+      .map(async (live) => {
+        const dispatch = options.dispatchStoreFor(live.workspace);
+        const { runId } = live.claim.run;
+        let posted = false;
+        try {
+          posted = await runPosted(live.workspace, runId);
+        } catch (error) {
+          reportError(error);
+        }
+        if (posted) await oweRunNotice(live.workspace, runId);
+        await dispatch.completeRun({ runId, exitCode: 0 });
+        live.terminalDurable = true;
+      }));
+    for (const result of quietEnds) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
     const preRunFailures = [...pendingPreRunFailures.values()];
     for (const test of selfTests.values()) {
       test.settled = true;
@@ -2310,6 +2403,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     resumeThreadDispatch,
     dispatchStateForThread,
     retryStoppedRun,
+    endRunQuietly,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,

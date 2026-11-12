@@ -110,7 +110,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
     await holdSystemClipboard(test.info(), async (remainingMs) => {
-      await share.getByRole("button", { name: "Copy", exact: true }).click({ timeout: remainingMs() });
+      await share.getByRole("button", { name: "Copy link", exact: true }).click({ timeout: remainingMs() });
       await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
     });
     await share.getByRole("button", { name: "Close", exact: true }).click();

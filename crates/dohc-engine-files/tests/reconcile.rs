@@ -4,7 +4,7 @@
 //! cancellation mid-scan leaving consistent, resumable state (no partial
 //! capture; dirty stays set so the next scan completes it).
 
-mod common;
+use crate::common;
 
 use common::Scratch;
 use dohc_engine_files::{

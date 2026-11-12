@@ -1,5 +1,4 @@
-//! Helpers every RPC test binary shares. Each binary compiles this module on
-//! its own and uses a different subset, so unused items are expected.
+//! Helpers shared by the RPC integration tests.
 #![allow(dead_code)]
 
 use dohc_engine_protocol::{

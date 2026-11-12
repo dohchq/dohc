@@ -5,7 +5,7 @@
 //! that through the RPC; `create_uninherited` and `copy_acl` in
 //! dohc-macos-files have their own tests.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

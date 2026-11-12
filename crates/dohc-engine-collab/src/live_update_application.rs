@@ -2857,7 +2857,7 @@ mod tests {
         ApplicationHandle,
     ) {
         let dir = ScratchDir::new_named("live-device-application").unwrap();
-        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut store = dohc_engine_testkit::open_empty_store(&dir.join("engine.db"), 0);
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace-1", "main", 0, &NoFaults)
             .unwrap();

@@ -257,15 +257,15 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
-  /** Activation does not wait for a slot: a busy pool answers `retry`, and a later pass captures again. */
+  /** Activation does not wait for a slot. A pass checks `hasCapacity` before it captures; a slot taken since answers `retry`. */
   function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    return (input, signal) =>
+    return Object.assign((input: OrdinaryActivationWork, signal?: AbortSignal) =>
       submit<OrdinaryActivationValidation>(
         { kind: "activation", policy: ownedPolicy, input },
         { kind: "capacity-refused" },
         signal,
-      );
+      ), { hasCapacity: () => hasCapacity(true) });
   }
   /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
   function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {

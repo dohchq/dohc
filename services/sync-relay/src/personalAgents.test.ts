@@ -1057,6 +1057,16 @@ describe("the owner's controls", () => {
     await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
     expect(inA).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps a stream running in a workspace lowered from Edit to View, and ends the same stream in a workspace leaving reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }, { workspaceId: WS_B, level: "edit" }] });
+    const lowered = running(f, agent, [WS_A]), removed = running(f, agent, [WS_B]);
+
+    await ok(await owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach: [{ workspaceId: WS_A, level: "view" }] } }));
+    expect(lowered).not.toHaveBeenCalled();
+    expect(removed).toHaveBeenCalledOnce();
+  });
 });
 
 describe("the owner's notice page", () => {

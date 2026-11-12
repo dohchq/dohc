@@ -137,7 +137,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   notice_rate_limited: "too many notices",
   notice_refused: "notice refused",
   payload_too_large: "payload too large",
-  personal_agent_edit_needed: "This agent needs Edit to change this workspace's Collections. Its owner can change that in Settings › Agents.",
+  personal_agent_edit_needed: "This agent needs Edit to change this workspace's pages and Collections. Its owner can change that in Settings › Agents.",
   personal_agent_not_collection: "Edit lets this agent change Collections. It can't write other files.",
   personal_agent_out_of_reach: "This agent can't reach this workspace. Its owner can change that in Settings › Agents.",
   personal_agent_unavailable: "dohc can't check this agent's sign-in right now. Try again shortly.",

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[cfg(target_vendor = "apple")]
 use common::FatVolume;

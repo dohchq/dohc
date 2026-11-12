@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[path = "rpc_relay/artifact_recovery.rs"]
 mod artifact_recovery;

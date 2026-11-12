@@ -4,6 +4,7 @@ import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspa
 vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
+import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -26,6 +27,10 @@ const PUBLIC_RELAY_URL = "https://relay.example.test";
 let exposeHeldLogQuery = false;
 
 // Legacy replay fixtures use Edit; current-only access has explicit coverage.
+const LINK_UNAVAILABLE = "This link isn't available." +
+  "Ask the person who shared it to send the link again. The address in a browser's address bar works only in that browser.";
+const VERSION_MISMATCH = "This page does not match its server.Reload it to get the version the server expects.Reload";
+
 const DEFAULT_META: ViewMeta = {
   access: "edit",
   subjectName: "Trip plans",
@@ -205,8 +210,7 @@ describe("App", () => {
   async function renderApp(
     condition: () => boolean = () =>
       container.querySelector(".viewer") !== null ||
-      container.querySelector("main.state")?.textContent ===
-        "This link isn't available.",
+      container.querySelector("main.state")?.textContent === LINK_UNAVAILABLE,
   ): Promise<void> {
     root = createRoot(container);
     await act(async () => {
@@ -427,22 +431,20 @@ describe("App", () => {
     await renderApp();
     const entry = container.querySelector('section[aria-labelledby="link-entry-title"]');
     expect(entry).not.toBeNull();
-    expect(entry?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
-    expect(entry?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
+    const agent = container.querySelector('section[aria-labelledby="link-agent-title"]');
+    expect(agent?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
+    expect(agent?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
     const copy = entry?.textContent ?? "";
-    expect(copy).toContain(access === "view" ? "You can read files and comments." :
-      access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
-    expect(copy).toContain("Included paths: docs.");
-    expect(copy).toContain(access === "edit" ? "retained History of files that remain in this share" : "History is unavailable with view or comment access.");
-    expect(copy).toContain("Open in dohc");
-    expect(copy.includes("Choose a file in Files")).toBe(path !== null);
-    expect(copy.includes("Choose Edit file")).toBe(access === "edit" && versionId === null && (path === "doc.md" || path === "trip/packing/collection.yaml"));
-    if (access !== "edit") expect(copy).toContain(access === "view" ? "does not let you comment or edit" : "does not let you edit files");
-    if (versionId !== null) {
-      expect(copy).toContain("pinned version");
-      expect(copy).toContain("Editing is unavailable on this link.");
-    }
-    expect(copy).toContain(access === "view" ? "Read the discussion in Comments." : "Use Comments to read or post comments.");
+    expect(copy).toContain(`Anyone with this link can ${access}`);
+    expect(copy).toContain(access === "view" ? "You can read the files and the comments." :
+      access === "comment" ? "You can read the files, and read and post comments." :
+      versionId !== null ? "A saved version can't be edited." : "You can edit pages here.");
+    expect(copy).toContain(path === null ? "No files yet in docs" : "1 file in docs");
+    expect(copy).toContain(versionId === null ? "Follows the current version" : "Shows a saved version");
+    const editable = access === "edit" && versionId === null && (path === "doc.md" || path === "trip/packing/collection.yaml");
+    expect(buttonNamed("Edit file") !== undefined).toBe(editable);
+    expect(container.querySelector(".badge")?.textContent).toBe(editable ? undefined :
+      access === "view" ? "View only" : access === "comment" ? "Can comment" : versionId !== null ? "Saved version, read-only" : "Can edit");
     expect(buttonNamed("Open in dohc")).toBeDefined();
   });
 
@@ -459,6 +461,106 @@ describe("App", () => {
     await settle(() => container.textContent.includes("This link isn't available."));
     expect(container.querySelector("#link-agent-title")).toBeNull();
     expect(container.textContent).not.toContain("/mcp/s/");
+  });
+
+  it("keeps the page readable when live editing can't start, with a way to try again and a way back", async () => {
+    const meta: ViewMeta = {...DEFAULT_META, access: "edit", effectiveSelector: {access: "edit", versionId: null, paths: ["docs"]}};
+    const files: SharedFile[] = [{path: "doc.md", blobSha256: "a".repeat(64), contentKind: "text"}];
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    let opens = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const route = requestPath(input);
+      if (route === "/api/view/meta") return jsonResponse(meta);
+      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+      if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+      if (route === "/api/live/link-document") {
+        opens += 1;
+        return jsonResponse(linkRefusalBody("link_live_unavailable"), LINK_REFUSALS.link_live_unavailable.status);
+      }
+      return fallback(input, init);
+    }));
+    await renderApp();
+    await settle(() => container.querySelector("article.markdown") !== null);
+
+    await act(async () => buttonNamed("Edit file")!.click());
+    await settle(() => container.querySelector(".edit-notice") !== null);
+
+    expect(container.querySelector(".edit-notice")?.textContent)
+      .toContain("dohc could not start editing this page.You can still read and comment here.");
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
+    expect(buttonNamed("Open in dohc")).toBeDefined();
+
+    await act(async () => buttonNamed("Try again")!.click());
+    await settle(() => opens === 2 && container.querySelector(".edit-notice") !== null);
+
+    await act(async () => buttonNamed("Done")!.click());
+    expect(buttonNamed("Edit file")).toBeDefined();
+    expect(container.querySelector(".edit-notice")).toBeNull();
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
+  });
+
+  it("keeps comments closed until asked for, with their count on the button", async () => {
+    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      if (requestPath(input) === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [{ messageId: "m1", createdAtMs: 1, deleted: false, body: "Shared comment", author: { kind: "named", displayName: "Sam" } }],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      return fallback(input, init);
+    }));
+    await renderApp();
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Comments"]')!;
+    const panel = container.querySelector<HTMLElement>("#link-discussion")!;
+    await settle(() => toggle.textContent === "1");
+    expect(panel.dataset.open).toBe("false");
+    expect(panel.hasAttribute("inert")).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => toggle.click());
+    expect(panel.dataset.open).toBe("true");
+    expect(panel.hasAttribute("inert")).toBe(false);
+    expect(panel.textContent).toContain("Shared comment");
+    expect(document.activeElement).toBe(panel);
+
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(panel.dataset.open).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("shows a link to one file as that file's name, and a link to several as a list", async () => {
+    const files: SharedFile[] = [
+      { path: "docs/a.md", blobSha256: "a".repeat(64), contentKind: "text" },
+      { path: "docs/b.md", blobSha256: "b".repeat(64), contentKind: "text" },
+    ];
+    let shared = files.slice(0, 1);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage(shared, 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage(shared);
+      if (path.startsWith("/api/view/blob/")) return new Response("Text");
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    await renderApp();
+    expect(container.querySelector("header nav")?.textContent).toBe("a.md");
+    expect(container.querySelector("button.folder")).toBeNull();
+    expect(container.querySelector('button[aria-label="Files"]')).toBeNull();
+    expect(container.querySelector("h1")?.textContent).toBe("a");
+
+    act(() => root?.unmount());
+    shared = files;
+    await renderApp();
+    expect(container.querySelector("header nav")).toBeNull();
+    expect(container.querySelector("button.folder")?.textContent).toBe("docs");
+    expect(renderedFilePaths()).toEqual(["a.md", "b.md"]);
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Files"]')!;
+    await act(async () => toggle.click());
+    expect(container.querySelector<HTMLElement>("#shared-files")?.hidden).toBe(true);
   });
 
   it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
@@ -816,7 +918,7 @@ describe("App", () => {
 
     expect(handoffSignals[0]?.aborted).toBe(true);
     expect(
-      [...container.querySelectorAll(".handoff-button")]
+      [...container.querySelectorAll("#link-more .handoff-button")]
         .map((button) => button.textContent),
     ).toEqual(["Open in dohc"]);
     expect(container.textContent).not.toContain("Opening in dohc…");
@@ -835,7 +937,7 @@ describe("App", () => {
 
     expect(navigate).not.toHaveBeenCalled();
     expect(
-      [...container.querySelectorAll(".handoff-button")]
+      [...container.querySelectorAll("#link-more .handoff-button")]
         .map((button) => button.textContent),
     ).toEqual(["Open in dohc"]);
 
@@ -961,7 +1063,7 @@ describe("App", () => {
     await settle(() => handoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
-    expect(container.textContent).toBe("This link isn't available.");
+    expect(container.textContent).toBe(LINK_UNAVAILABLE);
     expect(logRequests).toBe(2);
   });
 
@@ -980,7 +1082,7 @@ describe("App", () => {
 
     await renderApp(() => buttonNamed("Try again") !== undefined);
     expect(container.querySelector("[role=alert]")?.textContent).toBe(
-      "dohc couldn't open the shared files. Check your connection, then choose Try again.Try again",
+      "dohc couldn't open the shared files.Check your connection, then choose Try again.Try again",
     );
     clickButton("Try again");
     await settle(() => container.querySelector(".viewer") !== null);
@@ -1003,12 +1105,12 @@ describe("App", () => {
     expect(container.querySelector("header")?.textContent).toContain(
       "Trip plans",
     );
-    expect(container.querySelector(".badge")?.textContent).toBe("Edit");
+    expect(container.querySelector(".badge")?.textContent).toBe("Can edit");
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "No settled changes",
+      "No changes yet",
     );
     expect(container.querySelector("main.content")?.textContent).toBe(
-      "No files in this share yet.",
+      "No files on this link yet. This page shows them as soon as they arrive.",
     );
     expect(container.textContent).not.toContain("This link isn't available.");
   });
@@ -1049,7 +1151,7 @@ describe("App", () => {
       "Trip plans",
     );
     expect(container.querySelector("main.content")?.textContent).toBe(
-      "No files in this share yet.",
+      "No files on this link yet. This page shows them as soon as they arrive.",
     );
     expect(container.textContent).not.toContain("This link isn't available.");
   });
@@ -1060,11 +1162,13 @@ describe("App", () => {
       blobSha256: "f".repeat(64),
       contentKind: "text",
     };
+    // A link to one file shows no tree, so the folder needs a second file.
+    const files: SharedFile[] = [file, { ...file, path: "docs/second.md" }];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return currentPage([file], 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/current") return currentPage(files, 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage(files);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response("# Shared file");
       }
@@ -1255,7 +1359,7 @@ describe("App", () => {
     expect(blobRequestInit?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("renders unavailable freshness separately from no settled changes", async () => {
+  it("says nothing about the last change when the server can't say when it was", async () => {
     const meta = {
       ...DEFAULT_META,
       lastSettledKnown: false,
@@ -1271,9 +1375,7 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled time isn't available.",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("");
   });
 
   it("keeps tree selection and relative Markdown links inside the projected namespace", async () => {
@@ -1349,7 +1451,7 @@ describe("App", () => {
     });
 
     expect(followedPageLink).toBe(false);
-    expect(container.querySelector("h1")?.textContent).toBe("docs/notes/next.txt");
+    expect(container.querySelector("h1")?.textContent).toBe("next.txt");
     expect(location.pathname).toBe(`/s/${SESSION}`);
   });
 
@@ -1434,8 +1536,8 @@ describe("App", () => {
     expect(container.querySelector("header")?.textContent).toContain(
       "Trip plans",
     );
-    expect(container.querySelector("h1")?.textContent).toBe(staleFile.path);
-    expect(container.querySelector(".badge")?.textContent).toBe("Edit");
+    expect(container.querySelector("h1")?.textContent).toBe("readme");
+    expect(buttonNamed("Edit file")).toBeDefined();
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(staleFile.path);
     expect(metaRequests).toBe(0);
@@ -1878,7 +1980,7 @@ describe("App", () => {
     expect(store).not.toHaveBeenCalled();
   });
 
-  it.each(["exchange", "current"] as const)("renders server-supplied reload recovery for a share-web mismatch at %s", async (step) => {
+  it.each(["exchange", "current"] as const)("offers a reload for a share-web mismatch at %s", async (step) => {
     const message = "Reload this share page to use the supported API version.";
     const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_new", error: message }, 409);
     history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
@@ -1889,12 +1991,12 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
 
-    await renderApp(() => container.querySelector("main.state")?.textContent === message);
+    await renderApp(() => container.querySelector("main.state")?.textContent === VERSION_MISMATCH);
 
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each(["log", "meta"] as const)("shows server-supplied recovery and stops following after a share-web mismatch at %s", async (step) => {
+  it.each(["log", "meta"] as const)("offers a reload and stops following after a share-web mismatch at %s", async (step) => {
     const message = "Reload this share page to use the supported API version.";
     const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_old", error: message }, 409);
     vi.useFakeTimers();
@@ -1915,7 +2017,7 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
 
-    await renderApp(() => container.querySelector("main.state")?.textContent === message);
+    await renderApp(() => container.querySelector("main.state")?.textContent === VERSION_MISMATCH);
 
     // The follower stopped: past its longest retry delay, nothing reads again.
     const reads = logRequests + metaRequests;
@@ -1966,7 +2068,7 @@ describe("App", () => {
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
     expect(container.querySelector("main.content")?.textContent).toBe(
-      "No files in this share yet.",
+      "No files on this link yet. This page shows them as soon as they arrive.",
     );
     expect(container.textContent).not.toContain("This link isn't available.");
   });
@@ -2703,7 +2805,7 @@ describe("App", () => {
     await renderApp();
 
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled 59 seconds ago",
+      "Updated just now",
     );
 
     await act(async () => {
@@ -2711,7 +2813,7 @@ describe("App", () => {
     });
 
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled 2 minutes ago",
+      "Updated 2 minutes ago",
     );
   });
 
@@ -3705,7 +3807,7 @@ describe("App", () => {
 
     expect(metaPaths).toHaveLength(0);
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "No settled changes",
+      "No changes yet",
     );
     expect(renderedFilePaths()).toEqual(["zeta.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
@@ -3718,7 +3820,7 @@ describe("App", () => {
       freshness: container.querySelector(".freshness")?.textContent,
     }).toEqual({
       files: ["alpha.txt", "zeta.txt"],
-      freshness: "Last settled now",
+      freshness: "Updated just now",
     });
     expect(metaPaths).toHaveLength(1);
     expect(logPaths).toHaveLength(3);
@@ -3979,7 +4081,7 @@ describe("App", () => {
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled now",
+      "Updated just now",
     );
   });
 
@@ -4415,7 +4517,7 @@ describe("App", () => {
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
     expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled now",
+      "Updated just now",
     );
   });
 
@@ -4514,7 +4616,7 @@ describe("App", () => {
     await settle(() => container.textContent?.includes("Shared comment") === true);
     await settle(() => activitySignal !== undefined);
 
-    expect(container.querySelector(".badge")?.textContent).toBe("Comment");
+    expect(container.querySelector(".badge")?.textContent).toBe("Can comment");
     expect(container.querySelector("main.content")?.textContent).toContain(
       "File bytes stay read-only.",
     );
@@ -4628,14 +4730,14 @@ describe("App", () => {
     await renderApp();
     await settle(() =>
       parkedSignal !== undefined &&
-      container.querySelector(".badge")?.textContent === "View"
+      container.querySelector(".badge")?.textContent === "View only"
     );
 
     expect(container.querySelector(".comments-panel form")).toBeNull();
-    expect(container.querySelector('section[aria-labelledby="link-entry-title"]')?.textContent).toContain("This link does not let you comment or edit.");
+    expect(container.querySelector('section[aria-labelledby="link-entry-title"]')?.textContent).toContain("Anyone with this link can view");
     await settle(() => metaCalls === 1);
 
-    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector(".badge")?.textContent).toBe("View only");
     expect(container.querySelector(".comments-panel form")).toBeNull();
   });
 
@@ -4756,7 +4858,7 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(container.textContent).toBe("This link isn't available.");
+    expect(container.textContent).toBe(LINK_UNAVAILABLE);
   });
 
   describe("log rate limits", () => {
@@ -4807,7 +4909,7 @@ describe("App", () => {
       expect(logPaths).toEqual(Array.from({ length: 6 }, () => logPaths[0]!));
       expect(logTimes).toEqual([0, 1_000, 3_000, 7_000, 15_000, 15_000]);
       expect(container.querySelector("main.content")?.textContent).toBe(
-        "No files in this share yet.",
+        "No files on this link yet. This page shows them as soon as they arrive.",
       );
     });
 
@@ -4846,7 +4948,7 @@ describe("App", () => {
       throttled = false;
       clickButton("Try again");
       await settle(() => container.querySelector(".viewer") !== null);
-      expect(container.querySelector("main.content")?.textContent).toBe("No files in this share yet.");
+      expect(container.querySelector("main.content")?.textContent).toBe("No files on this link yet. This page shows them as soon as they arrive.");
     });
 
     it("offers Try again for a non-429 log failure without retrying it unasked", async () => {

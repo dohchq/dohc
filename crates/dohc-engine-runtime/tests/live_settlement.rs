@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::*;

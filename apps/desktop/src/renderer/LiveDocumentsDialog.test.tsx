@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
+import { HOST_STOP_UI_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { deferred } from "../testing/deferred";
 import {
   LiveDocumentsDialog,
@@ -81,6 +81,17 @@ it("distinguishes retired and hosted held notes and offers no Resume or Stop on 
   expect(actions("docs/diverged.md")).toEqual([]);
 });
 
+// Resume fails the same way because ordinary edits never give the document a new base, so the row offers only Stop and says why.
+it("shows a document whose edit history the server can't check, with Stop and no Resume", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(page([row("docs/long.md", {status: "unavailable", reason: "live-history-over-budget", canResume: false})]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const long = await screen.findByTestId("live-document-row-docs/long.md");
+  expect(long.children[1]?.textContent).toBe("History too long");
+  expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.")).toBeDefined();
+  expect(actions("docs/long.md")).toEqual(["Stop live editing"]);
+});
+
 function paths(): string[] {
   return screen
     .getAllByTestId(/^live-document-row-/)
@@ -93,8 +104,7 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
-  it.each(HOST_STOP_CASES.flatMap(([code, sessionHost, words, control]) =>
-    (["ready", "paused"] as const).map(status => ({code, sessionHost, words, control, status}))))(
+  it.each(HOST_STOP_UI_CASES)(
     "keys $code on a $status row on code alone ($sessionHost)", async ({code, sessionHost, words, control, status}) => {
     const h = harness(), user = userEvent.setup();
     h.load.mockResolvedValueOnce(page([row("a.md", {status, canResume: true})])).mockResolvedValue(page([row("a.md")]));

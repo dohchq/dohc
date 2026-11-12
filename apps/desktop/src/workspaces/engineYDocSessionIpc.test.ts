@@ -142,6 +142,7 @@ interface TestHarnessOptions {
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
+  onOwnerOpened?: (workspaceId: string, path: string) => void;
 }
 
 function rendererSession(
@@ -204,6 +205,7 @@ function harness(
     sharedCaptureFor: options.sharedCaptureFor,
     ownerDraftState: options.ownerDraftState,
     onPendingShareMayChange: options.onPendingShareMayChange,
+    onOwnerOpened: options.onOwnerOpened,
     resolveDocumentPath,
     onError,
   });
@@ -273,6 +275,21 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(onPendingShareMayChange).toHaveBeenCalledTimes(2);
     } finally {
       await h.ipc.shutdown();
+    }
+  });
+
+  // Proves: an owner's open reaches owner delivery only for a note the engine
+  // holds an owner binding for, so a note never shared asks the server nothing.
+  it("reports an owner's open only for a note the engine holds an owner binding for", async () => {
+    for (const ownerBound of [false, true]) {
+      const onOwnerOpened = vi.fn();
+      const h = harness(providerSession({ ownerBound }), { onOwnerOpened });
+      try {
+        await expect(h.ipc.open(new FakeSender(7), openPayload)).resolves.toMatchObject({ available: true });
+        expect(onOwnerOpened.mock.calls).toEqual(ownerBound ? [[DOCUMENT.workspaceId, DOCUMENT.path]] : []);
+      } finally {
+        await h.ipc.shutdown();
+      }
     }
   });
 

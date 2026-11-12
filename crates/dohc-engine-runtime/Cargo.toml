@@ -1,4 +1,5 @@
 [package]
+autotests = false
 license.workspace = true
 name = "dohc-engine-runtime"
 version.workspace = true
@@ -92,3 +93,7 @@ dohc-linux-files = { path = "../dohc-linux-files", features = ["test-support"] }
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

@@ -24,7 +24,7 @@ const GAMMA: &str = "rec_cccccccccccccccccccccccccc";
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
     let db = engine_db_path(scratch).expect("engine db path");
-    let mut store = EngineStore::open(&db, 1).expect("open store");
+    let mut store = dohc_engine_testkit::open_empty_store(&db, 1);
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, MAIN, 1, &NoFaults)
         .expect("main version");

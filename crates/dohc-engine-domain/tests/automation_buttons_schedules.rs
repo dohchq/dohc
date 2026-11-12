@@ -29,7 +29,7 @@ const BO: &str = "user:bo";
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
     let db = engine_db_path(scratch).expect("engine db path");
-    EngineStore::open(&db, 1).expect("open store")
+    dohc_engine_testkit::open_empty_store(&db, 1)
 }
 
 fn press_on(

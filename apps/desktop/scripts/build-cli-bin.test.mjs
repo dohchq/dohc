@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -26,11 +26,13 @@ console.error('probe-stderr'); process.exit(37);`;
 let serial = 0;
 let exercisedLaunchers = 0;
 // Homebrew's Node loads libnode through @rpath, which starts at the binary's own
-// folder, so each copy gets a link to it there. Official Node has no such library.
+// folder, so each fixture gets a link to it there. Official Node has no such library.
 const nodeLib = join(dirname(realpathSync(process.execPath)), "..", "lib");
 const nodeLibraries = existsSync(nodeLib) ? readdirSync(nodeLib).filter(name => /^libnode\..*\.dylib$/.test(name)) : [];
-function copyNode(to) {
-  copyFileSync(process.execPath, to);
+const fixtureNode = join(scratch, windows ? "node.exe" : "node");
+copyFileSync(process.execPath, fixtureNode);
+function linkNode(to) {
+  linkSync(fixtureNode, to);
   for (const name of nodeLibraries) symlinkSync(join(nodeLib, name), join(dirname(to), name));
 }
 function fixture(platform = "win32", arch = "x64", label = "Ice Test") {
@@ -41,8 +43,8 @@ function fixture(platform = "win32", arch = "x64", label = "Ice Test") {
   const competing = join(root, "competing");
   for (const dir of [cli, compiler, cwd, competing]) mkdirSync(dir, { recursive: true });
   const node = join(compiler, platform === "win32" ? "node.exe" : "node");
-  copyNode(node);
-  copyNode(join(competing, windows ? "node.exe" : "node"));
+  linkNode(node);
+  linkNode(join(competing, windows ? "node.exe" : "node"));
   for (const name of ["node.exe", "node.cmd"]) writeFileSync(join(cwd, name), "@echo WORKSPACE-NODE-RAN\r\nexit /b 98\r\n");
   const files = launchers.cliLaunchers({ platform, arch });
   for (const name of ["dohc", "dohc-mcp"]) {

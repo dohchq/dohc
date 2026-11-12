@@ -2267,6 +2267,19 @@ export async function replyToChat(
   };
 }
 
+// End an automation's run with nothing to report. It posts no message, and
+// the run ends without a failure.
+export async function reportNothing(ctx: ToolContext, args: { threadId: string; runId?: string }) {
+  // The run this server works for wins over a run the caller names.
+  const runId = ctx.runId ?? args.runId;
+  const result = await requestCli(ctx, "nothingToReport", {
+    thread: args.threadId,
+    ...(runId !== undefined ? { runId } : {}),
+  });
+  if ("ok" in result) return result;
+  return { ok: true as const, threadId: engineThreadId(result.threadId), nothingToReport: true as const };
+}
+
 // --- collections ------------------------------------------------------------
 //
 // Collection reads and writes cross the same desktop CLI hop as chats: the

@@ -2,7 +2,7 @@
 import { LIVE_STOP_SERVER_NOT_READY, LIVE_STOP_WAITING, liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
-import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
+import { HOST_STOP_CASES, HOST_STOP_UI_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
@@ -2374,7 +2374,7 @@ describe("notices sent to you", () => {
     const toggle = await screen.findByTestId("notice-center-toggle");
     expect(toggle.getAttribute("aria-label")).toBe("Notices, 1 unread");
     await user.click(toggle);
-    await user.click(within(await screen.findByTestId("sent-notice-mention:1")).getByRole("button", { name: "Open" }));
+    await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
     await screen.findByTestId("tab-b.md");
     expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
   });
@@ -2391,7 +2391,7 @@ describe("notices sent to you", () => {
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const row = await screen.findByTestId("sent-notice-mention:1");
     expect(row.textContent).toContain("Japan");
-    await user.click(within(row).getByRole("button", { name: "Open" }));
+    await user.click(within(row).getByTestId("sent-notice-mention:1-open-row"));
     expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, { to: "file", path: "Japan/day-1.md" });
   });
 
@@ -2437,7 +2437,7 @@ describe("notices sent to you", () => {
     renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first"), FAILED("second", "atc_second")]) });
     const open = async (id: string) => {
       await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(await screen.findByTestId(`sent-notice-automation-failed:${id}-open`));
+      await user.click(await screen.findByTestId(`sent-notice-automation-failed:${id}-open-row`));
     };
     await open("first");
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
@@ -3268,7 +3268,7 @@ describe("notices sent to you", () => {
     bridge.findAutomationCollection.mockReturnValueOnce(found.promise);
     renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first")]) });
     await user.click(await screen.findByTestId("notice-center-toggle"));
-    await user.click(await screen.findByTestId("sent-notice-automation-failed:first-open"));
+    await user.click(await screen.findByTestId("sent-notice-automation-failed:first-open-row"));
     // Closing Notices cancels the Open.
     await user.click(screen.getByTestId("notice-center-toggle"));
     await act(async () => found.resolve({ status: "found", collectionPath: "tasks" }));
@@ -3377,7 +3377,7 @@ describe("notices sent to you", () => {
       renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW, sentNotices: sentNotices([later]) });
       await waitFor(() => expect(bridge.resolveAutomationControls).toHaveBeenCalledTimes(1));
       await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(await screen.findByTestId("sent-notice-automation-failed:second-open"));
+      await user.click(await screen.findByTestId("sent-notice-automation-failed:second-open-row"));
       expect(await screen.findByTestId("tab-dohc://collection/chores")).toBeTruthy();
       await act(async () => first.resolve({ status: "found", collectionPath: "tasks", automation: "first" }));
       expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
@@ -3429,7 +3429,7 @@ describe("notices sent to you", () => {
       renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]) });
 
       await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
       await user.click(await screen.findByTestId("open-share-start"));
       expect(bridge.mountShare).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, shareCode: "code-1" });
       await screen.findByTestId("tab-shared-with-me/owner/Trips/Japan/report.md");
@@ -3442,7 +3442,7 @@ describe("notices sent to you", () => {
       renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]), onSwitchWorkspace });
 
       await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
       const start = await screen.findByTestId("open-share-start");
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
@@ -3458,7 +3458,7 @@ describe("notices sent to you", () => {
       renderWithNotices(bridge, { sentNotices: sentNotices([switchedOff]), onSwitchWorkspace });
 
       await user.click(await screen.findByTestId("notice-center-toggle"));
-      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
       const start = await screen.findByTestId("open-share-start");
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
@@ -4160,8 +4160,7 @@ describe("owner live documents", () => {
     await act(async () => {});
     expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
   });
-  it.each(HOST_STOP_CASES.flatMap(([code, sessionHost, words, control]) =>
-    (["ready", "paused"] as const).map(status => ({code, sessionHost, words, control, status}))))(
+  it.each(HOST_STOP_UI_CASES)(
     "keeps out-of-sight $code with $sessionHost and $status row in toast and Notices", async ({code, sessionHost, words, control, status}) => {
     const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
     bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [{...LIVE_ROW, status, canResume: true}], nextCursor: null}));

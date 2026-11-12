@@ -44,7 +44,7 @@ const inputPaths = {
   desktop: ["apps/desktop", "packages", "services", "patches", "scripts", "tools", "crates/dohc-compiler-owner", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...configFiles.desktop],
 };
 // CARGO_BUILD_JOBS sets how many compilers run at once, not what they build.
-const environmentInputs = {
+export const environmentInputs = {
   engine: /^(CARGO_(BUILD_(?!JOBS$)|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
   desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|DESKTOP_DIST)$)/,
 };
@@ -105,9 +105,11 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths = kindInp
       directory = dirname(directory);
       for (const name of ["config", "config.toml"]) {
         const path = join(directory, ".cargo", name);
-        hash.update(path + "\0");
-        hash.update(existsSync(path) ? readFileSync(path) : "<deleted>");
-        hash.update("\0");
+        if (existsSync(path)) {
+          hash.update(path + "\0");
+          hash.update(readFileSync(path));
+          hash.update("\0");
+        }
       }
     }
     const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
@@ -143,8 +145,8 @@ export function artifactSourceFingerprint(kind, root = repoRoot, files = listFil
     return manifest.name ? [{path: dirname(path).replaceAll("\\", "/"), manifest}] : [];
   });
   const owners = new Set(kind === "engine" ? ["crates", "vendor", ".cargo"] : kind === "runtime"
-    ? ["packages/app-backend-runtime"] : ["apps/desktop", "services/share-web"]);
-  const pending = kind === "runtime" ? ["@dohc/app-backend-runtime"] : ["@dohc/desktop", "@dohc/share-web"];
+    ? ["packages/app-backend-runtime"] : ["apps/desktop", "services/share-web", "services/sync-relay"]);
+  const pending = kind === "runtime" ? ["@dohc/app-backend-runtime"] : ["@dohc/desktop", "@dohc/share-web", "@dohc/sync-relay"];
   const visited = new Set();
   const buildScripts = new Set(["scripts/verification/build.mjs"]);
   if (kind !== "engine") while (pending.length) {
@@ -256,11 +258,13 @@ export function directoryFingerprint(path) {
 // The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
 // macOS and Linux stage only the Collection compiler's esbuild binary.
 const compilerTargets = ["win32-x64", "darwin-arm64", "linux-arm64", "linux-x64"];
+const readerTargets = ["win32-x64", "darwin-arm64", "linux-x64"];
 export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist",
     ...(compilerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/app-compiler"] : []),
+    ...(readerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/engine-reader"] : []),
     ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/agent-probe"] : []),
   ].map((path) => [path, directoryFingerprint(join(root, path))]))).digest("hex");
 }
@@ -361,6 +365,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
     } else {
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
       await run(...pnpm(["--filter", "@dohc/share-web", "build"]), { log: join(output, "share-web-build.log") });
+      await run(...pnpm(["--filter", "@dohc/sync-relay", "build"]), { log: join(output, "sync-relay-build.log") });
     }
     if (changed(kind)) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
     receipt[kind] = { source, production, artifact: artifactFingerprint(kind), commit, builtAt: new Date().toISOString() };

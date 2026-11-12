@@ -89,7 +89,7 @@ mod tests {
             before: impl FnOnce(&mut EngineStore, &LiveObjectBinding),
         ) -> Self {
             let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
-            let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+            let mut store = dohc_engine_testkit::open_empty_store(&scratch.join("engine.db"), 0);
             VersionedTextStore::new(&mut store)
                 .ensure_main_version("workspace", "main", 0, &NoFaults)
                 .unwrap();

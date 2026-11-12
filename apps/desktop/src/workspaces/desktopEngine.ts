@@ -55,7 +55,8 @@ export interface ServerOwnerDelivery {
     bearer: string; accountId: string; relayUrl: string; signal: AbortSignal;
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
-    documents(signal: AbortSignal): Promise<unknown>;
+    /** The server's list of the workspace's hosted documents. `fresh` skips one read before this call. */
+    documents(signal: AbortSignal, fresh?: boolean): Promise<unknown>;
     retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
     /**
      * The owner's page read, Try again or confirmed copy of edits the server
@@ -69,8 +70,15 @@ export interface ServerOwnerDelivery {
       {action: "copied"; outboxId: string; generation: number; checkpointDigest: string | null}, signal: AbortSignal): Promise<unknown>;
     /** A later page of the edits the server keeps, after the cursor the previous page named. */
     keptEditsPage(after: number, signal: AbortSignal): Promise<unknown>;
+    /**
+     * The owner's open of a document this computer holds an owner binding for
+     * and the server does not list as ready. `refused` when only the owner can
+     * change the server's answer.
+     */
+    open(path: string, signal: AbortSignal): Promise<"hosted" | "refused">;
   } | null>;
 }
+type ServerOwnerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
 /**
  * Whether this workspace has no ordinary sync configured: Stop sync saved a
  * pause, or the folder was attached again as local work. Sign-out, a lost
@@ -82,7 +90,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required" | "unsent-edits-limit";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget" | "restart-required" | "unsent-edits-limit";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -133,6 +141,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   // The server accepted or refused a document's edits, so the notes waiting for it changed.
   notifyOwnerDraftsChanged?(workspaceId: string): void;
+  // The shared notes whose edits wait on this computer for the server, as last read.
+  ownerPendingPaths?(workspaceId: string): readonly string[];
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
@@ -188,6 +198,22 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // The ready documents from each workspace's last complete live-host list, for the move guard.
   const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
+  // The owner's open. Each workspace's documents its last list named live or
+  // starting; those its owner opened here, in the order of `ownerOpenClock`,
+  // which a pass asks the server to host unless a list read after the open
+  // names them live or starting; and those whose open the server refused. No
+  // pass asks for a refused one again until its owner opens it, or a list
+  // names it live after a Resume. These outlive a pass and a restart of delivery.
+  const hostedOwnerPaths = new Map<string, Set<string>>();
+  const ownerOpened = new Map<string, Map<string, number>>();
+  const ownerOpenRefused = new Map<string, Set<string>>();
+  // Orders each owner open against the lists passes read.
+  let ownerOpenClock = 0;
+  const pathsOf = (paths: Map<string, Set<string>>, workspaceId: string) => {
+    let set = paths.get(workspaceId);
+    if (!set) paths.set(workspaceId, set = new Set());
+    return set;
+  };
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -338,6 +364,32 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         generation === ownerDeliveryGeneration && !isQuitting() && !ownerWorkspaceCloses) {
         const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, source = rustEngineSessionSource;
         const profile = serverOwnerConfig;
+        // At most one owner open per pass, of a document this computer holds an
+        // owner binding for and the list names neither live nor starting: first
+        // one its owner opened before the list was read, then one whose edits
+        // wait here. The next pass reads the list it changed.
+        const ownerOpenTurn = async (workspaceId: string, session: ServerOwnerSession,
+          rows: readonly {path: string; status: string}[], listedAt: number, signal: AbortSignal, check: () => void) => {
+          const current = server.workspaceIds();
+          for (const paths of [hostedOwnerPaths, ownerOpened, ownerOpenRefused]) for (const id of paths.keys()) if (!current.includes(id)) paths.delete(id);
+          const hosted = new Set(rows.filter(row => row.status === "ready" || row.status === "preparing").map(row => row.path));
+          hostedOwnerPaths.set(workspaceId, hosted);
+          const refused = pathsOf(ownerOpenRefused, workspaceId), opened = ownerOpened.get(workspaceId) ?? new Map<string, number>();
+          for (const path of refused) if (hosted.has(path)) refused.delete(path);
+          // An open made after this list was read waits for the next list.
+          for (const [path, at] of opened) if (at < listedAt && (hosted.has(path) || refused.has(path))) opened.delete(path);
+          let path = [...opened].find(([, at]) => at < listedAt)?.[0];
+          path ??= (dependencies.ownerPendingPaths?.(workspaceId) ?? []).find(candidate => !hosted.has(candidate) && !refused.has(candidate));
+          if (path === undefined) return;
+          const at = opened.get(path);
+          const answer = await session.open(path, signal);
+          check();
+          // The owner opened it again while this was asked: that open stays, and this answer records nothing.
+          const now = ownerOpened.get(workspaceId);
+          if (now?.get(path) !== at) return;
+          now?.delete(path);
+          if (answer === "refused") refused.add(path);
+        };
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
           onError: error => console.error("[desktop] server owner delivery failed:", error),
           runPass: async (workspaceId, index, lifetime) => {
@@ -375,7 +427,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 if (stopsChanged) await readQuarantinesAfterPass(workspaceId,client,binding.workspace);
               });
               } catch (error) {check();console.error("[desktop] owner Stop discovery failed:",error);}
-              const response = await session.documents(signal);
+              // A pass holding an owner's open reads a list made after it.
+              const listedAt = ++ownerOpenClock;
+              const response = await session.documents(signal, (ownerOpened.get(workspaceId)?.size ?? 0) > 0);
               check();
               // A scan that does not complete keeps the last complete answer: the edits are still on the server.
               try {
@@ -386,7 +440,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
               liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
-              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
+              const {documents: rows, diverged} = response as {documents: {path: string; status: string; reason?: unknown}[]; diverged?: unknown};
+              try {await ownerOpenTurn(workspaceId, session, rows, listedAt, signal, check);}
+              catch (error) {check(); console.error("[desktop] owner live open failed:", error);}
               const preparing = rows.some(row => row.status === "preparing");
               // The server reports a diverged copy even after its owner stopped every document.
               const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
@@ -400,10 +456,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
                 unavailableFor("conflict-parent-withheld") ? "conflict-parent-withheld" :
+                unavailableFor("live-history-over-budget") ? "live-history-over-budget" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
               const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
-                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld";
+                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld" ||
+                reason === "live-history-over-budget";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
@@ -872,6 +930,24 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     retryOwnerDelivery(workspaceId: string): void {
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
+    },
+    /**
+     * The owner opened `path`, which this computer holds an owner binding for,
+     * in an editor here. A pass asks the server to host it unless a list read
+     * after the open names it live or starting, and a refusal before is no
+     * longer an answer. A pass starts now unless the last list named it live
+     * or starting; then the next pass reads the list that decides.
+     */
+    ownerOpenedLiveDocument(workspaceId: string, path: string): void {
+      if (!dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) return;
+      ownerOpenRefused.get(workspaceId)?.delete(path);
+      let opened = ownerOpened.get(workspaceId);
+      if (!opened) ownerOpened.set(workspaceId, opened = new Map());
+      opened.delete(path);
+      opened.set(path, ++ownerOpenClock);
+      // Only the latest opens wait; an editor opens one document at a time.
+      for (const oldest of opened.keys()) {if (opened.size <= 64) break; opened.delete(oldest);}
+      if (!hostedOwnerPaths.get(workspaceId)?.has(path)) ownerDelivery?.retry?.(workspaceId);
     },
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;

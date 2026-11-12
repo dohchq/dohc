@@ -493,8 +493,10 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget"]).optional(),
   canResume: z.boolean(),
+  // A retired row's: its owner's Pause or Stop retired it. One the server released without either goes live again when its owner opens it.
+  stopped: z.boolean().optional(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
@@ -1510,7 +1512,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required", "unsent-edits-limit"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget", "restart-required", "unsent-edits-limit"]).optional(),
   // Files that take no edits until the ones waiting for the server reach it.
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
@@ -4355,6 +4357,7 @@ export type RelayShareLinkDependent = z.infer<
 >;
 
 const RelayShareLinkRowBase = z.object({
+  url: z.string().url().max(4096).nullable(),
   shareId: OPAQUE_ID,
   grantId: OPAQUE_ID,
   generation: z.number().int().min(1),
@@ -4387,6 +4390,7 @@ export const RelayShareLinkIndependentGrant = z
     grantId: OPAQUE_ID,
     recipientUserId: z.string().min(1).max(256).nullable(),
     recipientEmail: EMAIL_STRING.nullable(),
+    access: SHARE_ACCESS,
   })
   .strict();
 export type RelayShareLinkIndependentGrant = z.infer<

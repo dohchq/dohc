@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{CaptureIngest, ChangeActorKind, ChangeAttribution};
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};

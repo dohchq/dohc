@@ -69,7 +69,7 @@ test("opens mature shares from current state and then follows forward updates", 
   }
 
   await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-  await expect(page.getByRole("heading", { name: "mature.md" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "mature.md", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Current projection" })).toBeVisible();
   await expect(page.locator("article.markdown")).toContainText(
     "Opened without replaying mature history.",

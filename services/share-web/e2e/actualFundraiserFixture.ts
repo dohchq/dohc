@@ -68,7 +68,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   pushDatasetFile(0,true);
   storage.createFileLinkShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:JSON.stringify({paths:["fundraiser"],versionId:null}),createdAtMs:1},
     grant:{grantId:"g",shareId:"s",principalKind:"link",principalUserId:null,principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null},
-    credential:{credentialId:"credential",grantId:"g",secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
+    credential:{credentialId:"credential",grantId:"g",secretSealed:null,secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
   storage.tx(()=>storage.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('helper','s','user','helper-user',NULL,'view',1,'active',1,NULL,NULL)").run());
   const accountCookie=`${getCookies({baseURL:viewerOrigin}).sessionToken.name}=synthetic-organizer-session`;
   let signedIn=false, lostRegisterResponse = false;

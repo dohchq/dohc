@@ -190,9 +190,14 @@ beforeEach(() => {
 
 type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
 const unexpectedKeptEdits = async (): Promise<unknown> => {throw new Error("Unexpected kept edits request.");};
-/** A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`. */
+const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {throw new Error("Unexpected owner open.");};
+/**
+ * A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`.
+ * `listed` sees each list read's `fresh` flag after the list is read, and can hold back its answer.
+ */
 async function quarantinedOwner(documents: {path: string; objectId: string}[],
-  server: {kept?: () => unknown[]; keptCursor?: number; keptEdits?: ServerSession["keptEdits"]; keptEditsPage?: ServerSession["keptEditsPage"]} = {}) {
+  server: {kept?: () => unknown[]; keptCursor?: number; keptEdits?: ServerSession["keptEdits"]; keptEditsPage?: ServerSession["keptEditsPage"]; open?: ServerSession["open"];
+    listed?: (fresh: boolean | undefined) => Promise<void> | void; assertCurrent?: () => void; onConnect?: () => void} = {}) {
   const f = fixture(), credentials = new AbortController();
   Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
   const rootPath = await createTestScratch("dohc-owner-quarantine-");
@@ -204,14 +209,30 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[],
       maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
     attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
   f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
-    connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-      retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
-      documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
-        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}})),
-        ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})})})};
+    connect: async () => {
+      server.onConnect?.();
+      return {bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent: server.assertCurrent ?? (() => {}),
+        retire: async () => 0, refusals: async () => {}, keptEdits: server.keptEdits ?? unexpectedKeptEdits, keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits, open: server.open ?? unexpectedOpen,
+        documents: async (_signal, fresh) => {
+          const answer = {ok: true, documents: documents.map(({path, objectId}) =>
+            ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}})),
+            ...(server.kept ? {keptEdits: server.kept()} : {}), ...(server.keptCursor === undefined ? {} : {keptEditsCursor: server.keptCursor})};
+          await server.listed?.(fresh);
+          return answer;
+        }};
+    }};
   const workspace = () => f.authorities.withAuthority("owner", lease =>
     ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
   return {f, credentials, binding: bindingOf("notes/plan.md", "object"), workspace};
+}
+
+/** Waits for `count` more owner delivery passes of the "owner" workspace, each started by a Try again. */
+async function ownerPasses(f: {engine: {retryOwnerDelivery(workspaceId: string): void}}, count: number) {
+  for (let pass = 0; pass < count; pass++) {
+    const before = ownerDeliveryMock.pass.mock.calls.length;
+    f.engine.retryOwnerDelivery("owner");
+    await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+  }
 }
 
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -1049,7 +1070,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents})};
     ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -1081,7 +1102,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: []}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents})};
     // Main sends this uncoalesced, so the renderer's waiting notice for the document goes.
     const stopped = vi.fn((_workspaceId: string, _objectId: string) => {});
     f.dependencies.notifyOwnerLiveStopped = stopped;
@@ -1119,7 +1140,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen,
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -1165,7 +1186,7 @@ describe("server owner peer lifecycle", () => {
         attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
       f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
         connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
+          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen,
           documents: async () => ({ok: true, documents: rows()})})};
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.liveDocumentPaths("owner")).toBeDefined());
@@ -1234,7 +1255,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
     const refused = (recovery: "paused" | "retrying") => [{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
       outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}];
     quarantineMock.read.mockResolvedValue(refused("paused"));
@@ -1334,6 +1355,157 @@ describe("server owner peer lifecycle", () => {
       }
       expect(quarantineMock.read.mock.calls.length).toBe(reads);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
+  // Proves: a pass asks the server to host a document the owner holds edits
+  // for at most once. After a terminal answer no pass asks again, until the
+  // owner opens the document here.
+  it("asks the server once to host a document with owner edits, and again only when its owner opens it", async () => {
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "refused");
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open});
+    f.dependencies.ownerPendingPaths = () => ["notes/plan.md", "notes/draft.md"];
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The listed document is live already, so only the other is asked for.
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/draft.md"]);
+      await ownerPasses(f, 3);
+      expect(open).toHaveBeenCalledTimes(1);
+      f.engine.ownerOpenedLiveDocument("owner", "notes/draft.md");
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+      await ownerPasses(f, 3);
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/draft.md", "notes/draft.md"]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: an owner's open of a note the last list named live waits for a
+  // list read after it. The next pass asks once for the note the server
+  // retired since, not for the one still live, and no pass scans the
+  // engine's owner bindings.
+  it("asks once on the next pass for an opened note the server retired since its last list, and not for one still live", async () => {
+    const listed = [{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}];
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "hosted");
+    const {f, credentials} = await quarantinedOwner(listed, {open});
+    const drafts = vi.spyOn(EngineClient.prototype, "ownerYDocListDrafts").mockImplementation(async () => ({drafts: [], next: null}));
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The list named both live. The server retires plan.md without a Stop, then the owner opens both.
+      listed.splice(0, 1);
+      f.engine.ownerOpenedLiveDocument("owner", "notes/plan.md");
+      f.engine.ownerOpenedLiveDocument("owner", "notes/other.md");
+      await ownerPasses(f, 3);
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/plan.md"]);
+      expect(drafts).not.toHaveBeenCalled();
+    } finally {credentials.abort(); drafts.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: a refusal answers only the open it was asked for. The owner's
+  // newer open of the note keeps its entry, so the next pass asks again;
+  // without one, the refusal holds.
+  it.each<[string, boolean]>([["asks once more when the owner reopens the note", true], ["asks no more when the owner does not reopen it", false]])(
+    "after a slow refusal of an owner's open, %s", async (_name, reopen) => {
+      const refusal = deferred();
+      const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => {
+        if (open.mock.calls.length === 1) await refusal.promise;
+        return "refused";
+      });
+      const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open});
+      ownerDeliveryMock.pass.mockResolvedValue("empty");
+      try {
+        expect(await f.engine.start()).toBe(true);
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+        f.engine.ownerOpenedLiveDocument("owner", "notes/draft.md");
+        await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+        if (reopen) f.engine.ownerOpenedLiveDocument("owner", "notes/draft.md");
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        refusal.resolve();
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+        await ownerPasses(f, 3);
+        expect(open.mock.calls.map(call => call[0])).toEqual(reopen ? ["notes/draft.md", "notes/draft.md"] : ["notes/draft.md"]);
+      } finally {refusal.resolve(); credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+    });
+
+  // Proves: a list read before the owner's open does not answer it. The
+  // list names the note live, the server retires it before the next list,
+  // and the next pass asks once.
+  it("asks on the next pass for a note its owner opened while a list naming it live was read", async () => {
+    const listed = [{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}];
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "hosted");
+    const entered = deferred(), answer = deferred();
+    let holding = false;
+    const {f, credentials} = await quarantinedOwner(listed, {open, listed: async () => {
+      if (!holding) return;
+      holding = false; entered.resolve(); await answer.promise;
+    }});
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      holding = true;
+      f.engine.retryOwnerDelivery("owner");
+      await entered.promise;
+      // The pending list names plan.md live. The owner opens it, then the server retires it before it answers.
+      f.engine.ownerOpenedLiveDocument("owner", "notes/plan.md");
+      listed.splice(0, 1);
+      const before = ownerDeliveryMock.pass.mock.calls.length;
+      answer.resolve();
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      expect(open).not.toHaveBeenCalled();
+      await ownerPasses(f, 3);
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/plan.md"]);
+    } finally {answer.resolve(); credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: a pass holding an owner's open reads the list fresh, and one
+  // holding none reads it from the cache.
+  it("reads the live list fresh on a pass with an owner's open waiting, and from the cache with none", async () => {
+    const reads: (boolean | undefined)[] = [];
+    let readBeforeOpen: boolean | undefined;
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => {readBeforeOpen = reads.at(-1); return "hosted";});
+    const {f, credentials} = await quarantinedOwner([{path: "notes/other.md", objectId: "other"}], {open, listed: fresh => {reads.push(fresh);}});
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every(fresh => fresh === false)).toBe(true);
+      const before = ownerDeliveryMock.pass.mock.calls.length;
+      f.engine.ownerOpenedLiveDocument("owner", "notes/plan.md");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(readBeforeOpen).toBe(true);
+      await ownerPasses(f, 1);
+      expect(reads.at(-1)).toBe(false);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: an open's answer counts only for the session that asked. One
+  // that ended meanwhile records nothing, so the next session asks again.
+  it("drops an owner open's answer when its session ended meanwhile, and asks again in the next session", async () => {
+    let ended = false;
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => {
+      if (open.mock.calls.length === 1) ended = true;
+      return "refused";
+    });
+    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open,
+      assertCurrent: () => {if (ended) throw new Error("This live editing session ended.");}, onConnect: () => {ended = false;}});
+    f.dependencies.ownerPendingPaths = () => ["notes/draft.md"];
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      expect(open).toHaveBeenCalledTimes(2);
+      const before = ownerDeliveryMock.pass.mock.calls.length;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {credentials.abort(); errors.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
   it("reads a new refusal of the current queue beside its save-only queue", async () => {
@@ -2216,6 +2388,7 @@ describe("server owner peer lifecycle", () => {
     const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
     const edited = {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"};
     const held = {path: "held.md", status: "unavailable", reason: "conflict-parent-withheld"};
+    const long = {path: "long.md", status: "unavailable", reason: "live-history-over-budget"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
     // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
@@ -2226,11 +2399,14 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents: async () => ({ok: true, diverged, documents: rows})})};
+        retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen, documents: async () => ({ok: true, diverged, documents: rows})})};
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
+      // A document whose history the server can't check outranks the reasons an owner can't act on either way.
+      rows = [...others, long]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"));
       // With no document to deliver.
       rows = [...others, refused]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
@@ -2307,7 +2483,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {

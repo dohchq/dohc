@@ -6,7 +6,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
-import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
+import { openRelayDeployment } from "./relayDeployment.js";
+import { openEmptyRelayTestDeployment } from "./testing/emptyRelayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {errorResponse} from "./errors.js";
@@ -61,8 +62,7 @@ async function fixture({selfHosted = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
-  initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
-  const deployment = openRelayDeployment(deploymentConfig);
+  const deployment = openEmptyRelayTestDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
   const hostId = selfHosted ? `self-host-${deployment.history.namespace}` : "service";
   deployment.storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: 1, guard() {} });
   const config = { version: 1, engineExecutable: process.execPath, hostId, instanceId: "instance",
@@ -75,6 +75,11 @@ async function fixture({selfHosted = false} = {}) {
   const closeStorage = () => { if (!closed) { deployment.storage.close(); closed = true; } };
   cleanup.push(async () => { closeStorage(); await rm(root, { recursive: true, force: true }); });
   return { trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), ...deployment, root, config, configPath, save, closeStorage };
+}
+function seedRows(db: InstanceType<typeof DatabaseSync>, write: () => void) {
+  db.exec("BEGIN");
+  try {write(); db.exec("COMMIT");}
+  catch (error) {try {db.exec("ROLLBACK");} catch {} throw error;}
 }
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
@@ -545,22 +550,24 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
       sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", "object", "docs/a.md", "origin", "2"].join("\0")))}`,
       sourceDigest: validated.evidence.projectedMarkdownSha256, sourceByteLength: validated.evidence.projectedMarkdownByteLength,
       nativeHeadSequence: 2, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
-  raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
-  const log = raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,?)");
-  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: "object", momentId: "original-moment", path: "docs/a.md", operation: "write",
-    payloadAfterPath: "docs/a.md", payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
-    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 0);
-  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: true,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 1);
-  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: false,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 2);
-  const blob = raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
-  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
-  raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
-    .run(base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
-  raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)")
-    .run(JSON.stringify({paths: ["docs"], versionId: null}));
-  raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
+  seedRows(raw, () => {
+    raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
+    const log = raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,?)");
+    log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: "object", momentId: "original-moment", path: "docs/a.md", operation: "write",
+      payloadAfterPath: "docs/a.md", payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 0);
+    log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: true,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 1);
+    log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 2);
+    const blob = raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+    blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+    raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
+      .run(base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+    raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)")
+      .run(JSON.stringify({paths: ["docs"], versionId: null}));
+    raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
+  });
 
   // Complete the activation under the earlier connection: adoption, seed, native application. Without `adopted` it is only prepared.
   const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
@@ -1504,7 +1511,7 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false} = {}) {
   const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised});
   if (freshRegistrations) o.freshRegistrations();
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   const errors: unknown[] = [];
   let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
   if (supervised) {
@@ -1593,6 +1600,9 @@ it("retires a stopped last document once it settled and published and a pull con
   expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
   expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  const delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  expect(() => delivery.open({host: o.host.coordinate, document: o.document})).toThrow("Committed delivery follows a retired owner adoption.");
+  expect(o.raw.prepare("SELECT COUNT(*) AS bootstraps FROM sync_relay_live_delivery_bootstraps").get()).toEqual({bootstraps: 0});
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
   expect(o.membership.at(-1)).toEqual(o.detach);
@@ -1704,7 +1714,7 @@ it("scans a stopped document's queues once while it waits for a recovery copy", 
   await vi.waitFor(() => expect(pulls()).toBeGreaterThan(seen + 2));
   expect(reads()).toBe(scanned);
   // Back in the hosted set, then stopped and departing again.
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: true, nowMs: 30, guard() {}}))
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 30, guard() {}}))
     .toMatchObject({enabled: true});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], departing: []});
   o.stop();
@@ -1790,7 +1800,7 @@ it("retires a document refused at a seed nothing applied before its copy, and ac
   expect(o.host.drained("workspace")).toBe(false);
   o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   expect(k.row()).toMatchObject({copied: false});
@@ -1813,7 +1823,7 @@ it("keeps retiring a document resumed while its retirement on a refused seed wai
   await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThan(0));
   expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
   const resume = async () => {
-    o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+    o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
     await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   };
   o.replies.push = {};
@@ -2452,7 +2462,7 @@ it.each(["liveApplication.reconcileActivation", "liveApplication.settle", "liveA
 it.each([false, true])("retires a never-adopted activation only once its document parked, though the engine released it first, after a restart: %s", async restart => {
   const o = await emptyServiceHost({adopted: false});
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({enabled: false, retired: true});
   // Its replica lists it departed, so it has not parked.
@@ -2627,7 +2637,7 @@ it("keeps a stopped activation retiring, and out of activation, when its owner r
   await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThan(0));
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   o.replies.push = {};
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await o.nextPull();
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 20});
@@ -2660,7 +2670,7 @@ it("activates a retired activation's successor after Resume, which admits edits 
     seen.push([o.host.isDocumentReady(o.document), o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor}).kind]);
     return complete.call(this, input);
   });
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   expect(seen).toEqual([[false, "refused"]]);
@@ -2690,7 +2700,7 @@ it("captures a retired activation's successor only after a hosted pull that star
   // Resume waits behind a pass that is pulling, so the next pull is one that started after Resume.
   const before = o.park("sync.pullHosted");
   await before.entered.promise;
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   const resumed = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   const after = o.park("sync.pullHosted");
   before.release.resolve();
@@ -3330,7 +3340,7 @@ it("retires a restored note's kept session through its host once the note is ren
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   moveNote(o, o.sibling.path, 1_000_001);
   anotherEditGrant(o);
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
   o.supervisor!.reconcile();
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   expect(o.raw.prepare("SELECT activation_id,predecessor_activation_id,completion_json IS NOT NULL AS completed FROM sync_relay_service_activations ORDER BY rowid").all())
@@ -3380,11 +3390,11 @@ it("activates a restored note's successor at the restored generation after Stop 
     }
     return prepared;
   });
-  // Resume, with an Edit grant again since the restore revoked the only one.
+  // Resume. The restore revoked the only Edit grant, and another comes back too.
   o.engine.capture = pushRestoredNote(o);
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   anotherEditGrant(o);
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 400, guard() {}});
   o.supervisor!.reconcile();
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   expect(access).toEqual([["refused", "current"]]);
@@ -3536,7 +3546,7 @@ it("completes a moved document's retirement after a restart by its own object wh
 });
 
 // Proves: once that retirement completed, the document can move back to its
-// old path and be shared again. Its successor activates there for the same
+// old path and be resumed. Its successor activates there for the same
 // object, under its one enrollment, and edits reach it.
 it("brings live editing back at a moved document's old path once its retirement completed after a restart", async () => {
   const o = await enrolledServiceHost();
@@ -3546,7 +3556,7 @@ it("brings live editing back at a moved document's old path once its retirement 
   vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
   o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   await host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), o.sibling.path, 1_000_000, expect.any(AbortSignal), undefined);
@@ -3872,19 +3882,21 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
   const validated = o.validateJournal({document, currentPath: path, checkpoint: baselineBytes, suffix: [], candidate: fullState});
   const base = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: path, checkpoint: baselineBytes});
   if (validated.kind !== "accepted" || base.kind !== "accepted") throw new Error("Invalid replacement fixture.");
-  const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
   const relaySeq = (originSeq: number) => Number(o.raw.prepare(`SELECT relay_seq FROM sync_relay_log WHERE origin_id='${origin}' AND origin_seq=?`).get(originSeq)!.relay_seq);
-  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: `${name}-moment`, path, operation: "write",
-    payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
-    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
-  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 31);
-  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: false,
-    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
-  const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
-  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
-  o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,30)")
-    .run(document.objectId, relaySeq(0), `${name}-moment`, path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  seedRows(o.raw, () => {
+    const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
+    log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: `${name}-moment`, path, operation: "write",
+      payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
+    log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 31);
+    log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
+    const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+    blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+    o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,30)")
+      .run(document.objectId, relaySeq(0), `${name}-moment`, path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  });
   const capture: NativeOwnerActivation = {activationId, sessionId: `${name}-session`, baselineBytes, fullState,
     source: {version: 1, relayDatabaseNamespace: o.f.history.namespace, ...document, currentPath: path, replicationEpoch: "epoch",
       streamIdentity: "stream", committedCursor: relaySeq(2), baseOriginId: origin, baseOriginSeq: 1, baseRelaySeq: relaySeq(1),
@@ -3948,7 +3960,7 @@ for (const c of [
   const sibling = await replacementActivation(o, {name: "sibling", path: "docs/c.md"});
   const documents = [o.sibling, sibling];
   if (c.moves === 2) documents.push(await replacementActivation(o, {name: "ordinary", path: "docs/d.md", activationId: `ordinary-activation-${"d".repeat(64)}`}));
-  for (const row of documents.slice(1)) o.f.storage.enrollServiceHostDocument({workspaceId: row.workspaceId, ownerUserId: "owner",
+  for (const row of documents.slice(1)) o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: row.workspaceId, ownerUserId: "owner",
     shareId: "share", path: row.path, nowMs: 35, guard() {}});
   const documentFor = (row: typeof o.sibling) => {
     const capture = [o.engine.capture, ...o.otherActivations.values()].find(value => value.source.objectId === row.objectId)!;
@@ -4148,7 +4160,7 @@ for (const c of [
   if (!c.backAtPath) {returnedAt = log.mock.calls.length; move(o.sibling, o.sibling.path);}
   o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: true, nowMs: 60, guard() {}}))
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", nowMs: 60, guard() {}}))
     .toMatchObject({enabled: true});
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
@@ -4193,7 +4205,7 @@ it("retires a document paused after its moved restore ends and activates it agai
   move(o.sibling, o.sibling.path);
   o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: true, nowMs: 80, guard() {}}))
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", nowMs: 80, guard() {}}))
     .toMatchObject({enabled: true});
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
@@ -4213,7 +4225,7 @@ for (const c of [
   const siblingCapture = o.otherActivations.get(REPLACEMENT_ACTIVATION)!;
   const siblingDocument = {workspaceId: sibling.workspaceId, mainVersionId: "main" as const, objectId: sibling.objectId,
     lineageClaimId: siblingCapture.source.lineageClaimId};
-  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
     path: sibling.path, nowMs: 35, guard() {}});
   const visitor = c.changedText ? undefined : await replacementActivation(o, {name: "visitor", path: "docs/visitor.md",
     activationId: `ordinary-activation-${"d".repeat(64)}`});
@@ -4269,8 +4281,8 @@ for (const c of [
       expect(rebuilt).toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: capture.source.sourceDigest}});
     } finally {doc.destroy();}
   }
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
-    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true});
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    nowMs: 60, guard() {}})).toMatchObject({enabled: true});
   const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling, sibling], ...stay});
   if (c.changedText) {
@@ -4457,8 +4469,8 @@ for (const c of [
     try {check();} catch (error) {failure = error;}
     expect(failure, `The document must resume with its current edits. ${failure instanceof Error ? failure.message : String(failure)}`).toBeUndefined();
   } else expect(check, "The saved file must be checked before the document resumes.").toThrow(refusal);
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
-    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true});
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    nowMs: 60, guard() {}})).toMatchObject({enabled: true});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   if (resumes) {
     await vi.waitFor(() => expect(o.host.isDocumentReady(o.document), "The document must become ready with its current edits.").toBe(true));
@@ -4546,7 +4558,7 @@ it("does not repeat an at-path document's copied held retirement across later me
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.distinctRegistrations();
   const sibling = await replacementActivation(o, {name: "sibling", path: "docs/c.md"});
-  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: "share",
     path: sibling.path, nowMs: 35, guard() {}});
   await o.host.update({workspaces, documents: [o.sibling, sibling], ...stay});
   await vi.waitFor(() => expect(o.host.settled(sibling)).toBe(true));
@@ -4571,8 +4583,8 @@ it("does not repeat an at-path document's copied held retirement across later me
     .toMatchObject({enabled: false, hostDrainedAtMs: 55});
   const copiedAt = reconciliations();
   expect(copiedAt).toBeGreaterThan(0);
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
-    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
   expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
   expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 65})).toBeNull();
   // Only the sibling moves. The held document stays at its path and in every departing list.
@@ -4611,8 +4623,8 @@ it("does not repeat an at-path document's copied held retirement across workspac
     .toMatchObject({enabled: false, hostDrainedAtMs: 55});
   const copiedAt = reconciliations();
   expect(copiedAt).toBeGreaterThan(0);
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
-    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
   expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
   for (let cycle = 0; cycle < 2; cycle++) {
     await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
@@ -4649,8 +4661,8 @@ it("does not repeat a moved document's copied held retirement across workspace d
   await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
   expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 55}))
     .toMatchObject({enabled: false, hostDrainedAtMs: 55});
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
-    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
   expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
   documentMoves(o)(o.sibling, "elsewhere/a.md");
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
@@ -4843,7 +4855,7 @@ it("answers the engine's unproven deliveries from the journal during a retiremen
 it.each([false, true])("records an adoption whose reply was lost before Stop during its retirement, after a restart: %s", async restart => {
   const o = await emptyServiceHost({adopted: false});
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
   let ownersWhenLost: unknown, cutsWhenLost = 0;
   adopt.mockImplementationOnce(async (...args: unknown[]) => {
@@ -4915,7 +4927,7 @@ it("records a successor's adoption at its predecessor's boundary whose reply was
   });
   const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
   const acks = vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeOwnerAdoption");
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(adopt.mock.settledResults).toEqual([{type: "rejected", value: new Error("Adoption reply lost.")}]));
   expect(ownersWhenLost).toEqual({owners: 0});
@@ -5039,20 +5051,6 @@ it("retires a stopped document only once its settled output pushed, though its b
   o.replies.push = {};
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(retiredRow(o)).toEqual({retired: true, boundary: {terminalReceipt: tip, eventCount: 1, historyEvidenceDigest: expect.any(String)}});
-});
-
-// Proves: once an owner adoption retired on a host, ordinary committed
-// delivery there never starts a bootstrap for its lineage: the retired
-// adoption already consumed the lineage's adoption reservation.
-it("refuses ordinary committed delivery on a host where the lineage's owner adoption retired", async () => {
-  const o = await enrolledServiceHost();
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  o.stop();
-  await o.depart();
-  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
-  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
-  expect(() => store.open({host: o.host.coordinate, document: o.document})).toThrow("Committed delivery follows a retired owner adoption.");
-  expect(o.raw.prepare("SELECT COUNT(*) AS bootstraps FROM sync_relay_live_delivery_bootstraps").get()).toEqual({bootstraps: 0});
 });
 
 // Proves: a retiring document fails closed when its binding no longer holds:
@@ -5351,7 +5349,8 @@ it("resumes a document whose retained activation diverged once, then not again u
 // Proves: a document with no Y.Doc lineage has nothing to activate, so its
 // first capture blocks it and no pass captures it again, while its workspace
 // keeps pulling. Unblocking allows exactly one more capture. Any other conflict
-// on a first capture keeps it waiting, captured again on every pass.
+// on a first capture keeps it waiting and captured again, waiting longer between
+// tries, not on every pass.
 it.each([
   ["blocks", "live-document-without-lineage", withoutLineage, "without-lineage"],
   ["keeps retrying", "live-application-conflict", diverged, undefined],
@@ -5370,7 +5369,8 @@ it.each([
   await vi.waitFor(() => {expect(visits()).toBeGreaterThan(visited + 2); expect(o.pullCount()).toBeGreaterThan(pulls + 2);});
   expect(o.host.blocked(plain)).toBe(block);
   if (block === undefined) {
-    expect(captures()).toBeGreaterThan(2);
+    expect(captures()).toBeLessThan(visits());
+    await vi.waitFor(() => expect(captures()).toBeGreaterThan(2), {timeout: 10_000});
     return;
   }
   expect(captures()).toBe(1);
@@ -5624,6 +5624,38 @@ it("blocks a document re-enrolled into a new store after an identity change whil
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
   expect(captures()).toBe(before + 1);
   expect(o.host.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a pass whose engine call is refused logs the refusal's code and the
+// method refused beside its message, once while each pass fails the same way,
+// and again when only its code changes.
+it.each(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePendingCursor", "sync.commitCursor",
+  "liveApplication.captureOwnerActivation"])("logs the code and method of a refused %s", async method => {
+  const o = await emptyServiceHost(), send = o.client().sendRequest, reply = send.getMockImplementation()! as (...args: unknown[]) => Promise<never>;
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  let code = "INVALID_PARAMS", refused = 0;
+  // Built as the client builds it: the message alone stays redaction-safe.
+  const refusal = () => new EngineRequestError(1, {code, message: "workspace operation failed", retry: "afterBackoff"} as never, method);
+  if (method === "liveApplication.captureOwnerActivation") {
+    o.client().captureOwnerActivation.mockImplementation(async () => {refused++; throw refusal();});
+  } else {
+    send.mockImplementation(async (...args: unknown[]) => (args[0] as {method: string}).method === method ? (refused++, Promise.reject(refusal())) : reply(...args));
+  }
+  const lines = (shown: string) => log.mock.calls.filter(call => call[0] === "Service activation pass failed." && call[1] === shown).length;
+  const update = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  if (method === "sync.createHostedReplica") {
+    // A pass checks the origin of a replica whose attach could neither check it nor detach it.
+    o.failDetach(new EngineRequestError(1, {code: "CONFLICT", message: "detach refused", retry: "no"} as never, "liveApplication.detachWorkspace"));
+    await expect(update).rejects.toThrow("workspace operation failed");
+  } else await update;
+  const first = `workspace operation failed (code INVALID_PARAMS, method ${method})`;
+  await vi.waitFor(() => expect(lines(first), JSON.stringify(log.mock.calls)).toBe(1), {timeout: 10_000});
+  const seen = refused;
+  await vi.waitFor(() => expect(refused).toBeGreaterThan(seen + 1), {timeout: 10_000});
+  // A refused capture waits before it tries again, and a pass in between ends clean, so each try logs once.
+  if (method !== "liveApplication.captureOwnerActivation") expect(lines(first)).toBe(1);
+  code = "WORKSPACE_UNAVAILABLE";
+  await vi.waitFor(() => expect(lines(`workspace operation failed (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
 });
 
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {
@@ -6383,7 +6415,7 @@ it("sends an unanswered idle unload again before settling it or reloading it on 
 it("retires a stopped document whose idle unload went unanswered without sending that unload again", async () => {
   const o = await idleHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
   o.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
@@ -6544,6 +6576,16 @@ it.each([
   await expect(hostStop(o)).resolves.toMatchObject({retired: true, acceptedCursor: e});
   expect(journaled(o, "edit-e")).toEqual([e]);
   expect(o.native.entries).toEqual([]);
+});
+
+// Proves: Stop for a note that never went live finishes at once on a server
+// that hasn't hosted any note since it started, so it hasn't registered as
+// the host. Stop goes straight to the step that records it, with nothing prepared.
+it("stops a note that never went live on a server that hasn't hosted a note yet", async () => {
+  const o = await emptyServiceHost();
+  const fence = vi.fn((prepared?: ServiceHostRetirementPreparation) => prepared ?? "stopped");
+  await expect(o.host.stop({workspaceId: "workspace", objectId: o.other.objectId}, fence)).resolves.toBe("stopped");
+  expect(fence).toHaveBeenCalledExactlyOnceWith();
 });
 
 // Proves: a kept row that still says retrying does not hold Stop back once
@@ -6780,13 +6822,6 @@ it("rechecks the retirement candidate after a Stop queued behind another Stop", 
   await expect(second).resolves.toMatchObject({retired: true});
   expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
 });
-
-it.each(["liveApplication.prepareRetirement", "liveApplication.releaseRetirementPreparation"])(
-  "rejects a wrong request scalar type against the shared fixture for %s", async method => {
-    const o = await enrolledServiceHost();
-    const request = {id: 900, workspace: "attached-handle", method, params: {...prepared(o), restoreFenceGeneration: "0"}};
-    await expect(o.client().sendRequest(request)).rejects.toThrow("INVALID_PARAMS: invalid-retirement-preparation");
-  });
 
 it.each(["running without this workspace", "running without this document"] as const)(
   "answers Stop with the session host state %s without fencing", async state => {

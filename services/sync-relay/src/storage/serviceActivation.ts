@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
@@ -17,12 +17,17 @@ import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMEN
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
   type OrdinaryActivationBounds} from "./ordinaryActivationSource";
-import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+import {ServiceActivationHistoryOverBudget,type OrdinaryActivationValidator} from "./ordinaryActivationValidation";
 /** A retained activation whose stored record can't be read back. Only the operator can repair it. */
 export class ServiceActivationDamaged extends Error {
   constructor(options?: ErrorOptions) { super("Retained service activation is damaged.", options); }
 }
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
+export {ServiceActivationHistoryOverBudget} from "./ordinaryActivationValidation";
+/** The activation fields readiness reads, without its state or baseline bytes. */
+export interface ServiceActivationReadiness {
+  readonly activationId: string; readonly objectId: string; readonly lineageClaimId: string; readonly completed: boolean; readonly binding: LiveObjectBinding;
+}
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -335,6 +340,28 @@ export class ServiceActivationStore {
   }
 
   /**
+   * What readiness needs of the activation `read` finds: its id, lineage,
+   * completion and binding, without its state or baseline bytes. The callers
+   * that use the bytes read and check them with `read`.
+   */
+  readiness(workspaceId: string, path: string, objectId?: string): ServiceActivationReadiness | null {
+    requireLiveJournalHistory(this.storage, this.history);
+    const row = this.storage.db.prepare(`SELECT a.activation_id,a.workspace_id,a.object_id,a.lineage_claim_id,a.binding_json,a.completion_json IS NOT NULL AS completed
+      FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
+      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL
+        AND (? IS NULL OR a.object_id=?)`).get(this.history.namespace, workspaceId, path, objectId ?? null, objectId ?? null);
+    if (!row) return null;
+    try {
+      const binding = parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
+      if (row.workspace_id !== workspaceId || binding.currentPath !== path) throw new ServiceActivationDamaged();
+      return {activationId: String(row.activation_id), objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id),
+        completed: row.completed === 1, binding};
+    } catch (error) {
+      throw error instanceof ServiceActivationDamaged ? error : new ServiceActivationDamaged({cause: error});
+    }
+  }
+
+  /**
    * Retains a capture as the document's live baseline. Its validation runs in a live validation
    * process before the transaction opens; the transaction refuses it as stale if the history changed.
    */
@@ -345,8 +372,10 @@ export class ServiceActivationStore {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
     const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
-    if(capturedBytes>input.bounds.maxCaptureBytes||input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
-      throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    if(capturedBytes>input.bounds.maxCaptureBytes)throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    // The history read charges the baseline to the same budget, so a baseline past it waits for a new base too.
+    if(input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
+      throw new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured byte budget.");
     }
     const source = parseNativeOwnerActivationSource(input.capture.source, input.capture.source.currentPath, 20_971_520), document = key(source), baselineBytes = new Uint8Array(input.capture.baselineBytes),
       fullState = new Uint8Array(input.capture.fullState), activationId = input.capture.activationId;
@@ -387,6 +416,7 @@ export class ServiceActivationStore {
       ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
+    if (validation.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(validation.message);
     if (validation.kind !== "accepted") throw new Error(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {

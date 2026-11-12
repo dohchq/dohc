@@ -13,11 +13,10 @@
 // build.
 //
 // The bundle is built into this user's private scratch parent and removed
-// afterwards. On macOS the reader runs the staged pinned Node, as the reader's
-// own tests do; Linux and Windows use DOHC_READER_TEST_NODE when it is set, and
-// otherwise the Node running this script.
+// afterwards. Desktop-pinned POSIX targets use a private Node, as the reader's own tests do.
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { stagesReaderNode } from "./reader-test-node.mjs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -41,10 +40,10 @@ export function readerTests(crates = join(repoRoot, "crates")) {
 }
 
 /** The cargo arguments that `list` or `run` the ignored tests named `names`, in any module, and nothing else. */
-export function readerTestArgs(command, names) {
+export function readerTestArgs(command, names, buildArgs = nextest.slice(2)) {
   if (!names.length) throw new Error("No test has the reader phase's ignore reason.");
   const filter = [...new Set(names)].map(name => `test(/(^|::)${name}$/)`).join(" | ");
-  return ["nextest", command, ...nextest.slice(2), "--run-ignored", "ignored-only", "-E", filter];
+  return ["nextest", command, ...buildArgs, "--run-ignored", "ignored-only", "-E", filter];
 }
 
 /**
@@ -68,14 +67,15 @@ export function readerTestMismatches(names, list) {
 }
 
 async function readerNode() {
-  if (process.platform !== "darwin") return process.env.DOHC_READER_TEST_NODE || process.execPath;
+  if (process.env.DOHC_READER_TEST_NODE) return process.env.DOHC_READER_TEST_NODE;
+  if (!stagesReaderNode()) return process.execPath;
   const { stageReaderTestNode } = await import("./reader-test-node.mjs");
   return stageReaderTestNode();
 }
 
-export async function runReaderTests() {
+export async function runReaderTests(buildArgs = nextest.slice(2)) {
   const names = readerTests();
-  const listed = spawnSync("cargo", [...readerTestArgs("list", names), "--message-format", "json"],
+  const listed = spawnSync("cargo", [...readerTestArgs("list", names, buildArgs), "--message-format", "json"],
     { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "inherit"] });
   if (listed.status !== 0) throw new Error(`The reader regressions did not list: ${listed.error?.message ?? `exit ${listed.status}`}.`);
   const mismatches = readerTestMismatches(names, JSON.parse(listed.stdout));
@@ -92,7 +92,7 @@ export async function runReaderTests() {
     const env = { ...process.env, DOHC_ENGINE_READER_CONFIG: JSON.stringify({
       node, bundle: join(bundle, "reader.cjs"), manifest: join(bundle, "manifest.json"),
     }) };
-    const run = spawnSync("cargo", [...readerTestArgs("run", names), "--no-tests=fail", "--no-fail-fast"],
+    const run = spawnSync("cargo", [...readerTestArgs("run", names, buildArgs), "--no-tests=fail", "--no-fail-fast", "--retries=0"],
       { cwd: repoRoot, env, stdio: "inherit" });
     if (run.status !== 0) throw new Error(`Reader regressions failed: ${run.error?.message ?? `exit ${run.status}`}.`);
   } finally {
@@ -102,7 +102,7 @@ export async function runReaderTests() {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  await runReaderTests().catch(error => {
+  await runReaderTests(process.argv.length > 2 ? process.argv.slice(2) : undefined).catch(error => {
     console.error(error.message);
     process.exitCode = 1;
   });

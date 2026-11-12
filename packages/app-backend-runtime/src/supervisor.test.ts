@@ -24,6 +24,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
+let emptyCheckpoint: Buffer | undefined;
 const source = `globalThis.operations = { run(ctx,input) {
   if(input.refuse) ctx.refuse('full','No spaces remain.');
   if(input.id) ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,input.value]);
@@ -34,8 +35,14 @@ const source = `globalThis.operations = { run(ctx,input) {
 async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"]; workerRoot?:string } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
-  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
-  const checkpoint = await readFile(join(directory, "seed.sqlite"));
+  let seedCheckpoint = approvedSchema === schemaSql ? emptyCheckpoint : undefined;
+  if (!seedCheckpoint) {
+    const seed = new DatabaseSync(join(directory, "seed.sqlite"));
+    try { seed.exec(approvedSchema); } finally { seed.close(); }
+    seedCheckpoint = await readFile(join(directory, "seed.sqlite"));
+    if (approvedSchema === schemaSql) emptyCheckpoint = seedCheckpoint;
+  }
+  const checkpoint = seedCheckpoint;
   const db = new DatabaseSync(join(directory, "authority.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0); COMMIT;");
   function transaction<T>(work: () => T): T {

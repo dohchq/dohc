@@ -9,7 +9,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
     writeFileSync(join(root, path), contents);
   };
   put("package.json", '{"type":"module"}\n');
-  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\n");
+  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\nservices/sync-relay/dist/\n");
   put("pnpm-lock.yaml", "new-lock");
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
@@ -42,6 +42,12 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
         put(executable,'engine'); chmodSync(executable,0o755);
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-workspace-engine'},executable})};
       }
+      if(command==='pnpm' && args[1]==='@dohc/sync-relay') {
+        assert.deepEqual(args,['--filter','@dohc/sync-relay','build']);
+        put(join(repoRoot,'services/sync-relay/dist/main.js'),'relay');
+        put(join(repoRoot,'services/sync-relay/dist/liveValidationWorker.js'),'worker');
+        return {};
+      }
       if(command==='pnpm' && args[1]==='@dohc/share-web') {
         assert.deepEqual(args,['--filter','@dohc/share-web','build']);
         put(join(repoRoot,'services/share-web/viewer/dist/index.html'),'viewer');
@@ -51,6 +57,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
       for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/app-backend-runtime',
         ...(['win32-x64','darwin-arm64','linux-arm64','linux-x64'].includes(process.platform+'-'+process.arch)?['apps/desktop/resources/app-compiler']:[]),
+        ...(['win32-x64','darwin-arm64','linux-x64'].includes(process.platform+'-'+process.arch)?['apps/desktop/resources/engine-reader']:[]),
         ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/agent-probe']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       for(const name of ['dohc','dohc-mcp']) {

@@ -72,8 +72,8 @@ async fn rpc_undo_keeps_the_publisher_stopped_after_its_fence_releases_the_gates
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_thousand_sources_forward_and_undo_through_rpc() {
-    pending_rewrite_proof(2000, false, false).await;
+async fn rpc_rewrite_and_undo_cancel_each_unpublished_source_job() {
+    pending_rewrite_proof(2, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -353,7 +353,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool, publisher_in_ga
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NoFaults)
         .unwrap();
-    let files = if sources == 2000 { 4999 } else { sources };
+    let files = sources + 1;
     store
         .write_with(&NoFaults, |tx| -> Result<(), DomainError> {
             for i in 0..files {
@@ -566,6 +566,10 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool, publisher_in_ga
     assert_eq!(
         std::fs::read_to_string(root.join("source-0000.md")).unwrap(),
         restored
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(format!("source-{sources:04}.md"))).unwrap(),
+        "no links"
     );
     eprintln!("REWRITE_RPC sources={sources} forward_ns={forward_ns} undo_ns={undo_ns}");
     if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {

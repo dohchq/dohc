@@ -80,8 +80,9 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    // The owner's restore that kept its live session keeps it shared.
-    else if (row.ownerStop === null && (selectors.some(selector => pathVisibleThroughShare(selector, row.path)) || serviceHostOwnerRetains(storage, row))) {
+    // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
+    else if (row.ownerStop === null && (row.demandAtMs !== null || selectors.some(selector => pathVisibleThroughShare(selector, row.path)) ||
+      serviceHostOwnerRetains(storage, row))) {
       shared.set(row.objectId, row.path);
     }
   }
@@ -109,6 +110,14 @@ export function latestServiceHostDocumentUpdate(storage: StorageContext, input: 
     WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
     .get(input.workspaceId, input.objectId);
   return row ? Number(row.relay_seq) : 0;
+}
+
+/** Whether the document has a base Y.Doc row after `afterRelaySeq`. */
+export function serviceHostDocumentBaseAfter(storage: StorageContext, input: {workspaceId: string; objectId: string; afterRelaySeq: number}): boolean {
+  return !!storage.db.prepare(`SELECT 1 FROM sync_relay_log INDEXED BY ${INDEX}
+    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update' AND relay_seq>?
+      AND json_extract(payload_json, '$.isBaseState')=1 LIMIT 1`)
+    .get(input.workspaceId, input.objectId, input.afterRelaySeq);
 }
 
 /** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */

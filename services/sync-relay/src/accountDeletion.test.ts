@@ -151,7 +151,7 @@ async function fixture() {
   expect((await h(request("other","/sync/shares/"+ownedShare+"/blobs/"+proposedHash,{method:"PUT",body:proposedBytes}))).status).toBe(200);
   const proposed=await h(request("other","/sync/shares/"+ownedShare+"/proposals",jsonBody({submitId:"owned-proposal",ops:[{basedOnPath:"docs/file.md",basedOnBlobSha256:createHash("sha256").update("original\n").digest("hex"),operation:"write",afterPath:"docs/file.md",afterBlobSha256:proposedHash,afterContentKind:"text",afterByteLength:proposedBytes.byteLength,recordedAtMs:2000}]})));
   expect(proposed.status,await proposed.clone().text()).toBe(200);
-  storage.enrollServiceHostDocument({workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
+  storage.ensureOwnedLiveDocument({intent:"share",workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
   const serviceKey={key:Buffer.alloc(32,1),namespace:deployment.history.namespace};
   const serviceBearer=deriveServiceHostBearer(storage.currentServiceHostWorkspace(workspace)!,serviceKey);
   const serviceAccess=()=>authorizeServiceHostReplication(storage,{...serviceKey,workspaceId:workspace,bearer:serviceBearer,method:"GET",pathname:"/sync/"+workspace+"/hosted/log"});

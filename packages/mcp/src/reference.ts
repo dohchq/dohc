@@ -260,7 +260,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_create_group: "`{ ok: true, group: { id, name, slug, kind, purpose? } }`",
   dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
   dohc_start_file_chat: { cli: "fileChatStart" },
-  dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`",
+  dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`",
   dohc_query_collection: { cli: "collectionQuery" },
   dohc_read_record: { cli: "collectionRecord" },
   dohc_set_record_fields: { cli: "collectionSetFields" },

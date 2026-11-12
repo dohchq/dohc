@@ -12,6 +12,7 @@ import { liveBaselineStoredBytes } from './liveBaselineQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 import { initializeRelayDeployment, openRelayDeployment } from '../../../services/sync-relay/src/relayDeployment.js'
 import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
+import { openEmptyRelayTestStorage } from '../../../services/sync-relay/src/testing/emptyRelayStorage.js'
 import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
 import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
@@ -19,7 +20,9 @@ import {appendValidatedLiveJournal, liveJournalCoverageWithin} from '../../../se
 import {startLiveJournalCheck} from '../../../services/sync-relay/src/storage/liveJournalCheck.js'
 
 function openJournalStorage(...args: Parameters<typeof openSyncRelayStorage>) {
-  const storage = openSyncRelayStorage(...args)
+  return withJournalHistory(openSyncRelayStorage(...args))
+}
+function withJournalHistory(storage: ReturnType<typeof openSyncRelayStorage>) {
   attachLiveJournalHistory(storage as StorageContext, createLiveJournalHistoryAuthority({namespace: 'journal-test', reconciled: true}))
   return storage
 }
@@ -64,7 +67,7 @@ function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean }
   const path = options.deployment ? join(root, 'volume', 'relay.sqlite') : join(root, 'relay.sqlite')
   const configPath = join(root, 'deployment.json')
   if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, 'continuity') })
-  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openJournalStorage(path, options)
+  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : withJournalHistory(openEmptyRelayTestStorage(path, options))
   const raw = new DatabaseSync(path, { readOnly: options.deployment === true })
   const write = (run: (db: SqliteDb | InstanceType<typeof DatabaseSync>) => void) => {
     if (options.deployment) {
@@ -836,8 +839,9 @@ function deletedPayload(targetLength: number): { checkpoint: Uint8Array; resend:
   throw new Error('Exact encoded payload construction did not converge')
 }
 
+const payload = deletedPayload(20_971_520)
+
 it.each(['exact', 'over'] as const)('commits a real %s byte-trigger checkpoint including its candidate and charges quota once', boundary => {
-  const payload = deletedPayload(20_971_520)
   expect(hash(payload.checkpoint)).toBe('5eb79d5c003665f71fd1cb052bb2e7f8507ed35b07ae7e9a53312f701d18f47f')
   expect(hash(payload.resend)).toBe('8f71392008b8bf8cb5eb9f697088a3a068a06a2f5a6e255f2d14482839579cc9')
   const diagnosticPolicy = { maxStructVisits: 36, maxValueNodeVisits: 66,

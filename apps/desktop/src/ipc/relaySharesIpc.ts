@@ -488,7 +488,7 @@ export function createOwnerLiveDocumentActions<
         // Each row speaks for the server's document, never for another that had or has its path.
         const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld" && row.reason !== "live-history-over-budget"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];

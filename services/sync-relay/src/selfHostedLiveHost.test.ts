@@ -70,7 +70,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const root = await mkdtemp(join(tmpdir(), "dohc-self-host-supervisor-")); const data = join(root, "data"); await mkdir(data);
   cleanup.push(() => rm(root, {recursive: true, force: true}));
   const input = {workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId, path: binding.currentPath, nowMs: 10, guard() {}};
-  const enrolled = f.storage.enrollServiceHostDocument(input);
+  const enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...input});
   if (options.empty) {
     f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
     f.storage.releaseServiceHostEnrollment({workspaceId: enrolled.workspaceId, objectId: enrolled.objectId, nowMs: 10});
@@ -174,7 +174,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
   const add = (path = "docs/b.md", objectId = "object-b", shareId = scope.shareId) => {
     moment(path, objectId);
-    return f.storage.enrollServiceHostDocument({...input, path, shareId});
+    return f.storage.ensureOwnedLiveDocument({intent: "share", ...input, path, shareId});
   };
   const share = (shareId: string, paths: string[], options: {workspaceId?: string; ownerUserId?: string; grantId?: string} = {}) => {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,1)")
@@ -534,7 +534,7 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
 
 // Proves: stopping a workspace's last document keeps the workspace attached
 // until its replica drains, then detaches it and only then releases the
-// enrollment. The store stays, and sharing the document again reopens it.
+// enrollment. The store stays, and resuming the document reopens it.
 it("drains a stopped last document, then detaches the workspace and releases it, keeping its store", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const store = join(f.data, storeName(scope.workspaceId));
@@ -559,8 +559,8 @@ it("drains a stopped last document, then detaches the workspace and releases it,
   await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), {timeout: 10_000});
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
   expect(f.host.current()).toBeDefined(); expect(f.starts[0]!.close).not.toHaveBeenCalled();
-  // Shared again, the document's workspace attaches to the store it kept.
-  f.storage.enrollServiceHostDocument(f.input);
+  // Resumed, the document's workspace attaches to the store it kept.
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input});
   const returned = await f.waitUpdate(["docs/a.md"]);
   expect(returned.workspaces.map(row => basename(row.root))).toEqual([storeName(scope.workspaceId)]);
   expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]);
@@ -582,7 +582,7 @@ it("keeps a document resumed before its activation retired departing until that 
   f.pending.add(binding.objectId);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
   await f.waitUpdate([]);
-  f.storage.enrollServiceHostDocument({...f.input, nowMs: 40});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input, nowMs: 40});
   await f.waitPasses();
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
   expect(f.updates.at(-1)!.documents).toEqual([]);
@@ -595,9 +595,9 @@ it("keeps a document resumed before its activation retired departing until that 
 
 // Proves: the owner's restore that kept a note's live session through the end
 // of its last Edit grant keeps it hosted, with no release. Pause takes it out
-// of the hosted set and Resume brings it back once the paused activation
-// retired. Stop takes it out for good: Resume leaves it out, and its
-// enrollment retires again.
+// of the hosted set, and Stop also ends the session the restore kept. After
+// either, once the activation retired, Resume brings it back as the owner's
+// demand, though no Edit grant covers it.
 it.each(["pause", "stop"] as const)("keeps hosting a note its owner's restore kept live through the owner's %s and Resume as decided", async action => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const activationId = retainServiceActivation(f.raw, namespace, true);
@@ -615,12 +615,9 @@ it.each(["pause", "stop"] as const)("keeps hosting a note its owner's restore ke
   expect(f.enrollment()).toMatchObject({enabled: false, retired: action === "stop", ownerStop: action === "pause" ? "pause" : "retire"});
   // The host retired the activation the Pause or Stop ended.
   f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(activationId);
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50});
-  if (action === "pause") await f.waitUpdate(["docs/a.md"]);
-  else {
-    await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, retired: true}), {timeout: 10_000});
-    expect(f.updates.at(-1)!.documents).toEqual([]);
-  }
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input, nowMs: 50});
+  await f.waitUpdate(["docs/a.md"]);
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, demandAtMs: 50});
   expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
 });
 
@@ -688,7 +685,7 @@ it("hosts a document again after a failed update dropped it and the selection re
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(f.refusal), {timeout: 10_000});
   expect(f.holds(binding.objectId)).toBe(false);
   // The owner resumes docs/a.md and stops docs/c.md, so the hosted documents equal the last successful ones.
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/c.md", enabled: false, retire: true});
   await vi.waitFor(() => expect(f.holds(binding.objectId)).toBe(true), {timeout: 10_000});
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md", "docs/b.md"]);
@@ -705,7 +702,7 @@ it("releases a paused document while another workspace's attach stays refused", 
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
   f.refuseAttach(path);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(f.refusal), {timeout: 10_000});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   // Every update still fails on the other workspace, but the paused document has left its replica.
@@ -744,7 +741,7 @@ it.each([false, true])("releases a paused document under an obsolete identity wi
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   const first = await f.waitUpdate(["docs/a.md", path]);
   f.pending.add(binding.objectId);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
@@ -792,7 +789,7 @@ it("keeps a diverged store in place and its workspace detached across passes and
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([workspaceId]), {timeout: 10_000});
   // A replacement daemon knows nothing of the divergence, and still gets only the other workspace.
   f.starts[0]!.controller.abort();
@@ -858,6 +855,18 @@ it("tells the operator a document without lineage must be opened on a desktop fi
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
+// Proves: a document whose history is past what the server reads or checks
+// tells the operator, once, that it waits for the document's next base.
+it("tells the operator a document whose history is past its budget waits for a new base", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  f.block(binding.objectId, "history-over-budget");
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again once the document has a new base. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.host.blocked(binding)).toBe("history-over-budget");
+  await f.waitPasses();
+  expect(f.onError).toHaveBeenCalledTimes(1);
+});
+
 // Proves: a document whose host copy is missing an owner edit tells the
 // operator, once, that it is held until its owner resumes it.
 it("tells the operator a document missing an owner edit is held until its owner resumes it", async () => {
@@ -879,7 +888,7 @@ it("keeps a diverged workspace whose detach failed out of the replacement daemon
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId, workspaceId]), {timeout: 10_000});
   f.diverge(scope.workspaceId, false);
   f.starts[0]!.controller.abort();
@@ -1001,7 +1010,7 @@ it("retries runtime checks without rescanning unchanged shares and rescans after
   await f.waitUpdate([]);
   expect(scans).toHaveBeenCalled();
   scans.mockClear();
-  f.storage.enrollServiceHostDocument(f.input);
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", ...f.input});
   await f.waitUpdate(["docs/a.md"]);
   expect(scans).toHaveBeenCalled();
   expect(f.starts).toHaveLength(1);
@@ -1050,7 +1059,7 @@ it("adds another owner's workspace with a separate root and scoped credential", 
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   const {workspaces} = await f.waitUpdate(["docs/a.md", path]);
   expect(workspaces).toHaveLength(2);
   expect(workspaces[0]).toEqual(first.workspaces[0]);
@@ -1286,7 +1295,7 @@ it("keeps a deleted account's hosted and departing documents out of the hosted s
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
   f.share(shareId, ["docs"], {workspaceId, ownerUserId});
   f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId, ownerUserId, shareId, path});
   f.add();
   await f.waitUpdate(["docs/a.md", "docs/b.md", path]);
   // A paused sibling its replica has not let go yet.
@@ -1318,7 +1327,7 @@ it("removes a deleted account's hosted stores, parked state and markers on a run
   f.storage.claimWorkspaceIdentity({workspaceId: sibling, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.share("share-3", ["docs"], {workspaceId: sibling});
   f.moment(path, "sibling-object", sibling);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId: sibling, shareId: "share-3", path});
+  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, workspaceId: sibling, shareId: "share-3", path});
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId, sibling]), {timeout: 10_000});
   const store = join(f.data, storeName(scope.workspaceId)), marker = `${store}.diverged`, siblingStore = join(f.data, storeName(sibling));
   const earlier = join(f.data, storeName(scope.workspaceId, "epoch-0", "stream-0")), other = join(f.data, storeName("workspace-2"));

@@ -71,6 +71,12 @@ async function deleteComment(input: {
   );
 }
 
+// Comments stay closed until the reader opens them, and a reload closes them again.
+async function openComments(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Comments", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Comments", exact: true })).toBeVisible();
+}
+
 async function openLink(
   context: BrowserContext,
   shareWebUrl: string,
@@ -78,7 +84,7 @@ async function openLink(
 ): Promise<Page> {
   const page = await context.newPage();
   await page.goto(`${shareWebUrl}/s/#${link.secret}`);
-  await expect(page.getByRole("heading", { name: "Comments" })).toBeVisible();
+  await openComments(page);
   return page;
 }
 
@@ -141,7 +147,7 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     const sessionPath = new URL(page.url()).pathname;
     expect(new URL(page.url()).hash).toBe("");
     expect(sessionPath).toMatch(/^\/s\/[A-Za-z0-9_-]{12}$/u);
-    await expect(page.locator(".badge")).toHaveText("Comment");
+    await expect(page.locator(".badge")).toHaveText("Can comment");
     await expect(page.getByRole("button", { name: "Post comment" })).toBeVisible();
 
     const narrowed = await retuneLink({
@@ -152,7 +158,7 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     });
     expect(narrowed).toMatchObject({ access: "view", grantId: seeded.grantId });
     expect(narrowed).not.toHaveProperty("url");
-    await expect(page.locator(".badge")).toHaveText("View");
+    await expect(page.locator(".badge")).toHaveText("View only");
     await expect(page.getByRole("button", { name: "Post comment" })).toHaveCount(0);
 
     const current = await viewerRequest(page, { path: "/api/view/current" });
@@ -179,8 +185,9 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     expect(discussion.body).not.toContain(rejectedBody);
 
     await page.reload();
+    await openComments(page);
     expect(new URL(page.url()).pathname).toBe(sessionPath);
-    await expect(page.locator(".badge")).toHaveText("View");
+    await expect(page.locator(".badge")).toHaveText("View only");
     await expect(page.getByText("Retuned link", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Comment", { exact: true })).toHaveCount(0);
 
@@ -189,7 +196,7 @@ test("keeps a narrowed Comment link readable without weakening transition invali
       stack.shareWebUrl,
       { grantId: seeded.grantId, secret: seeded.secret },
     );
-    await expect(replacementPage.locator(".badge")).toHaveText("View");
+    await expect(replacementPage.locator(".badge")).toHaveText("View only");
 
     const invalidatingCases = [
       {
@@ -342,7 +349,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
       stack.shareWebUrl,
       { grantId: seeded.grantId, secret: seeded.secret },
     );
-    await expect(commentPage.locator(".badge")).toHaveText("Comment");
+    await expect(commentPage.locator(".badge")).toHaveText("Can comment");
     await expect(commentPage.getByText(namedBody, { exact: true })).toBeVisible();
     await commentPage.getByLabel("Name (optional)").fill("Link Reader");
     await commentPage.getByLabel("Comment", { exact: true }).fill("Committed from Comment");
@@ -352,8 +359,9 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
 
     const viewPage = await openLink(context, stack.shareWebUrl, viewLink);
     await viewPage.reload();
+    await openComments(viewPage);
     await expect(viewPage.getByRole("heading", { name: "Comments" })).toBeVisible();
-    await expect(viewPage.locator(".badge")).toHaveText("View");
+    await expect(viewPage.locator(".badge")).toHaveText("View only");
     await expect(viewPage.getByText(namedBody, { exact: true })).toBeVisible();
     await expect(viewPage.getByText("Committed from Comment", { exact: true })).toBeVisible();
     await expect(viewPage.getByLabel("Comment", { exact: true })).toHaveCount(0);
@@ -382,6 +390,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
       .toHaveText("Link ReaderUnverified");
 
     await viewPage.reload();
+    await openComments(viewPage);
     await expect(viewPage.getByText(afterProfilesBody, { exact: true })).toBeVisible();
     await expect(viewPage.getByLabel("Comment", { exact: true })).toHaveCount(0);
     await expect(viewPage.getByRole("button", { name: "Post comment" })).toHaveCount(0);
@@ -394,6 +403,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
       messageId: namedMessageId,
     });
     await Promise.all([commentPage.reload(), viewPage.reload()]);
+    await Promise.all([openComments(commentPage), openComments(viewPage)]);
     for (const page of [commentPage, viewPage]) {
       await expect(page.getByText("Comment deleted by the owner", { exact: true })).toBeVisible();
       await expect(page.getByText(namedBody, { exact: true })).toHaveCount(0);
@@ -443,7 +453,7 @@ test("keeps hostile comment text inert in the real viewer", async ({
       { name: ATTACK_SENTINEL, value: SENTINEL_BASELINE },
     );
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-    await expect(page.getByRole("heading", { name: "Comments", exact: true })).toBeVisible();
+    await openComments(page);
     await page.getByLabel("Name (optional)").fill(hostileName);
     await page.getByLabel("Comment", { exact: true }).fill(hostileBody);
     await page.getByRole("button", { name: "Post comment" }).click();
@@ -515,8 +525,9 @@ test("keeps a Comment version share pinned through a main-version rename", async
   });
   const pinned = seeded.files[0]!;
   await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-  await expect(page.getByRole("heading", { name: "docs/pinned.md" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "pinned.md", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
+  await openComments(page);
   await page.getByLabel("Comment", { exact: true }).fill("Snapshot discussion stays writable.");
   await page.getByRole("button", { name: "Post comment" }).click();
   await expect(page.getByText("Snapshot discussion stays writable.", { exact: true }))
@@ -572,7 +583,7 @@ test("keeps a Comment version share pinned through a main-version rename", async
   });
   await page.clock.fastForward(4 * 60_000);
   expect(await (await forwardRefreshResponse).finished()).toBeNull();
-  await expect(page.getByRole("heading", { name: "docs/pinned.md" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "pinned.md", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
   await expect(page.getByText("These bytes belong to the snapshot.", { exact: true })).toBeVisible();
   await expect(page.getByText("Live main version", { exact: true })).toHaveCount(0);

@@ -1,14 +1,16 @@
 import {liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import {useEffect, useRef, useState} from "react";
+import {createPortal} from "react-dom";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
 import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {PropertiesAsWritten, useFrontmatterAsWritten} from "./PropertiesAsWritten";
 import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>["select"]>;
+const OPENING = ["authorizing", "connecting", "syncing"];
 function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.status === "live") return state.pendingUpdates ? "Saving changes…" : state.lastApplied ? "Changes saved" : "Ready to edit";
-  if (["authorizing", "connecting", "syncing"].includes(state.status)) return "Opening the file…";
+  if (OPENING.includes(state.status)) return "Opening the file…";
   const limit = liveConnectionLimitMessage(state.reason);
   if (limit) return limit;
   if (state.status === "quarantined") return "Editing stopped. Review your draft before opening the current file.";
@@ -17,8 +19,14 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.reason === "authority-unavailable") return "dohc could not open the file for editing. Try again.";
   return "Editing paused. Check your connection, then retry.";
 }
-export function NamedDocumentEditor({session, path, onState, link = false}: {session: NamedDocumentSession; path: string; link?: boolean;
-  onState(state: NamedLiveBrowserState): void}) {
+/**
+ * A live document's editor. The link page draws the title and bar itself, so with `link` this
+ * shows neither. Its saved state goes to `statusSlot`, in that bar, while editing works; a state
+ * that stops editing stays above the text, where its sentence has room. `bodyHidden` keeps the
+ * text out of view while the page still shows its own copy.
+ */
+export function NamedDocumentEditor({session, path, onState, link = false, statusSlot, bodyHidden = false}: {session: NamedDocumentSession; path: string; link?: boolean;
+  statusSlot?: HTMLElement | null; bodyHidden?: boolean; onState(state: NamedLiveBrowserState): void}) {
   const element = useRef<HTMLDivElement>(null), [state, setState] = useState(session.state());
   const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
@@ -30,12 +38,14 @@ export function NamedDocumentEditor({session, path, onState, link = false}: {ses
     const unsubscribe = session.subscribe(receive);
     return () => {unsubscribe(); editor.destroy();};
   }, [session, onState]);
-  return <section className="content named-document" aria-label="Shared file">
-    <h1>{path}</h1>
-    <p className="named-document-status" role="status">{statusText(state, link)}</p>
+  const working = state.status === "live" || OPENING.includes(state.status);
+  const status = <p className={working ? "named-document-status" : "named-document-status stopped"} role="status">{statusText(state, link)}</p>;
+  return <section className={link ? "named-document" : "content named-document"} aria-label="Shared file">
+    {!link && <h1>{path}</h1>}
+    {statusSlot && working ? createPortal(status, statusSlot) : status}
     {state.status === "disconnected" && <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
       {state.reason === "authority-unavailable" || liveConnectionLimitMessage(state.reason) ? "Try again" : "Retry connection"}</button>}
-    <PropertiesAsWritten block={frontmatter}/>
-    <div className="named-body-editor" ref={element} />
+    {!bodyHidden && <PropertiesAsWritten block={frontmatter} collapsed={link}/>}
+    <div className="named-body-editor" ref={element} hidden={bodyHidden} />
   </section>;
 }

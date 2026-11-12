@@ -101,6 +101,27 @@ it("returns a pending document edit as a successful tool result", async () => {
   expect(JSON.stringify(reply)).toContain(outcome.warning);
 });
 
+it("ends an automation's run with nothing to report through the reply tool, and posts nothing", async () => {
+  const root = await workspaceRoot();
+  const requests: Array<{ verb: string; args: unknown }> = [];
+  const { client } = await connectedToolNames({ root, home: root, request: async request => {
+    requests.push(request);
+    return { threadId: "th_1", nothingToReport: true };
+  } });
+  const quiet = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", runId: "run-1", nothingToReport: true, needsDecision: false, attachments: [] } });
+  expect(quiet.isError).not.toBe(true);
+  expect(quiet.structuredContent).toEqual({ ok: true, threadId: "thread-1", nothingToReport: true });
+  expect(requests).toEqual([{ protocolVersion: expect.any(Number), door: "mcp", verb: "nothingToReport", args: { cwd: root, actor: "agent", thread: "th_1", runId: "run-1" } }]);
+
+  for (const message of [{ body: "Nothing due." }, { to: "msg_1" }, { options: ["A"] }, { needsDecision: true }, { work: { status: "done" } }]) {
+    const refused = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", nothingToReport: true, ...message } });
+    expect(refused.isError, JSON.stringify(message)).toBe(true);
+  }
+  const empty = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1" } });
+  expect(empty.isError).toBe(true);
+  expect(requests).toHaveLength(1);
+});
+
 it("uses the owner socket operation for held Review, Drop, and Undo", async () => {
   const root = await workspaceRoot();
   const requests: unknown[] = [];

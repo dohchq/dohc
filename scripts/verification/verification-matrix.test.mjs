@@ -93,7 +93,6 @@ function createVerificationFixtures(directory) {
     import assert from 'node:assert/strict';
     import {testWorkspace as realTests} from './js-tests-real.mjs';
     import {finishRuntimeReader} from './process.mjs';
-    export {takeJsShard} from './js-tests-real.mjs';
     export const testWorkspace = options => realTests({...options, beforeDesktopScripts: async () => {
       const pending = options.beforeDesktopScripts();
       let settled = false;
@@ -307,10 +306,10 @@ function createVerificationFixtures(directory) {
           return {stdout:''};
         }
         const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
-        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding|@share-link-agent-sign-in'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
+        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding|@share-link-agent-sign-in|@live-owner-open'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
         assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
         const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
-        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync','@share-link-agent-sign-in agent sign-in']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync','@share-link-agent-sign-in agent sign-in',process.env.FIXTURE_FAULT==='owner-open-missing'?'unrelated owner open spec':'@live-owner-open owner open']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
         const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
         writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
           stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
@@ -345,7 +344,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"], ["pr", "js", "smoke-missing"],
-    ["pr", "js", "restart-missing"], ["pr", "js", "restart-one-missing"], ["pr", "js", "restart-skipped"],
+    ["pr", "js", "restart-missing"], ["pr", "js", "restart-one-missing"], ["pr", "js", "restart-skipped"], ["pr", "js", "owner-open-missing"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
@@ -475,6 +474,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           "restart-missing": /did not pass every required proof: .*@restart-durability/,
           "restart-one-missing": /did not pass every required proof: .*@restart-durability-person-agent/,
           "restart-skipped": /A mandatory desktop smoke test was skipped/,
+          "owner-open-missing": /did not pass every required proof: .*@live-owner-open/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
           shared: /fixture package test failed/,
         };

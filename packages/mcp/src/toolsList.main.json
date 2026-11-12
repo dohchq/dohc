@@ -2786,7 +2786,7 @@
     },
     {
       "name": "dohc_list_live_documents",
-      "description": "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
+      "description": "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `live-history-over-budget`: The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3806,7 +3806,7 @@
     },
     {
       "name": "dohc_reply_to_chat",
-      "description": "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.",
+      "description": "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3886,11 +3886,14 @@
               "status"
             ],
             "additionalProperties": false
+          },
+          "nothingToReport": {
+            "type": "boolean",
+            "const": true
           }
         },
         "required": [
-          "threadId",
-          "body"
+          "threadId"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"

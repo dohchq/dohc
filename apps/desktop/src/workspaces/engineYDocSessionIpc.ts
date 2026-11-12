@@ -152,6 +152,8 @@ interface EngineYDocSessionIpcOptions {
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
+  /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
+  onOwnerOpened?: (workspaceId: string, path: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
 }
@@ -499,6 +501,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
+  readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
   readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
@@ -524,6 +527,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#onLiveEditsPaused = options.onLiveEditsPaused;
+    this.#onOwnerOpened = options.onOwnerOpened;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
@@ -880,6 +884,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           ? unavailableOpen({ engineMayHoldDocument: true })
           : unavailableOpen();
       }
+      // Only a note the engine holds an owner binding for can be hosted at its owner's open.
+      if (!shared && owned.provider.ownerBound) this.#onOwnerOpened?.(workspace.workspaceId, canonicalPath);
       return OpenEngineYDocSessionResult.parse({
         available: true,
         headSha256: owned.provider.headSha256,
