@@ -5628,6 +5628,38 @@ it("blocks a document re-enrolled into a new store after an identity change whil
   expect(o.host.retains(o.sibling)).toBe(true);
 });
 
+// Proves: a pass whose engine call is refused logs the refusal's code and the
+// method refused beside its message, once while each pass fails the same way,
+// and again when only its code changes.
+it.each(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePendingCursor", "sync.commitCursor",
+  "liveApplication.captureOwnerActivation"])("logs the code and method of a refused %s", async method => {
+  const o = await emptyServiceHost(), send = o.client().sendRequest, reply = send.getMockImplementation()! as (...args: unknown[]) => Promise<never>;
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  let code = "INVALID_PARAMS", refused = 0;
+  // Built as the client builds it: the message alone stays redaction-safe.
+  const refusal = () => new EngineRequestError(1, {code, message: "workspace operation failed", retry: "afterBackoff"} as never, method);
+  if (method === "liveApplication.captureOwnerActivation") {
+    o.client().captureOwnerActivation.mockImplementation(async () => {refused++; throw refusal();});
+  } else {
+    send.mockImplementation(async (...args: unknown[]) => (args[0] as {method: string}).method === method ? (refused++, Promise.reject(refusal())) : reply(...args));
+  }
+  const lines = (shown: string) => log.mock.calls.filter(call => call[0] === "Service activation pass failed." && call[1] === shown).length;
+  const update = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  if (method === "sync.createHostedReplica") {
+    // A pass checks the origin of a replica whose attach could neither check it nor detach it.
+    o.failDetach(new EngineRequestError(1, {code: "CONFLICT", message: "detach refused", retry: "no"} as never, "liveApplication.detachWorkspace"));
+    await expect(update).rejects.toThrow("workspace operation failed");
+  } else await update;
+  const first = `workspace operation failed (code INVALID_PARAMS, method ${method})`;
+  await vi.waitFor(() => expect(lines(first), JSON.stringify(log.mock.calls)).toBe(1), {timeout: 10_000});
+  const seen = refused;
+  await vi.waitFor(() => expect(refused).toBeGreaterThan(seen + 1), {timeout: 10_000});
+  // A refused capture waits before it tries again, and a pass in between ends clean, so each try logs once.
+  if (method !== "liveApplication.captureOwnerActivation") expect(lines(first)).toBe(1);
+  code = "WORKSPACE_UNAVAILABLE";
+  await vi.waitFor(() => expect(lines(`workspace operation failed (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
+});
+
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace], send = o.client().sendRequest;
   const refuse = (code: string) => {
