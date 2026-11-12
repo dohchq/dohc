@@ -653,7 +653,10 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
     const verify = reporting.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope === "js-worker" ? "js" : "rust"}`);
     assert.ok(verify > wait);
     assert.match(reporting[verify].name, /^Require complete proof and /u);
-    assert.equal(reporting.slice(wait + 1, verify).filter(step => step.uses?.startsWith("actions/download-artifact@")).length, 1);
+    const downloads = reporting.slice(wait + 1, verify).filter(step => step.uses?.startsWith("actions/download-artifact@"));
+    assert.equal(downloads.length, 1);
+    // The completed check finds this step by its default name.
+    assert.equal(downloads[0].name, undefined);
   }
 });
 

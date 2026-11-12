@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks, preparedArtifactPaths } from "./shards.mjs";
@@ -10,6 +11,10 @@ import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
+
+// A successful group wait records when it ended. These tests keep that record out of the checkout.
+const waitOutput = mkdtempSync(join(tmpdir(), "gate-wait-"));
+process.on("exit", () => rmSync(waitOutput, { recursive: true, force: true }));
 
 test("native results retain declared opt-in skips but reject runtime skips and missing engines", async t => {
   const parent = resolve(".agent-artifacts/verification/native-report-tests");
@@ -583,7 +588,7 @@ test("reporting joins its own successful group and caps queued or running siblin
     const proof = jobs.find(job => job.name === "compiler confinement");
     Object.assign(proof, { status: "queued", conclusion: null });
     let polls = 0;
-    await waitForGate(scope, { readJobs: async () => {
+    await waitForGate(scope, { outputDirectory: waitOutput, readJobs: async () => {
       if (++polls === 2) Object.assign(proof, { status: "completed", conclusion: "success" });
       return jobs;
     }, pause: async () => {} });
@@ -598,7 +603,7 @@ test("aggregate polling bounds latency by scope and counts each jobs request", a
     const jobs = passingCloudJobs(), sibling = jobs.find(job => job.name === name);
     Object.assign(sibling, { status: "in_progress", conclusion: null });
     let clock = 0, reads = 0;
-    await waitForGate(scope, { env: apiEnv, now: () => clock, pause: async ms => { assert.equal(ms, interval); clock += ms; },
+    await waitForGate(scope, { env: apiEnv, outputDirectory: waitOutput, now: () => clock, pause: async ms => { assert.equal(ms, interval); clock += ms; },
       request: async (url, { headers }) => {
         assert.equal(headers["If-None-Match"], undefined);
         if (++reads === 3) Object.assign(sibling, { status: "completed", conclusion: "success" });
@@ -614,7 +619,7 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
   for (const scope of ["js", "rust"]) {
     const jobs = passingCloudJobs(), name = scope === "js" ? "JS worker 1" : "Rust tests 1";
     let reads = 0, pauses = 0;
-    await waitForGate(scope, { readJobs: async () => ++reads === 1 ? jobs.filter(job => job.name !== name) : jobs,
+    await waitForGate(scope, { outputDirectory: waitOutput, readJobs: async () => ++reads === 1 ? jobs.filter(job => job.name !== name) : jobs,
       pause: async () => { pauses++; } });
     assert.equal(pauses, 1);
   }
