@@ -142,6 +142,8 @@ export async function startAutomationReplicas(options: {
   const replicas = new Map<string, AutomationReplica & {
     close(): Promise<void>; pulledHead: number; reasons: readonly CopyReason[];
     busy(): boolean;
+    /** Runs once a step caught the copy up with the relay. */
+    caughtUp(): Promise<void>;
   }>();
   // Replicas an engine exit is closing, until their close settles. One that
   // failed stays for close() to report.
@@ -301,9 +303,10 @@ export async function startAutomationReplicas(options: {
   }
 
   // A pass's step of an open copy. A failure keeps its retry, after its phone writes were looked at.
-  async function stepOf(replica: AutomationReplica): Promise<void> {
+  async function stepOf(replica: AutomationReplica & {caughtUp(): Promise<void>}): Promise<void> {
     try {
-      if (!(await replica.step())) schedule();
+      if (await replica.step()) await replica.caughtUp();
+      else schedule();
     } catch (error) {
       if (!replica.signal.aborted) await inspectAfterFailure(replica.client, replica.workspace, replica.workspaceId, replica.incarnation, error);
       throw error;
@@ -390,6 +393,17 @@ export async function startAutomationReplicas(options: {
       return run;
     };
     let closing: Promise<void> | undefined;
+    // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their stored
+    // commands once, after a step caught the copy up: a target is judged by the relay's current state, not by
+    // what the folder held when it last closed. The pass's publication of the copy then pushes them.
+    let replayed = false;
+    const caughtUp = async (): Promise<void> => {
+      if (replayed) return;
+      replayed = true;
+      await replayUnfinishedWrites({storage, copy: replica, nowMs,
+        records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
+        onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
+    };
     // Pushes, then pulls, each for at most `rounds`, so a copy that always
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
@@ -448,6 +462,7 @@ export async function startAutomationReplicas(options: {
       busy(): boolean {
         return running > 0;
       },
+      caughtUp,
       /** Every caller waits for the same close, which waits for the sync running in it. */
       close(): Promise<void> {
         return closing ??= (async () => {
@@ -466,13 +481,10 @@ export async function startAutomationReplicas(options: {
     try {
       // A pulled moment lands in the main version, as on a computer that joins.
       await request(engineClient, "versions.ensureMain", {workspaceId: row.workspaceId}, handle);
-      // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their
-      // stored commands before the copy pushes, while their account may still publish them.
-      await replayUnfinishedWrites({storage, copy: replica, nowMs,
-        records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
-        onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
-      // A copy with a long history catches up over several passes, after the others.
-      if (!(await replica.step())) schedule();
+      // A copy with a long history catches up over several passes, after the others. Once caught up, before
+      // any request can use it, its phone writes' unwritten stages replay.
+      if (await replica.step()) await caughtUp();
+      else schedule();
     } catch (error) {
       // Its phone writes are looked at before the handle goes, as after any failed sync.
       if (!replicaSignal.aborted) await inspectAfterFailure(engineClient, handle, row.workspaceId, row.incarnation, error);

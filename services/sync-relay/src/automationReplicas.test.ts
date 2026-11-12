@@ -268,6 +268,9 @@ describe("the automation replicas", () => {
     let failFolderCloses = 0;
     // The copies' chats, which every engine the test starts shares.
     const chats = new ChatsLoopbackEngine();
+    // Where the copy's folder holds each file, by object, and where a pull puts them next.
+    const filePaths = new Map<string, string>();
+    let pulledPaths: Map<string, string> | null = null;
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void; authToken?: string }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -304,7 +307,15 @@ describe("the automation replicas", () => {
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
             case "sync.fetchPull": return { result: { pageToken: "fetched" } };
-            case "sync.applyPull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+            case "files.resolve": return { result: { versionId: "main",
+              results: (request.params.targets as Array<{ objectId?: string }>).map((target) => {
+                const path = target.objectId === undefined ? undefined : filePaths.get(target.objectId);
+                return path === undefined ? { status: "absent" } : { status: "found", objectId: target.objectId, path };
+              }) } };
+            case "sync.applyPull":
+              for (const [objectId, path] of pulledPaths ?? []) filePaths.set(objectId, path);
+              pulledPaths = null;
+              return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
               fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
               changedPaths: [{ versionId: "main", path: "Tasks/automations.yaml", operation: "write", contentKind: "text" }] } };
             default:
@@ -321,7 +332,9 @@ describe("the automation replicas", () => {
     });
     return { sent, engines, failPush: (value: boolean | Error, workspace?: string) => { failPush = value; failingWorkspace = workspace; },
       receipts: (value: Map<string, unknown> | Error | (() => Promise<Map<string, unknown>>)) => { receipts = value; },
-      folderHandles, failFolderCloses: (count: number) => { failFolderCloses = count; }, chats,
+      folderHandles, failFolderCloses: (count: number) => { failFolderCloses = count; }, chats, filePaths,
+      /** The relay moved these files since the copy last pulled; its next pull brings them. */
+      movedOnRelay: (paths: Map<string, string>) => { pulledPaths = paths; },
       methods: () => sent.map((request) => request.method) };
   }
 
@@ -2731,8 +2744,45 @@ describe("the automation replicas", () => {
       authorKind: "human", authorDisplayName: "Owner", authorUserId: "owner", stageReceipt: true,
     } });
     const methods = after.map((request) => request.method);
-    expect(methods.indexOf("sync.push"), "the restarted copy pushes").toBeGreaterThanOrEqual(0);
-    expect(methods.indexOf("chats.threads.start"), "replayed before it pushes").toBeLessThan(methods.indexOf("sync.push"));
+    const replayedAt = methods.indexOf("chats.threads.start");
+    expect(methods.indexOf("sync.applyPull"), "replayed once the copy pulled").toBeLessThan(replayedAt);
+    expect(methods.lastIndexOf("sync.push"), "and pushed after").toBeGreaterThan(replayedAt);
+  });
+
+  it("doesn't replay a phone write into a thread whose file the relay made secret while the copy was stopped, and settles it as unsent", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const first = await stepped(storage, () => wanted);
+    const opened = first.running.replica(WORKSPACE)!;
+    const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
+    engine.filePaths.set("object-plan", "docs/plan.md");
+    const onPage = await chats.createThread({ workspaceId: WORKSPACE, title: "Plan", linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" } });
+    const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+    const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+    const write: WriteCommand = { kind: "reply", threadId: onPage.id, messageId: ids.messageId("reply"), body: "Ship it" };
+    const claim = storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+      binding: { workspaceId: WORKSPACE, operation: "reply", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
+      replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+      command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+    expect(claim.kind).toBe("recorded");
+    await first.running.close();
+
+    // While the server is stopped, the page moves to a secret path at the relay. The folder still has it where it was.
+    raw.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+      VALUES (?, 'object-plan', 1, 'moment-1', 'main', '.env', 1)`).run(WORKSPACE);
+    engine.movedOnRelay(new Map([["object-plan", ".env"]]));
+    const before = engine.sent.length;
+    const restarted = await stepped(storage, () => wanted, { root: first.root });
+    expect(engine.sent.slice(before).map((request) => request.method), "nothing replays into a hidden thread").not.toContain("chats.messages.send");
+    expect(outcome(raw, "unsent")[0], "the write stays unsent").not.toBe("refused");
+
+    // Its copy retires as any copy does, and the write settles as unsent.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    wanted = new Map();
+    await restarted.pass();
+    expect(outcome(raw, "unsent")).toEqual(["refused", "pending", { threadId: null, reason: "Couldn't send" }]);
+    expect(engine.sent.map((request) => request.method)).not.toContain("chats.messages.send");
   });
 
   it("refuses a copy's phone writes once its oldest stayed unknown thirty days past its active time, and opens the next visit a fresh copy", async () => {
