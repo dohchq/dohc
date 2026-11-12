@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
 import { parseCliArguments } from "./args";
+import { MAX_WORKSPACE_MEMBERS } from "@dohc/security-contract/workspace-members";
 
 const view = {
   workspaceId: "ws-1", workspaceName: "Community",
@@ -83,6 +84,11 @@ describe("dohc members", () => {
 
   it("pins results to the contract", () => {
     expect(parseCliResult("members", { status: "done" })).toEqual({ status: "done" });
+    const person = (n: number, state: string) => ({ ...view.people[1]!, memberId: `m-${state}-${n}`, role: "member", state, removedAtMs: state === "removed" ? 4 : null });
+    const full = [view.people[0]!, ...Array.from({ length: MAX_WORKSPACE_MEMBERS }, (_, n) => person(n, "active"))];
+    const removed = Array.from({ length: 5 }, (_, n) => person(n, "removed"));
+    expect(parseCliResult("members", { status: "ready", view: { ...view, people: [...full, ...removed] } })).toMatchObject({ status: "ready" });
+    expect(() => parseCliResult("members", { status: "ready", view: { ...view, people: [...full, person(0, "invited")] } })).toThrow();
     expect(() => parseCliResult("members", { status: "ready", view: { ...view, token: "secret" } })).toThrow();
     expect(() => parseCliResult("members", { status: "refused", view })).toThrow();
   });

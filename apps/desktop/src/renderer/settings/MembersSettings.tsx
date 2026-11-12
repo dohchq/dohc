@@ -145,6 +145,11 @@ export function MembersSettings(props: {
   // arrives late cannot undo a newer change.
   const issued = useRef(0);
   const applied = useRef(0);
+  // Changes still running, and whether two ran at once. The server may run
+  // overlapping changes in either order, so the page reads itself again once
+  // they all answer.
+  const running = useRef(0);
+  const overlapped = useRef(false);
   const listIdentity = `settings-members:${workspaceId}`;
 
   const showView = (key: string, order: number, view: WorkspaceMembersView) => {
@@ -163,7 +168,10 @@ export function MembersSettings(props: {
         if (!scope.isCurrent(token)) return;
         report.current.onClearError?.(listIdentity);
         if (result.status === "ready") showView(scopeKey, order, result.view);
-        else if (order >= applied.current) setLoad({ key: scopeKey, load: { status: "refused" } });
+        // A page that says this account left keeps saying so.
+        else if (order >= applied.current) {
+          setLoad((current) => (current?.key === scopeKey && current.load.status === "left" ? current : { key: scopeKey, load: { status: "refused" } }));
+        }
       },
       (cause: unknown) => {
         if (!scope.isCurrent(token)) return;
@@ -181,12 +189,19 @@ export function MembersSettings(props: {
     const order = ++issued.current;
     const key = keyOf(request);
     const identity = `settings-members:${workspaceId}:${key}`;
+    if (running.current > 0) overlapped.current = true;
+    running.current += 1;
     setPending((current) => {
       const items = new Map(current?.key === scopeKey ? current.items : []);
       items.set(key, request);
       return { key: scopeKey, items };
     });
     const settle = () => {
+      running.current -= 1;
+      if (running.current === 0 && overlapped.current) {
+        overlapped.current = false;
+        if (scope.isCurrent(token)) setAttempt((count) => count + 1);
+      }
       if (!scope.isCurrent(token)) return;
       setPending((current) => {
         if (current?.key !== scopeKey || !current.items.has(key)) return current;

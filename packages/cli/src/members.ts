@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  MAX_MEMBER_EMAIL_CHARS, MAX_WORKSPACE_MEMBERS, MEMBER_STATES, WORKSPACE_ROLES,
+  MAX_MEMBER_EMAIL_CHARS, MEMBER_STATES, WORKSPACE_ROLES, withinWorkspaceSeats,
   type InviteLinkAction, type WorkspaceMembersView,
 } from "@dohc/security-contract/workspace-members";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
@@ -63,7 +63,7 @@ export const WorkspaceMembersViewSchema = z.object({
   viewer: z.object({ memberId: z.string().min(1).max(256), role: z.enum(WORKSPACE_ROLES) }).strict(),
   memberLevel: level,
   inviteLink: z.object({ enabled: z.boolean(), url: z.string().url().max(4096).nullable() }).strict().nullable(),
-  people: z.array(WorkspacePersonSchema).max(MAX_WORKSPACE_MEMBERS + 1),
+  people: z.array(WorkspacePersonSchema).refine(withinWorkspaceSeats),
 }).strict() satisfies z.ZodType<WorkspaceMembersView>;
 
 export const MembersResult = z.discriminatedUnion("status", [

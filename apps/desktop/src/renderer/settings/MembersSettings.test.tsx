@@ -222,9 +222,31 @@ describe("Members page", () => {
     bridge.workspaceMembers.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
     await makeAdmin("m-bo");
-    await act(async () => second.resolve({ status: "ready", view: ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] }) }));
+    const final = ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] });
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: final }));
+    await act(async () => second.resolve({ status: "ready", view: final }));
     await act(async () => first.resolve({ status: "ready", view: ownerView({ memberLevel: "edit" }) }));
     expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
+  });
+
+  it("reads the page again after changes overlap, so it settles on what the server holds", async () => {
+    const linkOff = { inviteLink: { enabled: false, url: null } };
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const link = deferred<MembersResult>();
+    const level = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    // The server ran the level change first, then turned the link on.
+    const both = ownerView({ memberLevel: "edit" });
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
+    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, memberLevel: "edit" }) }));
+    await act(async () => link.resolve({ status: "ready", view: both }));
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Invite link" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("warns that copies stay before removing someone, and removes only on confirm", async () => {
