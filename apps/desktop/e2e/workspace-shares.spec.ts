@@ -409,7 +409,7 @@ confidentialTest.describe("View link lifecycle", () => {
         "The sync relay serves the link, so it can read this content.",
       );
       await expect(dialog).toContainText(
-        "Ending it stops future access, but can't take back copies people already made.",
+        "Anyone with the link can open it without an account.",
       );
 
       await dialog.getByRole("button", { name: "Create link", exact: true }).click();
@@ -419,7 +419,7 @@ confidentialTest.describe("View link lifecycle", () => {
       expect(oldUrl.origin === publicViewerOrigin).toBe(true);
       const oldSecret = oldUrl.hash.slice(1);
       expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
-      const copyButton = dialog.getByRole("button", { name: "Copy", exact: true });
+      const copyButton = dialog.getByRole("button", { name: "Copy link", exact: true });
       await holdSystemClipboard(test.info(), async (remainingMs) => {
         await copyButton.click({ timeout: remainingMs() });
         await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
@@ -543,7 +543,8 @@ confidentialTest.describe("View link lifecycle", () => {
       const linkRow = linkRows.first();
       const linkRowTestId = await linkRow.getAttribute("data-testid");
       expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
-      await expect(linkRow).toContainText("Used as recently as");
+      await expect(linkRow).toContainText(/Used .+ · Created /u);
+      await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText("Can view");
       await expect(
         linkAccess.getByRole("radio", { name: "Comment", exact: true }),
       ).toBeVisible();
@@ -555,7 +556,8 @@ confidentialTest.describe("View link lifecycle", () => {
         .allTextContents();
       expect(reachableRetuneTargets).toEqual([]);
 
-      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
       let confirmation = dialog.getByTestId("share-link-confirmation");
       await expect(confirmation).toContainText(RECIPIENT_EMAIL);
       await expect(confirmation).toContainText("keep access");
@@ -583,7 +585,8 @@ confidentialTest.describe("View link lifecycle", () => {
         ).status,
       ).toBe(200);
 
-      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "Reset link" }).click();
       const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
@@ -644,7 +647,8 @@ confidentialTest.describe("View link lifecycle", () => {
       );
       expect(namedAfterReset.status).toBe(200);
 
-      await linkRow.getByRole("button", { name: "End link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "End link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await expect(confirmation).toContainText(RECIPIENT_EMAIL);
       await expect(confirmation).toContainText("lose access");
@@ -665,7 +669,8 @@ confidentialTest.describe("View link lifecycle", () => {
         ).status,
       ).toBe(200);
 
-      await linkRow.getByRole("button", { name: "End link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "End link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "End link" }).click();
       await expect(confirmation).not.toBeVisible();

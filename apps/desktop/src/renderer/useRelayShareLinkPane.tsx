@@ -1,5 +1,5 @@
 import { ipcErrorMessage } from "./ipcError";
-import { Sparkles } from "lucide-react";
+import { ChevronDown, MessageSquare, Plus, Sparkles } from "lucide-react";
 import {
   useLayoutEffect,
   useMemo,
@@ -20,14 +20,16 @@ import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
-import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { DangerButton, GhostButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { Menu } from "./ui/Menu";
+import { MoreMenu } from "./ui/MoreMenu";
 import { CopyButton, CopyField, type CopySecret } from "./ui/CopyButton";
 import { AgentLinkAppMenu } from "./agentLinkApps";
 import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
 
-// Share links are shown once, so a link whose copy is gone is reset, not
-// copied again.
-const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Reset the link in Share to get a new one." };
+// The relay keeps a sealed copy of each link for its owner, so Share can
+// copy the same link again.
+const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Open Share to copy it again." };
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
@@ -376,6 +378,22 @@ function DependentNames({ dependents }: { dependents: RelayShareLinkDependent[] 
   ));
 }
 
+const LINK_ACCESS_WORDS: Record<LinkAccess, string> = {
+  view: "Can view",
+  comment: "Can comment",
+  edit: "Can edit",
+};
+
+const LINK_ACCESS_DETAIL: Record<LinkAccess, string> = {
+  view: "Read only",
+  comment: "Read and comment",
+  edit: "Read, comment, and change files",
+};
+
+function linkAccessOf(access: string): LinkAccess | null {
+  return access === "view" || access === "comment" || access === "edit" ? access : null;
+}
+
 function LinkAccessChoice(props: {
   supported: readonly LinkAccess[];
   access: LinkAccess;
@@ -384,22 +402,97 @@ function LinkAccessChoice(props: {
   onChange: (access: LinkAccess) => void;
 }) {
   return (
-    <>
-      <SegmentedControl
-        label={props.ariaLabel}
-        value={props.access}
-        options={LINK_ACCESS_OPTIONS.filter((option) =>
-          props.supported.includes(option.value),
-        )}
-        disabled={props.disabled}
-        onChange={props.onChange}
-      />
-      {props.access === "edit" && (
-        <p className="m-0 text-[11px] leading-relaxed text-subtle">
-          People who can edit can see the full History.
-        </p>
+    <SegmentedControl
+      label={props.ariaLabel}
+      value={props.access}
+      options={LINK_ACCESS_OPTIONS.filter((option) =>
+        props.supported.includes(option.value),
       )}
-    </>
+      disabled={props.disabled}
+      onChange={props.onChange}
+    />
+  );
+}
+
+const ACCESS_TRIGGER =
+  "inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[12px] font-medium text-ink transition-colors enabled:hover:bg-hover disabled:text-subtle";
+
+// A link's access, changed the way Docs and Notion change it: from the
+// access itself. Picking a level opens the row's confirmation.
+function LinkAccessMenu(props: {
+  access: LinkAccess;
+  supported: readonly LinkAccess[];
+  disabled: boolean;
+  testId: string;
+  onPick: (access: LinkAccess) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label="Access for this link"
+      open={open}
+      onOpenChange={setOpen}
+      width={224}
+      align="start"
+      items={props.supported.map((access) => ({
+        id: access,
+        label: LINK_ACCESS_WORDS[access],
+        description: LINK_ACCESS_DETAIL[access],
+        checked: access === props.access,
+        onSelect: () => props.onPick(access),
+      }))}
+      trigger={(trigger) => (
+        <button {...trigger} type="button" data-testid={props.testId} disabled={props.disabled} className={ACCESS_TRIGGER}>
+          {LINK_ACCESS_WORDS[props.access]}
+          <ChevronDown size={12} aria-hidden className="text-subtle" />
+        </button>
+      )}
+    />
+  );
+}
+
+// Another link to the same share: same files, same comments. Picking its
+// access adds it; an Edit link that stops automations asks once more.
+function AddLinkMenu(props: {
+  supported: readonly LinkAccess[];
+  disabled: boolean;
+  busyLabel: string | null;
+  warned: boolean;
+  onPick: (access: LinkAccess) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (props.busyLabel !== null) {
+    return <SecondaryButton size="compact" disabled>{props.busyLabel}</SecondaryButton>;
+  }
+  if (props.warned) {
+    return (
+      <div className="flex items-center gap-2">
+        <SecondaryButton size="compact" disabled={props.disabled} onClick={props.onCancel}>Cancel</SecondaryButton>
+        <SecondaryButton size="compact" disabled={props.disabled} onClick={props.onConfirm}>Add link anyway</SecondaryButton>
+      </div>
+    );
+  }
+  return (
+    <Menu
+      label="Access for the new link"
+      open={open}
+      onOpenChange={setOpen}
+      width={224}
+      items={props.supported.map((access) => ({
+        id: access,
+        label: LINK_ACCESS_WORDS[access],
+        description: LINK_ACCESS_DETAIL[access],
+        onSelect: () => props.onPick(access),
+      }))}
+      trigger={(trigger) => (
+        <GhostButton {...trigger} disabled={props.disabled}>
+          <Plus size={13} aria-hidden />
+          Add link
+        </GhostButton>
+      )}
+    />
   );
 }
 
@@ -1524,8 +1617,7 @@ export function useRelayShareLinkPane(props: {
     await mintLink({ kind: "create" }, () => bridge().createRelayShareLink(payload));
   }
 
-  async function addLink(shareId: string) {
-    const access = addAccessByShareId[shareId] ?? "view";
+  async function addLink(shareId: string, access: LinkAccess) {
     if (!(await checkAutomations({ recipientEmail: null, access, shareId }))) return;
     await mintLink({ kind: "add", shareId }, () =>
       bridge().addRelayShareLink({
@@ -1687,797 +1779,799 @@ export function useRelayShareLinkPane(props: {
     props.onClose();
   }
 
-  return {
-    content: props.visible ? (
-      <>
-        {minted ? (
-          <div className="flex flex-col gap-2">
-            <p className="m-0 text-xs leading-relaxed text-muted">
-              Copy the link now — dohc doesn't keep a copy.
+  function pickLinkAccess(row: RelayShareLinkRow, access: LinkAccess) {
+    if (linkBusy || mutationBusy !== null || row.status !== "active" || row.access === access) return;
+    setLifecycleError(null);
+    setConfirmation({ kind: "retune", shareId: row.shareId, grantId: row.grantId, access });
+  }
+
+  const linkControlsBusy = linkBusy || mutationBusy !== null || confirmation !== null;
+
+  function renderLinkConfirmation(row: RelayShareLinkRow) {
+    if (!confirmation) return null;
+    return (
+      <div
+        data-testid="share-link-confirmation"
+        className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
+      >
+        <p className="m-0 text-[13px] leading-relaxed text-ink">
+          {confirmation.kind === "retune" ? (
+            confirmationWidens ? (
+              <>
+                {confirmation.access === "edit" ? "Turn on editing for this link?" : "Turn on comments for this link?"}{" "}
+                The current link stops working right away, and you get a new link to send.
+                Published apps stop working until you review and publish them again.
+                {row.dependents.length > 0 ? (
+                  <>
+                    {" "}People who joined through it keep access and stay at
+                    their current level: <DependentNames dependents={row.dependents} />.
+                  </>
+                ) : null}
+              </>
+            ) : (
+              <>
+                {confirmation.access === "view"
+                  ? row.access === "edit"
+                    ? "Turn off editing for this link? The same link keeps working, for viewing only."
+                    : "Turn off comments for this link? The same link keeps working, for viewing only."
+                  : row.access === "edit"
+                    ? "Turn off editing for this link? The same link keeps working. Holders can view and comment."
+                    : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
+                {narrowerDependents.length > 0 ? (
+                  <>
+                    {" "}These people drop to {confirmation.access === "comment" ? "Comment" : "view"} too:{" "}
+                    <DependentNames dependents={narrowerDependents} />.
+                  </>
+                ) : null}
+              </>
+            )
+          ) : confirmation.kind === "reset" ? (
+            <>
+              Reset this link? The current link stops working right away, and you get a
+              new link to send. Published apps stop working until you review and publish them again.
+              {row.dependents.length > 0 ? (
+                <>
+                  {" "}People who joined through it keep access:{" "}
+                  <DependentNames dependents={row.dependents} />. To
+                  remove them, end the link instead.
+                </>
+              ) : null}
+            </>
+          ) : row.dependents.length === 0 ? (
+            <>
+              End this link? It stops working right away. Copies people already made
+              stay with them.
+            </>
+          ) : (
+            <>
+              End this link? It stops working right away, and these people lose
+              access through it: <DependentNames dependents={row.dependents} />.
+              Copies they already made stay with them.
+            </>
+          )}
+        </p>
+        <div className="flex justify-end gap-2">
+          <SecondaryButton
+            disabled={mutationBusy !== null}
+            onClick={() => setConfirmation(null)}
+          >
+            Cancel
+          </SecondaryButton>
+          <LinkConfirm
+            disabled={mutationBusy !== null}
+            onClick={() => void mutateLink(confirmation, row)}
+          >
+            {mutationBusy?.grantId === row.grantId
+              ? confirmationPendingLabel
+              : confirmationActionLabel}
+          </LinkConfirm>
+        </div>
+      </div>
+    );
+  }
+
+  function renderLinkUrl(url: string) {
+    const agentAddress = agentAddressFor(url);
+    return (
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <CopyField getText={() => url} label="Copy link" sensitive={SHARE_LINK_SECRET} copyTestId="share-link-copy">
+            <code data-testid="share-link-url" title={url}>{url}</code>
+          </CopyField>
+        </div>
+        {/* The same link, at the address an agent signs in with. Keyed
+            by the link, so a reset link is a new control. */}
+        {agentAddress !== null ? <>
+          <CopyButton
+            key={url}
+            size="header"
+            icon={Sparkles}
+            label="Copy for an agent"
+            getText={() => agentAddressFor(url)}
+            sensitive={AGENT_ADDRESS_SECRET}
+            testId="share-link-agent-copy"
+          />
+          <AgentLinkAppMenu
+            key={`apps:${url}`}
+            link={agentAddress}
+            server="dohc-share"
+            sensitive={AGENT_ADDRESS_SECRET}
+            testId="share-link-agent-apps"
+          />
+        </> : null}
+      </div>
+    );
+  }
+
+  function renderLinkRow(group: LinkGroup, row: RelayShareLinkRow) {
+    const damaged = row.selector === null;
+    const active = row.status === "active";
+    const access = linkAccessOf(row.access);
+    const retuneTo = !damaged && access !== null
+      ? (row.selector?.versionId === null ? availableLinkAccess : availableLinkAccess.filter((option) => option !== "edit"))
+      : [];
+    const canReset = !damaged && (row.access !== "edit" || (availableLinkAccess.includes("edit") && row.selector?.versionId === null));
+    // A link made or reset in this dialog is the one to send now; every
+    // other active link shows the copy the relay keeps for its owner.
+    const url = !active || damaged ? null : minted?.grantId === row.grantId ? minted.url : row.url ?? null;
+    const used = row.lastUsedAtMs === null ? "Not used yet" : `Used ${shortTimestamp.format(row.lastUsedAtMs)}`;
+    const issued = row.urlIssuedAtMs !== null && row.urlIssuedAtMs > row.createdAtMs
+      ? ` · Link reset ${shortDate.format(row.urlIssuedAtMs)}`
+      : "";
+    const confirming = confirmation !== null && confirmationRow?.grantId === row.grantId;
+    return (
+      <article
+        key={row.grantId}
+        data-testid={`share-link-row-${row.grantId}`}
+        data-status={row.status}
+        className="flex flex-col gap-2 border-t border-line px-3 py-3 first:border-t-0"
+      >
+        {damaged ? (
+          <div className="flex min-h-7 items-center gap-2">
+            <p className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
+              Unreadable link. dohc can't read what this link shares.
             </p>
-            <div className="flex items-center gap-2">
-              <div className="min-w-0 flex-1">
-                <CopyField
-                  getText={() => minted.url}
-                  sensitive={SHARE_LINK_SECRET}
-                >
-                  <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
-                </CopyField>
-              </div>
-              {/* The same link, at the address an agent signs in with. Keyed
-                  by the link, so a reset link is a new control. */}
-              {agentAddressFor(minted.url) !== null ? <>
-                <CopyButton
-                  key={minted.url}
-                  size="header"
-                  icon={Sparkles}
-                  label="Copy for an agent"
-                  getText={() => agentAddressFor(minted.url)}
-                  sensitive={AGENT_ADDRESS_SECRET}
-                  testId="share-link-agent-copy"
-                />
-                <AgentLinkAppMenu
-                  key={`apps:${minted.url}`}
-                  link={agentAddressFor(minted.url)}
-                  server="dohc-share"
-                  sensitive={AGENT_ADDRESS_SECRET}
-                  testId="share-link-agent-apps"
-                />
-              </> : null}
-            </div>
-            <p className="m-0 text-[11px] leading-relaxed text-subtle">
-              If you lose the link, reset it to get a new one.
+            {active ? (
+              <MoreMenu
+                label="Link options"
+                testId={`share-link-options-${row.grantId}`}
+                items={[{ label: "End link", danger: true, disabled: linkBusy || mutationBusy !== null, onSelect: () => openConfirmation("end", row) }]}
+              />
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex min-h-7 items-center gap-2">
+            {active && access !== null && retuneTo.length > 1 ? (
+              <LinkAccessMenu
+                access={access}
+                supported={retuneTo}
+                disabled={linkBusy || mutationBusy !== null}
+                testId={`share-link-access-${row.grantId}`}
+                onPick={(next) => pickLinkAccess(row, next)}
+              />
+            ) : (
+              <span className="flex h-7 shrink-0 items-center rounded-md px-2 text-[12px] font-medium text-ink">
+                {access === null ? row.access : LINK_ACCESS_WORDS[access]}
+              </span>
+            )}
+            <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
+              {active
+                ? `${used} · Created ${shortDate.format(row.createdAtMs)}${issued}`
+                : `Ended ${shortDate.format(row.revokedAtMs ?? row.createdAtMs)}`}
+            </span>
+            {active ? (
+              <MoreMenu
+                label="Link options"
+                testId={`share-link-options-${row.grantId}`}
+                items={[
+                  ...(canReset ? [{ label: "Reset link", disabled: linkBusy || mutationBusy !== null, onSelect: () => openConfirmation("reset", row) }] : []),
+                  { label: "End link", danger: true, disabled: linkBusy || mutationBusy !== null, onSelect: () => openConfirmation("end", row) },
+                ]}
+              />
+            ) : null}
+          </div>
+        )}
+
+        {url !== null ? (
+          renderLinkUrl(url)
+        ) : active && !damaged ? (
+          <p data-testid="share-link-no-copy" className="m-0 text-[12px] leading-relaxed text-muted">
+            This link was made before dohc kept a copy. Reset it to get a link you can copy.
+          </p>
+        ) : null}
+
+        {confirming ? renderLinkConfirmation(row) : null}
+
+        {active && !damaged ? (
+          <LinkAgentsList
+            key={`${props.workspaceId}:${group.shareId}:${row.grantId}`}
+            workspaceId={props.workspaceId}
+            shareId={group.shareId}
+            grantId={row.grantId}
+            revision={linksRevision}
+            disconnects={agentDisconnects}
+          />
+        ) : null}
+      </article>
+    );
+  }
+
+  function renderOwnerDiscussion(group: LinkGroup) {
+    const ownerDiscussion =
+      ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+    const ownerDraftInvalid =
+      ownerDiscussion.draft.length > 0 &&
+      normalizeShareDiscussionBody(ownerDiscussion.draft) === null;
+    const showOwnerAppendRetry =
+      ownerDiscussion.appendError && !ownerDraftInvalid;
+    const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
+    const displayedDependentIds = new Set(
+      group.rows.flatMap((row) =>
+        row.status === "active"
+          ? row.dependents.map((dependent) => dependent.grantId)
+          : [],
+      ),
+    );
+    const shareIndependentGrants = independentGrants.filter(
+      (grant) =>
+        grant.shareId === group.shareId &&
+        grant.recipientUserId !== null &&
+        !displayedDependentIds.has(grant.grantId),
+    );
+    const linkedPeople = group.rows.flatMap((row) =>
+      row.status === "active"
+        ? row.dependents
+            .filter((dependent) => dependent.recipientUserId !== null)
+            .map((dependent) => ({ row, dependent }))
+        : [],
+    );
+    return (
+      <div className="flex flex-col gap-3 border-t border-line px-3 py-3">
+        <div className="flex items-center gap-2">
+          <p className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
+            {ownerDiscussion.linkCommentsPaused
+              ? "Link comments are paused. People with links can still read everything."
+              : "Comments from everyone with a link to this share."}
+          </p>
+          <SecondaryButton
+            size="compact"
+            disabled={ownerMutationBusy !== null}
+            aria-busy={
+              ownerMutationBusy?.shareId === group.shareId &&
+              ownerMutationBusy.actionKey === "pause"
+            }
+            onClick={() =>
+              void runOwnerMutation(
+                group.shareId,
+                "pause",
+                () =>
+                  ownerDiscussion.linkCommentsPaused
+                    ? bridge().resumeRelayShareDiscussion({
+                        workspaceId: props.workspaceId,
+                        shareId: group.shareId,
+                      })
+                    : bridge().pauseRelayShareDiscussion({
+                        workspaceId: props.workspaceId,
+                        shareId: group.shareId,
+                      }),
+                "discussion",
+              )
+            }
+          >
+            {ownerDiscussion.linkCommentsPaused
+              ? "Resume link comments"
+              : "Pause link comments"}
+          </SecondaryButton>
+        </div>
+        {ownerMutationError?.shareId === group.shareId &&
+        ownerMutationError.actionKey === "pause" ? (
+          <p role="alert" className="m-0 text-[12px] text-danger">
+            dohc could not complete that change.
+          </p>
+        ) : null}
+
+        {ownerDiscussion.loading ? (
+          ownerDiscussion.loaded ? (
+            <p role="status" className="m-0 text-[12px] text-muted">Loading comments…</p>
+          ) : (
+            <SkeletonRows rows={2} label="Loading comments…" />
+          )
+        ) : null}
+
+        {ownerDiscussion.loadError ? (
+          <div className="flex items-center justify-between gap-3">
+            <p role="alert" className="m-0 text-[12px] text-danger">
+              dohc could not load comments.
             </p>
-            <p className="m-0 text-[11px] leading-relaxed text-subtle">
-              To reset or end this link later, open Share on this selection again.
-            </p>
+            <SecondaryButton
+              size="compact"
+              disabled={ownerDiscussion.loading}
+              onClick={() =>
+                void refreshOwnerDiscussion(
+                  group.shareId,
+                  ownerDiscussion.failedReadCursor ?? undefined,
+                )
+              }
+            >
+              Try again
+            </SecondaryButton>
           </div>
         ) : null}
 
-        <div className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium text-subtle">Access</span>
+        {ownerDiscussion.loaded &&
+        !ownerDiscussion.loading &&
+        ownerDiscussion.messages.length === 0 ? (
+          <p className="m-0 text-[12px] text-muted">No comments yet.</p>
+        ) : null}
+
+        {ownerDiscussion.messages.length > 0 ? (
+          <ol className="m-0 flex max-h-64 list-none flex-col overflow-y-auto p-0">
+            {ownerDiscussion.messages.map((message) => {
+              const linkAuthored = "moderation" in message;
+              const deleteActionKey = `delete:${message.messageId}`;
+              const principalActionKey = linkAuthored
+                ? `principal:${message.moderation.linkPrincipalId}`
+                : null;
+              const items = [
+                ...(!message.deleted
+                  ? [{
+                      label: "Delete comment",
+                      disabled: ownerMutationBusy !== null,
+                      onSelect: () => setOwnerConfirmation({ kind: "delete", shareId: group.shareId, messageId: message.messageId }),
+                    }]
+                  : []),
+                ...(linkAuthored
+                  ? [message.moderation.blocked
+                      ? {
+                          label: "Unblock",
+                          disabled: ownerMutationBusy !== null,
+                          onSelect: () =>
+                            void runOwnerMutation(
+                              group.shareId,
+                              principalActionKey!,
+                              () =>
+                                bridge().unblockRelayShareDiscussionPrincipal({
+                                  workspaceId: props.workspaceId,
+                                  shareId: group.shareId,
+                                  principalId: message.moderation.linkPrincipalId,
+                                }),
+                              "discussion",
+                            ),
+                        }
+                      : {
+                          label: "Block",
+                          disabled: ownerMutationBusy !== null,
+                          onSelect: () =>
+                            setOwnerConfirmation({
+                              kind: "block",
+                              shareId: group.shareId,
+                              principalId: message.moderation.linkPrincipalId,
+                              name: message.author.displayName,
+                            }),
+                        }]
+                  : []),
+              ];
+              return (
+                <li
+                  key={message.messageId}
+                  data-testid={`share-comment-${message.messageId}`}
+                  data-comment-message-id={message.messageId}
+                  className="flex flex-col gap-1 border-t border-line py-2 first:border-t-0 first:pt-0"
+                >
+                  <div className="flex min-h-6 items-center gap-2 text-[12px]">
+                    <span className="min-w-0 truncate font-medium text-ink">
+                      {message.author.displayName}
+                    </span>
+                    {message.author.kind === "link" ? (
+                      <span className="shrink-0 text-subtle">Unverified</span>
+                    ) : null}
+                    {linkAuthored && message.moderation.blocked ? (
+                      <span className="shrink-0 text-subtle">Blocked</span>
+                    ) : null}
+                    <span className="flex-1" />
+                    {items.map((item) => (
+                      <SecondaryButton
+                        key={item.label}
+                        size="row"
+                        disabled={item.disabled}
+                        onClick={item.onSelect}
+                      >
+                        {item.label}
+                      </SecondaryButton>
+                    ))}
+                  </div>
+                  <p className={`m-0 whitespace-pre-wrap break-words text-[13px] leading-relaxed ${message.deleted ? "text-subtle" : "text-ink"}`}>
+                    {message.deleted
+                      ? "Comment deleted by the owner"
+                      : message.body}
+                  </p>
+                  {ownerMutationError?.shareId === group.shareId &&
+                  (ownerMutationError.actionKey === deleteActionKey ||
+                    ownerMutationError.actionKey === principalActionKey) ? (
+                    <p role="alert" className="m-0 text-[12px] text-danger">
+                      dohc could not complete that change.
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+        ) : null}
+
+        {ownerDiscussion.nextCursor !== null ? (
+          <SecondaryButton
+            size="compact"
+            className="self-start"
+            disabled={
+              ownerDiscussion.loading ||
+              ownerDiscussion.paging ||
+              ownerDiscussion.reconciliationPending
+            }
+            onClick={() =>
+              void refreshOwnerDiscussion(
+                group.shareId,
+                ownerDiscussion.nextCursor ?? undefined,
+              )
+            }
+          >
+            Show more comments
+          </SecondaryButton>
+        ) : null}
+
+        <div className="flex flex-col gap-2">
+          <textarea
+            aria-label="Add a comment"
+            placeholder="Add a comment"
+            value={ownerDiscussion.draft}
+            disabled={ownerAppendBusy !== null}
+            aria-invalid={ownerDraftInvalid || undefined}
+            aria-describedby={
+              ownerDraftInvalid ? ownerDraftErrorId : undefined
+            }
+            rows={2}
+            onChange={(event) => {
+              const draft = event.currentTarget.value.replaceAll(
+                "\u0000",
+                "",
+              );
+              updateOwnerDiscussion(group.shareId, (current) => ({
+                ...current,
+                draft,
+                appendIntent: null,
+                appendError: false,
+              }));
+            }}
+            className="w-full resize-y rounded-lg border border-line bg-bg px-3 py-2 text-[13px] leading-relaxed text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
+          />
+          {ownerDraftInvalid ? (
+            <p
+              id={ownerDraftErrorId}
+              role="alert"
+              className="m-0 text-[12px] text-danger"
+            >
+              This comment is too long. Shorten it before posting.
+            </p>
+          ) : showOwnerAppendRetry ? (
+            <p role="alert" className="m-0 text-[12px] text-danger">
+              dohc could not post the comment.
+            </p>
+          ) : null}
+          <div className="flex justify-end">
+            <SecondaryButton
+              size="compact"
+              disabled={
+                ownerAppendBusy !== null ||
+                ownerDraftInvalid ||
+                (!showOwnerAppendRetry &&
+                  ownerDiscussion.draft.length === 0)
+              }
+              aria-busy={ownerAppendBusy === group.shareId}
+              onClick={() =>
+                void appendOwnerComment(
+                  group.shareId,
+                  showOwnerAppendRetry,
+                )
+              }
+            >
+              {showOwnerAppendRetry ? "Try again" : "Post"}
+            </SecondaryButton>
+          </div>
+        </div>
+
+        {linkedPeople.length > 0 || shareIndependentGrants.length > 0 ? (
+          <section aria-labelledby={`share-people-heading-${group.shareId}`} className="flex flex-col gap-1">
+            <SectionLabel as="h4" id={`share-people-heading-${group.shareId}`} className="m-0">
+              People
+            </SectionLabel>
+            {linkedPeople.map(({ row, dependent }) => {
+              const actionKey = `promote:${dependent.grantId}`;
+              return (
+                <div
+                  key={`${row.grantId}:${dependent.grantId}`}
+                  data-testid={`share-dependent-${dependent.grantId}`}
+                  className="flex flex-col gap-1"
+                >
+                  <div className="flex min-h-8 items-center justify-between gap-3">
+                    <span className="flex min-w-0 flex-col">
+                      <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
+                      <span className="text-[12px] text-subtle">Joined through a link</span>
+                    </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={ownerMutationBusy !== null}
+                      onClick={() => {
+                        setOwnerConfirmation({
+                          kind: "promote",
+                          shareId: group.shareId,
+                          grantId: dependent.grantId,
+                          parentGrantId: row.grantId,
+                          parentGeneration: row.generation,
+                          name: dependentName(dependent),
+                        });
+                      }}
+                    >
+                      Make independent
+                    </SecondaryButton>
+                  </div>
+                  {ownerMutationError?.shareId === group.shareId &&
+                  ownerMutationError.actionKey === actionKey ? (
+                    <p role="alert" className="m-0 text-[12px] text-danger">
+                      dohc could not complete that change.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+            {shareIndependentGrants.map((grant) => {
+              const actionKey = `revoke:${grant.grantId}`;
+              return (
+                <div
+                  key={grant.grantId}
+                  data-testid={`share-independent-${grant.grantId}`}
+                  className="flex flex-col gap-1"
+                >
+                  <div className="flex min-h-8 items-center justify-between gap-3">
+                    <span className="min-w-0 break-all text-[13px] text-ink">
+                      {namedGrantName(grant)}
+                    </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={ownerMutationBusy !== null}
+                      onClick={() => {
+                        setOwnerConfirmation({
+                          kind: "revoke",
+                          shareId: group.shareId,
+                          grantId: grant.grantId,
+                          name: namedGrantName(grant),
+                        });
+                      }}
+                    >
+                      End access
+                    </SecondaryButton>
+                  </div>
+                  {ownerMutationError?.shareId === group.shareId &&
+                  ownerMutationError.actionKey === actionKey ? (
+                    <p role="alert" className="m-0 text-[12px] text-danger">
+                      dohc could not complete that change.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </section>
+        ) : null}
+
+        {ownerConfirmation?.shareId === group.shareId ? (
+          <div
+            data-testid="owner-comments-confirmation"
+            className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
+          >
+            <p className="m-0 text-[13px] leading-relaxed text-ink">
+              {ownerConfirmation.kind === "delete"
+                ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+                : ownerConfirmation.kind === "block"
+                  ? `Block ${ownerConfirmation.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
+                  : ownerConfirmation.kind === "promote"
+                    ? `Make ${ownerConfirmation.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
+                    : `End ${ownerConfirmation.name}'s access? They lose access right away. Copies they already made stay with them.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <SecondaryButton
+                disabled={ownerMutationBusy !== null}
+                onClick={() => setOwnerConfirmation(null)}
+              >
+                Cancel
+              </SecondaryButton>
+              <OwnerConfirm
+                disabled={ownerMutationBusy !== null}
+                aria-busy={ownerMutationBusy !== null}
+                onClick={() =>
+                  executeOwnerConfirmation(ownerConfirmation)
+                }
+              >
+                {ownerConfirmation.kind === "delete"
+                  ? "Delete comment"
+                  : ownerConfirmation.kind === "block"
+                    ? "Block"
+                    : ownerConfirmation.kind === "promote"
+                      ? "Make independent"
+                      : "End access"}
+              </OwnerConfirm>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderLinkGroup(group: LinkGroup) {
+    const canAdd = eligibleShareIds.has(group.shareId);
+    const addAccess = addAccessByShareId[group.shareId] ?? "view";
+    const addNote = automationCheck.noteFor({ recipientEmail: null, access: addAccess, shareId: group.shareId });
+    const ownerDiscussion =
+      ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+    const addSupported = group.rows.some((row) => row.selector?.versionId !== null)
+      ? availableLinkAccess.filter((access) => access !== "edit")
+      : availableLinkAccess;
+    return (
+      <div
+        key={group.shareId}
+        data-testid={`share-link-group-${group.shareId}`}
+        className="flex flex-col rounded-lg border border-line bg-panel"
+      >
+        {group.rows.map((row) => renderLinkRow(group, row))}
+
+        {canAdd && ownerDiscussion.expanded ? renderOwnerDiscussion(group) : null}
+
+        {canAdd ? (
+          <div className="flex flex-col gap-2 border-t border-line px-3 py-2">
+            <div className="flex items-center gap-2">
+              <GhostButton
+                aria-expanded={ownerDiscussion.expanded}
+                onClick={() => toggleOwnerDiscussion(group.shareId)}
+              >
+                <MessageSquare size={13} aria-hidden />
+                Comments
+              </GhostButton>
+              <span className="flex-1" />
+              <AddLinkMenu
+                supported={addSupported}
+                disabled={linkControlsBusy}
+                busyLabel={
+                  linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === group.shareId
+                    ? "Checking automations…"
+                    : linkRequestBusy?.kind === "add" && linkRequestBusy.shareId === group.shareId
+                      ? "Adding link…"
+                      : null
+                }
+                warned={Boolean(addNote?.warning)}
+                onPick={(nextAccess) => {
+                  if (nextAccess !== addAccess) {
+                    setAddAccessByShareId((current) => ({ ...current, [group.shareId]: nextAccess }));
+                  }
+                  void addLink(group.shareId, nextAccess);
+                }}
+                onConfirm={() => void addLink(group.shareId, addAccess)}
+                onCancel={() => setAddAccessByShareId((current) => ({ ...current, [group.shareId]: "view" }))}
+              />
+            </div>
+            <AutomationShareNote note={addNote} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  const createLabel =
+    linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null
+      ? "Checking automations…"
+      : linkRequestBusy?.kind === "create"
+        ? "Creating link…"
+        : newLinkNote?.warning
+          ? "Create link anyway"
+          : hasMatchingShare
+            ? "Create separate link"
+            : "Create link";
+  const CreateButton = hasMatchingShare && !newLinkNote?.warning ? SecondaryButton : PrimaryButton;
+
+  const createSection = (
+    <section aria-label="New link" className="flex flex-col gap-2">
+      {hasMatchingShare ? (
+        <p className="m-0 text-[12px] leading-relaxed text-muted">
+          A separate link starts a new share of this selection, with its own comments.
+        </p>
+      ) : null}
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
           <LinkAccessChoice
             supported={availableLinkAccess}
             access={linkAccess}
             ariaLabel="Link access"
-            disabled={
-              linkBusy || mutationBusy !== null || confirmation !== null
-            }
+            disabled={linkControlsBusy}
             onChange={setLinkAccess}
           />
         </div>
-
-        <p className="m-0 text-xs leading-relaxed text-muted">
-          Anyone who has the link can read what you selected — no account needed.{" "}
+        <CreateButton
+          type="button"
+          aria-label="Create link"
+          className="shrink-0"
+          disabled={linkControlsBusy}
+          onClick={() => void createLink()}
+        >
+          {createLabel}
+        </CreateButton>
+      </div>
+      {linkAccess === "edit" ? (
+        <p className="m-0 text-[12px] leading-relaxed text-subtle">
+          People who can edit can see the full History.
+        </p>
+      ) : null}
+      <AutomationShareNote note={newLinkNote} />
+      {linkError ? (
+        <p data-testid="share-link-error" role="alert" className="m-0 text-[12px] text-danger">
+          {linkError}
+        </p>
+      ) : null}
+      {hasMatchingShare ? null : (
+        <p className="m-0 text-[12px] leading-relaxed text-muted">
+          Anyone with the link can open it without an account.{" "}
           {props.target.kind === "version"
             ? "The link shows this version as it is now."
             : "If files are added to this selection later, the link includes them."}{" "}
           The sync relay serves the link, so it can read this content.
         </p>
-        <p className="m-0 text-xs leading-relaxed text-muted">
-          You can end the link at any time. Ending it stops future access, but can't
-          take back copies people already made.
-        </p>
+      )}
+    </section>
+  );
 
-        {hasMatchingShare ? (
-          <p className="m-0 text-[11px] leading-relaxed text-subtle">
-            A separate share of this selection, with its own comments.
-          </p>
+  // A new link shows at once, before the list that holds it reads again.
+  const mintedElsewhere =
+    minted !== null && !visibleLinks.some((row) => row.grantId === minted.grantId && row.status === "active");
+
+  return {
+    content: props.visible ? (
+      <>
+        {mintedElsewhere ? (
+          <div data-testid="share-link-new" className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3">
+            {renderLinkUrl(minted.url)}
+          </div>
         ) : null}
-        <AutomationShareNote note={newLinkNote} />
-        <PrimaryButton
-          type="button"
-          aria-label="Create link"
-          disabled={linkBusy || mutationBusy !== null || confirmation !== null}
-          onClick={() => void createLink()}
-        >
-          {linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null
-            ? "Checking automations…"
-            : linkRequestBusy?.kind === "create"
-              ? "Creating link…"
-              : newLinkNote?.warning
-                ? "Create link anyway"
-                : hasMatchingShare
-                  ? "Create separate link"
-                  : "Create link"}
-        </PrimaryButton>
+        {visibleLinkGroups.length || linksLoading || linksError || lifecycleError ? (
+          <section className="flex flex-col gap-2" aria-labelledby="share-links-heading">
+            <SectionLabel as="h3" id="share-links-heading" className="m-0">
+              Links
+            </SectionLabel>
 
-        {linkError ? (
-          <p data-testid="share-link-error" role="alert" className="m-0 text-xs text-danger">
-            {linkError}
-          </p>
+            {/* Lines stand in only for links not yet shown; a refresh keeps the
+                links on screen and says so. */}
+            {linksLoading ? (
+              visibleLinkGroups.length ? (
+                <p role="status" className="sr-only">Loading links…</p>
+              ) : (
+                <SkeletonRows rows={2} label="Loading links…" />
+              )
+            ) : null}
+
+            {linksError ? (
+              <div className="flex items-center justify-between gap-3">
+                <p role="alert" className="m-0 min-w-0 text-[12px] text-danger">
+                  {linksError}
+                </p>
+                <SecondaryButton size="compact" onClick={() => void refreshLinks()}>Try again</SecondaryButton>
+              </div>
+            ) : null}
+
+            {lifecycleError ? (
+              <p role="alert" className="m-0 text-[12px] leading-relaxed text-danger">
+                {lifecycleError}
+              </p>
+            ) : null}
+
+            {visibleLinkGroups.map((group) => renderLinkGroup(group))}
+          </section>
         ) : null}
 
-        <section className="flex flex-col gap-2" aria-labelledby="share-links-heading">
-          <SectionLabel as="h3"
-            id="share-links-heading"
-            className="m-0"
-          >
-            Links
-          </SectionLabel>
-
-          {/* Lines stand in only for links not yet shown; a refresh keeps the
-              links on screen and says so. */}
-          {linksLoading ? (
-            visibleLinkGroups.length ? (
-              <p role="status" className="m-0 text-xs text-muted">Loading links…</p>
-            ) : (
-              <SkeletonRows rows={2} label="Loading links…" />
-            )
-          ) : null}
-
-          {linksError ? (
-            <div className="flex items-center justify-between gap-3">
-              <p role="alert" className="m-0 min-w-0 text-xs text-danger">
-                {linksError}
-              </p>
-              <SecondaryButton onClick={() => void refreshLinks()}>Retry</SecondaryButton>
-            </div>
-          ) : null}
-
-          {lifecycleError ? (
-            <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-              {lifecycleError}
-            </p>
-          ) : null}
-
-          {visibleLinkGroups.map((group) => {
-            const canAdd = eligibleShareIds.has(group.shareId);
-            const addAccess = addAccessByShareId[group.shareId] ?? "view";
-            const addNote = automationCheck.noteFor({ recipientEmail: null, access: addAccess, shareId: group.shareId });
-            const ownerDiscussion =
-              ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
-            const ownerDraftInvalid =
-              ownerDiscussion.draft.length > 0 &&
-              normalizeShareDiscussionBody(ownerDiscussion.draft) === null;
-            const showOwnerAppendRetry =
-              ownerDiscussion.appendError && !ownerDraftInvalid;
-            const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
-            const displayedDependentIds = new Set(
-              group.rows.flatMap((row) =>
-                row.status === "active"
-                  ? row.dependents.map((dependent) => dependent.grantId)
-                  : [],
-              ),
-            );
-            const shareIndependentGrants = independentGrants.filter(
-              (grant) =>
-                grant.shareId === group.shareId &&
-                grant.recipientUserId !== null &&
-                !displayedDependentIds.has(grant.grantId),
-            );
-            return (
-              <div
-                key={group.shareId}
-                data-testid={`share-link-group-${group.shareId}`}
-                className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-2"
-              >
-                {group.rows.map((row) => {
-                  const damaged = row.selector === null;
-                  const active = row.status === "active";
-                  const canRetune =
-                    !damaged &&
-                    (row.access === "view" || row.access === "comment" || row.access === "edit");
-                  return (
-                    <article
-                      key={row.grantId}
-                      data-testid={`share-link-row-${row.grantId}`}
-                      className="flex flex-col gap-2 border-t border-line pt-2 first:border-t-0 first:pt-0"
-                    >
-                      {damaged ? (
-                        <p className="m-0 text-xs leading-relaxed text-muted">
-                          Unreadable link — dohc can't read what this link shares
-                        </p>
-                      ) : (
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex min-w-0 flex-col gap-1">
-                            <p className="m-0 text-[11px] leading-relaxed text-subtle">
-                              {row.lastUsedAtMs === null
-                                ? "Not used yet"
-                                : `Used as recently as ${shortTimestamp.format(row.lastUsedAtMs)}`}
-                            </p>
-                            <p className="m-0 font-mono text-[11px] leading-relaxed text-subtle">
-                              {row.status === "revoked"
-                                ? `Created ${shortDate.format(row.createdAtMs)} · Ended ${shortDate.format(row.revokedAtMs ?? row.createdAtMs)}`
-                                : `Created ${shortDate.format(row.createdAtMs)}${
-                                    row.urlIssuedAtMs !== null &&
-                                    row.urlIssuedAtMs > row.createdAtMs
-                                      ? ` · Link reset ${shortDate.format(row.urlIssuedAtMs)}`
-                                      : ""
-                                  }`}
-                            </p>
-                          </div>
-                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted">
-                            {row.access === "edit" ? "Edit" : row.access === "comment" ? "Comment" : "View"}
-                          </span>
-                        </div>
-                      )}
-
-                      {active ? (
-                        <div className="flex flex-wrap justify-end gap-2">
-                          {canRetune ? (
-                            <SecondaryButton
-                              disabled={linkBusy || mutationBusy !== null}
-                              onClick={() => openConfirmation("retune", row)}
-                            >
-                              {row.access === "edit" || availableLinkAccess.includes("edit") ? "Change access" : row.access === "comment"
-                                ? "Turn off comments"
-                                : "Turn on comments"}
-                            </SecondaryButton>
-                          ) : null}
-                          {!damaged && (row.access !== "edit" || (availableLinkAccess.includes("edit") && row.selector?.versionId === null)) ? (
-                            <SecondaryButton
-                              disabled={linkBusy || mutationBusy !== null}
-                              onClick={() => openConfirmation("reset", row)}
-                            >
-                              Reset link
-                            </SecondaryButton>
-                          ) : null}
-                          <SecondaryButton
-                            disabled={linkBusy || mutationBusy !== null}
-                            onClick={() => openConfirmation("end", row)}
-                          >
-                            End link
-                          </SecondaryButton>
-                        </div>
-                      ) : null}
-                      {active && !damaged ? (
-                        <LinkAgentsList
-                          key={`${props.workspaceId}:${group.shareId}:${row.grantId}`}
-                          workspaceId={props.workspaceId}
-                          shareId={group.shareId}
-                          grantId={row.grantId}
-                          revision={linksRevision}
-                          disconnects={agentDisconnects}
-                        />
-                      ) : null}
-                    </article>
-                  );
-                })}
-
-                {canAdd ? (
-                  <section className="flex flex-col gap-2 border-t border-line pt-2">
-                    <SecondaryButton
-                      aria-expanded={ownerDiscussion.expanded}
-                      onClick={() => toggleOwnerDiscussion(group.shareId)}
-                    >
-                      Comments
-                    </SecondaryButton>
-
-                    {ownerDiscussion.expanded ? (
-                      <div className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3">
-                        <div className="flex flex-col gap-2">
-                          <div className="flex justify-end">
-                            <SecondaryButton
-                              disabled={ownerMutationBusy !== null}
-                              aria-busy={
-                                ownerMutationBusy?.shareId === group.shareId &&
-                                ownerMutationBusy.actionKey === "pause"
-                              }
-                              onClick={() =>
-                                void runOwnerMutation(
-                                  group.shareId,
-                                  "pause",
-                                  () =>
-                                    ownerDiscussion.linkCommentsPaused
-                                      ? bridge().resumeRelayShareDiscussion({
-                                          workspaceId: props.workspaceId,
-                                          shareId: group.shareId,
-                                        })
-                                      : bridge().pauseRelayShareDiscussion({
-                                          workspaceId: props.workspaceId,
-                                          shareId: group.shareId,
-                                        }),
-                                  "discussion",
-                                )
-                              }
-                            >
-                              {ownerDiscussion.linkCommentsPaused
-                                ? "Resume link comments"
-                                : "Pause link comments"}
-                            </SecondaryButton>
-                          </div>
-                          {ownerDiscussion.linkCommentsPaused ? (
-                            <p className="m-0 text-xs leading-relaxed text-muted">
-                              Link comments are paused. People with links can still read
-                              everything.
-                            </p>
-                          ) : null}
-                          {ownerMutationError?.shareId === group.shareId &&
-                          ownerMutationError.actionKey === "pause" ? (
-                            <p role="alert" className="m-0 text-xs text-danger">
-                              Couldn't complete that change.
-                            </p>
-                          ) : null}
-                        </div>
-
-                        {ownerDiscussion.loading ? (
-                          ownerDiscussion.loaded ? (
-                            <p role="status" className="m-0 text-xs text-muted">Loading comments…</p>
-                          ) : (
-                            <SkeletonRows rows={2} label="Loading comments…" />
-                          )
-                        ) : null}
-
-                        {ownerDiscussion.loadError ? (
-                          <div className="flex items-center justify-between gap-3">
-                            <p role="alert" className="m-0 text-xs text-danger">
-                              Couldn't load comments.
-                            </p>
-                            <SecondaryButton
-                              disabled={ownerDiscussion.loading}
-                              onClick={() =>
-                                void refreshOwnerDiscussion(
-                                  group.shareId,
-                                  ownerDiscussion.failedReadCursor ?? undefined,
-                                )
-                              }
-                            >
-                              Retry
-                            </SecondaryButton>
-                          </div>
-                        ) : null}
-
-                        {ownerDiscussion.loaded &&
-                        !ownerDiscussion.loading &&
-                        ownerDiscussion.messages.length === 0 ? (
-                          <p className="m-0 text-xs text-muted">No comments yet.</p>
-                        ) : null}
-
-                        {ownerDiscussion.messages.length > 0 ? (
-                          <ol className="m-0 flex max-h-64 list-none flex-col gap-2 overflow-y-auto p-0">
-                            {ownerDiscussion.messages.map((message) => {
-                              const linkAuthored = "moderation" in message;
-                              const deleteActionKey = `delete:${message.messageId}`;
-                              const principalActionKey = linkAuthored
-                                ? `principal:${message.moderation.linkPrincipalId}`
-                                : null;
-                              return (
-                                <li
-                                  key={message.messageId}
-                                  data-testid={`share-comment-${message.messageId}`}
-                                  data-comment-message-id={message.messageId}
-                                  className="flex flex-col gap-1 rounded-md border border-line bg-panel p-2"
-                                >
-                                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                                    <span className="font-medium text-ink">
-                                      {message.author.displayName}
-                                    </span>
-                                    {message.author.kind === "link" ? (
-                                      <span className="text-subtle">Unverified</span>
-                                    ) : null}
-                                  </div>
-                                  <p className="m-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-muted">
-                                    {message.deleted
-                                      ? "Comment deleted by the owner"
-                                      : message.body}
-                                  </p>
-                                  <div className="flex flex-wrap justify-end gap-2">
-                                    {!message.deleted ? (
-                                      <SecondaryButton
-                                        disabled={ownerMutationBusy !== null}
-                                        onClick={() => {
-                                          setOwnerConfirmation({
-                                            kind: "delete",
-                                            shareId: group.shareId,
-                                            messageId: message.messageId,
-                                          });
-                                        }}
-                                      >
-                                        Delete comment
-                                      </SecondaryButton>
-                                    ) : null}
-                                    {linkAuthored ? (
-                                      message.moderation.blocked ? (
-                                        <SecondaryButton
-                                          disabled={ownerMutationBusy !== null}
-                                          onClick={() =>
-                                            void runOwnerMutation(
-                                              group.shareId,
-                                              principalActionKey!,
-                                              () =>
-                                                bridge().unblockRelayShareDiscussionPrincipal(
-                                                  {
-                                                    workspaceId: props.workspaceId,
-                                                    shareId: group.shareId,
-                                                    principalId:
-                                                      message.moderation
-                                                        .linkPrincipalId,
-                                                  },
-                                                ),
-                                              "discussion",
-                                            )
-                                          }
-                                        >
-                                          Unblock
-                                        </SecondaryButton>
-                                      ) : (
-                                        <SecondaryButton
-                                          disabled={ownerMutationBusy !== null}
-                                          onClick={() => {
-                                            setOwnerConfirmation({
-                                              kind: "block",
-                                              shareId: group.shareId,
-                                              principalId:
-                                                message.moderation.linkPrincipalId,
-                                              name: message.author.displayName,
-                                            });
-                                          }}
-                                        >
-                                          Block
-                                        </SecondaryButton>
-                                      )
-                                    ) : null}
-                                  </div>
-                                  {ownerMutationError?.shareId === group.shareId &&
-                                  (ownerMutationError.actionKey === deleteActionKey ||
-                                    ownerMutationError.actionKey ===
-                                      principalActionKey) ? (
-                                    <p role="alert" className="m-0 text-xs text-danger">
-                                      Couldn't complete that change.
-                                    </p>
-                                  ) : null}
-                                </li>
-                              );
-                            })}
-                          </ol>
-                        ) : null}
-
-                        {ownerDiscussion.nextCursor !== null ? (
-                          <SecondaryButton
-                            disabled={
-                              ownerDiscussion.loading ||
-                              ownerDiscussion.paging ||
-                              ownerDiscussion.reconciliationPending
-                            }
-                            onClick={() =>
-                              void refreshOwnerDiscussion(
-                                group.shareId,
-                                ownerDiscussion.nextCursor ?? undefined,
-                              )
-                            }
-                          >
-                            Show more comments
-                          </SecondaryButton>
-                        ) : null}
-
-                        <div className="flex flex-col gap-2 border-t border-line pt-3">
-                          <label className="flex flex-col gap-1 text-[11px] font-medium text-subtle">
-                            Add a comment
-                            <textarea
-                              value={ownerDiscussion.draft}
-                              disabled={ownerAppendBusy !== null}
-                              aria-invalid={ownerDraftInvalid || undefined}
-                              aria-describedby={
-                                ownerDraftInvalid ? ownerDraftErrorId : undefined
-                              }
-                              rows={3}
-                              onChange={(event) => {
-                                const draft = event.currentTarget.value.replaceAll(
-                                  "\u0000",
-                                  "",
-                                );
-                                updateOwnerDiscussion(group.shareId, (current) => ({
-                                  ...current,
-                                  draft,
-                                  appendIntent: null,
-                                  appendError: false,
-                                }));
-                              }}
-                              className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
-                            />
-                          </label>
-                          {ownerDraftInvalid ? (
-                            <p
-                              id={ownerDraftErrorId}
-                              role="alert"
-                              className="m-0 text-xs text-danger"
-                            >
-                              This comment is too long. Shorten it before posting.
-                            </p>
-                          ) : showOwnerAppendRetry ? (
-                            <p role="alert" className="m-0 text-xs text-danger">
-                              Couldn't post comment.
-                            </p>
-                          ) : null}
-                          <div className="flex justify-end">
-                            <SecondaryButton
-                              disabled={
-                                ownerAppendBusy !== null ||
-                                ownerDraftInvalid ||
-                                (!showOwnerAppendRetry &&
-                                  ownerDiscussion.draft.length === 0)
-                              }
-                              aria-busy={ownerAppendBusy === group.shareId}
-                              onClick={() =>
-                                void appendOwnerComment(
-                                  group.shareId,
-                                  showOwnerAppendRetry,
-                                )
-                              }
-                            >
-                              {showOwnerAppendRetry ? "Retry" : "Post"}
-                            </SecondaryButton>
-                          </div>
-                        </div>
-
-                        {group.rows.some(
-                          (row) =>
-                            row.status === "active" &&
-                            row.dependents.some(
-                              (dependent) => dependent.recipientUserId !== null,
-                            ),
-                        ) ? (
-                          <div className="flex flex-col gap-2 border-t border-line pt-3">
-                            {group.rows.flatMap((row) =>
-                              row.status === "active"
-                                ? row.dependents
-                                    .filter(
-                                      (dependent) =>
-                                        dependent.recipientUserId !== null,
-                                    )
-                                    .map((dependent) => {
-                                      const actionKey = `promote:${dependent.grantId}`;
-                                      return (
-                                        <div
-                                          key={`${row.grantId}:${dependent.grantId}`}
-                                          data-testid={`share-dependent-${dependent.grantId}`}
-                                          className="flex flex-col gap-1"
-                                        >
-                                          <div className="flex items-center justify-between gap-3">
-                                            <span className="min-w-0 break-all text-xs text-muted">
-                                              {dependentName(dependent)}
-                                            </span>
-                                            <SecondaryButton
-                                              disabled={ownerMutationBusy !== null}
-                                              onClick={() => {
-                                                setOwnerConfirmation({
-                                                  kind: "promote",
-                                                  shareId: group.shareId,
-                                                  grantId: dependent.grantId,
-                                                  parentGrantId: row.grantId,
-                                                  parentGeneration: row.generation,
-                                                  name: dependentName(dependent),
-                                                });
-                                              }}
-                                            >
-                                              Make independent
-                                            </SecondaryButton>
-                                          </div>
-                                          {ownerMutationError?.shareId ===
-                                            group.shareId &&
-                                          ownerMutationError.actionKey === actionKey ? (
-                                            <p
-                                              role="alert"
-                                              className="m-0 text-xs text-danger"
-                                            >
-                                              Couldn't complete that change.
-                                            </p>
-                                          ) : null}
-                                        </div>
-                                      );
-                                    })
-                                : [],
-                            )}
-                          </div>
-                        ) : null}
-
-                        {shareIndependentGrants.length > 0 ? (
-                          <div className="flex flex-col gap-2 border-t border-line pt-3">
-                            {shareIndependentGrants.map((grant) => {
-                              const actionKey = `revoke:${grant.grantId}`;
-                              return (
-                                <div
-                                  key={grant.grantId}
-                                  data-testid={`share-independent-${grant.grantId}`}
-                                  className="flex flex-col gap-1"
-                                >
-                                  <div className="flex items-center justify-between gap-3">
-                                    <span className="min-w-0 break-all text-xs text-muted">
-                                      {namedGrantName(grant)}
-                                    </span>
-                                    <SecondaryButton
-                                      disabled={ownerMutationBusy !== null}
-                                      onClick={() => {
-                                        setOwnerConfirmation({
-                                          kind: "revoke",
-                                          shareId: group.shareId,
-                                          grantId: grant.grantId,
-                                          name: namedGrantName(grant),
-                                        });
-                                      }}
-                                    >
-                                      End access
-                                    </SecondaryButton>
-                                  </div>
-                                  {ownerMutationError?.shareId === group.shareId &&
-                                  ownerMutationError.actionKey === actionKey ? (
-                                    <p role="alert" className="m-0 text-xs text-danger">
-                                      Couldn't complete that change.
-                                    </p>
-                                  ) : null}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : null}
-
-                        {ownerConfirmation?.shareId === group.shareId ? (
-                          <div
-                            data-testid="owner-comments-confirmation"
-                            className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3"
-                          >
-                            <p className="m-0 text-xs leading-relaxed text-ink">
-                              {ownerConfirmation.kind === "delete"
-                                ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
-                                : ownerConfirmation.kind === "block"
-                                  ? `Block ${ownerConfirmation.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
-                                  : ownerConfirmation.kind === "promote"
-                                    ? `Make ${ownerConfirmation.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
-                                    : `End ${ownerConfirmation.name}'s access? They lose access right away. Copies they already made stay with them.`}
-                            </p>
-                            <div className="flex justify-end gap-2">
-                              <SecondaryButton
-                                disabled={ownerMutationBusy !== null}
-                                onClick={() => setOwnerConfirmation(null)}
-                              >
-                                Cancel
-                              </SecondaryButton>
-                              <OwnerConfirm
-                                disabled={ownerMutationBusy !== null}
-                                aria-busy={ownerMutationBusy !== null}
-                                className="h-8 py-0 text-xs"
-                                onClick={() =>
-                                  executeOwnerConfirmation(ownerConfirmation)
-                                }
-                              >
-                                {ownerConfirmation.kind === "delete"
-                                  ? "Delete comment"
-                                  : ownerConfirmation.kind === "block"
-                                    ? "Block"
-                                    : ownerConfirmation.kind === "promote"
-                                      ? "Make independent"
-                                      : "End access"}
-                              </OwnerConfirm>
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
-
-                {canAdd ? (
-                  <div className="flex flex-col gap-2 border-t border-line pt-2">
-                    <p className="m-0 text-[11px] leading-relaxed text-subtle">
-                      Another link to the same share. Same files, same comments.
-                    </p>
-                    <LinkAccessChoice
-                      supported={group.rows.some(row => row.selector?.versionId !== null) ? availableLinkAccess.filter(access => access !== "edit") : availableLinkAccess}
-                      access={addAccess}
-                      ariaLabel="Access for another link"
-                      disabled={
-                        linkBusy ||
-                        mutationBusy !== null ||
-                        confirmation !== null
-                      }
-                      onChange={(nextAccess) =>
-                        setAddAccessByShareId((current) => ({
-                          ...current,
-                          [group.shareId]: nextAccess,
-                        }))
-                      }
-                    />
-                    <AutomationShareNote note={addNote} />
-                    <SecondaryButton
-                      disabled={
-                        linkBusy ||
-                        mutationBusy !== null ||
-                        confirmation !== null
-                      }
-                      onClick={() => void addLink(group.shareId)}
-                    >
-                      {linkRequestBusy?.kind === "check" &&
-                      linkRequestBusy.shareId === group.shareId
-                        ? "Checking automations…"
-                        : linkRequestBusy?.kind === "add" &&
-                            linkRequestBusy.shareId === group.shareId
-                          ? "Adding link…"
-                          : addNote?.warning
-                            ? "Add link anyway"
-                            : "Add link"}
-                    </SecondaryButton>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-
-          {confirmation && confirmationRow ? (
-            <div
-              data-testid="share-link-confirmation"
-              className="flex flex-col gap-2 rounded-lg border border-line bg-panel-2 p-3"
-            >
-              {confirmation.kind === "retune" ? <LinkAccessChoice
-                supported={(confirmationRow.selector?.versionId === null ? availableLinkAccess : availableLinkAccess.filter(access => access !== "edit")).filter(access => access !== confirmationRow.access)}
-                access={confirmation.access} ariaLabel="New link access" disabled={mutationBusy !== null}
-                onChange={access => setConfirmation({...confirmation, access})}
-              /> : null}
-              <p className="m-0 text-xs leading-relaxed text-ink">
-                {confirmation.kind === "retune" ? (
-                  confirmationWidens ? (
-                    <>
-                      {confirmation.access === "edit" ? "Turn on editing for this link?" : "Turn on comments for this link?"} The current link stops working
-                      right away, and dohc shows the new link once. Published apps stop working until you review and publish them again.
-                      {confirmationRow.dependents.length > 0 ? (
-                        <>
-                          {" "}People who joined through it keep access and stay at
-                          their current level:{" "}
-                          <DependentNames dependents={confirmationRow.dependents} />.
-                        </>
-                      ) : null}
-                    </>
-                  ) : (
-                    <>
-                      {confirmation.access === "view"
-                        ? confirmationRow.access === "edit"
-                          ? "Turn off editing for this link? The same link keeps working, for viewing only."
-                          : "Turn off comments for this link? The same link keeps working, for viewing only."
-                        : confirmationRow.access === "edit"
-                          ? "Turn off editing for this link? The same link keeps working. Holders can view and comment."
-                          : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
-                      {narrowerDependents.length > 0 ? (
-                        <>
-                          {" "}These people drop to {confirmation.access === "comment" ? "Comment" : "view"} too:{" "}
-                          <DependentNames dependents={narrowerDependents} />.
-                        </>
-                      ) : null}
-                    </>
-                  )
-                ) : confirmation.kind === "reset" ? (
-                  <>
-                    Reset this link? The current link stops working right away, and dohc
-                    shows the new link once. Published apps stop working until you review and publish them again.
-                    {confirmationRow.dependents.length > 0 ? (
-                      <>
-                        {" "}People who joined through it keep access:{" "}
-                        <DependentNames dependents={confirmationRow.dependents} />. To
-                        remove them, end the link instead.
-                      </>
-                    ) : null}
-                  </>
-                ) : confirmationRow.dependents.length === 0 ? (
-                  <>
-                    End this link? It stops working right away. Copies people already made
-                    stay with them.
-                  </>
-                ) : (
-                  <>
-                    End this link? It stops working right away, and these people lose
-                    access through it: <DependentNames dependents={confirmationRow.dependents} />.
-                    Copies they already made stay with them.
-                  </>
-                )}
-              </p>
-              <div className="flex justify-end gap-2">
-                <SecondaryButton
-                  disabled={mutationBusy !== null}
-                  onClick={() => setConfirmation(null)}
-                >
-                  Cancel
-                </SecondaryButton>
-                <LinkConfirm
-                  disabled={mutationBusy !== null}
-                  onClick={() => void mutateLink(confirmation, confirmationRow)}
-                >
-                  {mutationBusy?.grantId === confirmationRow.grantId
-                    ? confirmationPendingLabel
-                    : confirmationActionLabel}
-                </LinkConfirm>
-              </div>
-            </div>
-          ) : null}
-        </section>
+        {createSection}
       </>
     ) : null,
     scope: linkScope,
