@@ -2081,10 +2081,30 @@ describe("CLI socket server", () => {
       const appPublication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async () => { throw new Error("reached"); });
       context.dataset = dataset;
       context.appPublication = appPublication;
-      await send("dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } });
-      await send("appPublication", { request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "app" } });
-      expect(dataset).toHaveBeenCalledWith(expect.objectContaining({ datasetPath: "shared-with-me/received/notes/tasks/dataset.json" }), expect.anything());
-      expect(appPublication).toHaveBeenCalledWith(expect.objectContaining({ appRoot: "shared-with-me/received/notes/app" }), expect.anything());
+      // The reply is the operation's own, so the request got past the rule.
+      const reached = { protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" };
+      const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      const definition = { formatVersion: 1, datasetId: id(1), name: "Equipment", schemaPath: "equipment/schema.sql", operationsPath: "equipment/actions.ts",
+        tables: [{ tableId: id(2), name: "Equipment", sqlName: "equipment", primaryKey: "id",
+          fields: [{ fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true }] }],
+        operations: [{ operationId: id(4), name: "list", label: "List equipment", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] }] };
+      const below = join(inShare, "tasks");
+      await mkdir(below, { recursive: true });
+      for (const [cwd, prefix] of [[inShare, "shared-with-me/received/notes"], [below, "shared-with-me/received/notes/tasks"]] as const) {
+        dataset.mockClear();
+        appPublication.mockClear();
+        expect(await send("dataset", { cwd, request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "prepare", workspaceId: WORKSPACE_ID, descriptorPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "create", workspaceId: WORKSPACE_ID, definition } }), cwd).toEqual(reached);
+        expect(await send("appPublication", { cwd, request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "app" } }), cwd).toEqual(reached);
+        expect(dataset.mock.calls.map(([request]) => request), cwd).toEqual([
+          expect.objectContaining({ action: "describe", datasetPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "prepare", descriptorPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "create",
+            definition: expect.objectContaining({ schemaPath: `${prefix}/equipment/schema.sql`, operationsPath: `${prefix}/equipment/actions.ts` }) }),
+        ]);
+        expect(appPublication, cwd).toHaveBeenCalledWith(expect.objectContaining({ appRoot: `${prefix}/app` }), expect.anything());
+      }
     });
 
     it("answers reads", async () => {
