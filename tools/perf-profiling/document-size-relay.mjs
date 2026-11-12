@@ -229,6 +229,7 @@ export async function runRelayCase(options) {
           credential: {
             credentialId: 'link-credential',
             grantId: 'link-grant',
+            secretSealed: null,
             secretHash: linkSecurity.hashLinkBearer('benchmark-link-secret', 'document-size-key-32-characters-long'),
             generation: 1,
             mintedAtMs: now,
