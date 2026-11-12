@@ -151,12 +151,37 @@ it("answers in words when the file changed elsewhere, and never writes over it",
   file.text=theirs;file.version++;
   let answer:string|null=null;
   await act(async()=>{answer=await latest!.create({name:"Second",kind:"table"});});
-  expect(answer).toBe("dohc could not save this view. The saved views changed elsewhere. Refresh before editing them again.");
+  expect(answer).toBe("dohc could not save this view. The saved views changed elsewhere. Try again.");
   expect(file.text).toBe(theirs);
   // The popover shows the answer, so no toast repeats it.
   expect(onError).not.toHaveBeenCalled();
-  await act(async()=>{answer=await latest!.rename(file.views()[0]!.viewId as string,"Renamed");});
-  expect(file.text).toBe(theirs);
+  // The hook read the file again, so the tabs show it and the next change names its hash.
+  expect(savedNames()).toEqual(["Theirs"]);expect(openView()).toBe("");
+  await act(async()=>{answer=await latest!.create({name:"Second",kind:"table"});});
+  expect(answer).toBeNull();
+  expect(file.views().map(view=>view.name)).toEqual(["Theirs","Second"]);
+  await act(async()=>{answer=await latest!.rename(id(9),"Renamed");});
+  expect(answer).toBeNull();
+  expect(file.views().map(view=>view.name)).toEqual(["Renamed","Second"]);
+  expect(onError).not.toHaveBeenCalled();
+});
+it("reads the file again after a write that failed, so the next change saves",async()=>{
+  const file=viewsFile(),onError=vi.fn();
+  render(<Views workspaceId="w" dataset={dataset} tableId={id(2)} onError={onError}/>);
+  await ready();
+  await act(async()=>{await latest!.create({name:"Mine",kind:"table"});});
+  const mine=file.views()[0]!.viewId as string,reads=backend.readWorkspaceText.mock.calls.length;
+  backend.writeWorkspaceText.mockRejectedValueOnce(Error("The disk is full."));
+  let answer:string|null=null;
+  await act(async()=>{answer=await latest!.rename(mine,"Ours");});
+  expect(answer).toBe("dohc could not save this view. The disk is full.");
+  expect(backend.readWorkspaceText.mock.calls.length).toBe(reads+1);
+  // The page is not left busy, and the open view stays open.
+  expect((screen.getByRole("button",{name:"Views"}) as HTMLButtonElement).disabled).toBe(false);expect(openView()).toBe(mine);
+  await act(async()=>{answer=await latest!.rename(mine,"Ours");});
+  expect(answer).toBeNull();
+  expect(file.views().map(view=>view.name)).toEqual(["Ours"]);
+  expect(onError).not.toHaveBeenCalled();
 });
 it("renames a view, refuses a name another view has, and saves the field a board groups by",async()=>{
   const file=viewsFile(),onError=vi.fn();
@@ -175,8 +200,18 @@ it("renames a view, refuses a name another view has, and saves the field a board
   await act(async()=>{answer=await latest!.rename(pending!,"Waiting");});
   expect(answer).toBeNull();
   expect(file.views().map(view=>view.name)).toEqual(["Waiting","Board"]);
-  // A renamed view stays the open one.
-  expect(openView()).toBe(pending);
+  // Board was open, and a rename of another view leaves it open.
+  expect(openView()).toBe(board);
+  // The open view stays open under its new name.
+  await act(async()=>{answer=await latest!.rename(board!,"Columns");});
+  expect(answer).toBeNull();
+  expect(openView()).toBe(board);expect(latest!.active).toMatchObject({name:"Columns"});
+  // With All records open, a rename opens nothing.
+  act(()=>latest!.select(null));
+  await act(async()=>{answer=await latest!.rename(pending!,"Queue");});
+  expect(answer).toBeNull();
+  expect(openView()).toBe("");
+  expect(file.views().map(view=>view.name)).toEqual(["Queue","Columns"]);
   // A field the table cannot group by is refused, and reported, since no popover shows it.
   await act(async()=>{latest!.setField(board!,{groupBy:id(8)});});
   await waitFor(()=>expect(onError).toHaveBeenCalledExactlyOnceWith("Choose a readable field to group this board.",expect.any(Error)));

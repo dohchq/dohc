@@ -93,6 +93,8 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
     }catch(error){
       if(request!==current.current||controller.current.signal.aborted)return null;
       if(report)onError("Could not save Collection views.",error,()=>{void refresh();});
+      // The file may have changed, so the next change starts from what it holds now.
+      await refresh();
       return withErrorWords("dohc could not save this view.",error);
     }
     finally{saving.current=false;if(request===current.current)setBusy(false);}
@@ -107,8 +109,8 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
     if(held.current?.document.views.some(view=>view.viewId!==parsed.viewId&&view.name===parsed.name))throw Error("A view already has this name. Choose another name.");
     return parsed;
   }
-  /** Saves one view, new or changed, and opens it. What is wrong with the view is answered, never reported. */
-  async function put(view:CollectionTableView,report:boolean,after?:()=>void):Promise<string|null> {
+  /** Saves one view, new or changed, and opens it, or keeps the open view for `stay`. What is wrong with the view is answered, never reported. */
+  async function put(view:CollectionTableView,report:boolean,after?:()=>void,stay=false):Promise<string|null> {
     const saved=held.current?.document.views;
     if(!saved){void refresh();return NOT_READ;}
     let parsed:CollectionTableView;
@@ -116,7 +118,7 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
     catch(error){return error instanceof Error?error.message:"Check this view's fields.";}
     const exists=saved.some(view=>view.viewId===parsed.viewId);
     if(!exists&&saved.length>=VIEW_LIMIT)return `A Collection holds ${VIEW_LIMIT} views. Delete one, then add this one.`;
-    return save(exists?saved.map(view=>view.viewId===parsed.viewId?parsed:view):[...saved,parsed],parsed,after,report);
+    return save(exists?saved.map(view=>view.viewId===parsed.viewId?parsed:view):[...saved,parsed],stay?active:parsed,after,report);
   }
   function saveDraft() {
     if(!draft||!snapshot)return;
@@ -173,7 +175,7 @@ export function useCollectionTableViews(props:{enabled:boolean;workspaceId:strin
     list:views,active,busy,dialog,
     select:viewId=>select(viewId===null?null:find(viewId)??null),
     create:view=>put({viewId:crypto.randomUUID(),name:view.name,kind:view.kind,search:"",filters:[],sort:null,...(view.groupBy?{groupBy:view.groupBy}:{}),...(view.dateField?{dateField:view.dateField}:{})},false),
-    rename:async(viewId,name)=>{const view=find(viewId);return view?put({...view,name},false):NOT_READ;},
+    rename:async(viewId,name)=>{const view=find(viewId);return view?put({...view,name},false,undefined,true):NOT_READ;},
     remove:viewId=>{
       const view=find(viewId);
       if(!view)return;
