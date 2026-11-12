@@ -369,9 +369,14 @@ export class ServiceActivationDriver {
     },{binding:operation.basis.ownerBinding,activationPending:false,ownerUserId:saved.ownerUserId},undefined,slot);
     return owner.consumer;
   }
+  // A document with no owner that waits out a backoff after a failed activation does not hold its workspace back,
+  // so its siblings' settled edits still publish while it waits.
   workspaceReady(workspaceId:string){
     return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
-      !this.#blocked.has(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+      !this.#blocked.has(targetKey(target)) && !this.#backingOff(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+  }
+  #backingOff(key:string){
+    return Date.now()<(this.#failures.get(key)?.until ?? 0) && ![...this.#owners.values()].some(owner=>owner.target===key);
   }
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
@@ -657,7 +662,7 @@ export class ServiceActivationDriver {
     }
     if(!owner){
       // Waiting applies to capturing: a document already live keeps draining on every pass.
-      if(Date.now()<(this.#failures.get(key)?.until ?? 0))return backingOff;
+      if(this.#backingOff(key))return backingOff;
       let update=this.#latestUpdate(target);
       if(catchUp || !saved){
         let pulling=catchUp?.get(target.workspaceId);
