@@ -374,9 +374,9 @@ describe("a document record's panel", () => {
     expect(sides()).toEqual(["Plan"]);
   });
 
-  it("renames a record in its heading where its name is a text field, through the cell's write, and shows a record named by its file as text", async () => {
+  it("renames a record in its heading where its name is a text field, through the cell's write", async () => {
     const doc = liveDoc();
-    renderPage(makeBridge([task("rec-1", "Plan"), task("rec-2", null, "tasks/Draft.md")]));
+    renderPage(makeBridge([task("rec-1", "Plan")]));
     await screen.findByRole("button", { name: "Open Plan" });
     open("Plan");
     fireEvent.click(nameButton());
@@ -384,12 +384,32 @@ describe("a document record's panel", () => {
     fireEvent.change(input, { target: { value: "Plan B" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(doc.getMap("frontmatter").get("title")).toBe("Plan B"));
+  });
 
-    // A record with no title is named by its file, which no cell writes. Its title is a row to fill in.
+  it("opens the heading of a record with no name yet for typing, empty over Untitled, and saves to the title field", async () => {
+    const doc = liveDoc();
+    renderPage(makeBridge([task("rec-1", null, "tasks/Draft.md")]));
+    await screen.findByRole("button", { name: "Open Draft" });
+    open("Draft");
+    const draft = screen.getByRole("complementary", { name: "Draft" });
+    fireEvent.click(within(within(draft).getByRole("heading", { name: "Untitled" })).getByRole("button"));
+    const empty = within(draft).getByRole<HTMLInputElement>("textbox", { name: "title" });
+    expect(empty.value).toBe("");
+    expect(empty.placeholder).toBe("Untitled");
+    expect(document.querySelector('[data-property="title"]')).toBeNull();
+    fireEvent.change(empty, { target: { value: "Drafted" } });
+    fireEvent.keyDown(empty, { key: "Enter" });
+    await waitFor(() => expect(doc.getMap("frontmatter").get("title")).toBe("Drafted"));
+  });
+
+  it("keeps the plain heading for a record of a Collection with no title or name field", async () => {
+    const schema = { ...TASKS, fields: TASKS.fields.filter((field) => field.name !== "title") };
+    const untitled = { ...task("rec-2", null, "tasks/Draft.md"), values: task("rec-2", null, "tasks/Draft.md").values.filter((entry) => entry.field !== "title") };
+    renderPage(makeBridge([untitled], schema));
+    await screen.findByRole("button", { name: "Open Draft" });
     open("Draft");
     const heading = within(screen.getByRole("complementary", { name: "Draft" })).getByRole("heading", { name: "Draft" });
     expect(within(heading).queryByRole("button")).toBeNull();
-    expect(property("title")).toBeTruthy();
   });
 
   it("closes the innermost thing on Escape, leaves Escape to text typed in the body, and returns focus to what opened the record", async () => {

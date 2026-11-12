@@ -155,6 +155,20 @@ export interface NewRecordOptions {
   onFailure?(failure: { reason: string; retry: (() => void) | null }): boolean;
 }
 
+/**
+ * The text field a Collection's records are named in: `title`, then `name`,
+ * by `recordLabel`'s rule for a record's values. Undefined where the
+ * Collection has neither.
+ */
+function nameFieldOf(schema: CollectionSchema): FieldDefinition | undefined {
+  for (const preferred of ["title", "name"]) {
+    const matches = schema.fields.filter((field) => field.type === "text" && field.name.toLowerCase() === preferred);
+    const field = matches.find((candidate) => candidate.name === preferred) ?? matches.sort((a, b) => (a.name < b.name ? -1 : 1))[0];
+    if (field) return field;
+  }
+  return undefined;
+}
+
 export interface CollectionPageProps extends RecordPanelHost {
   readOnly?: boolean;
   accessEnded?: boolean;
@@ -1024,10 +1038,16 @@ export function CollectionPage({
   const recordPanelNode = (() => {
     if (openRecordId === null || automationsOpen) return null;
     const record = shownRecord;
-    // The name opens for typing only where it is a text field's value, which the page writes as the table's cell does.
-    const nameFieldName = record === null ? null : labelField(record.values);
-    const nameField = schema.fields.find((field) => field.name === nameFieldName && field.type === "text");
-    const stored = nameField && record?.values.find((entry) => entry.field === nameField.name)?.value;
+    // The name opens for typing where it is a text field's value, which the page writes as the table's cell does:
+    // the field that names the record, or with no name yet, the Collection's title or name field, so a new
+    // record can be named. A record of a Collection with neither is named by its file, which no cell writes.
+    const labelled = record === null ? null : labelField(record.values);
+    const candidate = record === null ? undefined
+      : labelled !== null ? schema.fields.find((field) => field.name === labelled && field.type === "text") : nameFieldOf(schema);
+    const stored = candidate && record?.values.find((entry) => entry.field === candidate.name)?.value;
+    // A value that is not text stays in its row, where its flag shows.
+    const nameField = candidate && (typeof stored === "string" || stored === null || stored === undefined) ? candidate : undefined;
+    const storedText = typeof stored === "string" ? stored : "";
     const commands: RecordPanelCommand[] = record !== null && onOpenRecordHistory
       ? [{
           id: "history",
@@ -1042,7 +1062,7 @@ export function CollectionPage({
         panelRef={recordPanel.element}
         collectionName={name}
         name={record === null ? "" : recordLabel(record)}
-        nameText={typeof stored === "string" ? stored : undefined}
+        nameText={nameField ? storedText : undefined}
         nameField={nameField?.name}
         nameLabel={nameField?.name}
         canRename={nameField !== undefined && onCellChange !== undefined && !readOnly}
@@ -1051,7 +1071,7 @@ export function CollectionPage({
         } : undefined}
         // A name the input still shows as it was is no change, as for a press away.
         onNameAbandoned={nameField && record ? (text) => {
-          if (text !== stored) saveLeftText(record, nameField.name, text, text || null);
+          if (text !== storedText) saveLeftText(record, nameField.name, text, text || null);
         } : undefined}
         onOpenAsPage={record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))}
         commands={commands}

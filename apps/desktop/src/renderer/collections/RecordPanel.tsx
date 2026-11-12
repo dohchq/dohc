@@ -61,6 +61,12 @@ export interface RecordPanelProps {
   /** The name field's own name, which the open input takes. */
   nameLabel?: string;
   /**
+   * The record was made a moment ago, here, with no name yet: its name is
+   * open for typing, with focus, as the panel shows it. Only that first
+   * showing reads it, and only where the name opens.
+   */
+  startRenaming?: boolean;
+  /**
    * Receives a name still being typed when its input goes, neither saved
    * nor cancelled: with the panel, with the right to rename, or because
    * another field became the name. The host keeps it and sends nothing.
@@ -110,10 +116,10 @@ function typesText(target: EventTarget): boolean {
 }
 
 /** The record's name: a heading, and where the host lets it change, the control that opens it for typing. */
-function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRename" | "onNameChange" | "nameLabel" | "onNameAbandoned">) {
+function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRename" | "onNameChange" | "nameLabel" | "onNameAbandoned" | "startRenaming">) {
   const { canRename = false, onNameChange } = props;
   const name = props.nameText ?? props.name;
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(() => props.startRenaming === true && canRename);
   const input = useRef<HTMLInputElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   // Enter closes the input, which can blur it. One edit saves once.
@@ -149,7 +155,7 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRenam
   }, [editing, canRename]);
   // The record's title, not a panel title, so the type scale's panel title recipe does not apply: 20px, to stand out from the Collection's name above it.
   const heading = "m-0 min-w-0 text-xl font-semibold leading-tight tracking-tight text-ink";
-  const shown = name === "" ? <span className="text-subtle">Untitled</span> : name;
+  const shown = name.trim() === "" ? <span className="text-subtle">Untitled</span> : name;
   if (!editing && !canRename) return <h2 className={`${heading} whitespace-pre-wrap break-words`}>{shown}</h2>;
   const save = (value: string, focused: boolean) => {
     if (done.current) return;
@@ -164,6 +170,8 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRenam
           autoFocus
           type="text"
           aria-label={props.nameLabel ?? "Name"}
+          // What the heading says of a record with no name, in the same place.
+          placeholder="Untitled"
           defaultValue={name}
           onChange={() => {
             typed.current = true;
@@ -178,7 +186,7 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRenam
             }
           }}
           onBlur={(event) => save(event.currentTarget.value, false)}
-          className="-mx-1 w-[calc(100%+0.5rem)] rounded border border-line bg-bg px-1 text-xl font-semibold leading-tight tracking-tight text-ink focus:border-ink"
+          className="-mx-1 w-[calc(100%+0.5rem)] rounded border border-line bg-bg px-1 text-xl font-semibold leading-tight tracking-tight text-ink placeholder:text-subtle focus:border-ink"
         />
       ) : (
         <button
@@ -319,7 +327,7 @@ export function RecordPanel(props: RecordPanelProps) {
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-4">
             <div className="flex flex-col gap-1 pb-3 pt-1">
               {/* Another field as the name is another name: an input open on the first goes with it. */}
-              <PanelName key={props.nameField ?? ""} name={name} nameText={props.nameText} canRename={props.canRename} onNameChange={props.onNameChange} nameLabel={props.nameLabel} onNameAbandoned={props.onNameAbandoned} />
+              <PanelName key={props.nameField ?? ""} name={name} nameText={props.nameText} canRename={props.canRename} onNameChange={props.onNameChange} nameLabel={props.nameLabel} onNameAbandoned={props.onNameAbandoned} startRenaming={props.startRenaming} />
               {props.nameNote}
             </div>
             {props.properties}

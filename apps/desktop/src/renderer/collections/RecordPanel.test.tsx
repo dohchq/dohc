@@ -141,6 +141,18 @@ describe("the record panel", () => {
     expect(view.in.getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("");
   });
 
+  it("opens with the name's input focused for a record made a moment ago, empty over Untitled, only where the name opens", () => {
+    const view = setup({ name: "record 7", nameText: "", nameLabel: "title", onNameChange: vi.fn(), canRename: true, startRenaming: true });
+    const input = view.in.getByRole<HTMLInputElement>("textbox", { name: "title" });
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Untitled");
+    cleanup();
+    const plain = setup({ name: "record 7", nameText: "", startRenaming: true });
+    expect(plain.in.queryByRole("textbox")).toBeNull();
+    expect(plain.in.getByRole("heading", { name: "Untitled" })).toBeTruthy();
+  });
+
   it("keeps the name being typed through a new read, and hands it to the host when the panel goes", () => {
     const onNameAbandoned = vi.fn(), onNameChange = vi.fn();
     function Host() {
