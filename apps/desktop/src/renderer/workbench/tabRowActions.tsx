@@ -19,12 +19,24 @@ export function useTabRowActionsSlot(): HTMLElement | null | undefined {
   return useContext(TabRowActionsSlot);
 }
 
+// Whether a view's own row of actions sits inside a page that has its own
+// frame, such as the record panel: the row then draws no band of its own.
+const PlainActionsRow = createContext(false);
+export function usePlainActionsRow(): boolean {
+  return useContext(PlainActionsRow);
+}
+
 // A view drawn inside another tab's page, such as a record's body in its
 // Collection's record panel, keeps its actions with it: they draw in a row of
 // their own, as outside an editor group, and not in the row of a tab that is
-// not the view's.
+// not the view's. The page frames the row, so it has a line above it and no
+// band.
 export function OwnActionsRow(props: { children: ReactNode }) {
-  return <TabRowActionsSlot.Provider value={undefined}>{props.children}</TabRowActionsSlot.Provider>;
+  return (
+    <TabRowActionsSlot.Provider value={undefined}>
+      <PlainActionsRow.Provider value>{props.children}</PlainActionsRow.Provider>
+    </TabRowActionsSlot.Provider>
+  );
 }
 
 // One editor group: its tab row, given the element the actions land in, then

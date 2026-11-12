@@ -324,10 +324,11 @@ export function RecordPanel(props: RecordPanelProps) {
             </div>
             {props.properties}
             {props.body === undefined || props.body === null ? null : (
-              // The body keeps its own gutters and scrolls in the room under the fields, and keeps room when they are many.
+              // The body scrolls in the room under the fields, and keeps room when they are many. Its side margin is
+              // narrower than a page's, so its text starts near the fields' and a narrow panel keeps its width for text.
               <div
                 data-record-body=""
-                className="-mx-3 mt-3 flex min-h-60 flex-1 flex-col"
+                className="-mx-3 mt-3 flex min-h-60 flex-1 flex-col [--dohc-editor-gutter:32px]"
                 onKeyDown={(event) => {
                   if (event.key === "Escape" && typesText(event.target)) bodyTextKeys.add(event.nativeEvent);
                 }}
