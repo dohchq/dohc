@@ -84,3 +84,18 @@ it("requires explicit discard before opening a fresh session and never replays t
   expect(first.session.close).toHaveBeenCalled(); expect(next.session.doc).not.toBe(first.session.doc);
   expect(openLinkDocument).toHaveBeenLastCalledWith("abcdefghijkl", "docs/a.md", expect.any(AbortSignal));
 });
+it("reports the file open only once its session is first live, and keeps it open after that", async () => {
+  const f = fixture(), onOpenChange = vi.fn(); f.update({status: "connecting"});
+  vi.mocked(openLinkDocument).mockResolvedValue(f.session);
+  await act(async () => root.render(<LinkDocumentEditor discriminator="abcdefghijkl" path="docs/a.md" available onClose={vi.fn()} onOpenChange={onOpenChange}/>));
+  await settle(() => container.querySelector('[role="textbox"]') !== null);
+  const body = container.querySelector<HTMLElement>(".named-body-editor")!;
+  expect(onOpenChange).not.toHaveBeenCalledWith(true); expect(body.hidden).toBe(true);
+  await act(async () => f.update({status: "disconnected", reason: "authority-unavailable"}));
+  expect(onOpenChange).not.toHaveBeenCalledWith(true); expect(body.hidden).toBe(true);
+  expect(container.textContent).toContain("dohc could not open the file for editing. Try again.");
+  await act(async () => f.update({status: "live", reason: null}));
+  expect(onOpenChange).toHaveBeenLastCalledWith(true); expect(body.hidden).toBe(false);
+  await act(async () => f.update({status: "disconnected", reason: null}));
+  expect(onOpenChange).toHaveBeenLastCalledWith(true); expect(body.hidden).toBe(false);
+});

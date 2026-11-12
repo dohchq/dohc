@@ -22,10 +22,11 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
 /**
  * A live document's editor. The link page draws the title and bar itself, so with `link` this
  * shows neither. Its saved state goes to `statusSlot`, in that bar, while editing works; a state
- * that stops editing stays above the text, where its sentence has room.
+ * that stops editing stays above the text, where its sentence has room. `bodyHidden` keeps the
+ * text out of view while the page still shows its own copy.
  */
-export function NamedDocumentEditor({session, path, onState, link = false, statusSlot}: {session: NamedDocumentSession; path: string; link?: boolean;
-  statusSlot?: HTMLElement | null; onState(state: NamedLiveBrowserState): void}) {
+export function NamedDocumentEditor({session, path, onState, link = false, statusSlot, bodyHidden = false}: {session: NamedDocumentSession; path: string; link?: boolean;
+  statusSlot?: HTMLElement | null; bodyHidden?: boolean; onState(state: NamedLiveBrowserState): void}) {
   const element = useRef<HTMLDivElement>(null), [state, setState] = useState(session.state());
   const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
@@ -44,7 +45,7 @@ export function NamedDocumentEditor({session, path, onState, link = false, statu
     {statusSlot && working ? createPortal(status, statusSlot) : status}
     {state.status === "disconnected" && <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
       {state.reason === "authority-unavailable" || liveConnectionLimitMessage(state.reason) ? "Try again" : "Retry connection"}</button>}
-    <PropertiesAsWritten block={frontmatter} collapsed={link}/>
-    <div className="named-body-editor" ref={element} />
+    {!bodyHidden && <PropertiesAsWritten block={frontmatter} collapsed={link}/>}
+    <div className="named-body-editor" ref={element} hidden={bodyHidden} />
   </section>;
 }

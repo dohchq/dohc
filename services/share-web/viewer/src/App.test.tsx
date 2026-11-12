@@ -517,16 +517,18 @@ describe("App", () => {
     const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Comments"]')!;
     const panel = container.querySelector<HTMLElement>("#link-discussion")!;
     await settle(() => toggle.textContent === "1");
-    expect(panel.hidden).toBe(true);
+    expect(panel.dataset.open).toBe("false");
+    expect(panel.hasAttribute("inert")).toBe(true);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
     await act(async () => toggle.click());
-    expect(panel.hidden).toBe(false);
+    expect(panel.dataset.open).toBe("true");
+    expect(panel.hasAttribute("inert")).toBe(false);
     expect(panel.textContent).toContain("Shared comment");
     expect(document.activeElement).toBe(panel);
 
     await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
-    expect(panel.hidden).toBe(true);
+    expect(panel.dataset.open).toBe("false");
     expect(document.activeElement).toBe(toggle);
   });
 

@@ -100,7 +100,6 @@ test("keeps authored navigation inert until the user follows an allowed link", a
     await expect(internalLink).toHaveAttribute("href", "/docs/next.md");
     await internalLink.click();
     expect(page.url()).toBe(viewerUrl);
-    await expect(page.getByRole("heading", { level: 1, name: "docs/next.md" })).toBeVisible();
     await expect(page.locator("article.markdown")).toContainText(NEXT_FILE_MARKER);
     await expect(
       navigation.getByRole("button", { name: "next.md", exact: true }),

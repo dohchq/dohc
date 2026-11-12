@@ -1693,7 +1693,7 @@ export function App() {
             </div>
           </div>
           {ready && !editing ? (
-            <div className="side-panel" id="link-discussion" tabIndex={-1} hidden={surface !== "comments"}>
+            <div className="side-panel" id="link-discussion" tabIndex={-1} data-open={surface === "comments"} inert={surface !== "comments"}>
               <button className="icon-button panel-close" type="button" aria-label={`Close ${discussion.toLowerCase()}`} title="Close" onClick={closeSurface}>
                 <Icon name="x" />
               </button>

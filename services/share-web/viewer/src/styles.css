@@ -230,6 +230,8 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .column > section[aria-label="Shared app"] p { margin: 0; color: var(--viewer-muted); }
 
 .side-panel { position: relative; display: flex; width: 344px; min-height: 0; flex: none; flex-direction: column; border-left: 1px solid var(--viewer-line); background: var(--viewer-panel); }
+/* A closed panel keeps its size, out of sight, so a channel that loads meanwhile can still scroll to its newest message. */
+.side-panel[data-open="false"] { position: absolute; top: 48px; right: 0; bottom: 0; visibility: hidden; }
 .panel-close { position: absolute; top: 8px; right: 8px; z-index: 1; }
 .link-page .comments-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; border: 0; padding: 14px 16px 16px; background: none; }
 .link-page .comments-panel h2 { margin: 0 32px 4px 0; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; }
@@ -324,6 +326,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
   .backdrop { background: var(--viewer-scrim); }
   .backdrop.narrow-only { display: block; }
   .side-panel { position: fixed; inset: 20% 0 0; z-index: 30; width: auto; border: 1px solid var(--viewer-line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: var(--viewer-shadow); }
+  .side-panel[data-open="false"] { position: fixed; inset: 20% 0 0; }
   .link-page .comments-panel { border: 0; padding: 14px 16px 16px; }
   .popover, .edit-notice { position: fixed; top: auto; right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; max-height: 80%; border-radius: 16px; }
   .popover.link-more { width: auto; padding: 8px; }
