@@ -70,16 +70,28 @@ function gateJobNames(scope) {
 
 function jobReadyAt(job, metadata) {
   const node = Object.values(CLOUD_JOB_GRAPH).find(node => node.names.includes(job.name));
-  const dependencies = (node?.needs ?? []).flatMap(id => CLOUD_JOB_GRAPH[id].names).map(name => {
-    const matches = metadata.filter(dependency => dependency.name === name && dependency.head_sha === job.head_sha);
-    return matches.length === 1 ? matches[0] : null;
+  const sameHead = metadata.filter(dependency => dependency.head_sha === job.head_sha);
+  const dependencies = (node?.needs ?? []).flatMap(id => {
+    const { names } = CLOUD_JOB_GRAPH[id], present = sameHead.filter(dependency => names.includes(dependency.name));
+    if (!present.length && names.length > 1) {
+      const prefix = names.reduce((prefix, name) => {
+        while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
+        return prefix;
+      });
+      if (sameHead.some(dependency => {
+        const expression = dependency.name.indexOf("${{");
+        return dependency.conclusion === "skipped" && expression > 0 && prefix.startsWith(dependency.name.slice(0, expression));
+      })) return [];
+    }
+    return names.flatMap(name => {
+      const matches = present.filter(dependency => dependency.name === name);
+      return matches.length !== 1 ? [null] : matches[0].conclusion === "skipped" ? [] : matches;
+    });
   });
   const createdAt = Date.parse(job.created_at);
-  if (!dependencies.length || dependencies.some(dependency => !dependency || dependency.conclusion === "skipped"
-    || dependency.status !== "completed" || !Number.isFinite(Date.parse(dependency.completed_at)))) return createdAt;
+  if (!dependencies.length || dependencies.some(dependency => !dependency || !Number.isFinite(Date.parse(dependency.completed_at)))) return createdAt;
   // A partial re-run can carry old jobs. Do not count the pause between attempts as a scheduling wait.
-  if (job.run_attempt && (dependencies.every(dependency => dependency.run_attempt < job.run_attempt)
-    || dependencies.some(dependency => dependency.run_attempt > job.run_attempt))) return createdAt;
+  if (job.run_attempt && dependencies.every(dependency => dependency.run_attempt < job.run_attempt)) return createdAt;
   const readyAt = Math.max(...dependencies.map(dependency => Date.parse(dependency.completed_at)));
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
@@ -108,7 +120,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
   const excused = longest.runnerWaitSeconds > 30 || transferSeconds > 30 && seconds - transferSeconds <= budgetSeconds;
   const timing = seconds <= targetSeconds ? "within budget" : excused ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
-  const waitingFor = Date.parse(longest.createdAt) > Date.parse(longest.startedAt) - longest.runnerWaitSeconds * 1000 ? "wait for GitHub to start" : "runner wait";
+  const waitingFor = (Date.parse(longest.startedAt) - Date.parse(longest.createdAt)) / 1000 * 2 >= longest.runnerWaitSeconds ? "runner wait" : "wait for GitHub to start";
   const delay = [longest.runnerWaitSeconds > 30 ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
     transferSeconds > 30 ? `receipt transfer took ${transferSeconds}s` : null].filter(Boolean).join("; ");
   return { spanSeconds, seconds, targetSeconds, budgetSeconds, transferSeconds, contended, timing, jobs,
