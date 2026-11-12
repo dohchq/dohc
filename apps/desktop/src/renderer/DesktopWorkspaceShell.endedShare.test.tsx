@@ -126,6 +126,10 @@ async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBri
   expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
   expect(offersCollectionAction("collection-fields-button")).toBe(false);
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
+  // The view still shows as a tab, with nothing that saves a view.
+  expect(within(screen.getByTestId("collection-view-switcher")).getByRole("button", { name: "Table" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Retained task" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Finish for Retained task" })).toBeNull();
   expect(screen.queryByRole("textbox")).toBeNull();

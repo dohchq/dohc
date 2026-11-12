@@ -692,6 +692,27 @@ describe("a Data Collection's table", () => {
     command("Refresh");
     expect(commandsBySection()).toEqual([["View", ["Refresh"]]]);
   });
+  it("holds the commands that need records after a read failed and says to refresh first, and Refresh reads again", async () => {
+    const description = dataset(); description.operations.find(operation => operation.operationId === create)!.access = "link";
+    const handlers = { onReviewSchema: vi.fn(), onTransferCsv: vi.fn(), onCreateForm: vi.fn(), onHistory: vi.fn() };
+    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>().mockRejectedValueOnce(new Error("The worker stopped.")).mockResolvedValue({ result: page() });
+    setup({ dataset: description, invoke, ...handlers });
+    await screen.findByText("dohc could not load People.");
+    for (const name of ["Fields and names", "Import or export CSV", "Create form"]) {
+      const row = command(name);
+      expect(row.getAttribute("aria-disabled"), name).toBe("true");
+      expect(document.getElementById(row.getAttribute("aria-describedby")!)!.textContent, name).toBe("dohc could not load the records. Refresh first.");
+      fireEvent.click(row);
+    }
+    expect(handlers.onReviewSchema).not.toHaveBeenCalled(); expect(handlers.onTransferCsv).not.toHaveBeenCalled(); expect(handlers.onCreateForm).not.toHaveBeenCalled();
+    // What needs no records still runs, and Refresh is what the reason names.
+    expect(command("History").getAttribute("aria-disabled")).toBeNull();
+    expect(command("Refresh").getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(command("Refresh"));
+    await screen.findByText("Alice");
+    expect(command("Fields and names").getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(command("Fields and names")); expect(handlers.onReviewSchema).toHaveBeenCalledOnce();
+  });
   it("holds the menu's commands while a form is open and says why, except what needs no records", async () => {
     const handlers = { onReviewSchema: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
     const onToggle = vi.fn();
