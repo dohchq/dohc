@@ -757,11 +757,14 @@ async function openSelfHostProof(name: string) {
     await push();
     // A rich document the owner writes and edits ordinarily on their device, each change pushed to the relay.
     // Unless `seeded`, it is only written as text, as an agent writes it, until `open` opens it as the desktop does.
-    const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
+    // `firstVersion` changes the Y.Doc before it becomes the document's first version.
+    const ownerDocument = async (path: string, text: string, {seeded = true, firstVersion}: {seeded?: boolean; firstVersion?: (doc: Y.Doc) => void} = {}) => {
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
       // The owner's Y.Doc, as its engine holds it. It records no source, so `text` is in the engine's form, with its final newline.
-      const doc = markdownToYDoc(text), baseline = Y.encodeStateAsUpdate(doc);
+      const doc = markdownToYDoc(text);
+      firstVersion?.(doc);
+      const baseline = Y.encodeStateAsUpdate(doc);
       closes.push(async () => doc.destroy());
       const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array) => {
         const editor = await rpc("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
@@ -1566,6 +1569,51 @@ it("blocks a document written only as text, and activates it once its owner open
   expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim!.id);
   return {attemptsBeforeOpen: blocked, failures: failures(), reports: proof.reports};
 }), 120000);
+
+// #3793: a note that never activated stayed in its host's replica after live editing ended for it. Its
+// enrollment was never released, and its workspace pulled on every pass until the server restarted.
+// The engine refuses this note's capture as it refuses a first version from before #3805, which names no
+// schema version. The owner's engine now writes that version, so this note stands in for one: its first
+// version names a schema version the engine does not support, which the capture refuses at the same check
+// with the same answer.
+for (const ending of ["its owner stops live editing", "its last link ends"] as const) {
+  it(`lets a note go whose capture the engine refuses, once ${ending}`, () => withSelfHostProof("self-host-refused-capture", async proof => {
+    const from = harness.calls.length, path = "docs/refused.md";
+    const note = await proof.ownerDocument(path, "Typed\n", {firstVersion: doc => {doc.getMap("meta").set("schemaVersion", 2);}});
+    const refusals = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.code);
+    await vi.waitFor(() => expect(refusals()).toContain("INVALID_PARAMS"), {timeout: 30000});
+    // While the note is enrolled, its owner sees that live editing has not started.
+    expect(await proof.documents()).toContainEqual(expect.objectContaining({path, status: "preparing"}));
+    // The host pulls four later edits of the owner's, one at a time. Each pull queues a write of the note's file
+    // in its replica and writes the file itself, so five queued writes wait when live editing ends.
+    const writes = () => proof.serviceRead(engine => engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id LIKE 'ydoc-mat_%' GROUP BY status ORDER BY status")
+      .all(path) as {status: string; count: number}[]);
+    for (const edit of ["second", "third", "fourth", "fifth"]) {
+      await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
+      await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
+    }
+    expect(writes()).toEqual([{status: "pending", count: 5}]);
+    if (ending === "its owner stops live editing") expect((await proof.route("DELETE", {path, retire: true})).body).toMatchObject({status: "retired"});
+    else expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+    await vi.waitFor(() => expect(proof.storage.readServiceHostEnrollment("workspace", path)).toMatchObject({retired: true, hostDrainedAtMs: expect.any(Number)}), {timeout: 30000});
+    // Its replica parked the note and removed its file. The four writes of earlier states were cancelled
+    // and left no conflict file, and the write of its last state is recorded as on disk.
+    expect(proof.hosted(note.objectId)).toEqual({state: "parked", reason: null});
+    const folder = join(proof.store, "docs");
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual(ending === "its owner stops live editing" ? ["a.md"] : []);
+    expect(writes()).toEqual([{status: "cancelled", count: 4}, {status: "complete", count: 1}]);
+    // The host accepted no live edit of it, and its owner's list no longer shows it.
+    expect(proof.journal(note.objectId)).toEqual([]);
+    expect(await proof.documents()).not.toContainEqual(expect.objectContaining({path}));
+    // Later passes do nothing more for it: no pull for unfinished work, no departure left waiting, no capture.
+    await twelvePasses(proof);
+    const work = () => ({pulls: proof.live().hostedPulls("workspace").reasons.pending ?? 0, waiting: proof.live().passCounts().lifecycleRetries, captures: proof.started("captureOwnerActivation")});
+    const settled = work();
+    await twelvePasses(proof);
+    expect(work()).toEqual(settled);
+    return {refusals: refusals(), ...settled};
+  }), 120000);
+}
 
 // #2088: the operator puts back an older copy of the session host's store,
 // which lost live edits the host already pushed. The next attach finds that
