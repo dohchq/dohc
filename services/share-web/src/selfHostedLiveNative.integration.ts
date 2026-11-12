@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, resolve, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { getCookies, parseSetCookieHeader } from "better-auth/cookies";
@@ -759,6 +759,7 @@ async function openSelfHostProof(name: string) {
     // Unless `seeded`, it is only written as text, as an agent writes it, until `open` opens it as the desktop does.
     // `firstVersion` changes the Y.Doc before it becomes the document's first version.
     const ownerDocument = async (path: string, text: string, {seeded = true, firstVersion}: {seeded?: boolean; firstVersion?: (doc: Y.Doc) => void} = {}) => {
+      mkdirSync(dirname(join(ownerRoot, path)), {recursive: true});
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
       // The owner's Y.Doc, as its engine holds it. It records no source, so `text` is in the engine's form, with its final newline.
@@ -844,6 +845,10 @@ async function openSelfHostProof(name: string) {
     const stopSupervisor = async () => {const stopping = supervisor; supervisor = undefined; await stopping?.close();};
     const proof = {root, hostRoot, store, executable, expectedHash, relayRead, reports, ownerDocument, ownerEdit: first.edit, objectId, ownerUserId: ownerUser.id,
       route, serviceRead, activation, live, startSupervisor, stopSupervisor,
+      /** Shares another folder with the named collaborator for Edit, so the host enrolls the notes already in it. */
+      shareFolder: (folder: string) => storage.createShare({
+        share: {shareId: `share-${folder}`, workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: [folder], versionId: null}), createdAtMs: Date.now()},
+        grant: {grantId: `grant-${folder}`, shareId: `share-${folder}`, principalKind: "user", principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}}),
       /** The relay storage the running relay opened. */
       get storage() {return storage;},
       /** Stops the running daemon, as when it loses an engine reply. The supervisor starts another. */
@@ -1570,6 +1575,76 @@ it("blocks a document written only as text, and activates it once its owner open
   return {attemptsBeforeOpen: blocked, failures: failures(), reports: proof.reports};
 }), 120000);
 
+// The file writes a note's Y.Doc projections queued in the host's replica, counted by status.
+const projectionWrites = (proof: SelfHostProof, path: string) => proof.serviceRead(engine =>
+  engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id LIKE 'ydoc-mat_%' GROUP BY status ORDER BY status")
+    .all(path) as {status: string; count: number}[]);
+// None of a note's queued writes waits and none conflicted: each is complete, or cancelled as a state the
+// note's head replaced. `count` is how many there are, when the case knows.
+function expectProjectionWritesEnded(proof: SelfHostProof, path: string, count?: number) {
+  const writes = projectionWrites(proof, path);
+  expect(writes.filter(row => row.status !== "complete" && row.status !== "cancelled")).toEqual([]);
+  const total = writes.reduce((sum, row) => sum + row.count, 0);
+  if (count === undefined) expect(total).toBeGreaterThan(0);
+  else expect(total).toBe(count);
+}
+// The names in a folder of the host's copy, or none when the folder is gone.
+const hostFolder = (proof: SelfHostProof, folder: string) => existsSync(join(proof.store, folder)) ? readdirSync(join(proof.store, folder)).sort() : [];
+
+// #3804: a note with several past versions is shared for editing. The host pulls its history, and each
+// version's projection queues a write of the note's file while the pull's page writes the file itself.
+// The note's capture then settled it, and each settle replayed one queued write of a past version: the
+// write conflicted, left that version beside the file as a conflict file, and refused the settle with
+// conflict-stale-target. The note stayed at Preparing for one refused settle per past version.
+it("takes a note with several past versions live without replaying their file writes", () => withSelfHostProof("self-host-long-history", async proof => {
+  const from = harness.calls.length, path = "notes/long.md";
+  // Its owner types it before anyone shares it: five versions reach the relay.
+  const note = await proof.ownerDocument(path, "Typed\n");
+  for (const edit of ["second", "third", "fourth", "fifth"]) await note.edit(doc => doc.getMap("frontmatter").set(edit, "typed"));
+  proof.shareFolder("notes");
+  await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path, status: "ready"})), {timeout: 60000});
+  // No settle of it was refused on the way.
+  const refusedSettles = harness.calls.slice(from).filter(call => call.method === "liveApplication.settle" && call.status === "failed").map(call => call.message);
+  expect(refusedSettles).toEqual([]);
+  // The host's copy holds the note as its owner typed it, and no past version beside it.
+  expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
+  expect(readFileSync(join(proof.store, path), "utf8")).toContain("fifth: typed");
+  expectProjectionWritesEnded(proof, path);
+  // Live editing works: the host accepts an edit of the note and settles it into the file.
+  const accepted = await proof.liveEdit("live", "edit", note.document);
+  await vi.waitFor(() => expect(proof.settlement(note.objectId)).toEqual({applied: accepted.journalCursor, settled: accepted.journalCursor}), {timeout: 30000});
+  expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit");
+  expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
+  return {path, refusedSettles};
+}), 120000);
+
+// #3804: a store written before the fix holds a hosted note's queued writes. Opening it replayed every
+// one, and each write of a past version left a conflict file. The engine refuses this note's capture, as
+// in the case below, so nothing else ends its writes before the restart.
+it("writes no conflict file for a hosted note's queued writes when the engine restarts", () => withSelfHostProof("self-host-queued-restart", async proof => {
+  const from = harness.calls.length, path = "docs/queued.md";
+  const note = await proof.ownerDocument(path, "Typed\n", {firstVersion: doc => {doc.getMap("meta").set("schemaVersion", 2);}});
+  await vi.waitFor(() => expect(harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.code)).toContain("INVALID_PARAMS"), {timeout: 30000});
+  for (const edit of ["second", "third", "fourth", "fifth"]) {
+    await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
+    await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
+  }
+  const pulled = readFileSync(join(proof.store, path), "utf8");
+  // With the engine stopped, queue the note's five writes again, as a store from before the fix holds them.
+  await proof.stopSupervisor();
+  const engine = new DatabaseSync(toNamespacedPath(join(proof.store, ".dohc/engine/engine.db")));
+  try {engine.prepare("UPDATE materialization_jobs SET status='pending', completed_at_ms=NULL WHERE target_path=? AND job_id LIKE 'ydoc-mat_%'").run(path);}
+  finally {engine.close();}
+  expect(projectionWrites(proof, path)).toEqual([{status: "pending", count: 5}]);
+  await proof.startSupervisor();
+  await vi.waitFor(() => expect(projectionWrites(proof, path).map(row => row.status)).not.toContain("pending"), {timeout: 30000});
+  // The four writes of past versions are cancelled and the write of the newest is complete. Nothing was written.
+  expect(projectionWrites(proof, path)).toEqual([{status: "cancelled", count: 4}, {status: "complete", count: 1}]);
+  expect(hostFolder(proof, "docs")).toEqual(["a.md", "queued.md"]);
+  expect(readFileSync(join(proof.store, path), "utf8")).toBe(pulled);
+  return {path};
+}), 120000);
+
 // #3793: a note that never activated stayed in its host's replica after live editing ended for it. Its
 // enrollment was never released, and its workspace pulled on every pass until the server restarted.
 // The engine refuses this note's capture as it refuses a first version from before #3805, which names no
@@ -1585,23 +1660,21 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
     // While the note is enrolled, its owner sees that live editing has not started.
     expect(await proof.documents()).toContainEqual(expect.objectContaining({path, status: "preparing"}));
     // The host pulls four later edits of the owner's, one at a time. Each pull queues a write of the note's file
-    // in its replica and writes the file itself, so five queued writes wait when live editing ends.
-    const writes = () => proof.serviceRead(engine => engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id LIKE 'ydoc-mat_%' GROUP BY status ORDER BY status")
-      .all(path) as {status: string; count: number}[]);
+    // in its replica and writes the file itself. The pull ends the write it queued (#3804), so none waits when
+    // live editing ends.
     for (const edit of ["second", "third", "fourth", "fifth"]) {
       await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
       await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
     }
-    expect(writes()).toEqual([{status: "pending", count: 5}]);
+    expectProjectionWritesEnded(proof, path, 5);
     if (ending === "its owner stops live editing") expect((await proof.route("DELETE", {path, retire: true})).body).toMatchObject({status: "retired"});
     else expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
     await vi.waitFor(() => expect(proof.storage.readServiceHostEnrollment("workspace", path)).toMatchObject({retired: true, hostDrainedAtMs: expect.any(Number)}), {timeout: 30000});
-    // Its replica parked the note and removed its file. The four writes of earlier states were cancelled
-    // and left no conflict file, and the write of its last state is recorded as on disk.
+    // Its replica parked the note and removed its file, with no conflict file left beside it.
     expect(proof.hosted(note.objectId)).toEqual({state: "parked", reason: null});
     const folder = join(proof.store, "docs");
     expect(existsSync(folder) ? readdirSync(folder) : []).toEqual(ending === "its owner stops live editing" ? ["a.md"] : []);
-    expect(writes()).toEqual([{status: "cancelled", count: 4}, {status: "complete", count: 1}]);
+    expectProjectionWritesEnded(proof, path, 5);
     // The host accepted no live edit of it, and its owner's list no longer shows it.
     expect(proof.journal(note.objectId)).toEqual([]);
     expect(await proof.documents()).not.toContainEqual(expect.objectContaining({path}));
