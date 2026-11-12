@@ -1700,12 +1700,12 @@ export function useRelayShareLinkPane(props: {
       grantId: row.grantId,
       expectedDependentGrantIds: dependentGrantIds(row),
     };
-    const retiresDisplayedCredential =
-      (minted?.grantId === row.grantId || row.url !== null) &&
-      (action.kind === "reset" ||
-        action.kind === "end" ||
-        (action.kind === "retune" &&
-          shareAccessRank(action.access) > shareAccessRank(row.access)));
+    // A change that may replace or end the link's URL, whether or not the
+    // dialog had one to show.
+    const changesCredential =
+      action.kind === "reset" ||
+      action.kind === "end" ||
+      (action.kind === "retune" && shareAccessRank(action.access) > shareAccessRank(row.access));
     setMutationBusy({ kind: action.kind, grantId: row.grantId });
     setLifecycleError(null);
 
@@ -1765,6 +1765,13 @@ export function useRelayShareLinkPane(props: {
 
       if (result.outcome === "rotated" || result.outcome === "widened") {
         setMinted({ grantId: row.grantId, url: result.url });
+        // The answer names the current URL, so it is no longer in doubt.
+        setUnsureUrls((current) => {
+          if (!current.has(row.grantId)) return current;
+          const next = new Set(current);
+          next.delete(row.grantId);
+          return next;
+        });
       } else if (result.outcome !== "narrowed") {
         setMinted((current) =>
           current?.grantId === row.grantId ? null : current,
@@ -1798,7 +1805,7 @@ export function useRelayShareLinkPane(props: {
       if (!isCurrentLinkScope(scopeGeneration) || latestMutationRequest.current !== requestId) return;
       // The change may have landed: neither copy of the old URL is known to
       // work until the list reads again.
-      if (retiresDisplayedCredential) {
+      if (changesCredential) {
         setMinted((current) => (current?.grantId === row.grantId ? null : current));
         setUnsureUrls((current) => new Set(current).add(row.grantId));
       }

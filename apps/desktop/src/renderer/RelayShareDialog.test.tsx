@@ -2883,6 +2883,65 @@ codex mcp login dohc-share`);
     });
   });
 
+  it("shows a later reset's URL even when the list still cannot read", async () => {
+    const kept = readableLink("kept-again", { shareId: "share-kept-again", access: "view", url: LINK_URL_A });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [kept] })
+      .mockRejectedValue(new Error("The relay did not answer."));
+    bridgeMock.rotateRelayShareLink
+      .mockRejectedValueOnce(new Error("The relay did not answer."))
+      .mockResolvedValueOnce({ outcome: "rotated", url: LINK_URL_B });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const reset = async () => {
+      await chooseLinkOption(user, screen.getByTestId("share-link-row-kept-again"), "Reset link");
+      await user.click(
+        within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }),
+      );
+    };
+    await screen.findByTestId("share-link-row-kept-again");
+    await reset();
+    expect(await screen.findByTestId("share-link-unsure")).toBeTruthy();
+    await reset();
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect(screen.queryByTestId("share-link-unsure")).toBeNull();
+  });
+
+  it("says an older link's URL is unconfirmed after a lost reset", async () => {
+    const older = readableLink("older-lost", { shareId: "share-older-lost", access: "view", url: null });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [older] })
+      .mockRejectedValueOnce(new Error("The relay did not answer."));
+    bridgeMock.rotateRelayShareLink.mockRejectedValueOnce(new Error("The relay did not answer."));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const row = await screen.findByTestId("share-link-row-older-lost");
+    expect(within(row).getByTestId("share-link-no-copy")).toBeTruthy();
+    await chooseLinkOption(user, row, "Reset link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }),
+    );
+    // The reset may have stored a copy, so the row no longer says there is none.
+    expect(await within(row).findByTestId("share-link-unsure")).toBeTruthy();
+    expect(within(row).queryByTestId("share-link-no-copy")).toBeNull();
+  });
+
   it("never shows an ended link's URL when the list fails to read again", async () => {
     const kept = readableLink("kept-end", { shareId: "share-kept-end", access: "view", url: LINK_URL_A });
     bridgeMock.listRelayShareLinks
