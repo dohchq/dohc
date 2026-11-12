@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { memberPermissions, parseWorkspaceMembersView } from "./workspaceMembers";
+import { MAX_WORKSPACE_MEMBERS, memberPermissions, parseWorkspaceMembersView } from "./workspaceMembers";
 
 const owner = { memberId: "owner", role: "owner", state: "active", name: "Ice", email: "ice@example.com", invitedAtMs: null, joinedAtMs: 1, removedAtMs: null };
 const sam = { memberId: "m1", role: "member", state: "active", name: "Sam", email: null, invitedAtMs: 2, joinedAtMs: 3, removedAtMs: null };
@@ -25,6 +25,17 @@ describe("parseWorkspaceMembersView", () => {
     expect(parseWorkspaceMembersView({ ...base, memberLevel: "comment", people: [{ ...sam, memberId: "owner" }] })).toBeNull();
     expect(parseWorkspaceMembersView({ ...base, memberLevel: "Edit", people: [owner] })).toBeNull();
     expect(parseWorkspaceMembersView({ ...base, memberLevel: "edit", inviteLink: { enabled: true, url: null }, people: [owner] })).toBeNull();
+  });
+});
+
+describe("the people limit", () => {
+  const base = { workspaceId: "w1", workspaceName: "C", viewer: { memberId: "owner", role: "owner" }, memberLevel: "comment", inviteLink: { enabled: false, url: null } };
+  const people = (count: number, state: string) => Array.from({ length: count }, (_, n) => ({ ...sam, memberId: `${state}-${n}`, state, email: "x@example.com", removedAtMs: state === "removed" ? 4 : null }));
+
+  it("counts invited and active people, not removed ones", () => {
+    const full = [owner, ...people(MAX_WORKSPACE_MEMBERS, "active")];
+    expect(parseWorkspaceMembersView({ ...base, people: [...full, ...people(5, "removed")] })?.people).toHaveLength(MAX_WORKSPACE_MEMBERS + 6);
+    expect(parseWorkspaceMembersView({ ...base, people: [...full, ...people(1, "invited")] })).toBeNull();
   });
 });
 

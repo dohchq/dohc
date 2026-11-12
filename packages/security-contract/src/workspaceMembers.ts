@@ -25,8 +25,16 @@ export const DEFAULT_MEMBER_LEVEL: MemberLevel = "comment";
 export const MEMBER_STATES = ["invited", "active", "removed"] as const;
 export type MemberState = (typeof MEMBER_STATES)[number];
 
-/** The most people one workspace holds: invited and active entries together. */
+/**
+ * The most people one workspace holds besides its owner: invited and active
+ * entries together. Removed entries take no seat.
+ */
 export const MAX_WORKSPACE_MEMBERS = 1_000;
+
+/** Whether a listing holds no more invited and active people than the relay seats, with the owner. */
+export function withinWorkspaceSeats(people: readonly { state: MemberState }[]): boolean {
+  return people.filter((person) => person.state !== "removed").length <= MAX_WORKSPACE_MEMBERS + 1;
+}
 
 export const MAX_MEMBER_EMAIL_CHARS = 320;
 
@@ -153,13 +161,14 @@ export function parseWorkspaceMembersView(value: unknown): WorkspaceMembersView 
   if (!isShareAccessValue(memberLevel)) return null;
   const link = parseInviteLink(inviteLink);
   if (link === undefined) return null;
-  if (!Array.isArray(people) || people.length > MAX_WORKSPACE_MEMBERS + 1) return null;
+  if (!Array.isArray(people)) return null;
   const parsed: WorkspacePerson[] = [];
   for (const entry of people) {
     const person = parsePerson(entry);
     if (!person) return null;
     parsed.push(person);
   }
+  if (!withinWorkspaceSeats(parsed)) return null;
   const manages = viewer.role !== "member";
   if (manages !== (link !== null)) return null;
   if (!manages && parsed.some((person) => person.email !== null || person.state !== "active")) return null;
