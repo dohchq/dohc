@@ -452,7 +452,8 @@ test("shared Rust archive downloads retry once under bounded step timeouts", () 
 // Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.
 function workflowExpression(expression, { github, vars = {}, inputs = {}, needs = {}, steps = {}, cancelled = false }) {
-  const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  // A hyphenated step or job id is a property name in Actions and a subtraction in JavaScript.
+  const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "").replace(/\b(steps|needs)\.(\w+(?:-\w+)+)/g, '$1["$2"]');
   return Function("github", "vars", "inputs", "needs", "steps", "fromJSON", "format", "always", "cancelled", `return (${source});`)(
     github, vars, inputs, needs, steps, JSON.parse,
     (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[index]),
