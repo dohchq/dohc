@@ -117,7 +117,8 @@ export function useRecordPanel(options: RecordPanelOptions) {
   useLayoutEffect(() => {
     if (!focusPanel.current) return;
     focusPanel.current = false;
-    element.current?.focus({ preventScroll: true });
+    // The name of a record made a moment ago opens for typing as the panel shows it, and has focus already.
+    if (!element.current?.contains(document.activeElement)) element.current?.focus({ preventScroll: true });
   }, [openKey]);
   // Two editor groups can show this tab, and its one saved entry holds the record a person last opened or closed
   // in either. When a close in the other copy empties the entry while this copy still shows a record, this copy

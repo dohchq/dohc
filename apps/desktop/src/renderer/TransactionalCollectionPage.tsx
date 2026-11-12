@@ -1123,6 +1123,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       disabled={busy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       openRecord={openKey} onOpen={openPanel}
+      // A column's New and a day's New record open the new record in the panel, with the column's value or the day filled in.
+      canNew={fieldId=>canCreate===true&&create.fieldIds.includes(fieldId)}
+      onNew={(fieldId,value)=>{const field=table.fields.find(entry=>entry.fieldId===fieldId);
+        openCreate(document.activeElement instanceof HTMLElement?document.activeElement:null,field&&!isEmptyValue(value)?{[fieldId]:{value,under:field}}:{});}}
       canMove={fieldId=>editOperation(fieldId)!==undefined}
       onMove={(row,fieldId,value)=>{const operation=editOperation(fieldId),field=fields.find(field=>field.fieldId===fieldId);if(!operation||!field||disabled)return;
         queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"},view);}} /></Suspense></div> : null}

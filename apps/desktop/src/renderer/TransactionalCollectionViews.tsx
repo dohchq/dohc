@@ -33,6 +33,10 @@ interface Props {
   openRecord?: string | null;
   onMove(row: TransactionalRow, fieldId: string, value: AppBackendJson): void;
   canMove(fieldId: string): boolean;
+  /** Starts a new record with a value in one field: a board column's value, or a calendar day. */
+  onNew(fieldId: string, value: AppBackendJson): void;
+  /** Whether a new record can be made with a value in this field. */
+  canNew(fieldId: string): boolean;
 }
 type Position = { after: TransactionalCursor | null; history: Array<TransactionalCursor | null> };
 type Loaded = { columns: Column[]; calendar: TransactionalPage | null; nearby: string[]; moreGroups: boolean; nextGroup: GroupCursor | null };
@@ -182,6 +186,7 @@ export function TransactionalCollectionViews(props: Props) {
     {props.view.kind==="board" ? <>
       <div className="min-h-0 flex-1"><BoardView schema={schema} groups={groups} groupBy={props.view.groupBy!} fieldLabel={fieldLabel} visibleFields={visibleFields.length > 1 ? visibleFields.filter(fieldId=>fieldId!==props.view.groupBy) : visibleFields}
         onCellChange={!disabled&&props.canMove(props.view.groupBy!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} openRecordId={props.openRecord}
+        onNewRecord={!disabled&&props.canNew(props.view.groupBy!)?value=>props.onNew(props.view.groupBy!,value as AppBackendJson):undefined}
         groupCount={(_group,index)=>`${loaded.columns[index]!.page.rows.length}${loaded.columns[index]!.page.nextCursor ? "+" : ""}`}
         groupFooter={(_group,index)=>{const column=loaded.columns[index]!,key=JSON.stringify(column.value);return pageControls(positions[key]??beginning(),column.page,next=>setPositions({...positions,[key]:next}),display(column.value)||"No value",false);}} /></div>
       {groups.length===0&&<p className="m-0 text-sm text-muted">No records match this board. Change the filters or add a record.</p>}
@@ -191,7 +196,8 @@ export function TransactionalCollectionViews(props: Props) {
     </> : <>
       <div className="min-h-80 flex-1"><CalendarView schema={schema} records={rows.map(row=>visualRecord(row,props.fields))} dateField={props.view.dateField!} visibleFields={visibleFields}
         date={month} nearbyDates={loaded.nearby} onNavigate={date=>{if(!disabled){setMonth(date);setCalendarPosition(beginning());}}}
-        onCellChange={!disabled&&props.canMove(props.view.dateField!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} openRecordId={props.openRecord} /></div>
+        onCellChange={!disabled&&props.canMove(props.view.dateField!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} openRecordId={props.openRecord}
+        onNewRecord={!disabled&&props.canNew(props.view.dateField!)?day=>props.onNew(props.view.dateField!,day):undefined} /></div>
       <span className="text-[12px] text-muted">Records without a date appear in the table.</span>
       {pageControls(calendarPosition,loaded.calendar!,setCalendarPosition,"this calendar")}
     </>}

@@ -2108,14 +2108,124 @@ describe("record click-through", () => {
     doc.getMap("frontmatter").set("id", "rec-new");
     docMock.current = engineDocState({ available: true, doc });
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
-    renderPage(bridge, onNewRecord);
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, onNewRecord, onOpenRecord);
 
     fireEvent.click(await screen.findByRole("button", { name: "New record in Doing" }));
     expect(onNewRecord).toHaveBeenCalledOnce();
-    const [path, created] = onNewRecord.mock.calls[0]!;
+    const [path, created, options] = onNewRecord.mock.calls[0]!;
     expect(path).toBe("tasks");
+    // The record's file opens in no tab.
+    expect(options).toEqual({ open: false });
+    // The board reads the new record, in the column it was made in.
+    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [
+      { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+      { field: "status", value: "Doing", validation: { status: "valid" }, resolvedRelations: [] },
+    ] };
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [selectRecord(), made], groups: [{ value: "Todo", records: [selectRecord()] }, { value: "Doing", records: [made] }], nextCursor: null,
+    });
     act(() => created!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
     await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
+    // The record opens in the panel, with its name ready to type.
+    const record = await screen.findByRole("complementary", { name: "Untitled" });
+    const heading = await within(record).findByRole<HTMLInputElement>("textbox", { name: "title" });
+    expect(document.activeElement).toBe(heading);
+    expect(heading.value).toBe("");
+    expect(heading.placeholder).toBe("Untitled");
+    expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("makes a record with no value filled in from New record beside a board, and opens it in the panel", async () => {
+    const schema: CollectionSchema = {
+      ...BOARD_SCHEMA,
+      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+    };
+    const bridge = makeBridge([selectRecord()], schema, { groups: [{ value: "Todo", records: [selectRecord()] }] });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, onNewRecord, onOpenRecord);
+    await screen.findByRole("button", { name: "New record in Doing" });
+    fireEvent.click(screen.getByTestId("collection-new-record"));
+    expect(onNewRecord).toHaveBeenCalledOnce();
+    expect(onNewRecord.mock.calls[0]![2]).toEqual({ open: false });
+    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [{ field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] }] };
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [selectRecord(), made], groups: [{ value: "Todo", records: [selectRecord()] }, { value: null, records: [made] }], nextCursor: null,
+    });
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
+    const record = await screen.findByRole("complementary", { name: "Untitled" });
+    expect(document.activeElement).toBe(await within(record).findByRole("textbox", { name: "title" }));
+    expect(onOpenRecord).not.toHaveBeenCalled();
+    // No field is written: the record has no column's value.
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+  });
+
+  it("opens no panel for a record made after the page closed, and still writes its column's value", async () => {
+    const schema: CollectionSchema = {
+      ...BOARD_SCHEMA,
+      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+    };
+    const bridge = makeBridge([selectRecord()], schema, { groups: [{ value: "Todo", records: [selectRecord()] }] });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const view = renderPage(bridge, onNewRecord);
+    fireEvent.click(await screen.findByRole("button", { name: "New record in Doing" }));
+    view.unmount();
+    const queries = bridge.queryCollectionRecords.mock.calls.length;
+    onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" });
+    await Promise.resolve();
+    // The value is with the write queue, which outlives the page. Nothing is read again, and nothing opens.
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries);
+    expect(screen.queryByRole("complementary")).toBeNull();
+  });
+
+  it("starts a record on a calendar day with the day in the calendar's date field, and opens it in the panel", async () => {
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-15`;
+    const dated: CollectionRecord = { id: "rec-1", path: "tasks/Plan.md", conflicted: false, values: [
+      { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
+      { field: "due", value: iso, validation: { status: "valid" }, resolvedRelations: [] },
+    ] };
+    const bridge = makeBridge([dated], CALENDAR_SCHEMA);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-new");
+    docMock.current = engineDocState({ available: true, doc });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, onNewRecord, onOpenRecord);
+    await screen.findByText("Plan");
+    const month = today.toLocaleString("en-US", { month: "long" });
+    fireEvent.click(screen.getByRole("button", { name: `New record on ${month} 20, ${today.getFullYear()}` }));
+    expect(onNewRecord).toHaveBeenCalledOnce();
+    expect(onNewRecord.mock.calls[0]![2]).toEqual({ open: false });
+    const day = iso.replace(/-15$/, "-20");
+    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [
+      { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+      { field: "due", value: day, validation: { status: "valid" }, resolvedRelations: [] },
+    ] };
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [dated, made], groups: null, nextCursor: null,
+    });
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
+    await waitFor(() => expect(doc.getMap("frontmatter").get("due")).toBe(day));
+    const record = await screen.findByRole("complementary", { name: "Untitled" });
+    expect(document.activeElement).toBe(await within(record).findByRole("textbox", { name: "title" }));
+    expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("offers no New record on a calendar's days to someone who cannot change the Collection", async () => {
+    const today = new Date();
+    const dated: CollectionRecord = { id: "rec-1", path: "tasks/Plan.md", conflicted: false, values: [
+      { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
+      { field: "due", value: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-15`, validation: { status: "valid" }, resolvedRelations: [] },
+    ] };
+    renderPage(makeBridge([dated], CALENDAR_SCHEMA), undefined, undefined, { readOnly: true });
+    await screen.findByText("Plan");
+    expect(screen.queryAllByRole("button", { name: /^New record on / })).toEqual([]);
   });
 
   it("saves a board column's color to the schema", async () => {

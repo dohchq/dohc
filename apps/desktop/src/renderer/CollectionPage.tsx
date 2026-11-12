@@ -562,9 +562,32 @@ export function CollectionPage({
   }, []);
   // What starts the table's new row, while a table shows.
   const startNewRow = useRef<(() => void) | null>(null);
+  // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
+  const [justMade, setJustMade] = useState<string | null>(null);
+  const openMade = useRef<(recordId: string) => void>(() => undefined);
+  /**
+   * Makes a record from a board or a calendar, with a value in one field
+   * where the column or the day gives one. The record then opens in the
+   * panel, in no file tab. A creation that answers after the page closed
+   * still writes its value, and opens nothing.
+   */
+  const makeRecord = useCallback(
+    (field?: string, value?: CollectionValue) => {
+      onNewRecord(collectionPath, (record) => {
+        if (field !== undefined && value !== undefined && value !== null) enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
+        const show = () => {
+          if (pageOpen.current) openMade.current(record.recordId);
+        };
+        // The view reads its records first, so the panel finds the new one among them.
+        if (pageOpen.current) void store.refresh().then(show, show);
+      }, { open: false });
+    },
+    [onNewRecord, collectionPath, enqueueCellChange, store],
+  );
+  // In a table the button starts the new row. Beside a board or a calendar it makes a record with no value filled in.
   const newRecord = useCallback(
-    () => (startNewRow.current ? startNewRow.current() : onNewRecord(collectionPath)),
-    [onNewRecord, collectionPath],
+    () => (startNewRow.current ? startNewRow.current() : makeRecord()),
+    [makeRecord],
   );
   const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, onNotice, collectionName: collectionPath });
   rowHost.current = { onNewRecord, enqueueCellChange, onError, onNotice, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
@@ -629,18 +652,17 @@ export function CollectionPage({
   // through the same queue as any edit once the record exists.
   const groupBy = activeView?.kind === "board" ? activeView.groupBy : undefined;
   const newRecordInGroup = useCallback(
-    (value: CollectionValue) => {
-      if (!groupBy || value === null) return onNewRecord(collectionPath);
-      onNewRecord(collectionPath, (record) => {
-        enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field: groupBy, value });
-      });
-    },
-    [onNewRecord, collectionPath, groupBy, enqueueCellChange],
+    (value: CollectionValue) => makeRecord(groupBy ?? undefined, value),
+    [makeRecord, groupBy],
   );
   // Stable, so opening or closing a record builds no column of the table again.
   const openInPanel = useRef(recordPanel.open);
   openInPanel.current = recordPanel.open;
   const openRecord = useCallback((record: CollectionRecord) => openInPanel.current(record.id), []);
+  openMade.current = (recordId) => {
+    setJustMade(recordId);
+    openInPanel.current(recordId);
+  };
 
   // The open record, as the page holds it: among the view's records, or as a search by its id found it.
   const [sought, setSought] = useState<({ id: string } & FoundRecord) | null>(null);
@@ -1016,6 +1038,8 @@ export function CollectionPage({
   const dateFields = schema.fields.filter((field) => field.type === "date");
   const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
+  // A calendar day's New record: the record starts with the day in the calendar's date field.
+  const newRecordOnDay = (day: string) => makeRecord(calendarReady || undefined, day);
   const toggleAutomations = () => (automationsOpen ? setCloseAsk((ask) => ask + 1) : showAutomations());
   // Every record the page holds, in rows or in a board's columns. More can load while a cursor remains.
   const loaded = new Set([...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])].map((record) => record.path)).size;
@@ -1066,6 +1090,7 @@ export function CollectionPage({
         nameField={nameField?.name}
         nameLabel={nameField?.name}
         canRename={nameField !== undefined && onCellChange !== undefined && !readOnly}
+        startRenaming={justMade === openRecordId}
         onNameChange={nameField && record ? (value) => {
           enqueueCellChange({ recordId: record.id, recordPath: record.path, field: nameField.name, value: value || null });
         } : undefined}
@@ -1192,6 +1217,7 @@ export function CollectionPage({
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
             openRecordId={openRecordId}
+            onNewRecord={readOnly || writesPaused ? undefined : newRecordOnDay}
           />
         ) : kind === "calendar" ? (
           <CalendarNeedsDateField onAddDateField={readOnly ? undefined : () => setFieldsOpen("date")} />

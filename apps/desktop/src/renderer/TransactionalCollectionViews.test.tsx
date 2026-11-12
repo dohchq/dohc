@@ -9,8 +9,8 @@ import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type Tra
 import type { CollectionTableView } from "./collectionTableViews";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
-  CalendarView: (props:CalendarViewProps)=><div data-testid="calendar" data-open-record={props.openRecordId??""}><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
+  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}{props.onNewRecord?<button onClick={()=>props.onNewRecord?.("Done")}>New in Done</button>:null}</div>,
+  CalendarView: (props:CalendarViewProps)=><div data-testid="calendar" data-open-record={props.openRecordId??""}><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}{props.onNewRecord?<button onClick={()=>props.onNewRecord?.("2026-11-20")}>New on November 20</button>:null}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
   {fieldId:"name",name:"Name",type:"text",required:true,unique:false},
@@ -182,6 +182,74 @@ it("does not move offline records and refuses an authored read that ignores boar
   invoke.mockImplementation(async(request?:TransactionalInvoke)=>({result:{...empty,group:(request!.input as Record<string,AppBackendJson>).group!,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));
   result.rerender(<TransactionalCollectionPage {...result.props} dataset={{...dataset,tables:[{...dataset.tables[0]!,fields:dataset.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo"]}:field)}]}} copy={{offline:true,savedAtMs:1}}/>);
   expect((await screen.findByRole("button",{name:"Move 4"})).hasAttribute("disabled")).toBe(true);
+});
+/** The same Collection with a create action that takes every field. */
+const creating=(fieldIds=["name","status","date"]):TransactionalDatasetDescription=>({...dataset,operations:[...dataset.operations,{operationId:"create",name:"create",label:"Create",kind:"create",tableId:"table",readOnly:false,access:"owner",fieldIds}]});
+const draftPanel=()=>screen.getByRole("complementary",{name:"New record"});
+const draftValue=(field:string)=>within(draftPanel()).getByRole("group",{name:field}).querySelector("[data-property-value]")!.textContent;
+function typeDraft(field:string,text:string){
+  const row=within(draftPanel()).getByRole("group",{name:field});
+  fireEvent.click(within(row).getAllByRole("button")[0]!);
+  const input=row.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+  fireEvent.change(input,{target:{value:text}}); fireEvent.keyDown(input,{key:"Enter"});
+}
+it("opens a board column's new record in the panel with the column's value filled in, and sends one create from Create record",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(request.operationId==="create")return {result:{id:9,version:1}};
+    return {result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}};
+  });
+  const view=setup(invoke);
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"New in Done"}));
+  // The record does not exist yet: the panel holds it, with the column's value, and the board stays beside it.
+  expect(within(draftPanel()).getByRole("heading",{name:"New record"})).toBeTruthy();
+  expect(draftValue("Status")).toBe("Done");
+  expect(screen.getByTestId("board")).toBeTruthy();
+  expect(invoke.mock.calls.some(([request])=>request.operationId==="create")).toBe(false);
+  typeDraft("Name","Ship it");
+  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
+  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>request.operationId==="create").map(([request])=>request.input)).toEqual([{values:{name:"Ship it",status:"Done",date:null}}]));
+  await waitFor(()=>expect(screen.queryByRole("complementary",{name:"New record"})).toBeNull());
+});
+it("opens New record beside a board in the panel with no value filled in, and offers a column no New where the create does not take its field",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>({result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}}));
+  const view=setup(invoke);
+  // No create action: nothing offers a new record.
+  await screen.findByTestId("board");
+  expect(screen.queryByRole("button",{name:"New in Done"})).toBeNull();
+  expect(screen.queryByTestId("collection-new-record")).toBeNull();
+  // A create that does not take the group field: the frame's button, and no column's.
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating(["name","date"])}/>);
+  await screen.findByTestId("board");
+  expect(screen.queryByRole("button",{name:"New in Done"})).toBeNull();
+  fireEvent.click(screen.getByTestId("collection-new-record"));
+  expect(within(draftPanel()).getAllByRole("group").map(row=>row.getAttribute("data-property"))).toEqual(["name","date"]);
+  expect(draftValue("Name")).toBe("Empty");
+  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
+  expect(screen.queryByRole("complementary")).toBeNull();
+});
+it("opens a calendar day's new record in the panel with the day in the calendar's date field",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(request.operationId==="create")return {result:{id:9,version:1}};
+    return {result:{...empty,range:(request.input as Record<string,AppBackendJson>).range!}};
+  });
+  const view=setup(invoke,calendar);
+  // A create that does not take the date field offers no day.
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating(["name","status"])}/>);
+  await screen.findByTestId("calendar");
+  expect(screen.queryByRole("button",{name:"New on November 20"})).toBeNull();
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={{...creating(),revision:2,revisionSha256:"b".repeat(64)}}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"New on November 20"}));
+  expect(draftValue("Date")).toBe(shortDate("2026-11-20"));
+  typeDraft("Name","Launch");
+  // Status is required and has no default, so Create record says so and sends nothing.
+  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
+  expect(within(draftPanel()).getByRole("alert").textContent).toBe("Enter Status.");
+  expect(invoke.mock.calls.some(([request])=>request.operationId==="create")).toBe(false);
+  fireEvent.click(within(within(draftPanel()).getByRole("group",{name:"Status"})).getAllByRole("button")[0]!);
+  fireEvent.click(within(within(draftPanel()).getByRole("listbox",{name:"Status options"})).getByRole("option",{name:"Todo"}));
+  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
+  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>request.operationId==="create").map(([request])=>request.input)).toEqual([{values:{name:"Launch",status:"Todo",date:"2026-11-20"}}]));
 });
 it("loads the visible calendar range and changes range on navigation",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,range:input.range!}};});
