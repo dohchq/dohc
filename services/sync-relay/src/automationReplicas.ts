@@ -238,18 +238,16 @@ export async function startAutomationReplicas(options: {
     if (records.length === 0) return;
     if (replicas.get(workspaceId)?.incarnation === incarnation) throw new Error("A copy's phone writes settle only once it is closed.");
     const home = join(folderOf(workspaceId), String(incarnation));
-    try {
-      if (await missing(home)) await settleOperations(storage, records, null, reason, nowMs());
-      else await readFolder((await engine()).engine, nextRequestId, join(home, "workspace"), workspaceId,
-        (read) => settleOperations(storage, records, read, reason, nowMs()));
-    } catch (error) {
-      // The writes settled, but the folder stays until its handle closes.
-      if (error instanceof CopyFolderStillOpen) {
-        const held = heldOpen.get(folderOf(workspaceId)) ?? new Set<{engine: EngineClient; handle: string}>();
-        held.add({engine: error.engine, handle: error.handle});
-        heldOpen.set(folderOf(workspaceId), held);
-      }
-      throw error;
+    if (await missing(home)) await settleOperations(storage, records, null, reason, nowMs());
+    else {
+      const reader = (await engine()).engine;
+      // A handle the read left open keeps the folder until a removal path closes it.
+      await readFolder(reader, nextRequestId, join(home, "workspace"), workspaceId,
+        (read) => settleOperations(storage, records, read, reason, nowMs()), (handle) => {
+          const held = heldOpen.get(folderOf(workspaceId)) ?? new Set<{engine: EngineClient; handle: string}>();
+          held.add({engine: reader, handle});
+          heldOpen.set(folderOf(workspaceId), held);
+        });
     }
     storage.restorePublicationReasons();
   }
@@ -581,8 +579,8 @@ export async function startAutomationReplicas(options: {
           await close();
           if (!unwanted()) return;
           await settleWorkspace(row.workspaceId, COULD_NOT_SEND);
-          // A visit admitted while the receipts were read wants the copy again: it keeps its folder and row.
-          if (!unwanted()) return;
+          // Settlement is final: the folder's unsent writes now answer refused, so it must not
+          // publish again. A visit admitted meanwhile gets a copy joined anew.
           await closeHeld(folderOf(row.workspaceId));
           await rm(folderOf(row.workspaceId), {recursive: true, force: true});
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
@@ -825,8 +823,9 @@ export async function startAutomationReplicas(options: {
      * phone writes settle first. One whose receipts can't be read is
      * reported, and its folder goes anyway: the deletion's purge removes the
      * account's rows, and deleting the workspace refuses any other account's.
-     * Throws, after the others, only when a folder couldn't be removed, so
-     * the deletion stays pending until its retry removes it.
+     * Throws, after the others, when a folder couldn't be removed or a read's
+     * handle in it wouldn't close, so the deletion stays pending until its
+     * retry finishes both.
      */
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       await runningPass?.catch(() => undefined);
@@ -840,13 +839,21 @@ export async function startAutomationReplicas(options: {
           if (signal.aborted) throw error;
           observe(() => options.onError?.(error, id));
         }
-        // A folder whose handle won't close stays, like one that won't go, and the deletion retries.
+        // The folder goes even while a read's handle won't close, so the deleted account's content
+        // doesn't stay. The close's failure keeps the deletion pending, and its retry closes the handle
+        // and removes anything written since.
+        let unclosed: {error: unknown} | null = null;
         try {
           await closeHeld(folderOf(id));
+        } catch (error) {
+          unclosed = {error};
+        }
+        try {
           await rm(folderOf(id), {recursive: true, force: true});
         } catch (error) {
           failed ??= {error};
         }
+        if (unclosed) failed ??= unclosed;
       }
       if (failed) throw failed.error;
     },
@@ -918,23 +925,31 @@ function replicaFolder(root: string, namespace: string, workspaceId: string): st
   return join(root, createHash("sha256").update(JSON.stringify([namespace, workspaceId])).digest("hex"));
 }
 
-/** A copy's folder was read, and the engine didn't answer that its handle closed, so the folder may still be open. */
+/**
+ * A copy's folder was read, and the engine didn't answer that its handle
+ * closed, so the folder may still be open. It names only the handle and the
+ * workspace: it is logged, and the engine client holds its credential.
+ */
 class CopyFolderStillOpen extends Error {
-  constructor(readonly engine: EngineClient, readonly handle: string, cause: unknown) {
-    super("The engine didn't close the copy's folder after reading it.", {cause});
+  readonly handle: string;
+  readonly workspaceId: string;
+  constructor(handle: string, workspaceId: string, cause: unknown) {
+    super(`The engine didn't close the copy of workspace "${workspaceId}" after reading it.`, {cause});
     this.name = "CopyFolderStillOpen";
+    this.handle = handle;
+    this.workspaceId = workspaceId;
   }
 }
 
 /**
  * Opens a copy's workspace folder that no replica holds open, with no relay,
  * only to read the receipts of the phone's writes in it, then closes it.
- * After a read that succeeded, a close that fails throws CopyFolderStillOpen,
- * so the caller keeps the folder. After a read that failed, the read's
- * failure is the one thrown.
+ * A close that fails tells `unclosed` the handle it left open. After a read
+ * that succeeded, it then throws CopyFolderStillOpen, so the caller keeps the
+ * folder. After a read that failed, the read's failure is the one thrown.
  */
 async function readFolder<T>(engineClient: EngineClient, nextRequestId: () => number, root: string, workspaceId: string,
-  read: (reader: ReceiptReader) => Promise<T>): Promise<T> {
+  read: (reader: ReceiptReader) => Promise<T>, unclosed?: (handle: string) => void): Promise<T> {
   const send = async (method: string, params: {[key: string]: JsonValue}, workspace?: string) =>
     (await engineClient.sendRequest({id: nextRequestId(), method, params, ...(workspace ? {workspace} : {}), deadlineMs: REQUEST_DEADLINE_MS})).result;
   const opened = await send("workspace.open", {rootDir: root, workspaceId, captureMode: "none", recoverRunningDispatches: false}) as {workspace?: unknown} | null;
@@ -944,13 +959,14 @@ async function readFolder<T>(engineClient: EngineClient, nextRequestId: () => nu
   try {
     result = await read(receiptReader({client: engineClient, nextRequestId}, handle));
   } catch (error) {
-    await send("workspace.close", {}, handle).catch(() => undefined);
+    await send("workspace.close", {}, handle).catch(() => unclosed?.(handle));
     throw error;
   }
   try {
     await send("workspace.close", {}, handle);
   } catch (error) {
-    throw new CopyFolderStillOpen(engineClient, handle, error);
+    unclosed?.(handle);
+    throw new CopyFolderStillOpen(handle, workspaceId, error);
   }
   return result;
 }
