@@ -767,6 +767,11 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
     await input.authorize();
     return answer;
   };
+  // Access is checked before the error is read: a bad request says something of the target.
+  const failedBeforeRecord = async (error: unknown) => {
+    await input.authorize();
+    return refusalBeforeRecord(error, signal);
+  };
   const messageIdOf = (record: OperationRecord) => {
     const stored = storedWrite(record.command);
     return stored === null || stored.write.kind === "react" ? undefined : stored.write.messageId;
@@ -786,7 +791,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
     } catch (error) {
       if (error instanceof RelayError || signal?.aborted) throw error;
       // Nothing is written yet, so the write wasn't sent; a recorded one's publication answers.
-      if (found.kind === "absent") return await answered(refusalBeforeRecord(error, signal));
+      if (found.kind === "absent") return await failedBeforeRecord(error);
       synced = false;
     }
     await input.authorize();
@@ -812,7 +817,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
         const author = authorOf(writer, workspaceId);
         stored = { stages: publicationStages(command, author, ids.key), write: command, author };
       } catch (error) {
-        return await answered(refusalBeforeRecord(error, signal));
+        return await failedBeforeRecord(error);
       }
       const session: Session = { stored, record: null, committed: false };
       // The row, written before the engine's first stage, under the identity the copy was made for.
@@ -831,7 +836,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       try {
         await runCommand(serverWriteHost(context, targets, session, claim), stored);
       } catch (error) {
-        if (session.record === null) return await answered(refusalBeforeRecord(error, signal));
+        if (session.record === null) return await failedBeforeRecord(error);
         if (error instanceof RelayError || signal?.aborted) throw error;
         // Once the row is made, what the relay holds answers, whatever this attempt saw.
       }
@@ -851,8 +856,9 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
 
 /**
  * Runs one phone write in a visit to the account's copy of `workspaceId`,
- * and answers it with the change feed's cursor from before the write synced
- * the copy. The caller authenticates the account, checks that it owns the
+ * and answers it with the change feed's cursor when it ran. A settled write
+ * answers without a sync, so the copy may not have pulled up to that cursor,
+ * and it is not a read's starting point. The caller authenticates the account, checks that it owns the
  * workspace and that the workspace shows on the phone, and parses the write.
  * `authorize` runs once the copy is open, then at each of the write's own
  * checks. The write runs its own sync, so a settled one answers without it.

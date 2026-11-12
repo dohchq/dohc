@@ -46,8 +46,10 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * account's name is looked up for a write, once the copy is open, once it
  * has synced, after every wait, and once the answer is ready. A workspace
  * the account does not own, one that does not exist, and an ID that cannot
- * be one answer alike. Each answer carries the feed's cursor for what its
- * copy had synced before it ran.
+ * be one answer alike. Each read carries the feed's cursor for what its
+ * copy had synced before it ran. A write's cursor is the relay's position
+ * when it ran, which its copy may not have pulled, so it never moves a
+ * read's starting point.
  */
 export function createAccountOperationRoute(options: {
   storage: SyncRelayStorage;

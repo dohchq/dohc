@@ -962,8 +962,10 @@ describe("an account's chat writes through the server's copy", () => {
           const reasons = hooks.wanted().get("trip");
           const joined = reasons === undefined ? null : storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons });
           const opens = joined?.incarnation === copy.incarnation && joined.ownerUserId === copy.ownerUserId;
-          if (opens && !open) hooks.onChanged?.("trip");
+          // The copy opens before the hook, whose recheck reads it.
+          const was = open;
           open = opens;
+          if (opens && !was) hooks.onChanged?.("trip");
         };
         return { unavailable: false, replica: (id) => id === "trip" && open ? copy : undefined, reconcile: () => queueMicrotask(pass),
           deleteWorkspaces: async () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
@@ -1284,6 +1286,26 @@ describe("an account's chat writes through the server's copy", () => {
         expect(f.rows(), `${label}, ${kind}`).toBe(rows);
         expect(f.engine.writes, `${label}, ${kind}`).toHaveLength(writes);
       }
+    }
+  });
+
+  it("answers a write the Group refuses as missing, not as a bad request, when access ends while it reads the Group", async () => {
+    const { h } = await relay();
+    const missing = await denialBytes(await h(op("nowhere", "groups")));
+    for (const kind of ACCESS_CHANGES) {
+      const f = await writeRelay();
+      const lobby = await new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" })
+        .createChannel({ workspaceId: "trip", name: "Lobby", type: "chat" });
+      // With access, the Group's kind answers.
+      expect((await f.write("post", { operationId: "op-kind", groupId: lobby.channelId, body: "Hi" })).status, kind).toBe(400);
+      const held = f.engine.hold(CHATS_METHOD.channelsList);
+      const writing = f.write("post", { operationId: "op-gone", groupId: lobby.channelId, body: "Hi" });
+      await held.reached;
+      f.change(kind);
+      held.release();
+      expect(await denialBytes(await writing), kind).toBe(missing);
+      expect(f.rows(), kind).toBe(0);
+      expect(f.engine.writes, kind).toEqual([]);
     }
   });
 });
