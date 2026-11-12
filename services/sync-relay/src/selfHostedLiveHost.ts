@@ -98,6 +98,8 @@ export async function startSelfHostedLiveHost(options: {
   startHost?: typeof startServiceLiveHost;
   /** How long reconciliation waits between periodic runs, unless a test holds them. Relay writes and host progress also run one. */
   reconcileIntervalMs?: number;
+  /** Called as each reconciliation ends, so a test can wait on reconciliations rather than on their interval. */
+  onReconcile?: () => void;
   onError?(error: unknown): void;
 }) {
   const {storage, history} = options, profile = selfHostLiveProfile();
@@ -350,6 +352,7 @@ export async function startSelfHostedLiveHost(options: {
       // File operations and daemon starts may ignore cancellation. Drain them
       // before finalization, so a late start cannot escape its owner's close.
       yield* Effect.uninterruptible(Effect.promise(() => exclusive(reconcile)));
+      options.onReconcile?.();
     }
   })), {signal});
   return {

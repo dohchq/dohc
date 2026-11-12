@@ -848,10 +848,11 @@ async function openSelfHostProof(name: string) {
     // What the supervisor tells the operator.
     const reports: string[] = [];
     // How many passes in a row the daemons of this proof ended idle. Below zero, the next pass to end does not count.
-    let idlePasses = 0;
+    // And how many reconciliations its supervisors ended.
+    let idlePasses = 0, reconciliations = 0;
     const startSupervisor = async () => {
       supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable,
-        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));},
+        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));}, onReconcile: () => {reconciliations++;},
         startHost: options => startServiceLiveHost({...options, onPass: idle => {idlePasses = idle ? idlePasses + 1 : Math.min(idlePasses, 0);}})});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
     };
@@ -979,11 +980,16 @@ async function openSelfHostProof(name: string) {
         .get(object) as {state: string; reason: string | null} | undefined),
       /** Engine RPCs the service host started. */
       started: (method: string) => harness.calls.filter(call => call.method === method && call.status === "started").length,
-      /** Resolves once the service host ended `count` idle passes in a row that began after the call. */
-      async idle(count: number) {
-        // The first pass to end may have begun before the call.
+      /**
+       * Resolves once a reconciliation that began after the call ended, and the service host then ended two idle
+       * passes in a row that began after it.
+       */
+      async settled() {
+        // The first reconciliation to end, and then the first pass, may have begun before.
+        const from = reconciliations;
+        await vi.waitFor(() => expect(reconciliations).toBeGreaterThanOrEqual(from + 2), {timeout: 30000});
         idlePasses = -1;
-        await vi.waitFor(() => expect(idlePasses).toBeGreaterThanOrEqual(count), {timeout: 30000});
+        await vi.waitFor(() => expect(idlePasses).toBeGreaterThanOrEqual(2), {timeout: 30000});
       },
       /** The rows the service host wrote that the relay does not have. */
       unpushed: () => serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM replication_log WHERE workspace_id='workspace' AND imported=0")
@@ -1006,10 +1012,10 @@ async function openSelfHostProof(name: string) {
   }
 }
 type SelfHostProof = Awaited<ReturnType<typeof openSelfHostProof>>["proof"];
-// Resolves once the service host found nothing to do for four passes in a row. An idle host pauses at least 500 ms,
-// 1 s and 2 s between them, so they outlast a two-second reconciliation.
+// Resolves once the supervisor reconciled and the service host then found nothing to do for two passes in a row.
+// It waits on the reconciliation itself, since a recovery probe can cut an idle host's pause to 250 ms.
 // A quiet workspace pulls only for a relay change, so a count of its pulls says nothing of how many passes ran.
-const settledPasses = (proof: SelfHostProof) => proof.idle(4);
+const settledPasses = (proof: SelfHostProof) => proof.settled();
 
 async function withSelfHostProof(name: string, run: (proof: SelfHostProof) => Promise<Record<string, unknown>>) {
   const {proof, close} = await openSelfHostProof(name);
