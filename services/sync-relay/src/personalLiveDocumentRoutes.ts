@@ -37,7 +37,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "live-document-without-lineage": "The owner must open this document in dohc on a desktop first.",
   "document-unavailable": "The document is no longer at this path.",
   "workspace-changed": "The workspace changed. The owner must open the document again.",
-  "live-history-over-budget": "This document's edit history is past what this server reads or checks. Live editing starts once the document has a new base.",
+  "live-history-over-budget": "This document's edit history is too long for this server to check, so live editing can't start for it.",
 };
 const REFUSED = "This server cannot continue this document until its owner tries again.";
 
