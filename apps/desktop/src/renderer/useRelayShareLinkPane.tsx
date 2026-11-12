@@ -1597,6 +1597,7 @@ export function useRelayShareLinkPane(props: {
     setLinkRequestBusy(action);
     setLinkError(null);
     setMinted(null);
+    focusAfterRender.current = null;
 
     try {
       const result = await request();
@@ -2049,17 +2050,9 @@ export function useRelayShareLinkPane(props: {
         {url !== null ? (
           renderLinkUrl(url, row.grantId)
         ) : active && !damaged && unsure ? (
-          <div className="flex items-center gap-2">
-            <p data-testid="share-link-unsure" className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
-              dohc could not load the current link.
-            </p>
-            {/* The list's own error already offers Try again. */}
-            {linksError === null ? (
-              <SecondaryButton size="compact" disabled={linksLoading} onClick={() => void refreshLinks()}>
-                Try again
-              </SecondaryButton>
-            ) : null}
-          </div>
+          <p data-testid="share-link-unsure" className="m-0 text-[12px] leading-relaxed text-muted">
+            dohc could not load the current link.
+          </p>
         ) : active && !damaged ? (
           <p data-testid="share-link-no-copy" className="m-0 text-[12px] leading-relaxed text-muted">
             {canReset
