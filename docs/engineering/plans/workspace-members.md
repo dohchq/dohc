@@ -60,13 +60,14 @@ An automation runs a step only if every editor of its Collection could take that
 - A step that touches a folder some editor cannot see, or changes one some editor cannot edit, stops.
 - A step that posts in a Group stops if any editor cannot post there, such as an Announcements Group with "Members: View".
 - A step that reads a Group stops if any editor cannot read it.
+
 To keep these steps running, keep the Collection in a folder where members have View or Comment.
 
 A step that acts as one person, such as waking the owner's agent, runs only while that person is the Collection's only editor. In a workspace with an admin, it never runs.
 
 A folder's rule lives in a file inside it, `access.yaml`. The rule moves with its folder, whatever renames it, and it can be read and exported like any other file. Only the owner and admins see and change `access.yaml`; members never see it. It names people by a verified account email, as share invites do. The owner changes it like any file. An admin changes it through the relay's checked write path, which `collection.yaml` uses today. The relay alone checks that the writer is an admin, and the owner's computer accepts `access.yaml` on that path. If the file cannot be read, members lose access to the folder until it is fixed.
 
-A Group's rule is saved on the Group itself, by its lasting id, and changed in the Group's settings. A Group is not a file, and its link to a folder does not follow renames, so its rule cannot live in a folder. The Group's rule covers its messages. The Group's folder is an ordinary folder with its own `access.yaml`. dohc never changes a folder's rule from the Group's settings. Group settings shows the rule of the folder the Group recorded, with a way to change it, and warns when members can reach that folder but not the Group. Only the owner and admins see and change a Group's rule.
+A Group's rule is saved on the Group itself, by its lasting id, and changed in the Group's settings. A Group is not a file, and its link to a folder does not follow renames, so its rule cannot live in a folder. The Group's rule covers its messages. The Group's folder is an ordinary folder with its own `access.yaml`. Changing a Group's rule never changes a folder's rule. Group settings shows the rule of the folder the Group recorded, with a link to that folder's own rule, and warns when members can reach that folder but not the Group. If no folder is at that path, Group settings says so. Only the owner and admins see and change a Group's rule.
 
 A folder's files must never reach members before its rule. The owner's computer sends a folder's `access.yaml` with or before the folder's other files, so a restricted folder copied in from outside dohc is never briefly visible. [ADR 0015](../adr/0015-access-rules-live-in-the-folder.md) records why a folder's rule lives in the folder and a Group's rule lives on the Group.
 

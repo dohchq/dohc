@@ -10,7 +10,7 @@ An access rule decides which members reach a folder or a Group. We keep a folder
 
 Folders have no lasting id. A rule kept anywhere else would have to follow a folder by its path. If someone renamed the folder outside dohc, for example in File Explorer, the rule would stop matching and the folder would open to every member. A file inside the folder moves with it, whatever renames it. The rule also stays a plain file the owner can read, back up, and export, which AGENTS.md commitment 1 asks for.
 
-A Group's rule is saved on the Group, by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename, so a rule in the Group's folder could separate from the Group and open it to every member. The Group's rule covers its messages. The Group's folder keeps its own `access.yaml`. Group settings never writes it, because the Group finds its folder by path, and more than one Group can record the same folder. Group settings shows that folder's rule and warns when members can reach the folder but not the Group.
+A Group's rule is saved on the Group, by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename, so a rule in the Group's folder could separate from the Group and open it to every member. The Group's rule covers its messages. The Group's folder keeps its own `access.yaml`. Changing a Group's rule never changes it, because the Group finds its folder by path, and more than one Group can record the same folder. Group settings shows that folder's rule, with a link to it, and warns when members can reach the folder but not the Group.
 
 ## Considered options
 
