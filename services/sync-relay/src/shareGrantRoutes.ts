@@ -6,7 +6,7 @@ import type {PublicEditRelease} from "@dohc/security-contract";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
-import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
+import { composePublicLinkUrl, hashLinkBearer, isPublicLinkAccess, recoverPublicLinkUrl, sealLinkBearer } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
 import { fileHalfOfGroup, linkAccessLevels, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
@@ -26,10 +26,6 @@ export type WorkspaceShareCreationRoute =
   | { route: "shares-create"; workspaceId: string }
   | { route: "share-link-create-atomic"; workspaceId: string }
   | { route: "share-link-create"; workspaceId: string; shareId: string };
-
-function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
-  return `${shareWebOrigin}/s/#${secret}`;
-}
 
 function validatePublicLinkAccess(value: unknown, release?: PublicEditRelease): "view" | "comment" | "edit" {
   const validation = validateFileShareAccess(value);
@@ -77,6 +73,7 @@ export function createShareGrantRoutes(
   storage: Pick<SyncRelayStorage,
     | "getShare"
     | "getShareGrant"
+    | "getCurrentLinkCredential"
     | "workspaceIsOwnedBy"
     | "rotateLinkGrant"
     | "retuneShareGrant"
@@ -208,8 +205,10 @@ export function createShareGrantRoutes(
         },
         mintCredential: () => {
           secret = newLinkBearer();
+          const credentialId = newId();
           return {
-            credentialId: newId(),
+            credentialId,
+            secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
             secretHash: hashLinkBearer(secret, linkKey!),
           };
         },
@@ -272,8 +271,10 @@ export function createShareGrantRoutes(
           ? {
               mintCredential: () => {
                 secret = newLinkBearer();
+                const credentialId = newId();
                 return {
-                  credentialId: newId(),
+                  credentialId,
+                  secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
                   secretHash: hashLinkBearer(secret, linkKey!),
                 };
               },
@@ -456,7 +457,8 @@ export function createShareGrantRoutes(
       const receipt = operationId && storage.readLinkCreation(route.workspaceId,operationId,actor.userId);
       if (receipt) {
         if (receipt.requestJson !== requestJson) throw relayError("conflict", "Link operation changed.");
-        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,urlUnavailable:true});
+        const url = recoverPublicLinkUrl(storage.getShareGrant(receipt.grantId), storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin);
+        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})});
       }
       requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();
@@ -484,12 +486,14 @@ export function createShareGrantRoutes(
         revokedAtMs: null,
         parentGrantId: null,
       };
+      const credentialId = newId();
       const created = storage.createFileLinkShare({
         ...(operationId ? {operation: {operationId, requestJson}} : {}),
         share,
         grant,
         credential: {
-          credentialId: newId(),
+          credentialId,
+          secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grantId),
           grantId,
           secretHash: hashLinkBearer(secret, linkKey!),
           generation: 1,
@@ -552,10 +556,12 @@ export function createShareGrantRoutes(
         revokedAtMs: null,
         parentGrantId: null,
       };
+      const credentialId = newId();
       const created = storage.createLinkGrant({
         grant,
         credential: {
-          credentialId: newId(),
+          credentialId,
+          secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grantId),
           grantId,
           secretHash: hashLinkBearer(secret, linkKey!),
           generation: 1,

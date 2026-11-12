@@ -217,6 +217,7 @@ export interface SyncRelayLinkCredentialRow {
   credentialId: string;
   grantId: string;
   secretHash: string;
+  secretSealed: string | null;
   generation: number;
   mintedAtMs: number;
   retiredAtMs: number | null;
@@ -449,6 +450,7 @@ export interface SyncRelayIndependentGrantInventoryPage {
 export interface SyncRelayLinkCredentialMint {
   credentialId: string;
   secretHash: string;
+  secretSealed: string | null;
 }
 
 // A recipient's submitted changes, held at the relay until the

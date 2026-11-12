@@ -1,3 +1,4 @@
+import { recoverPublicLinkUrl } from "./linkSecurity";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { RelayShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -29,6 +30,7 @@ export function createShareInventoryRoutes(
     | "setShareLabels"
     | "shareHasActiveGrants"
     | "getShareGrant"
+    | "getCurrentLinkCredential"
     | "listActiveShareGrantsForRecipient"
     | "findChannelCreateKind"
     | "workspaceIsOwnedBy"
@@ -50,6 +52,7 @@ export function createShareInventoryRoutes(
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
   linkKey?: string | Uint8Array,
+  shareWebOrigin?: string,
 ) {
   async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
     const receivedLookups = await Promise.all(rows.map(async fallback => {
@@ -230,7 +233,10 @@ export function createShareInventoryRoutes(
     const [links, independentGrants] = await Promise.all([
       independentGrantCursor
         ? []
-        : Promise.all(page.links.map(linkInventorySummary)),
+        : Promise.all(page.links.map(async row => ({
+            ...await linkInventorySummary(row),
+            url: recoverPublicLinkUrl(row.grant, storage.getCurrentLinkCredential(row.grant.grantId), linkKey, shareWebOrigin),
+          }))),
       Promise.all(
         independentGrantPage.grants.map(independentGrantSummary),
       ),

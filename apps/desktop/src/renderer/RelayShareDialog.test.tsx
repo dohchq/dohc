@@ -60,6 +60,7 @@ type ReadableLink = {
   createdAtMs: number;
   revokedAtMs: number | null;
   lastUsedAtMs: number | null;
+  url: string | null;
   urlIssuedAtMs: number | null;
   // The copy the relay keeps for the link's owner; null for a link made
   // before it kept one. Absent reads as null.
@@ -128,7 +129,7 @@ function readableLink(
     createdAtMs: CREATED_MS,
     revokedAtMs: null,
     lastUsedAtMs: null,
-    urlIssuedAtMs: CREATED_MS,
+    url: null, urlIssuedAtMs: CREATED_MS,
     dependents: [],
     selector: { paths: ["docs/plan.md"], versionId: null },
     access: "view",
@@ -148,7 +149,7 @@ function damagedLink(
     createdAtMs: CREATED_MS,
     revokedAtMs: null,
     lastUsedAtMs: null,
-    urlIssuedAtMs: CREATED_MS,
+    url: null, urlIssuedAtMs: CREATED_MS,
     dependents: [],
     selector: null,
     access: "unknown",
@@ -854,7 +855,7 @@ describe("RelayShareDialog", () => {
           },
         }),
         readableLink("active-reset", {
-          urlIssuedAtMs: resetAt,
+          url: null, urlIssuedAtMs: resetAt,
           selector: {
             paths: ["./docs/plan.md", "assets\\map.png"],
             versionId: null,

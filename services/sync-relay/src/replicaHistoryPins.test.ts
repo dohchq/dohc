@@ -675,7 +675,7 @@ it.each(["same-stream","both-streams"])("position floor uses the earliest replac
 it("captures link and redeemed dependent floors in their grant transactions and rolls them back",async()=>{
   const f=await fixture();f.save();f.at(130_000);f.save();const id=String(f.pins()[0]!.pin_id);
   const log=replacementEvidence(f.db,"log"),journal=replacementEvidence(f.db,"journal","other-object");
-  seedLinkGrant(f.storage,{shareId:"g",grantId:"link-floor",secretHash:"hash"});
+  seedLinkGrant(f.storage,{shareId:"g",grantId:"link-floor",secretSealed: null, secretHash:"hash"});
   expect(f.storage.mintLinkHandoffCode({code:{codeId:"code",codeHash:"code-hash",grantId:"link-floor",generation:1,
     mintedAtMs:10,expiresAtMs:100},guard:()=>true})).toBe(true);
   expect(f.storage.redeemLinkHandoffCode({codeHash:"code-hash",principalUserId:"reader",redeemedAtMs:20,
@@ -689,7 +689,7 @@ it("captures link and redeemed dependent floors in their grant transactions and 
   expect(f.read(id)).toMatchObject({text:"initial"});
   f.db.exec(`CREATE TRIGGER reject_credential BEFORE INSERT ON sync_relay_link_credentials BEGIN SELECT RAISE(ABORT,'refuse'); END`);
   expect(()=>f.storage.createLinkGrant({grant:{...f.storage.getShareGrant("link-floor")!,grantId:"rolled-back"},
-    credential:{credentialId:"reject",grantId:"rolled-back",secretHash:"reject",generation:1,mintedAtMs:10,retiredAtMs:null}})).toThrow("refuse");
+    credential:{credentialId:"reject",grantId:"rolled-back",secretSealed: null, secretHash:"reject",generation:1,mintedAtMs:10,retiredAtMs:null}})).toThrow("refuse");
   expect(f.db.prepare("SELECT * FROM sync_relay_history_grant_floors WHERE grant_id='rolled-back'").get()).toBeUndefined();
 });
 
@@ -810,7 +810,7 @@ it.each(["view","comment"])("R4: %s denies named and link pin lists and known pi
   const f=await fixture();f.save();f.at(130_000);f.save();const pinId=String(f.pins()[0]!.pin_id);
   f.db.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='g'").run(access);
   expect(f.list()).toEqual({status:"denied"});expect(f.read(pinId)).toEqual({status:"denied"});
-  seedLinkGrant(f.storage,{shareId:"g",grantId:"r4-link",secretHash:sha256("r4-link"),access:access as "view"|"comment"});
+  seedLinkGrant(f.storage,{shareId:"g",grantId:"r4-link",secretSealed: null, secretHash:sha256("r4-link"),access:access as "view"|"comment"});
   const input={grantId:"r4-link",generation:1,principal:{kind:"link" as const,requireSession(){return {grantId:"r4-link",generation:1};}}};
   expect(f.storage.listReplicaHistoryPins(input)).toEqual({status:"denied"});
   expect(f.storage.readReplicaHistoryPin({...input,pinId})).toEqual({status:"denied"});
@@ -878,13 +878,13 @@ it("requires both the historical path and the object's current path to be visibl
 });
 
 it("rechecks revocation, generation, principal, narrowing and widening", async () => {
-  const f = await fixture(); seedLinkGrant(f.storage,{shareId:"g",grantId:"link",secretHash:"hash",access:"edit"});
+  const f = await fixture(); seedLinkGrant(f.storage,{shareId:"g",grantId:"link",secretSealed: null, secretHash:"hash",access:"edit"});
   f.save(); f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   const input = {grantId:"link",principal:{kind:"link" as const,requireSession(){return {grantId:"link",generation:1};}}};
   expect(f.storage.retuneShareGrant({shareId:"g",grantId:"link",access:"view",changedAtMs:140_000,expectedDependentGrantIds:[],guard(){}}).ok).toBe(true);
   expect(f.read(id,input)).toEqual({status:"denied"});
   expect(f.storage.retuneShareGrant({shareId:"g",grantId:"link",access:"edit",changedAtMs:150_000,expectedDependentGrantIds:[],guard(){},
-    mintCredential:()=>({credentialId:"widened",secretHash:"new-hash"})}).ok).toBe(true);
+    mintCredential:()=>({credentialId:"widened",secretSealed: null, secretHash:"new-hash"})}).ok).toBe(true);
   expect(f.read(id,input)).toEqual({status:"denied"}); expect(f.read(id,{...input,generation:2,principal:{kind:"link",requireSession:()=>({grantId:"link",generation:2})}})).toMatchObject({status:"ready"});
   expect(f.read(id,{principal:{kind:"user",userId:"stranger"}})).toEqual({status:"denied"});
   f.storage.revokeShareGrant({shareId:"g",grantId:"link",revokedAtMs:160_000});
@@ -913,7 +913,7 @@ it.each(["epoch","stream","workspace-owner","last-share","share-delete","share-o
 
 it("accountless History projects paths and omits authors, without internal cursors", async () => {
   const f = await fixture(false); f.grant("project",["private/docs"]);
-  seedLinkGrant(f.storage,{shareId:"project",grantId:"link",secretHash:"hash",access:"edit"});
+  seedLinkGrant(f.storage,{shareId:"project",grantId:"link",secretSealed: null, secretHash:"hash",access:"edit"});
   f.save(f.view("baseline",{path:"private/docs/a.md"}));
   f.save(f.view("initial",{path:"private/docs/a.md"})); f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   f.db.prepare("UPDATE sync_relay_history_pins SET authors_json=?").run('[{"kind":"human","humanId":"owner","humanName":"Owner"}]');

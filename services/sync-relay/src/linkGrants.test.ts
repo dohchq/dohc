@@ -9,6 +9,8 @@ import {
   LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
+  sealLinkBearer,
+  unsealLinkBearer,
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
@@ -46,6 +48,120 @@ const WORKSPACE = "workspace-links";
 const OTHER_WORKSPACE = "workspace-links-other";
 
 afterEach(closeTestStorages);
+
+describe("recoverable owner link URLs", () => {
+  it("uses random authenticated seals bound to both row identities and the relay key", () => {
+    const sealed = sealLinkBearer("bearer", LINK_KEY, "credential", "grant");
+    expect(sealed).toMatch(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+$/u);
+    expect(sealLinkBearer("bearer", LINK_KEY, "credential", "grant")).not.toBe(sealed);
+    expect(unsealLinkBearer(sealed, LINK_KEY, "credential", "grant")).toBe("bearer");
+    expect(unsealLinkBearer(sealed, LINK_KEY, "another", "grant")).toBeNull();
+    expect(unsealLinkBearer(sealed, LINK_KEY, "credential", "another")).toBeNull();
+    expect(unsealLinkBearer(sealed, "another-key", "credential", "grant")).toBeNull();
+  });
+
+  it("lists the current URL across creation, reset, retune, and ending", async () => {
+    const storage = await newStorage();
+    let byte = 1;
+    const h = handler(storage, { newLinkBearer: () => Buffer.alloc(32, byte++).toString("base64url") });
+    await seedFileShare(h, "edit");
+    const created = await createLink(h);
+    const grantId = String(created.grantId);
+    expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(created.url);
+    const path = `/sync/shares/share-existing/links/${grantId}`;
+    const transition = { workspaceId: WORKSPACE, expectedDependentGrantIds: [] };
+    const resetResponse = await h(request(OWNER, `${path}/rotate`, jsonBody(transition)));
+    expect(resetResponse.status).toBe(200);
+    const reset = await json(resetResponse);
+    expect(reset.url).not.toBe(created.url);
+    expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(reset.url);
+    expect(JSON.stringify(await ownerLinkInventory(h))).not.toContain(String(created.url));
+    const widenedResponse = await h(request(OWNER, `${path}/retune`, jsonBody({ ...transition, access: "comment" })));
+    expect(widenedResponse.status).toBe(200);
+    const widened = await json(widenedResponse);
+    expect(widened.url).not.toBe(reset.url);
+    expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(widened.url);
+    expect(JSON.stringify(await ownerLinkInventory(h))).not.toContain(String(reset.url));
+    expect((await h(request(OWNER, `${path}/retune`, jsonBody({ ...transition, access: "view" })))).status).toBe(200);
+    expect((await ownerLinkInventoryRow(h, grantId)).url).toBe(widened.url);
+    expect((await h(request(OWNER, "/sync/shares/share-existing/revoke", jsonBody({ ...transition, grantId })))).status).toBe(200);
+    expect((await ownerLinkInventoryRow(h, grantId)).url).toBeNull();
+    expect(storage.getCurrentLinkCredential(grantId)).toBeNull();
+  });
+
+  it("returns null for legacy, retired, corrupted, and transplanted seals", async () => {
+    const storage = await newStorage(), h = handler(storage);
+    await seedFileShare(h);
+    const first = await createLink(h), second = await createLink(h);
+    const firstId = String(first.grantId), secondId = String(second.grantId);
+    const credential = storage.getCurrentLinkCredential(firstId)!;
+    expect(credential.secretSealed).toEqual(expect.any(String));
+    expect(credential.secretSealed).not.toContain(linkSecret(first.url));
+    const db = inspectDatabase(storagePath(storage));
+    try {
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ? WHERE grant_id = ?").run(credential.secretSealed, secondId);
+      expect((await ownerLinkInventoryRow(h, secondId)).url).toBeNull();
+      const parts = credential.secretSealed!.split(".");
+      const encrypted = Buffer.from(parts[2]!, "base64url");
+      encrypted[0] = encrypted[0]! ^ 1;
+      parts[2] = encrypted.toString("base64url");
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ? WHERE grant_id = ?").run(parts.join("."), firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = NULL WHERE grant_id = ?").run(firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ?, retired_at_ms = 3000 WHERE grant_id = ?").run(credential.secretSealed, firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+    } finally { db.close(); }
+  });
+
+  it("denies URLs to recipients, anonymous callers, and link capability holders", async () => {
+    const storage = await newStorage(), h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h);
+    for (const userId of [RECIPIENT, null]) {
+      const response = await h(request(userId, `/sync/${WORKSPACE}/shares/links`));
+      expect(response.status).toBe(userId ? 404 : 401);
+      expect(await response.text()).not.toContain(String(created.url));
+    }
+    const bearer = Buffer.alloc(32, 9).toString("base64url");
+    seedLinkSession(storage, { grantId: String(created.grantId), capabilityHash: hmac(bearer) });
+    const headers = { authorization: `LinkCapability ${bearer}` };
+    expect((await h(request(null, `/sync/${WORKSPACE}/shares/links`, { headers }))).status).toBe(401);
+    const linkSummary = await h(request(null, "/sync/link/share", { headers }));
+    expect(linkSummary.status).toBe(200);
+    expect(await linkSummary.text()).not.toContain('"url":');
+    const recipient = await h(request(RECIPIENT, "/sync/shares?received=true"));
+    expect(recipient.status).toBe(200);
+    expect(await recipient.text()).not.toContain(String(created.url));
+  });
+
+  it("adds the nullable seal column to the previous credential schema without losing rows", async () => {
+    const { storage, dbPath } = await newStorageWithPath();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h);
+    closeTestStorage(storage);
+    const db = inspectDatabase(dbPath);
+    let before: Record<string, unknown>[];
+    try {
+      db.exec("ALTER TABLE sync_relay_link_credentials DROP COLUMN secret_sealed");
+      db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run("link-credential-seal-v1");
+      before = db.prepare("SELECT * FROM sync_relay_link_credentials").all();
+      expect(db.prepare("PRAGMA table_info(sync_relay_link_credentials)").all().map(row => row.name)).toEqual([
+        "credential_id", "grant_id", "secret_hash", "generation", "minted_at_ms", "retired_at_ms",
+      ]);
+    } finally { db.close(); }
+    const reopened = reopenTestStorage(dbPath);
+    expect(reopened.getCurrentLinkCredential(String(created.grantId))!.secretSealed).toBeNull();
+    expect((await ownerLinkInventoryRow(handler(reopened), String(created.grantId))).url).toBeNull();
+    inspect(dbPath, database => {
+      expect(database.prepare("SELECT * FROM sync_relay_link_credentials").all()).toEqual(before!.map(row => ({ ...row, secret_sealed: null })));
+      expect(database.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get("link-credential-seal-v1")).toBeDefined();
+    });
+    closeTestStorage(reopened);
+    expect(reopenTestStorage(dbPath).getCurrentLinkCredential(String(created.grantId))!.secretSealed).toBeNull();
+  });
+});
 
 it("lists ended holders only for the owner, without changing recipient or link-holder listings", async () => {
   const storage = await newStorage();
@@ -235,7 +351,7 @@ function seedStorageLink(
   seedLinkGrant(storage, {
     ...input,
     shareId: input.shareId ?? "share-existing",
-    secretHash: hmac(input.secret ?? defaultStorageLinkSecret(input.grantId)),
+    secretSealed: null, secretHash: hmac(input.secret ?? defaultStorageLinkSecret(input.grantId)),
   });
 }
 
@@ -340,7 +456,7 @@ describe("atomic View and Comment link mint", () => {
     });
     expect(storage.getCurrentLinkCredential(grantId)).toMatchObject({
       generation: 1,
-      secretHash: hmac(secret),
+      secretSealed: expect.any(String), secretHash: hmac(secret),
       retiredAtMs: null,
     });
     expect(storage.listSharesGrantedBy(OWNER)).toHaveLength(1);
@@ -405,7 +521,7 @@ describe("atomic View and Comment link mint", () => {
       generation: 1,
     });
     expect(storage.getCurrentLinkCredential(grantId)).toMatchObject({
-      secretHash: hmac(secret),
+      secretSealed: expect.any(String), secretHash: hmac(secret),
       generation: 1,
       retiredAtMs: null,
     });
@@ -456,7 +572,7 @@ describe("atomic View and Comment link mint", () => {
         credential: {
           credentialId: "seed-credential",
           grantId: "seed-link-grant",
-          secretHash: hmac("s".repeat(43)),
+          secretSealed: null, secretHash: hmac("s".repeat(43)),
           generation: 1,
           mintedAtMs: 1,
           retiredAtMs: null,
@@ -489,7 +605,7 @@ describe("atomic View and Comment link mint", () => {
         credential: {
           credentialId: "seed-credential",
           grantId: "rolled-back-grant",
-          secretHash: hmac("s".repeat(43)),
+          secretSealed: null, secretHash: hmac("s".repeat(43)),
           generation: 1,
           mintedAtMs: 2,
           retiredAtMs: null,
@@ -839,7 +955,7 @@ describe("owner link contract", () => {
         credential: {
           credentialId: "storage-seeded-comment-credential",
           grantId: "storage-seeded-comment-link",
-          secretHash: hmac(higherSecret),
+          secretSealed: null, secretHash: hmac(higherSecret),
           generation: 1,
           mintedAtMs: 2_001,
           retiredAtMs: null,
@@ -1049,7 +1165,7 @@ describe("owner link contract", () => {
       generation: 2,
     });
     expect(storage.getCurrentLinkCredential(grantId)).toMatchObject({
-      secretHash: hmac(commentSecret),
+      secretSealed: expect.any(String), secretHash: hmac(commentSecret),
       generation: 2,
       retiredAtMs: null,
     });
@@ -1120,14 +1236,14 @@ describe("owner link contract", () => {
     const storage = await newStorage();
     await seedFileShare(handler(storage));
     const grantId = "rank-transition";
-    const original = {credentialId: "rank-original", grantId, secretHash: hmac("o".repeat(43)), generation: 1,
+    const original = {credentialId: "rank-original", grantId, secretSealed: null, secretHash: hmac("o".repeat(43)), generation: 1,
       mintedAtMs: 2000, retiredAtMs: null};
     expect(storage.createLinkGrant({
       grant: {grantId, shareId: "share-existing", principalKind: "link", principalUserId: null,
         principalEmail: null, access: from, generation: 1, status: "active", createdAtMs: 2000,
         revokedAtMs: null, parentGrantId: null}, credential: original,
     })).toBe(true);
-    const mintCredential = vi.fn(() => ({credentialId: "rank-replacement", secretHash: hmac("n".repeat(43))}));
+    const mintCredential = vi.fn(() => ({credentialId: "rank-replacement", secretSealed: null, secretHash: hmac("n".repeat(43))}));
     const input = {shareId: "share-existing", grantId, access, changedAtMs: 3000,
       expectedDependentGrantIds: [], guard: () => undefined};
     expect(storage.retuneShareGrant({...input, ...(widening ? {} : {mintCredential})})).toEqual({ok: false});
@@ -1206,7 +1322,7 @@ describe("owner link contract", () => {
           credential: {
             credentialId: `${grantId}-credential`,
             grantId,
-            secretHash: hmac(`${access[0]}${"e".repeat(42)}`),
+            secretSealed: null, secretHash: hmac(`${access[0]}${"e".repeat(42)}`),
             generation: 1,
             mintedAtMs: 2_000,
             retiredAtMs: null,
@@ -1303,7 +1419,7 @@ describe("owner link contract", () => {
         credential: {
           credentialId: "storage-seeded-comment-without-origin-credential",
           grantId: "storage-seeded-comment-without-origin-link",
-          secretHash: hmac(highSecret),
+          secretSealed: null, secretHash: hmac(highSecret),
           generation: 1,
           mintedAtMs: 2_001,
           retiredAtMs: null,
@@ -1883,7 +1999,7 @@ describe("owner link contract", () => {
         guard: () => undefined,
         mintCredential: () => ({
           credentialId: "link-validation-rotated-credential",
-          secretHash: hmac("rotated-validation-secret"),
+          secretSealed: null, secretHash: hmac("rotated-validation-secret"),
         }),
       }),
     ).toMatchObject({ ok: true });
@@ -2120,7 +2236,7 @@ describe("owner link inventory and impact preconditions", () => {
         credential: {
           credentialId: "link-independent-pages-credential",
           grantId: "link-independent-pages",
-          secretHash: hmac("link-independent-pages-secret"),
+          secretSealed: null, secretHash: hmac("link-independent-pages-secret"),
           generation: 1,
           mintedAtMs: 2_001,
           retiredAtMs: null,
@@ -2333,7 +2449,7 @@ describe("owner link inventory and impact preconditions", () => {
       expect(storage.getCurrentLinkCredential(seed.grantId)).toEqual({
         credentialId: `${seed.grantId}-credential`,
         grantId: seed.grantId,
-        secretHash: hmac(defaultStorageLinkSecret(seed.grantId)),
+        secretSealed: null, secretHash: hmac(defaultStorageLinkSecret(seed.grantId)),
         generation: 1,
         mintedAtMs: seed.createdAtMs,
         retiredAtMs: null,
@@ -2633,7 +2749,7 @@ describe("owner link inventory and impact preconditions", () => {
         credential: {
           credentialId: "damaged-credential",
           grantId: "link-damaged",
-          secretHash: hmac("d".repeat(43)),
+          secretSealed: null, secretHash: hmac("d".repeat(43)),
           generation: 1,
           mintedAtMs: 3_000,
           retiredAtMs: null,
@@ -2653,6 +2769,7 @@ describe("owner link inventory and impact preconditions", () => {
       "link-damaged",
     ]);
     expect(links[0]).toEqual({
+      url: activeLink.url,
       subjectName: null, sharerName: null,
       shareId: "share-existing",
       grantId: activeGrantId,
@@ -2699,6 +2816,7 @@ describe("owner link inventory and impact preconditions", () => {
       dependents: [],
     });
     expect(links[2]).toEqual({
+      url: null,
       subjectName: null, sharerName: null,
       shareId: "share-damaged",
       grantId: "link-damaged",
@@ -2717,7 +2835,7 @@ describe("owner link inventory and impact preconditions", () => {
     });
     expect(serialized).not.toContain("workspace-links");
     expect(serialized).not.toContain("secret");
-    expect(serialized).not.toContain('"url":');
+    expect(links.map(row => row.url)).toEqual([activeLink.url, null, null]);
     expect(serialized).not.toContain("credential");
   });
 
@@ -3218,7 +3336,7 @@ describe("owner link inventory and impact preconditions", () => {
     const beforeCredential = storage.getCurrentLinkCredential("link-widening");
     const mintCredential = vi.fn(() => ({
       credentialId: "must-not-be-minted",
-      secretHash: hmac("w".repeat(43)),
+      secretSealed: null, secretHash: hmac("w".repeat(43)),
     }));
     expect(
       storage.retuneShareGrant({
@@ -3633,7 +3751,7 @@ describe("durable link usage inventory", () => {
         guard: () => undefined,
         mintCredential: () => ({
           credentialId: "storage-seeded-widened-credential",
-          secretHash: hmac("storage-seeded-widened-secret"),
+          secretSealed: null, secretHash: hmac("storage-seeded-widened-secret"),
         }),
       }),
     ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
@@ -3828,7 +3946,7 @@ describe("relay link grants", () => {
         credential: {
           credentialId: "storage-seeded-edit-credential",
           grantId: linkGrantId,
-          secretHash: hmac(firstSecret),
+          secretSealed: null, secretHash: hmac(firstSecret),
           generation: 1,
           mintedAtMs: 2_000,
           retiredAtMs: null,
@@ -3905,7 +4023,7 @@ describe("relay link grants", () => {
         guard: () => undefined,
         mintCredential: () => ({
           credentialId: "storage-widened-credential",
-          secretHash: hmac(widenedSecret),
+          secretSealed: null, secretHash: hmac(widenedSecret),
         }),
       }),
     ).toMatchObject({ ok: true, grant: { access: "edit", generation: 2 } });
@@ -3937,7 +4055,7 @@ describe("relay link grants", () => {
         guard: () => undefined,
         mintCredential: () => ({
           credentialId: "storage-rotated-credential",
-          secretHash: hmac(rotatedSecret),
+          secretSealed: null, secretHash: hmac(rotatedSecret),
         }),
       }),
     ).toMatchObject({ ok: true, grant: { access: "edit", generation: 3 } });
@@ -4381,7 +4499,7 @@ describe("relay link grants", () => {
         credential: {
           credentialId: "storage-seeded-comment-generation-credential",
           grantId,
-          secretHash: hmac("c".repeat(43)),
+          secretSealed: null, secretHash: hmac("c".repeat(43)),
           generation: 1,
           mintedAtMs: 2_000,
           retiredAtMs: null,
@@ -4408,7 +4526,7 @@ describe("relay link grants", () => {
         guard: () => undefined,
         mintCredential: () => ({
           credentialId: "storage-seeded-edit-generation-credential",
-          secretHash: hmac("e".repeat(43)),
+          secretSealed: null, secretHash: hmac("e".repeat(43)),
         }),
       }),
     ).toMatchObject({ ok: true, grant: { access: "edit", generation: 2 } });
@@ -4471,7 +4589,7 @@ describe("relay link grants", () => {
       expectedDependentGrantIds: [] as string[],
       mintCredential: () => ({
         credentialId: "credential-invalid-transition",
-        secretHash: hmac("replacement"),
+        secretSealed: null, secretHash: hmac("replacement"),
       }),
     };
     for (const grantId of ["grant-0", "grant-email"]) {
@@ -4654,7 +4772,7 @@ describe("relay link grants", () => {
           guard: () => undefined,
           mintCredential: () => ({
             credentialId: `credential-rotation-${index}`,
-            secretHash: hmac(currentSecret),
+            secretSealed: null, secretHash: hmac(currentSecret),
           }),
         }),
       ).toMatchObject({ ok: true, grant: { generation: index + 1 } });
@@ -4729,7 +4847,7 @@ describe("relay link grants", () => {
           guard: () => undefined,
           mintCredential: () => ({
             credentialId: "credential-widening",
-            secretHash: hmac(wideningSecret),
+            secretSealed: null, secretHash: hmac(wideningSecret),
           }),
         }),
       ).toMatchObject({ ok: true, grant: { access: "comment", generation: 17 } });
@@ -4857,7 +4975,7 @@ describe("relay link grants", () => {
         credential: {
           credentialId: `storage-seeded-${access}-exchange-credential`,
           grantId: `storage-seeded-${access}-exchange-link`,
-          secretHash: hmac(secret),
+          secretSealed: null, secretHash: hmac(secret),
           generation: 1,
           mintedAtMs: 2_000,
           retiredAtMs: null,
@@ -5682,7 +5800,7 @@ describe("relay link grants", () => {
         credential: {
           credentialId: "credential-chat",
           grantId: "grant-chat-link",
-          secretHash: hmac(chatSecret),
+          secretSealed: null, secretHash: hmac(chatSecret),
           generation: 1,
           mintedAtMs: 2_020,
           retiredAtMs: null,
@@ -5739,7 +5857,7 @@ describe("relay link grants", () => {
       seedLinkGrant(storage, {
         grantId: `grant-${wire}-link`,
         shareId: `share-${wire}`,
-        secretHash: hmac(groupSecret),
+        secretSealed: null, secretHash: hmac(groupSecret),
         access: "read-only",
       });
       expect(
@@ -5889,7 +6007,7 @@ describe("relay link grants", () => {
             guard: () => undefined,
             mintCredential: () => ({
               credentialId: "credential-race-winner",
-              secretHash: hmac("race-winner-secret"),
+              secretSealed: null, secretHash: hmac("race-winner-secret"),
             }),
           });
         }
@@ -6072,11 +6190,11 @@ it("retries an agent link creation across restart without minting another creden
   const reopened=reopenTestStorage(dbPath), next=handler(reopened);
   const retry=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
   expect(retry.status).toBe(200);
-  expect(await json(retry)).toMatchObject({shareId:first.shareId,grantId:first.grantId,urlUnavailable:true});
+  expect(await json(retry)).toMatchObject({shareId:first.shareId,grantId:first.grantId,url:first.url});
   const links=await ownerLinkInventory(next);
   expect(links).toHaveLength(1);
   expect(links[0]!.creationProvenance).toMatchObject({agent,selector:{paths:["docs"],versionId:null},access:"view"});
-  expect(JSON.stringify(links)).not.toContain(String(first.url));
+  expect(links[0]!.url).toBe(first.url);
   const changed=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody({...body,access:"comment"})));
   expect(changed.status).toBe(409);
   expect((await next(request(RECIPIENT,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)))).status).toBe(404);
@@ -6085,7 +6203,13 @@ it("retries an agent link creation across restart without minting another creden
   try {
     expect(database.prepare("SELECT COUNT(*) n FROM sync_relay_link_credentials").get()!.n).toBe(1);
     expect(database.prepare("SELECT request_json FROM sync_relay_link_creations").get()!.request_json).not.toContain(String(first.url).split("#")[1]);
+    database.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = NULL").run();
   } finally {database.close();}
+  const legacyRetry = await next(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body)));
+  expect(legacyRetry.status).toBe(200);
+  const legacyResult = await json(legacyRetry);
+  expect(legacyResult).toMatchObject({ shareId: first.shareId, grantId: first.grantId, urlUnavailable: true });
+  expect(legacyResult).not.toHaveProperty("url");
 });
 
 it.each([[[]],[[".env"]],[["docs/.env"]],[[".dohc/secret"]]])("refuses agent link secret paths and empty selectors %j",async paths=>{

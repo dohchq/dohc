@@ -200,6 +200,19 @@ describe("named browser invitations", () => {
   });
 });
 
+it.each(["https://share.example.test/s/#owner-secret", null])("passes the owner inventory URL through IPC: %s", async url => {
+  const h = harness();
+  const row = {
+    shareId: "share", grantId: "grant", selector: { paths: ["docs"], versionId: null },
+    access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null,
+    lastUsedAtMs: null, urlIssuedAtMs: 1, url, dependents: [],
+  };
+  h.request.mockResolvedValue({ ok: true, links: [row], independentGrants: [], supportedLinkAccess: ["view", "comment"] });
+  expect(await h.invoke(relayShareOperations.listRelayShareLinks.channel, { workspaceId })).toEqual({
+    links: [row], independentGrants: [], supportedLinkAccess: ["view", "comment"],
+  });
+});
+
 describe("sync before live hosting", () => {
   const editShare = {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"};
   const shareSent = (h: ReturnType<typeof harness>) => h.request.mock.calls.some(([, path, init]) => path === "/sync/workspace/shares" && init?.method === "POST");

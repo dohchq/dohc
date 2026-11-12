@@ -569,6 +569,7 @@ export function seedLinkGrant(
     grantId: string;
     shareId: string;
     secretHash: string;
+    secretSealed?: string | null;
     access?: "view" | "comment" | "edit" | "read-only" | "read-write";
     createdAtMs?: number;
     credentialId?: string;
@@ -593,6 +594,7 @@ export function seedLinkGrant(
       credential: {
         credentialId: input.credentialId ?? `${input.grantId}-credential`,
         grantId: input.grantId,
+        secretSealed: input.secretSealed ?? null,
         secretHash: input.secretHash,
         generation: 1,
         mintedAtMs: createdAtMs,

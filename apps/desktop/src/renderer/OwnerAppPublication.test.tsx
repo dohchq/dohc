@@ -19,7 +19,7 @@ const datasetCapability = { kind: "dataset" as const, name: "Orders", datasetId:
 const datasetRow = { publicationId: published.publicationId, authorityRevision: 1, shareId: "share-trip", grantId: "grant-trip", active: true, linkCurrent: true, datasetCapability, collectionCapability: null, manifestUnavailable: false as const, appRoot: "trip", sourceRevision: "b".repeat(64) };
 const row: ListRelayShareLinksResult["links"][number] = {
   shareId: "share-trip", grantId: "grant-trip", generation: 1, status: "active", createdAtMs: 1,
-  revokedAtMs: null, lastUsedAtMs: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
+  revokedAtMs: null, lastUsedAtMs: null, url: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
 };
 const page: ListRelayShareLinksResult = { supportedLinkAccess: ["view", "comment"], links: [row], independentGrants: [] };
 const syncedStatus: SyncStatusResult = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null, liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false };
